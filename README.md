@@ -7,7 +7,7 @@
 **Born for local models.**
 The AI workspace built around on-device LLMs — not one that treats them as an afterthought.
 
-[English](README.md)
+
 
 [![Discord](https://img.shields.io/badge/Discord-Join%20us-5865F2?style=flat-square&logo=discord&logoColor=white)](https://discord.gg/PcQ3jr3MfH)
 [![Twitter](https://img.shields.io/badge/X-@YOUR_HANDLE-000000?style=flat-square&logo=x&logoColor=white)](https://x.com/ZeraixAI)
