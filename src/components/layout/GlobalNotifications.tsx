@@ -1,11 +1,13 @@
 "use client";
 
 /**
- * 全局通知栏（右下角常驻）。两类内容：
- *  1. 运行中的本地服务（AI 跑起的 dev server 等）：显示项目地址，可点击在内置浏览器打开、可「停止」。
- *     由主进程后台进程启停事件驱动（带 pid → 可停止），并做健康探测，断连自动移除。
- *  2. notificationStore 通知：模型下载/安装进度、应用操作提示等。
- * 容器 pointer-events-none，仅卡片可交互，不遮挡页面点击。
+ * Global notification bar (docked at the bottom-right). Two kinds of content:
+ *  1. Running local services (dev servers started by the AI, etc.): shows the project URL,
+ *     clickable to open in the built-in browser, and can be "stopped".
+ *     Driven by the main process's background-process start/stop events (with a pid -> can be stopped),
+ *     with health probing that auto-removes on disconnect.
+ *  2. notificationStore notifications: model download/install progress, app operation hints, etc.
+ * The container is pointer-events-none; only the cards are interactive, so it doesn't block page clicks.
  */
 import { useEffect, useRef } from "react";
 import { AlertCircle, CheckCircle2, Globe, Info, Loader2, Square, X } from "lucide-react";
@@ -20,7 +22,7 @@ const AUTO_DISMISS_MS = 5000;
 const PING_MS = 6000;
 const MAX_FAILS = 2;
 
-/** no-cors 探活：可达 resolve，被拒 / 超时 reject。 */
+/** no-cors liveness probe: resolves if reachable, rejects on refusal / timeout. */
 async function ping(url: string): Promise<boolean> {
   const ctrl = new AbortController();
   const t = setTimeout(() => ctrl.abort(), 3000);
@@ -46,7 +48,7 @@ export default function GlobalNotifications() {
   const removeByUrl = useServicesStore((s) => s.removeByUrl);
   const failsRef = useRef<Record<string, number>>({});
 
-  // 订阅后台服务启停事件 + 初始同步。
+  // Subscribe to background service start/stop events + initial sync.
   useEffect(() => {
     void listServices().then((list) =>
       list.forEach((s) => upsert({ url: s.url, pid: s.pid, command: s.command })),
@@ -57,10 +59,11 @@ export default function GlobalNotifications() {
     });
   }, [upsert, removeByPid]);
 
-  // 健康探测：仅对「探测到的外部地址（无 pid，仅展示）」做探测，连续多次不可达即移除。
-  // 由 AI 启动的后台服务（有 pid）不参与——它只应在进程真正退出（主进程回传 stopped 事件 → removeByPid）
-  // 或用户手动停止时消失。否则端口探测的偶发失败、以及打包版 app:// → http://localhost 的混合内容拦截
-  // 会让「运行中的服务」卡片启动后很快被误删（用户反馈：服务未停，弹窗却一闪就没了）。
+  // Health probing: only probe "detected external URLs (no pid, display-only)"; remove after several consecutive unreachable results.
+  // Background services started by the AI (with a pid) are excluded -- they should only disappear when the process actually exits
+  // (main process sends back a stopped event -> removeByPid) or when the user stops them manually. Otherwise, occasional port-probe
+  // failures, plus the packaged build's app:// -> http://localhost mixed-content blocking, would cause the "running service" card to be
+  // wrongly removed shortly after starting (user feedback: the service isn't stopped, yet the popup flashes and vanishes).
   useEffect(() => {
     const withUrl = services.filter((s) => s.url && s.pid == null);
     if (withUrl.length === 0) return;
@@ -83,7 +86,7 @@ export default function GlobalNotifications() {
     return () => window.clearInterval(id);
   }, [services, removeByUrl]);
 
-  // 非常驻的 info/success 通知：到期自动消失（error 与 progress 不自动消失）。
+  // Non-sticky info/success notifications: auto-dismiss on timeout (error and progress do not auto-dismiss).
   useEffect(() => {
     for (const it of items) {
       if (it.sticky || it.kind === "progress" || it.kind === "error") continue;
@@ -98,7 +101,7 @@ export default function GlobalNotifications() {
 
   const onStop = async (svc: RunningService) => {
     if (svc.pid != null) {
-      await stopService(svc.pid); // 主进程结束进程后会回传 stopped 事件移除；这里也乐观移除
+      await stopService(svc.pid); // After the main process kills the process it sends back a stopped event to remove it; also remove optimistically here
       removeByPid(svc.pid);
     } else {
       removeByUrl(svc.url);

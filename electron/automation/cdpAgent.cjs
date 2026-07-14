@@ -1,14 +1,15 @@
 /**
- * <webview> 自动化代理（运行于独立 utilityProcess，与主线程 / 渲染线程隔离）。
+ * <webview> automation agent (runs in a dedicated utilityProcess, isolated from the main / renderer threads).
  *
- * 经 CDP 远程调试端口用 puppeteer-core 连接到 Electron，挂载到内置 <webview> 的页面 target
- * （按 type==="webview" 识别，跨导航保持），既被动监视搜索导航并回传触发事件，也接受
- * 渲染层（经主进程）下发的 action 指令，对页面执行 读取 / 列链接 / 点击 / 输入 / 跳转，
- * 把结果回传——即 AI 经 CDP「接管」浏览器。
+ * Connects to Electron via the CDP remote-debugging port using puppeteer-core, and attaches to the page target
+ * of the built-in <webview> (identified by type==="webview", kept across navigations). It both passively watches
+ * search navigations and reports trigger events back, and accepts action commands sent down from the renderer
+ * (via the main process) to perform read / list-links / click / type / navigate on the page, sending the results
+ * back -- i.e. the AI "takes over" the browser via CDP.
  *
- * 与主进程的通信：process.parentPort（utilityProcess 消息通道）。
+ * Communication with the main process: process.parentPort (the utilityProcess message channel).
  */
-// puppeteer-core 为 ESM-only（package "type":"module"），不能用 require —— 用动态 import 懒加载。
+// puppeteer-core is ESM-only (package "type":"module"), so require() cannot be used -- lazy-load it via dynamic import.
 let puppeteer = null;
 async function loadPuppeteer() {
   if (puppeteer) return puppeteer;
@@ -22,7 +23,7 @@ const send = (msg) => {
   try {
     process.parentPort.postMessage(msg);
   } catch {
-    /* 通道未就绪时忽略 */
+    /* ignore when the channel is not ready */
   }
 };
 
@@ -32,10 +33,10 @@ let port = 0;
 let stopped = false;
 let connecting = false;
 let lastError = "";
-let attachedPage = null; // 已挂载的 webview 页面（puppeteer Page）
+let attachedPage = null; // the attached webview page (puppeteer Page)
 let attachedTargetId = null;
 let lastTrigger = "";
-let activeUrl = ""; // 渲染层告知的当前活动标签 URL（多标签时用于定位活动 webview）
+let activeUrl = ""; // current active-tab URL reported by the renderer (used to locate the active webview when there are multiple tabs)
 
 process.parentPort.on("message", (e) => {
   const msg = e?.data;
@@ -47,7 +48,7 @@ process.parentPort.on("message", (e) => {
     const u = String(msg.url || "");
     if (u && u !== activeUrl) {
       activeUrl = u;
-      // 活动标签变了 → 重新挂载到新的活动页。
+      // active tab changed -> re-attach to the new active page.
       attachedPage = null;
       attachedTargetId = null;
       void attachAndWatch();
@@ -66,14 +67,14 @@ async function connectWithRetry(p, tries = 20) {
       await delay(500);
     }
   }
-  throw new Error(`无法连接到 CDP 端口 ${p}：${String(err?.message || err)}`);
+  throw new Error(`Cannot connect to CDP port ${p}: ${String(err?.message || err)}`);
 }
 
-/** 幂等连接：start 与 action 都用它，缺连接时按需（重）连。 */
+/** Idempotent connect: used by both start and action; (re)connects on demand when there is no connection. */
 async function ensureConnected() {
   if (browser) return browser;
   if (!port) {
-    lastError = "尚未启动（start 未调用 / 缺少端口）";
+    lastError = "Not started yet (start was not called / port is missing)";
     return null;
   }
   if (connecting) {
@@ -115,7 +116,7 @@ async function start(cfg) {
   }
 }
 
-/** 该 URL 是否为应用自身的外壳 / 调试页（需排除，剩下的 page 即内置 <webview>）。 */
+/** Whether the URL is the app's own shell / debug page (to be excluded; the remaining page is the built-in <webview>). */
 function isAppShell(u) {
   return (
     !u ||
@@ -127,7 +128,7 @@ function isAppShell(u) {
   );
 }
 
-/** 找到要操作的 <webview>：多标签时优先匹配活动标签 URL；否则取首个 webview / 非外壳 page。 */
+/** Find the <webview> to operate on: with multiple tabs, prefer the one matching the active-tab URL; otherwise take the first webview / non-shell page. */
 function findWebviewTarget() {
   const webviews = browser.targets().filter((x) => x.type() === "webview");
   if (webviews.length > 1 && activeUrl) {
@@ -170,18 +171,18 @@ async function attachAndWatch() {
     try {
       query = new URL(url).searchParams.get((config && config.queryParam) || "q") || "";
     } catch {
-      /* 非标准 URL */
+      /* non-standard URL */
     }
     send({ type: "trigger", url, query, source });
   };
-  // 仅监听主框架导航来检测搜索——不监听每个网络请求（避免 Network 事件洪流拖慢页面）。
+  // Only listen to main-frame navigations to detect searches -- not every network request (avoids a flood of Network events slowing the page down).
   page.on("framenavigated", (frame) => {
     if (frame === page.mainFrame()) fire(frame.url(), "navigate");
   });
   fire(page.url(), "initial");
 }
 
-/** 确保已挂载页面（必要时等待 webview 出现）。 */
+/** Ensure a page is attached (waits for the webview to appear if necessary). */
 async function getPage() {
   for (let i = 0; i < 20 && !attachedPage && !stopped; i++) {
     await attachAndWatch();
@@ -191,29 +192,29 @@ async function getPage() {
   return attachedPage;
 }
 
-/** 执行 AI 下发的页面操作，并回传结果（按 id 关联）。 */
+/** Execute the page action sent by the AI and report the result back (correlated by id). */
 async function handleAction({ id, action, params = {} }) {
   const reply = (ok, result, error) => send({ type: "action-result", id, ok, result, error });
-  await ensureConnected(); // 缺连接时按需重连
+  await ensureConnected(); // reconnect on demand when there is no connection
   const page = await getPage();
   if (!page) {
     const list = browser
-      ? browser.targets().map((t) => `${t.type()}|${t.url()}`).join(" ; ") || "(无)"
-      : "(未连接)";
+      ? browser.targets().map((t) => `${t.type()}|${t.url()}`).join(" ; ") || "(none)"
+      : "(not connected)";
     return reply(
       false,
       null,
-      `内置浏览器未就绪。port=${port || "?"} 已启动=${!!config} 连接错误=${lastError || "无"} targets=[${list}]`,
+      `Built-in browser not ready. port=${port || "?"} started=${!!config} connectError=${lastError || "none"} targets=[${list}]`,
     );
   }
   try {
     switch (action) {
       case "navigate": {
         const raw = String(params.url || "").trim();
-        if (!raw) return reply(false, null, "navigate 缺少 url");
+        if (!raw) return reply(false, null, "navigate is missing url");
         const u = /^https?:\/\//.test(raw) ? raw : `https://${raw}`;
         await page.goto(u, { waitUntil: "domcontentloaded", timeout: 30000 });
-        return reply(true, `已导航到 ${page.url()}`);
+        return reply(true, `Navigated to ${page.url()}`);
       }
       case "read": {
         const text = await page.evaluate(() => (document.body ? document.body.innerText : ""));
@@ -238,7 +239,7 @@ async function handleAction({ id, action, params = {} }) {
       case "click": {
         if (params.selector) {
           await page.click(String(params.selector));
-          return reply(true, `已点击 ${params.selector}`);
+          return reply(true, `Clicked ${params.selector}`);
         }
         if (params.text) {
           const clicked = await page.evaluate((t) => {
@@ -249,28 +250,28 @@ async function handleAction({ id, action, params = {} }) {
             return (el.innerText || el.textContent || "").trim().slice(0, 120);
           }, String(params.text));
           return clicked
-            ? reply(true, `已点击：${clicked}`)
-            : reply(false, null, `未找到包含「${params.text}」的可点击元素`);
+            ? reply(true, `Clicked: ${clicked}`)
+            : reply(false, null, `No clickable element containing "${params.text}" was found`);
         }
-        return reply(false, null, "click 需要 selector 或 text");
+        return reply(false, null, "click requires selector or text");
       }
       case "type": {
         const sel = String(params.selector || "");
-        if (!sel) return reply(false, null, "type 需要 selector");
+        if (!sel) return reply(false, null, "type requires selector");
         if (params.clear) {
-          // 先清空输入框（全选删除）再输入
+          // clear the input first (select all + delete) before typing
           await page.click(sel, { clickCount: 3 }).catch(() => page.click(sel).catch(() => {}));
         } else {
           await page.click(sel).catch(() => {});
         }
         await page.type(sel, String(params.text || ""));
         if (params.submit || params.enter) await page.keyboard.press("Enter");
-        return reply(true, `已在 ${sel} 输入${params.submit || params.enter ? "并回车提交" : ""}`);
+        return reply(true, `Typed into ${sel}${params.submit || params.enter ? " and submitted with Enter" : ""}`);
       }
       case "eval": {
         const expr = String(params.expr || params.js || "").trim();
-        if (!expr) return reply(false, null, "eval 缺少 expr");
-        const val = await page.evaluate(expr); // puppeteer 把字符串当表达式在页面上下文求值
+        if (!expr) return reply(false, null, "eval is missing expr");
+        const val = await page.evaluate(expr); // puppeteer evaluates the string as an expression in the page context
         const s = typeof val === "string" ? val : JSON.stringify(val);
         return reply(true, (s ?? "undefined").slice(0, 4000));
       }
@@ -282,8 +283,8 @@ async function handleAction({ id, action, params = {} }) {
         }
         const tree = await page.accessibility.snapshot(opts);
         const s = JSON.stringify(tree);
-        // 树可能很大：超长则截断为字符串回传，避免撑爆上下文。
-        return reply(true, s.length > 6000 ? `${s.slice(0, 6000)}…(已截断)` : tree);
+        // the tree can be large: if too long, truncate to a string before returning to avoid blowing up the context.
+        return reply(true, s.length > 6000 ? `${s.slice(0, 6000)}…(truncated)` : tree);
       }
       case "list": {
         const out = browser
@@ -297,10 +298,10 @@ async function handleAction({ id, action, params = {} }) {
         const path = require("path");
         const file = String(params.path || "").trim() || path.join(os.tmpdir(), `cdp-shot-${id}.png`);
         await page.screenshot({ path: file, fullPage: !!params.full });
-        return reply(true, `已截图: ${file}`);
+        return reply(true, `Screenshot saved: ${file}`);
       }
       default:
-        return reply(false, null, `未知动作：${action}`);
+        return reply(false, null, `Unknown action: ${action}`);
     }
   } catch (err) {
     return reply(false, null, String(err?.message || err));

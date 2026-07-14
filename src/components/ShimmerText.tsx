@@ -4,44 +4,44 @@ import React from 'react';
 
 interface ShimmerTextProps {
   /**
-   * 文本内容
+   * Text content
    */
   children: React.ReactNode;
-  
+
   /**
-   * 自定义类名
+   * Custom class name
    */
   className?: string;
-  
+
   /**
-   * 动画持续时间(秒),默认 2s
+   * Animation duration (seconds), default 2s
    */
   duration?: number;
-  
+
   /**
-   * 扫光宽度百分比,默认 30%
+   * Shimmer width percentage, default 30%
    */
   shimmerWidth?: number;
-  
+
   /**
-   * 扫光颜色,默认白色半透明
+   * Shimmer color, default translucent white
    */
   shimmerColor?: string;
-  
+
   /**
-   * 是否暂停动画
+   * Whether to pause the animation
    */
   paused?: boolean;
 }
 
 /**
- * 扫白光文本组件
- * 用于展示"正在思考中..."等状态文本,带有白光扫过的动效
- * 
+ * Shimmering white-light text component
+ * Used to display status text such as "Thinking...", with a white light sweeping across it
+ *
  * @example
  * ```tsx
- * <ShimmerText>正在思考中...</ShimmerText>
- * <ShimmerText duration={3} shimmerWidth={40}>加载中...</ShimmerText>
+ * <ShimmerText>Thinking...</ShimmerText>
+ * <ShimmerText duration={3} shimmerWidth={40}>Loading...</ShimmerText>
  * ```
  */
 export const ShimmerText: React.FC<ShimmerTextProps> = ({

@@ -5,15 +5,15 @@ import { useT } from "@/lib/i18n";
 import FilesTree from "./FilesTree";
 
 /**
- * 独立的「文件」侧栏：主侧边栏折叠后浮现于同一位置，展示当前工作目录的文件树。
- * 顶部返回按钮收起本侧栏并恢复主侧边栏（由 AgentShell 协调开合状态）。
- * 卡片外观与主侧边栏（AgentSidebar）保持一致。
+ * Standalone "Files" sidebar: surfaces in the same spot after the main sidebar collapses, showing the file tree of the current working directory.
+ * The top back button collapses this sidebar and restores the main sidebar (open/close state coordinated by AgentShell).
+ * The card appearance matches the main sidebar (AgentSidebar).
  */
 export default function FilesSidebar({ onClose }: { onClose?: () => void }) {
   const t = useT();
   return (
     <aside className="m-2 flex h-[calc(100%_-_16px)] w-[260px] shrink-0 flex-col overflow-hidden rounded-2xl border border-line bg-surface shadow-[0px_4px_12.3px_0px_#0000000A]">
-      {/* 顶部：返回 + 标题（整块作为无边框窗口拖拽区，交互元素 no-drag） */}
+      {/* Top: back + title (the whole block is a frameless-window drag region; interactive elements are no-drag) */}
       <div
         className="flex items-center gap-1.5 px-3 pt-4 pb-3"
         style={{ WebkitAppRegion: "drag" } as React.CSSProperties}
@@ -33,7 +33,7 @@ export default function FilesSidebar({ onClose }: { onClose?: () => void }) {
         </span>
       </div>
 
-      {/* 文件树：整块可滚动 */}
+      {/* File tree: the whole block scrolls */}
       <div className="min-h-0 flex-1 overflow-y-auto px-2 pb-3">
         <FilesTree />
       </div>

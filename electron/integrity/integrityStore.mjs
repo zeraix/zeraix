@@ -1,16 +1,19 @@
 /**
- * 聊天完整性 & 本地加密（主进程）。
+ * Chat integrity & local encryption (main process).
  *
- * 三件事：
- *  1) 本地加密：用 AES-256-GCM 加密「对话内容」落盘（conversationStore 透明调用本模块的
- *     encryptJson / decryptEnvelope）。主密钥（32B 随机）由操作系统凭据库保护：
- *     Windows DPAPI / macOS Keychain / Linux Secret Service —— 经 Electron safeStorage 封装。
- *  2) 设备标识 deviceId：首次启动生成一次并持久化，之后每台设备稳定不变（归属标识，非鉴权）。
- *  3) 完整性元数据 sidecar：每个会话一份 <chatId>.json（仅存 version/hash/signature 等，
- *     不含正文），供启动批量对账时「只读元数据、不解密正文」。
+ * Three responsibilities:
+ *  1) Local encryption: encrypt "conversation content" to disk with AES-256-GCM (conversationStore
+ *     transparently calls this module's encryptJson / decryptEnvelope). The master key (32B random)
+ *     is protected by the OS credential store:
+ *     Windows DPAPI / macOS Keychain / Linux Secret Service -- wrapped via Electron safeStorage.
+ *  2) Device identifier deviceId: generated once on first launch and persisted, then stable per device
+ *     thereafter (an ownership identifier, not authentication).
+ *  3) Integrity metadata sidecar: one <chatId>.json per conversation (stores only version/hash/signature
+ *     etc., no message body), so startup batch reconciliation can "read metadata only, never decrypt the body".
  *
- * 密钥/密文永不出本机；服务端只拿到前端算好的 hash 与它下发的 signature。
- * 详见 docs/chat.md、docs/chat-integrity-frontend-zh.md。
+ * Keys/ciphertext never leave the local machine; the server only receives the hash computed by the
+ * frontend and the signature it issues.
+ * See docs/chat.md, docs/chat-integrity-frontend-zh.md for details.
  */
 import { app, safeStorage } from "electron";
 import fs from "node:fs";
@@ -18,20 +21,20 @@ import fsp from "node:fs/promises";
 import path from "node:path";
 import { randomBytes, randomUUID, createCipheriv, createDecipheriv, hkdfSync } from "node:crypto";
 
-// ── 路径布局（userData/agent/integrity 下）──────────────────────────────────────
+// ── Path layout (under userData/agent/integrity) ────────────────────────────────
 const rootDir = () => path.join(app.getPath("userData"), "agent", "integrity");
 const keyFile = () => path.join(rootDir(), "master.key.json");
 const deviceFile = () => path.join(rootDir(), "device.json");
 const metaDir = () => path.join(rootDir(), "meta");
-/** 仅允许安全字符，防止路径穿越（与 conversationStore.safeId 对齐）。 */
+/** Allow only safe characters to prevent path traversal (aligned with conversationStore.safeId). */
 const safeId = (id) => String(id ?? "").replace(/[^a-zA-Z0-9_-]/g, "");
 const metaFile = (id) => path.join(metaDir(), `${safeId(id)}.json`);
 
 const ENVELOPE_ALG = "AES-256-GCM";
 
-// ── 主密钥与加密可用性（惰性、幂等初始化）───────────────────────────────────────
-let MASTER_KEY = null; // Buffer(32) —— 仅内存
-/** "keychain"：主密钥由 OS 凭据库封装；"plain"：凭据库不可用，主密钥明文落盘（降级）。 */
+// ── Master key & encryption availability (lazy, idempotent init) ─────────────────
+let MASTER_KEY = null; // Buffer(32) -- in memory only
+/** "keychain": master key wrapped by the OS credential store; "plain": credential store unavailable, master key written to disk in plaintext (degraded). */
 let ENCRYPTION_MODE = null;
 
 function ensureDirSync() {
@@ -39,9 +42,10 @@ function ensureDirSync() {
 }
 
 /**
- * 初始化主密钥（幂等）。必须在 app ready 后调用（safeStorage 依赖之）。
- * 首次：生成 32B 随机密钥；能用凭据库就封装后落盘，否则明文落盘并降级。
- * 后续：读取并（按需）解封装恢复到内存。
+ * Initialize the master key (idempotent). Must be called after app ready (safeStorage depends on it).
+ * First time: generate a 32B random key; wrap and persist it if the credential store is available,
+ * otherwise write plaintext and degrade.
+ * Thereafter: read and (as needed) unwrap it back into memory.
  */
 export function initIntegrity() {
   if (MASTER_KEY) return { mode: ENCRYPTION_MODE };
@@ -58,9 +62,9 @@ export function initIntegrity() {
     if (fs.existsSync(keyFile())) {
       const rec = JSON.parse(fs.readFileSync(keyFile(), "utf8"));
       if (rec?.mode === "keychain") {
-        // key 字段是 safeStorage 封装后的密文（base64）。
+        // The key field is the safeStorage-wrapped ciphertext (base64).
         const wrapped = Buffer.from(String(rec.key), "base64");
-        const b64 = safeStorage.decryptString(wrapped); // -> base64 的原始密钥
+        const b64 = safeStorage.decryptString(wrapped); // -> raw key as base64
         MASTER_KEY = Buffer.from(b64, "base64");
         ENCRYPTION_MODE = "keychain";
       } else {
@@ -77,13 +81,13 @@ export function initIntegrity() {
         writeKeyFile({ v: 1, mode: "plain", key: MASTER_KEY.toString("base64") });
         ENCRYPTION_MODE = "plain";
         console.warn(
-          "[integrity] OS 凭据库不可用（Linux 无 Secret Service？），主密钥以明文落盘（降级）。",
+          "[integrity] OS credential store unavailable (no Secret Service on Linux?); master key written to disk in plaintext (degraded).",
         );
       }
     }
   } catch (e) {
-    // 任何失败都不能拖垮应用：放弃加密，走明文存储（读路径仍兼容）。
-    console.error("[integrity] 初始化主密钥失败，加密已禁用：", e);
+    // No failure may take down the app: give up encryption and fall back to plaintext storage (the read path stays compatible).
+    console.error("[integrity] Failed to initialize master key; encryption disabled:", e);
     MASTER_KEY = null;
     ENCRYPTION_MODE = "disabled";
   }
@@ -91,11 +95,11 @@ export function initIntegrity() {
 }
 
 function writeKeyFile(rec) {
-  // 尽量收紧权限（POSIX 0600；Windows 上 mode 基本被忽略，靠 DPAPI 封装保护）。
+  // Tighten permissions as much as possible (POSIX 0600; on Windows mode is largely ignored, protection relies on DPAPI wrapping).
   fs.writeFileSync(keyFile(), JSON.stringify(rec), { encoding: "utf8", mode: 0o600 });
 }
 
-/** 是否已启用加密（keychain 或 plain 都算启用；disabled 表示不加密）。 */
+/** Whether encryption is enabled (keychain or plain both count as enabled; disabled means no encryption). */
 export function isEncryptionEnabled() {
   if (!ENCRYPTION_MODE) initIntegrity();
   return !!MASTER_KEY && ENCRYPTION_MODE !== "disabled";
@@ -106,16 +110,16 @@ export function encryptionStatus() {
   return { enabled: isEncryptionEnabled(), mode: ENCRYPTION_MODE };
 }
 
-// ── AES-256-GCM 信封 ───────────────────────────────────────────────────────────
-/** 判断一个 JSON 对象是否为本模块的加密信封。 */
+// ── AES-256-GCM envelope ─────────────────────────────────────────────────────────
+/** Determine whether a JSON object is an encryption envelope produced by this module. */
 export function isEnvelope(obj) {
   return !!obj && typeof obj === "object" && obj.alg === ENVELOPE_ALG && typeof obj.ciphertext === "string";
 }
 
-/** 把任意可序列化对象加密成信封 { v, alg, iv, authTag, ciphertext }（均 base64）。 */
+/** Encrypt any serializable object into an envelope { v, alg, iv, authTag, ciphertext } (all base64). */
 export function encryptJson(value) {
   if (!isEncryptionEnabled()) return null;
-  const iv = randomBytes(12); // GCM 推荐 96-bit nonce
+  const iv = randomBytes(12); // GCM recommends a 96-bit nonce
   const cipher = createCipheriv("aes-256-gcm", MASTER_KEY, iv);
   const pt = Buffer.from(JSON.stringify(value), "utf8");
   const ct = Buffer.concat([cipher.update(pt), cipher.final()]);
@@ -129,9 +133,9 @@ export function encryptJson(value) {
   };
 }
 
-/** 解密信封，返回原对象。密钥缺失 / 篡改（GCM tag 不符）会抛错。 */
+/** Decrypt an envelope and return the original object. Throws if the key is missing or on tampering (GCM tag mismatch). */
 export function decryptEnvelope(env) {
-  if (!MASTER_KEY) throw new Error("加密密钥不可用，无法解密");
+  if (!MASTER_KEY) throw new Error("Encryption key unavailable, cannot decrypt");
   const iv = Buffer.from(env.iv, "base64");
   const decipher = createDecipheriv("aes-256-gcm", MASTER_KEY, iv);
   decipher.setAuthTag(Buffer.from(env.authTag, "base64"));
@@ -143,9 +147,10 @@ export function decryptEnvelope(env) {
 }
 
 /**
- * 为 SQLCipher（记忆库整库加密）派生一个独立的 32B 原始密钥，返回 hex 字符串。
- * 用 HKDF 从主密钥派生，与 encryptJson 直接使用主密钥的用途区分开（同一主密钥不复用于两处）。
- * 加密不可用（disabled）时返回 null —— 调用方应据此以「明文库」降级。
+ * Derive a separate 32B raw key for SQLCipher (whole-database encryption of the memory store), returned as a hex string.
+ * Derived from the master key via HKDF, keeping it distinct from encryptJson's direct use of the master key
+ * (the same master key is not reused in two places).
+ * Returns null when encryption is unavailable (disabled) -- the caller should degrade to a "plaintext database" accordingly.
  */
 export function getSqlCipherKey() {
   if (!isEncryptionEnabled()) return null;
@@ -154,26 +159,26 @@ export function getSqlCipherKey() {
   return Buffer.from(derived).toString("hex");
 }
 
-// ── 设备标识 ────────────────────────────────────────────────────────────────────
-/** 取（或首次生成并持久化）稳定的 deviceId。 */
+// ── Device identifier ──────────────────────────────────────────────────────────
+/** Get (or generate and persist on first use) a stable deviceId. */
 export function getDeviceId() {
   ensureDirSync();
   try {
     const rec = JSON.parse(fs.readFileSync(deviceFile(), "utf8"));
     if (rec && typeof rec.deviceId === "string" && rec.deviceId) return rec.deviceId;
   } catch {
-    /* 不存在 → 生成 */
+    /* Does not exist -> generate */
   }
   const deviceId = randomUUID();
   try {
     fs.writeFileSync(deviceFile(), JSON.stringify({ v: 1, deviceId }), "utf8");
   } catch (e) {
-    console.error("[integrity] 持久化 deviceId 失败：", e);
+    console.error("[integrity] Failed to persist deviceId:", e);
   }
   return deviceId;
 }
 
-// ── 完整性元数据 sidecar（明文；仅 hash/签名/版本，无正文）─────────────────────────
+// ── Integrity metadata sidecar (plaintext; only hash/signature/version, no body) ──
 export async function loadMeta(chatId) {
   try {
     const data = JSON.parse(await fsp.readFile(metaFile(chatId), "utf8"));
@@ -189,7 +194,7 @@ export async function saveMeta(chatId, meta) {
     await fsp.writeFile(metaFile(chatId), JSON.stringify(meta ?? {}, null, 2), "utf8");
     return true;
   } catch (e) {
-    console.error("[integrity] saveMeta 失败：", e);
+    console.error("[integrity] saveMeta failed:", e);
     return false;
   }
 }
@@ -199,12 +204,12 @@ export async function deleteMeta(chatId) {
     await fsp.rm(metaFile(chatId), { force: true });
     return true;
   } catch (e) {
-    console.error("[integrity] deleteMeta 失败：", e);
+    console.error("[integrity] deleteMeta failed:", e);
     return false;
   }
 }
 
-/** 读取全部 sidecar 元数据（启动批量对账用；不触碰正文）。 */
+/** Read all sidecar metadata (for startup batch reconciliation; never touches the body). */
 export async function listMeta() {
   try {
     const files = await fsp.readdir(metaDir());
@@ -215,7 +220,7 @@ export async function listMeta() {
         const data = JSON.parse(await fsp.readFile(path.join(metaDir(), f), "utf8"));
         if (data && typeof data === "object") out.push(data);
       } catch {
-        /* 跳过坏文件 */
+        /* Skip corrupt files */
       }
     }
     return out;

@@ -1,11 +1,11 @@
 #!/usr/bin/env node
 /**
- * DOWNLOAD 单个 Windows 二进制包（内含 qemu + llama 两个子目录）并铺到
- * resources/bin/win32-<arch>/{qemu,llama}/，供 dist:win 内置。
- *   - qemu：沙箱命令执行引擎；
- *   - llama：本地大模型推理（llama-server.exe，建议 Vulkan 后端：跨 NVIDIA/AMD/Intel）。
- * 一次下载一个 zip（bin/win32-<arch>.zip），解压后按子目录拆分。CDN 优先，失败回落鉴权 OSS。
- * 可在任意构建主机运行；仅在 Windows 上做 --version 自测。对应上传见 scripts/bundle-bin-win.mjs。
+ * DOWNLOAD a single Windows binary bundle (containing the qemu + llama subdirectories) and lay it
+ * out under resources/bin/win32-<arch>/{qemu,llama}/ for dist:win to embed.
+ *   - qemu: the sandbox command-execution engine;
+ *   - llama: local large-model inference (llama-server.exe, Vulkan backend recommended: works across NVIDIA/AMD/Intel).
+ * Downloads one zip at a time (bin/win32-<arch>.zip) and splits it by subdirectory after extraction. CDN first, falling back to authenticated OSS on failure.
+ * Can run on any build host; only runs the --version self-test on Windows. For the matching upload see scripts/bundle-bin-win.mjs.
  *
  *   node scripts/download-bin-win.mjs
  */
@@ -40,7 +40,7 @@ const encKey = key.split("/").map(encodeURIComponent).join("/");
 
 const PAYLOADS = [
   { name: "qemu", selfTest: { exe: "qemu-system-x86_64.exe", hard: true } },
-  // llama 不再随包分发（改为运行时动态安装，见 electron/llm/llamaInstaller.mjs）。
+  // llama is no longer distributed with the bundle (it is now installed dynamically at runtime, see electron/llm/llamaInstaller.mjs).
 ];
 
 function fetchTo(url, dest, maxRedirs = 5) {

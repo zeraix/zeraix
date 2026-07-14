@@ -228,7 +228,7 @@ export function upsertLocalModel(info: { endpoint: string; model?: string; label
     id: LOCAL_MODEL_ID,
     providerId: LOCAL_PROVIDER_ID,
     model: info.model || "local",
-    label: info.label || "本地模型（llama.cpp）",
+    label: info.label || "Local model（llama.cpp）",
     endpoint: info.endpoint,
     custom: false,
     apiFormat: "openai-chat",

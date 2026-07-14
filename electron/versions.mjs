@@ -1,10 +1,14 @@
 /**
- * 版本常量：数据单一来源在 electron/versions.json（便于读写 / 手动更新）；本模块只读出并具名导出，
- * 供运行时（llamaInstaller / qemu）与构建/发布脚本引入（导入面不变）。纯 node，不依赖 electron。
+ * Version constants: the single source of truth lives in electron/versions.json (easy to read/write
+ * and update by hand); this module only reads it out and re-exports named values, for import by the
+ * runtime (llamaInstaller / qemu) and build/publish scripts (the import surface stays unchanged).
+ * Pure node, no electron dependency.
  *
- * llama：llama.cpp release tag，`npm run publish:llama <tag>` 发布后自动写回 JSON。
- * vm：各架构 docker 镜像 ID 短哈希（per-arch）。`npm run build:rootfs` 依 `docker image inspect` 自动写回。
- *   OSS/CDN 路径为 vm/<arch>/<id>/；本地目录为 .../vm/<id>/。空值 = 尚未构建/发布该架构。
+ * llama: the llama.cpp release tag; `npm run publish:llama <tag>` writes it back to the JSON after publishing.
+ * vm: per-arch short hash of the docker image ID. `npm run build:rootfs` writes it back automatically
+ *   based on `docker image inspect`.
+ *   The OSS/CDN path is vm/<arch>/<id>/; the local directory is .../vm/<id>/. An empty value = that
+ *   architecture has not been built/published yet.
  */
 import fs from "node:fs";
 import { fileURLToPath } from "node:url";

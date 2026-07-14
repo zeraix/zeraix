@@ -1,95 +1,95 @@
 /**
- * 本地模型目录 + 依硬件推荐 + llama-server 启动参数（主进程，纯逻辑无副作用）。
+ * Local model catalog + hardware-based recommendations + llama-server launch args (main process, pure logic, no side effects).
  *
- * 体积按「参数量 × 每权重比特(bpw)」估算；架构维度（层数/KV 头/头维）为近似值，仅用于估 KV 缓存。
- * 目录含 Qwen3.6 旗舰 + Gemma 4 QAT（E4B/12B/26B-A4B，面向低端→中端）；UI 也允许直接填任意 `user/repo:QUANT`，
- * 故此列表是推荐而非限制。GGUF 仓库名 / 量化可用性以 Hugging Face 为准，落地前请核对。
+ * Size is estimated as "parameter count × bits-per-weight (bpw)"; architecture dimensions (layers / KV heads / head dim) are approximate, used only to estimate the KV cache.
+ * The catalog includes the Qwen3.6 flagship + Gemma 4 QAT (E4B/12B/26B-A4B, targeting low-end → mid-range); the UI also allows entering any `user/repo:QUANT` directly,
+ * so this list is a recommendation, not a restriction. GGUF repo names / quant availability follow Hugging Face; please verify before shipping.
  */
 import os from "node:os";
 import { execSync } from "node:child_process";
 
 const round = (n) => Math.round(n * 10) / 10;
 
-// 量化档：质量高→体积小。bpw = 有效每权重比特。
+// Quantization tiers: higher quality → larger size. bpw = effective bits per weight.
 export const QUANTS = [
-  { id: "Q8_0", bpw: 8.5, quality: 99, label: "Q8_0 · 近无损" },
-  { id: "Q6_K", bpw: 6.56, quality: 97, label: "Q6_K · 很高" },
-  { id: "Q5_K_M", bpw: 5.67, quality: 95, label: "Q5_K_M · 高" },
-  { id: "Q4_K_M", bpw: 4.85, quality: 90, label: "Q4_K_M · 均衡（默认）" },
-  { id: "IQ4_XS", bpw: 4.25, quality: 87, label: "IQ4_XS · 紧凑 4-bit" },
-  { id: "Q3_K_M", bpw: 3.91, quality: 80, label: "Q3_K_M · 小" },
-  { id: "IQ3_M", bpw: 3.5, quality: 74, label: "IQ3_M · 很小" },
-  { id: "IQ2_M", bpw: 2.7, quality: 58, label: "IQ2_M · 极小（明显掉质量）" },
+  { id: "Q8_0", bpw: 8.5, quality: 99, label: "Q8_0 · near-lossless" },
+  { id: "Q6_K", bpw: 6.56, quality: 97, label: "Q6_K · very high" },
+  { id: "Q5_K_M", bpw: 5.67, quality: 95, label: "Q5_K_M · high" },
+  { id: "Q4_K_M", bpw: 4.85, quality: 90, label: "Q4_K_M · balanced (default)" },
+  { id: "IQ4_XS", bpw: 4.25, quality: 87, label: "IQ4_XS · compact 4-bit" },
+  { id: "Q3_K_M", bpw: 3.91, quality: 80, label: "Q3_K_M · small" },
+  { id: "IQ3_M", bpw: 3.5, quality: 74, label: "IQ3_M · very small" },
+  { id: "IQ2_M", bpw: 2.7, quality: 58, label: "IQ2_M · tiny (noticeable quality loss)" },
 ];
 
-// 能力高→小。active=激活参数（MoE）；arch 仅用于估 KV。
+// Capability high → small. active = activated parameters (MoE); arch is only used to estimate KV.
 export const MODELS = [
   {
     id: "qwen3.6-35b-a3b", name: "Qwen3.6-35B-A3B", params: 35, active: 3, moe: true, vision: true, mtp: true, mtpEmbedded: true,
-    // vision:true = 该 GGUF 仓库带视觉投影（mmproj）。启动时显式 --mmproj 加载同仓库视觉投影（视觉开启，默认）；
-    // 视觉关闭则传 --no-mmproj 跳过（省 ~1GB 常驻内存，见 VISION_OVERHEAD_GB）。是否真有 mmproj 以 HF 仓库为准。
-    // mtpEmbedded:true = 用 unsloth 的「-MTP-GGUF」仓库：MTP（多 token 预测）头内置于权重本身（自投机，无独立 drafter 文件），
-    // 同样发 UD 量化 + mmproj。启动时 --spec-type draft-mtp 启用自投机解码（关闭视觉/MTP 只影响加载/开关，权重仍来自该仓库）。
+    // vision:true = this GGUF repo ships a vision projector (mmproj). At launch, explicitly pass --mmproj to load the same repo's vision projector (vision on, default);
+    // if vision is off, pass --no-mmproj to skip it (saves ~1GB of resident memory, see VISION_OVERHEAD_GB). Whether an mmproj actually exists follows the HF repo.
+    // mtpEmbedded:true = use unsloth's "-MTP-GGUF" repo: the MTP (multi-token prediction) head is embedded in the weights themselves (self-speculative, no separate drafter file),
+    // and it also ships UD quants + mmproj. At launch, --spec-type draft-mtp enables self-speculative decoding (turning off vision/MTP only affects loading/toggles; the weights still come from this repo).
     hf: "unsloth/Qwen3.6-35B-A3B-MTP-GGUF", arch: { L: 48, kvH: 4, hd: 128 }, maxCtx: 262144,
-    // unsloth 只发 UD 动态量化；按设备内存分档选 UD 标签（即 -hf 的 :QUANT）。memGB = Mac 统一内存总量 / 独显显存。
+    // unsloth ships only UD dynamic quants; pick a UD tag by device-memory tier (i.e. the :QUANT in -hf). memGB = total Mac unified memory / discrete-GPU VRAM.
     quantTiers: [
       { minMemGB: 31, quant: "UD-Q4_K_XL", bpw: 4.5 },
       { minMemGB: 23, quant: "UD-Q3_K_XL", bpw: 3.6 },
-      // UD-Q2_K_XL（约 14GB 权重）在 16G 机器上给 KV/上下文的余量过小，暂注释；如需在 16G 勉强跑 35B 再启用。
+      // UD-Q2_K_XL (~14GB weights) leaves too little headroom for KV/context on a 16G machine, commented out for now; enable it if you need to barely run 35B on 16G.
       // { minMemGB: 16, quant: "UD-Q2_K_XL", bpw: 2.6 },
     ],
-    notes: "MoE，约 3B 激活 → 解码快、质量接近大模型。多模态 + 智能编码。"
+    notes: "MoE, ~3B active → fast decode, quality close to a large model. Multimodal + agentic coding."
   },
-  // —— Gemma 4 QAT（量化感知训练）系列：4-bit 近 bf16，用官方 QAT 检查点做的 unsloth UD GGUF。
-  // 只用 UD-Q4_K_XL（QAT 仓库仅发 Q2/Q4，Q2 掉质量明显故舍弃）。三者仓库都含独立 MTP drafter（MTP/mtp-*-Q4_0.gguf，约百 MB），
-  // 随主权重自下载并经 -md + --spec-type draft-mtp 启用投机解码（默认开，UI 可关）。drafter 缺失时降级为无投机（不阻断启动）。
-  // vision:true：三仓库均自带 mmproj（mmproj-F16.gguf 等），启动时显式 --mmproj 加载视觉投影；不需要视觉可在 UI 关闭（省 ~1GB 常驻）。
+  // —— Gemma 4 QAT (quantization-aware training) series: 4-bit near bf16, unsloth UD GGUF built from the official QAT checkpoints.
+  // Use only UD-Q4_K_XL (the QAT repos ship only Q2/Q4; Q2 loses quality noticeably so it is dropped). All three repos include a separate MTP drafter (MTP/mtp-*-Q4_0.gguf, ~hundreds of MB),
+  // auto-downloaded alongside the main weights and enabling speculative decoding via -md + --spec-type draft-mtp (on by default, can be turned off in the UI). If the drafter is missing, it degrades to no speculation (does not block startup).
+  // vision:true: all three repos bundle an mmproj (mmproj-F16.gguf etc.); at launch, explicitly pass --mmproj to load the vision projector; if you don't need vision, turn it off in the UI (saves ~1GB resident).
   {
     id: "gemma4-26b-a4b", name: "Gemma 4 26B-A4B", params: 26, active: 4, moe: true, vision: true, mtp: true,
     hf: "unsloth/gemma-4-26B-A4B-it-qat-GGUF", arch: { L: 48, kvH: 8, hd: 256, swa: { every: 6, window: 1024 } }, maxCtx: 262144,
     quantTiers: [
       { minMemGB: 18, quant: "UD-Q4_K_XL", bpw: 4.37 }, // 14.2 GB
     ],
-    notes: "MoE 约 4B 激活 → 解码快、质量高。多模态（仅图像，无音频）。"
+    notes: "MoE ~4B active → fast decode, high quality. Multimodal (images only, no audio)."
   },
   {
-    // mtp:true：稠密 12B 解码受带宽限制（每 token 读 ~6.7GB），投机解码约 1.5–2× 提速。drafter（MTP/…-Q4_0-MTP.gguf，
-    // ~254MB）与主权重同仓库，自下载时随权重一并拉取（hfDownload），启动经 -md 传给 llama-server；-hf 回退路径不启用。
+    // mtp:true: dense 12B decoding is bandwidth-bound (reads ~6.7GB per token); speculative decoding gives ~1.5–2× speedup. The drafter (MTP/…-Q4_0-MTP.gguf,
+    // ~254MB) is in the same repo as the main weights and is fetched alongside them during auto-download (hfDownload), then passed to llama-server via -md; not enabled on the -hf fallback path.
     id: "gemma4-12b", name: "Gemma 4 12B", params: 12, active: 12, moe: false, vision: true, mtp: true,
     hf: "unsloth/gemma-4-12B-it-qat-GGUF", arch: { L: 48, kvH: 8, hd: 256, swa: { every: 6, window: 1024 } }, maxCtx: 262144,
     quantTiers: [
       { minMemGB: 12, quant: "UD-Q4_K_XL", bpw: 4.48 }, // 6.72 GB
     ],
-    notes: "稠密 12B，质量接近 26B-A4B。多模态（图/音）。"
+    notes: "Dense 12B, quality close to 26B-A4B. Multimodal (image/audio)."
   },
   {
     id: "gemma4-e4b", name: "Gemma 4 E4B", params: 8, active: 8, moe: false, vision: true, mtp: true,
-    // ≈4.5B 有效参数（8B 原始，MatFormer + Per-Layer Embeddings）；低端笔记本首选（4–5GB 即可）。
-    // 原生工具调用 token，适合智能体。Q4_0 会掉质量，故用 UD-Q4_K_XL。
+    // ≈4.5B effective parameters (8B raw, MatFormer + Per-Layer Embeddings); top pick for low-end laptops (4–5GB is enough).
+    // Native tool-calling tokens, well suited for agents. Q4_0 loses quality, so use UD-Q4_K_XL.
     hf: "unsloth/gemma-4-E4B-it-qat-GGUF", arch: { L: 34, kvH: 4, hd: 256, swa: { every: 6, window: 1024 } }, maxCtx: 131072,
     quantTiers: [
       { minMemGB: 8, quant: "UD-Q4_K_XL", bpw: 4.22 }, // 4.22 GB
     ],
-    notes: "≈4.5B 有效参数。原生工具调用，QAT 4-bit 近 bf16。多模态（图/音）。"
+    notes: "≈4.5B effective parameters. Native tool calling, QAT 4-bit near bf16. Multimodal (image/audio)."
   },
   // { id: "qwen3.6-27b", name: "Qwen3.6-27B", params: 27, active: 27, moe: false, vision: true, mtp: false,
   //   hf: "unsloth/Qwen3.6-27B-GGUF", arch: { L: 64, kvH: 8, hd: 128 },
-  //   notes: "稠密 27B，质量最高但算力更重（全参激活 → 解码慢于 A3B）。多模态。" },
+  //   notes: "Dense 27B, highest quality but heavier compute (all params active → slower decode than A3B). Multimodal." },
   // { id: "qwen3-coder-30b-a3b", name: "Qwen3-Coder-30B-A3B", params: 30, active: 3, moe: true, vision: false, mtp: false,
   //   hf: "unsloth/Qwen3-Coder-30B-A3B-Instruct-GGUF", arch: { L: 48, kvH: 4, hd: 128 },
-  //   notes: "纯文本编码专精，MoE 约 3B 激活。适合代码智能体；比 3.6 更轻、无视觉开销。" },
+  //   notes: "Text-only coding specialist, MoE ~3B active. Good for coding agents; lighter than 3.6, no vision overhead." },
   // { id: "qwen3-14b", name: "Qwen3-14B", params: 14, active: 14, moe: false, vision: false, mtp: false,
-  //   hf: "unsloth/Qwen3-14B-GGUF", arch: { L: 40, kvH: 8, hd: 128 }, notes: "稠密 14B，16GB 级机器的稳妥选择。" },
+  //   hf: "unsloth/Qwen3-14B-GGUF", arch: { L: 40, kvH: 8, hd: 128 }, notes: "Dense 14B, a solid choice for 16GB-class machines." },
   // { id: "qwen3-8b", name: "Qwen3-8B", params: 8, active: 8, moe: false, vision: false, mtp: false,
-  //   hf: "unsloth/Qwen3-8B-GGUF", arch: { L: 36, kvH: 8, hd: 128 }, notes: "稠密 8B，12GB 机器 / 8GB 显卡的好默认。" },
+  //   hf: "unsloth/Qwen3-8B-GGUF", arch: { L: 36, kvH: 8, hd: 128 }, notes: "Dense 8B, a good default for 12GB machines / 8GB GPUs." },
   // { id: "qwen3-4b", name: "Qwen3-4B", params: 4, active: 4, moe: false, vision: false, mtp: false,
-  //   hf: "unsloth/Qwen3-4B-GGUF", arch: { L: 36, kvH: 8, hd: 128 }, notes: "稠密 4B，8GB 机器 / 老显卡可跑。" },
+  //   hf: "unsloth/Qwen3-4B-GGUF", arch: { L: 36, kvH: 8, hd: 128 }, notes: "Dense 4B, runs on 8GB machines / older GPUs." },
   // { id: "qwen3-1.7b", name: "Qwen3-1.7B", params: 1.7, active: 1.7, moe: false, vision: false, mtp: false,
-  //   hf: "unsloth/Qwen3-1.7B-GGUF", arch: { L: 28, kvH: 8, hd: 128 }, notes: "低内存 / 纯 CPU 可跑。快但推理力有限。" },
+  //   hf: "unsloth/Qwen3-1.7B-GGUF", arch: { L: 28, kvH: 8, hd: 128 }, notes: "Runs on low memory / pure CPU. Fast but limited reasoning." },
 ];
 
 const OVERHEAD_BASE_GB = 0.6;
-// 视觉投影（mmproj）常驻显存/内存的近似开销：Qwen-VL 级 ViT 视觉塔约 0.6–1.4GB，取 1GB。仅在视觉开启且模型支持时计入。
+// Approximate resident VRAM/memory overhead of the vision projector (mmproj): a Qwen-VL-class ViT vision tower is ~0.6–1.4GB, take 1GB. Counted only when vision is on and the model supports it.
 const VISION_OVERHEAD_GB = 1.0;
 
 export function detectHardware() {
@@ -114,7 +114,7 @@ export function detectHardware() {
       backend = "cuda";
       gpu = { name, vramGB: round(Number(memMiB) / 1024) };
     } catch {
-      backend = "vulkan"; // 有 GPU 但读不到显存；让用户在 UI 里手填
+      backend = "vulkan"; // GPU present but VRAM unreadable; let the user fill it in manually in the UI
       gpu = null;
     }
   }
@@ -122,24 +122,24 @@ export function detectHardware() {
 }
 
 /**
- * Vulkan GPU：区分「集显（共享系统内存 UMA）」与「独显（专用显存）」。见 docs/vulkan-uma-windows.md。
- * 权威信号是 ggml 的 `uma:` 标志（uma:1=集显 / uma:0=独显），由 llama stderr 解析（--list-devices 不打印，
- * 需真正加载模型时才有）。uma 未知时退回按设备名启发式，并默认「共享」——这是保守选择：宁可当集显（预算只算
- * 系统内存）也不把一段系统内存重复计成独立显存而高估容量、推荐放不下的量化。
- * @param {string|null} name --list-devices 的设备名
- * @param {boolean|null} uma 解析到的 ggml uma 标志，未知为 null
- * @returns {boolean} true=共享/UMA（按统一内存对待），false=独显（专用显存）
+ * Vulkan GPU: distinguish "integrated GPU (shared system memory, UMA)" from "discrete GPU (dedicated VRAM)". See docs/vulkan-uma-windows.md.
+ * The authoritative signal is ggml's `uma:` flag (uma:1 = integrated / uma:0 = discrete), parsed from llama stderr (--list-devices does not print it,
+ * it only appears once a model is actually loaded). When uma is unknown, fall back to a device-name heuristic and default to "shared" — this is the conservative choice: better to treat it as integrated (budgeting only
+ * system memory) than to double-count a slice of system memory as dedicated VRAM, overestimate capacity, and recommend a quant that won't fit.
+ * @param {string|null} name device name from --list-devices
+ * @param {boolean|null} uma the parsed ggml uma flag, null if unknown
+ * @returns {boolean} true = shared/UMA (treated as unified memory), false = discrete GPU (dedicated VRAM)
  */
 export function isSharedGpu(name, uma) {
   if (uma === true) return true;
   if (uma === false) return false;
   const n = (name || "").toLowerCase();
-  // 明确的独显信号优先判定为独显。
+  // Clear discrete-GPU signals take priority and are classified as discrete.
   if (/\b(rtx|gtx|geforce|quadro|tesla|instinct)\b/.test(n)) return false; // NVIDIA / AMD Instinct
-  if (/\barc\b/.test(n)) return false; // Intel Arc（独显）
-  if (/radeon\s+(rx|pro|vii)\b/.test(n) || /\brx\s?\d{3,}\b/.test(n)) return false; // AMD 独显
-  // 其余一律按共享：集显名（"Radeon(TM) Graphics" / "UHD·Iris·Xe·HD Graphics" / "Vega"）以及无法判定者。
-  // 真正跑一次模型即可拿到权威 uma: 并自我校正。
+  if (/\barc\b/.test(n)) return false; // Intel Arc (discrete)
+  if (/radeon\s+(rx|pro|vii)\b/.test(n) || /\brx\s?\d{3,}\b/.test(n)) return false; // AMD discrete
+  // Everything else is treated as shared: integrated-GPU names ("Radeon(TM) Graphics" / "UHD·Iris·Xe·HD Graphics" / "Vega") and anything undetermined.
+  // Actually running a model once yields the authoritative uma: flag and self-corrects.
   return true;
 }
 
@@ -149,7 +149,7 @@ export function usableModelMemoryGB(hw, overrideGB) {
     const reserve = Math.min(8, Math.max(3, hw.totalMemGB * 0.22));
     return round(Math.max(2, Math.min(hw.totalMemGB * 0.7, hw.totalMemGB - reserve)));
   }
-  // 独显：部分卸载可用「可用显存 + 可用系统内存」（放不下的层留 CPU）；读不到显存则仅系统内存。
+  // Discrete GPU: partial offload can use "available VRAM + available system memory" (layers that don't fit stay on CPU); if VRAM is unreadable, use system memory only.
   const usableVram = hw.gpu && hw.gpu.vramGB ? Math.max(0, hw.gpu.vramGB - 1.2) : 0;
   return round(Math.max(2, usableVram + hw.totalMemGB * 0.6));
 }
@@ -162,8 +162,8 @@ export function kvGB(model, ctx, kvBits) {
   const { L, kvH, hd, swa } = model.arch;
   const per = (layers, len) => (layers * kvH * hd * 2 * len * (kvBits / 8)) / 1e9;
   if (!swa) return per(L, ctx);
-  // 滑窗注意力（如 Gemma 4 的 5:1）：每 every 层仅 1 层全注意力按 ctx 计，其余层 KV 只占窗口大小
-  // （llama.cpp iSWA 缓存按窗口分配）。全量口径会把 Gemma 的 KV 高估 ~5–6×，导致上下文分档过小。
+  // Sliding-window attention (e.g. Gemma 4's 5:1): out of every `every` layers only 1 is full attention counted at ctx, the rest hold only a window's worth of KV
+  // (llama.cpp iSWA cache is allocated per window). Counting everything at full length would overestimate Gemma's KV by ~5–6×, making the context tier too small.
   const gL = Math.ceil(L / swa.every);
   return per(gL, ctx) + per(L - gL, Math.min(ctx, swa.window));
 }
@@ -180,16 +180,16 @@ export function bestQuant(model, budgetGB, ctx, kvBits) {
   return null;
 }
 
-// 上下文自动分档（由大到小）：按设备内存选「放得下的最大 -c」，封顶该模型原生窗口（maxCtx）。
-// 16K 对真实使用太小（系统提示即 ~6K），故尽量往上探；同档优先 KV q8（近无损），放不下再降 q4（省一半）解锁更大上下文。
+// Automatic context tiering (largest to smallest): pick "the largest -c that fits" by device memory, capped at the model's native window (maxCtx).
+// 16K is too small for real use (the system prompt alone is ~6K), so probe upward as much as possible; within a tier prefer KV q8 (near-lossless), and only drop to q4 (half the size) when it doesn't fit, to unlock a larger context.
 export const CTX_LADDER = [262144, 131072, 65536, 32768, 16384];
 
 /**
- * 为「模型 + 量化」选上下文与 KV 量化：{ ctx, kvBits }。
- * cap 取 usable 预算与 deviceMem*0.78 的较大者（与分档模型按设备内存判 fits 的口径折中）。
- * 0.78 而非 0.75：KV 估算本就偏保守（q4 实际 4.5bpw 已+12%、SWA 窗口取上限），放宽让 26B-A4B 在
- * 24G 到达 128K（18.4GB≈77%，贴近 macOS Metal wired 上限 ~75–80%，极限组合首启失败可关视觉/降档）。
- * 全档放不下时回退 { 16K, q4 }（最省组合，行为接近旧默认）。
+ * Pick context length and KV quantization for a "model + quant": { ctx, kvBits }.
+ * cap is the larger of the usable budget and deviceMem*0.78 (a compromise with the device-memory "fits" criterion used for tiered models).
+ * 0.78 rather than 0.75: the KV estimate is already conservative (q4 is actually 4.5bpw, i.e. +12%; the SWA window uses the upper bound), so loosening it lets 26B-A4B reach
+ * 128K on 24G (18.4GB ≈ 77%, close to the macOS Metal wired ceiling of ~75–80%; if an extreme combo fails on first launch, turn off vision / drop a tier).
+ * When nothing fits, fall back to { 16K, q4 } (the leanest combo, behavior close to the old default).
  */
 export function pickCtxKv(model, bpw, hw, budgetGB, vision = false) {
   const cap = Math.max(budgetGB || 0, deviceMemGB(hw) * 0.78);
@@ -203,22 +203,22 @@ export function pickCtxKv(model, bpw, hw, budgetGB, vision = false) {
   return { ctx: 16384, kvBits: 4 };
 }
 
-// 设备可用于模型的容量：统一内存(Mac)用总量；独显因「部分卸载」可横跨显存 + 系统内存，故取两者之和；
-// CPU / 读不到显存则仅系统内存。用于 quantTiers 分档与是否支持的判断。
+// Device capacity available to a model: unified memory (Mac) uses the total; a discrete GPU can span VRAM + system memory via "partial offload", so take the sum of both;
+// CPU / unreadable VRAM uses system memory only. Used for quantTiers tiering and support checks.
 export function deviceMemGB(hw) {
   if (hw.unified) return hw.totalMemGB;
   const vram = hw.gpu && hw.gpu.vramGB ? hw.gpu.vramGB : 0;
   return round(vram + hw.totalMemGB);
 }
 
-// 运行本地模型的最低门槛：低于此（deviceMem = Mac 统一内存 / 独显显存）连最小模型的最小量化都放不下 → 整体停用本地模型。
-// 与目录里最低分档一致：Gemma 4 E4B 的 UD-Q4_K_XL（minMemGB=8）。旗舰 35B 现从 23GB 起（Q2 档已注释，见其 quantTiers）。
+// Minimum bar for running local models: below this (deviceMem = Mac unified memory / discrete-GPU VRAM), even the smallest quant of the smallest model won't fit → disable local models entirely.
+// Consistent with the lowest tier in the catalog: Gemma 4 E4B's UD-Q4_K_XL (minMemGB=8). The flagship 35B now starts at 23GB (the Q2 tier is commented out, see its quantTiers).
 export const MIN_LOCAL_MEM_GB = 8;
 export function localSupported(hw) {
   return deviceMemGB(hw) >= MIN_LOCAL_MEM_GB;
 }
 
-// 选模型的量化：有 quantTiers（如 flagship 用 unsloth UD 分档）按设备内存选 UD 标签；否则走通用 QUANTS。
+// Pick a model's quant: if it has quantTiers (e.g. the flagship uses unsloth UD tiers), pick a UD tag by device memory; otherwise use the generic QUANTS.
 function selectQuant(model, hw, budgetGB, ctx, kvBits) {
   if (model.quantTiers) {
     const mem = deviceMemGB(hw);
@@ -228,10 +228,10 @@ function selectQuant(model, hw, budgetGB, ctx, kvBits) {
   return bestQuant(model, budgetGB, ctx, kvBits);
 }
 
-// 该模型在 UI 量化下拉里可选的标签、各自体积、以及是否放得下（fits）：fits=false 的量化在 UI 里禁用（不可选）。
-// 分档模型（quantTiers）按 deviceMem≥minMemGB 判 fits（与 selectQuant 同口径）；其余用通用 QUANTS 按 totalGB≤budget 判。
-// 每个量化各自跑 pickCtxKv：体积按「该量化下自动选出的 ctx/kv」估算，并把 ctx 一并返回供 UI 显示。
-// vision 开启且模型支持视觉时，体积含视觉投影开销（与实际启动一致）。
+// The quant tags this model offers in the UI quant dropdown, each one's size, and whether it fits: quants with fits=false are disabled (not selectable) in the UI.
+// Tiered models (quantTiers) judge fits by deviceMem ≥ minMemGB (same criterion as selectQuant); the rest use the generic QUANTS with totalGB ≤ budget.
+// Each quant runs pickCtxKv on its own: size is estimated from "the ctx/kv auto-selected for that quant", and ctx is returned alongside for the UI to display.
+// When vision is on and the model supports vision, the size includes the vision-projector overhead (matching the actual launch).
 function modelQuants(model, hw, budgetGB, vision = false) {
   const mem = deviceMemGB(hw);
   const list = model.quantTiers
@@ -244,13 +244,13 @@ function modelQuants(model, hw, budgetGB, vision = false) {
   });
 }
 
-/** 为某模型自动选量化标签（分档模型走 quantTiers 的 UD 标签，其余走通用 QUANTS）；供启动时未显式指定 quant 的回退。 */
+/** Auto-select a quant tag for a model (tiered models use the UD tag from quantTiers, the rest use the generic QUANTS); a fallback for when quant isn't explicitly specified at launch. */
 export function autoQuantId(model, hw, ctx = 16384, kvBits = 8) {
   const q = selectQuant(model, hw, usableModelMemoryGB(hw), ctx, kvBits);
   return q ? q.id : "Q4_K_M";
 }
 
-/** 该量化标签的每权重比特（bpw）：分档模型取 quantTiers，其余取 QUANTS，未知按标签名粗估。 */
+/** Bits-per-weight (bpw) for a quant tag: tiered models read from quantTiers, the rest from QUANTS, and unknown tags are roughly estimated from the tag name. */
 export function quantBpw(model, quantId) {
   if (model && model.quantTiers) { const t = model.quantTiers.find((x) => x.quant === quantId); if (t) return t.bpw; }
   const q = QUANTS.find((x) => x.id === quantId); if (q) return q.bpw;
@@ -259,24 +259,24 @@ export function quantBpw(model, quantId) {
   if (/Q5/i.test(quantId)) return 5.6;
   if (/Q6/i.test(quantId)) return 6.5;
   if (/Q8/i.test(quantId)) return 8.5;
-  return 4.5; // Q4 及未知
+  return 4.5; // Q4 and unknown
 }
 
 /**
- * 计算 -ngl（卸载到 GPU 的层数）。独显按可用显存估算能放下多少层，放不下的留在 CPU（部分卸载 partial offload）。
- * vramGB 建议由启动时 `llama-server --list-devices` 探测得到（比预装粗估更准）。
- *   999 = 全部卸载；0 = 全在 CPU；N = 前 N 层在 GPU。信息不全 / 读不到显存 → 乐观全卸载（失败由回退兜底）。
+ * Compute -ngl (number of layers to offload to the GPU). For a discrete GPU, estimate how many layers fit in available VRAM and leave the rest on CPU (partial offload).
+ * vramGB is best probed at launch via `llama-server --list-devices` (more accurate than a preinstalled rough estimate).
+ *   999 = offload all; 0 = all on CPU; N = first N layers on GPU. Incomplete info / unreadable VRAM → optimistically offload all (failures are caught by the fallback).
  */
 export function gpuLayers(model, bpw, ctx, kvBits, vramGB) {
   const L = model && model.arch ? model.arch.L : 0;
   if (!L || !bpw || !vramGB || vramGB <= 0) return 999;
-  const perLayer = (model.params * bpw / 8) / L + kvGB(model, ctx, kvBits) / L; // 权重/层 + KV/层（卸载层的 KV 也在显存）
-  const usable = Math.max(0, vramGB - 1.2); // 预留计算缓冲 / 桌面占用
+  const perLayer = (model.params * bpw / 8) / L + kvGB(model, ctx, kvBits) / L; // weights/layer + KV/layer (KV of offloaded layers is also in VRAM)
+  const usable = Math.max(0, vramGB - 1.2); // reserve for compute buffers / desktop usage
   const n = Math.max(0, Math.min(L, Math.floor(usable / perLayer)));
   return n >= L ? 999 : n;
 }
 
-// 返回语言无关的速度码（fast|medium|slow），由渲染层按 i18n 本地化显示。
+// Returns a language-agnostic speed code (fast|medium|slow), which the render layer localizes for display via i18n.
 function speedHint(model, hw) {
   const a = model.moe ? model.active : model.params;
   let base = a <= 4 ? "fast" : a <= 16 ? "medium" : "slow";
@@ -284,8 +284,8 @@ function speedHint(model, hw) {
   return base;
 }
 
-/** 依硬件预算列出所有放得下的模型（各取最佳量化）并高亮 primary。每项含 ngl（GPU 卸载层数）与 layers（总层数）供 UI 显示。
- *  vision（视觉开关，默认 UI 传入）：开启且模型支持视觉时，体积估算含视觉投影开销。 */
+/** List all models that fit within the hardware budget (each with its best quant) and highlight the primary. Each entry includes ngl (GPU-offloaded layers) and layers (total layers) for the UI to display.
+ *  vision (the vision toggle, normally passed in by the UI): when on and the model supports vision, the size estimate includes the vision-projector overhead. */
 export function recommend(hw, budgetGB, { ctx = 16384, kvBits = 8, vision = false } = {}) {
   const vram = hw.unified ? 0 : (hw.gpu && hw.gpu.vramGB) || 0;
   const options = [];
@@ -293,14 +293,14 @@ export function recommend(hw, budgetGB, { ctx = 16384, kvBits = 8, vision = fals
     const q = selectQuant(model, hw, budgetGB, ctx, kvBits);
     if (!q) continue;
     const v = vision && !!model.vision;
-    const pick = pickCtxKv(model, q.bpw, hw, budgetGB, v); // 每模型自动选 ctx / KV 量化（覆盖入参 16K 基线）
+    const pick = pickCtxKv(model, q.bpw, hw, budgetGB, v); // each model auto-selects ctx / KV quant (overriding the 16K baseline argument)
     const ngl = hw.unified ? 999 : hw.backend === "cpu" ? 0 : gpuLayers(model, q.bpw, pick.ctx, pick.kvBits, vram);
     options.push({ model, quant: q, fit: computeFit(model, q, pick.ctx, pick.kvBits, v), speed: speedHint(model, hw), ctx: pick.ctx, kvBits: pick.kvBits, quants: modelQuants(model, hw, budgetGB, v), ngl, layers: model.arch.L });
   }
-  // primary：质量优先，且上下文越大越好——先找 ≥128K（重度使用目标），再退 ≥32K（16K 连系统提示 ~6K 都吃紧），最后兜底。
-  // 无需 YaRN：目录内模型原生窗口均 ≥128K（E4B 128K，其余 256K），长上下文的代价只在 KV（已按滑窗/量化分档估算）。
-  // 低带宽设备（纯 CPU / 集显共享内存；非 Apple Silicon、无独显）解码≈带宽/激活权重体积：同档优先激活参数小者
-  //（16G 纯 CPU：稠密 12B 仅 ~6–10 tok/s，E4B/MoE 快一倍以上）。Mac(Metal) 与独显机器仍按质量优先。
+  // primary: quality first, and larger context is better — first look for ≥128K (the heavy-use target), then fall back to ≥32K (16K is tight even for the ~6K system prompt), then a final fallback.
+  // No YaRN needed: every model in the catalog has a native window ≥128K (E4B 128K, the rest 256K), so the cost of long context is only in KV (already estimated with sliding-window/quant tiering).
+  // On low-bandwidth devices (pure CPU / integrated-GPU shared memory; non-Apple-Silicon, no discrete GPU), decode speed ≈ bandwidth / activated-weight size: within a tier prefer the one with fewer activated parameters
+  // (16G pure CPU: dense 12B is only ~6–10 tok/s, E4B/MoE is more than twice as fast). Mac (Metal) and discrete-GPU machines still go by quality first.
   const dedicatedGpu = !hw.unified && !!(hw.gpu && hw.gpu.vramGB);
   const lowBw = hw.backend !== "metal" && !dedicatedGpu;
   const activeOf = (o) => (o.model.moe ? o.model.active : o.model.params);
@@ -314,22 +314,22 @@ export function recommend(hw, budgetGB, { ctx = 16384, kvBits = 8, vision = fals
 }
 
 /**
- * 构造 llama-server 启动参数。这些开关对应我们对 rapid-mlx/oMLX/vmlx 评估的「必备项」，
- * 且都是 llama.cpp 现成功能（非源码改动）：
- *   -ngl N          卸载 N 层到 GPU（Metal/CUDA/Vulkan）；独显按显存部分卸载，其余留 CPU
- *   -fa on          flash attention（提速 + 长上下文省 KV 显存）
- *   -ctk/-ctv q8_0  KV 缓存量化
- *   --cache-reuse   跨请求复用前缀（prefix sharing）
- *   --slot-save-path 落盘 KV（当下的「SSD KV」，整槽粒度，非 vmlx 的分块 paged-SSD）
- *   -md FILE        投机解码 drafter 文件（Gemma：独立 MTP drafter；配合 --spec-type draft-mtp 生效）
- *   --spec-type draft-mtp  启用 MTP 投机解码（b9936）。Gemma 用 -md 指向独立 drafter；
- *                   Qwen「-MTP-GGUF」权重内置 MTP 头 → 只需本开关、无需 -md（自投机）。缺 -md 且非内置则不加此开关。
- *   -m FILE         本地权重文件（我们自下载后用它启动，见 hfDownload.mjs）；给了 modelPath 就不用 -hf
- *   --mmproj FILE   显式指定多模态视觉投影文件（自下载视觉模型时传入）
- *   --no-mmproj     视觉关闭：跳过 -hf 自动加载的同仓库视觉投影（省 ~1GB 常驻内存）
- *   --jinja         聊天模板 + 工具调用解析（智能体必需）
- * 优先本地：给 modelPath → `-m FILE`（+ 视觉时显式 `--mmproj FILE`），权重已由我们自主下载（带进度/续传）；
- * 未自下载（回退路径）→ `-hf repo:quant` 由 llama 自己拉，此时 noMmproj=true 才用 --no-mmproj 关掉自动视觉投影。
+ * Build the llama-server launch args. These flags correspond to the "must-haves" from our evaluation of rapid-mlx/oMLX/vmlx,
+ * and are all off-the-shelf llama.cpp features (no source changes):
+ *   -ngl N          offload N layers to the GPU (Metal/CUDA/Vulkan); for a discrete GPU, partial-offload by VRAM and leave the rest on CPU
+ *   -fa on          flash attention (faster + saves KV VRAM on long contexts)
+ *   -ctk/-ctv q8_0  KV cache quantization
+ *   --cache-reuse   reuse prefixes across requests (prefix sharing)
+ *   --slot-save-path persist KV to disk (today's "SSD KV", whole-slot granularity, not vmlx's chunked paged-SSD)
+ *   -md FILE        speculative-decoding drafter file (Gemma: separate MTP drafter; takes effect with --spec-type draft-mtp)
+ *   --spec-type draft-mtp  enable MTP speculative decoding (b9936). Gemma points -md at a separate drafter;
+ *                   Qwen "-MTP-GGUF" weights embed the MTP head → only this flag is needed, no -md (self-speculative). Without -md and not embedded, this flag is omitted.
+ *   -m FILE         local weight file (we launch with it after downloading ourselves, see hfDownload.mjs); when modelPath is given, -hf is not used
+ *   --mmproj FILE   explicitly specify the multimodal vision-projector file (passed when we auto-download the vision model)
+ *   --no-mmproj     vision off: skip the same-repo vision projector that -hf loads automatically (saves ~1GB resident memory)
+ *   --jinja         chat template + tool-call parsing (required for agents)
+ * Local first: given modelPath → `-m FILE` (+ explicit `--mmproj FILE` when vision), the weights already downloaded by us (with progress/resume);
+ * if not auto-downloaded (fallback path) → `-hf repo:quant` is fetched by llama itself, and only then, when noMmproj=true, is --no-mmproj used to turn off the automatic vision projector.
  */
 export function buildServerArgs({ hf, modelPath = null, hw, ctx = 16384, port = 8080, kvBits = 8, mtpDraft = null, specMtp = false, mmproj = null, noMmproj = false, kvCacheDir = null, ngl = null, extraArgs = [] }) {
   const args = modelPath ? ["-m", modelPath] : ["-hf", hf];
@@ -345,11 +345,11 @@ export function buildServerArgs({ hf, modelPath = null, hw, ctx = 16384, port = 
   const kvType = kvBits === 8 ? "q8_0" : kvBits === 4 ? "q4_0" : "f16";
   if (kvType !== "f16") args.push("-ctk", kvType, "-ctv", kvType);
   if (kvCacheDir) args.push("--slot-save-path", kvCacheDir);
-  if (mtpDraft) args.push("-md", mtpDraft); // Gemma：独立 MTP drafter 文件
-  // MTP 投机解码开关（b9936）：Gemma 需配 -md drafter；Qwen 权重内置 MTP 头 → 仅开关即可自投机。
-  // 无独立 drafter 且非内置（specMtp=false）时不加，避免 draft-mtp 找不到 MTP 头而报错。
+  if (mtpDraft) args.push("-md", mtpDraft); // Gemma: separate MTP drafter file
+  // MTP speculative-decoding flag (b9936): Gemma needs an -md drafter; Qwen weights embed the MTP head → the flag alone enables self-speculation.
+  // Omitted when there's no separate drafter and it's not embedded (specMtp=false), to avoid draft-mtp erroring out when it can't find an MTP head.
   if (specMtp) args.push("--spec-type", "draft-mtp");
-  if (mmproj) args.push("--mmproj", mmproj); // 显式文件覆盖（一般不用）
-  else if (noMmproj) args.push("--no-mmproj"); // 视觉关闭：不加载 -hf 自动带来的视觉投影
+  if (mmproj) args.push("--mmproj", mmproj); // explicit file override (usually unused)
+  else if (noMmproj) args.push("--no-mmproj"); // vision off: don't load the vision projector that -hf brings in automatically
   return args.concat(extraArgs);
 }

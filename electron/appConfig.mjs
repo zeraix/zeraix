@@ -1,38 +1,39 @@
 /**
- * app.config：位于可执行文件同级目录的 INI 配置文件，持久化用户在「设置」里调整的
- * [llm] / [limits] / [ui] 参数。启动时读入内存，渲染层经 IPC 读写；写入即落盘。
+ * app.config: an INI config file located alongside the executable that persists the
+ * [llm] / [limits] / [ui] parameters the user adjusts under "Settings". Loaded into memory at
+ * startup; the renderer reads/writes it via IPC; every write is flushed to disk.
  *
- * 结构：{ [section]: { [key]: string } }，序列化为 INI（; 注释、[section]、key=value）。
- * 仅存字符串标量；不做转义（键名受控，值为端点 / 模型 / 密钥 / 数字，均无换行）。
- * value 内允许出现 '='（如端点带查询串）：解析时只按「第一个 =」拆分。
+ * Structure: { [section]: { [key]: string } }, serialized as INI (; comments, [section], key=value).
+ * Only string scalars are stored; no escaping (key names are controlled, values are endpoints / models / keys / numbers, none with newlines).
+ * A value may contain '=' (e.g. an endpoint with a query string): on parse, split only on the "first =".
  */
 import { app } from "electron";
 import fs from "node:fs";
 import path from "node:path";
 
-/** 配置文件路径：优先 electron-builder 便携版目录，否则可执行文件所在目录。 */
+/** Config file path: prefer the electron-builder portable directory, otherwise the directory containing the executable. */
 function configPath() {
   const dir = process.env.PORTABLE_EXECUTABLE_DIR || path.dirname(app.getPath("exe"));
   return path.join(dir, "app.config");
 }
 
-/** 对外暴露配置文件绝对路径（供主进程「打开 app.config」用）。 */
+/** Expose the config file's absolute path (for the main process's "Open app.config" action). */
 export function getConfigPath() {
   return configPath();
 }
 
-/** 确保配置文件已在磁盘存在（不存在则按当前内存快照落盘），返回其路径。 */
+/** Ensure the config file exists on disk (if not, flush the current in-memory snapshot), and return its path. */
 export function ensureConfigFile() {
   const p = configPath();
   try {
     if (!fs.existsSync(p)) persist();
   } catch {
-    /* 落盘失败不影响后续打开尝试 */
+    /* a failed flush does not prevent a later open attempt */
   }
   return p;
 }
 
-let cache = null; // { section: { key: value } }；null 表示尚未从磁盘读入
+let cache = null; // { section: { key: value } }; null means not yet loaded from disk
 
 function parseIni(text) {
   const out = {};
@@ -59,7 +60,7 @@ function parseIni(text) {
 function serializeIni(obj) {
   const lines = [
     "; Zeraix app.config",
-    "; 由「设置」自动写入，也可手动编辑（重启应用后生效）。",
+    "; Written automatically by \"Settings\"; may also be edited by hand (takes effect after restarting the app).",
     "",
   ];
   for (const section of Object.keys(obj)) {
@@ -72,7 +73,7 @@ function serializeIni(obj) {
   return lines.join("\n");
 }
 
-/** 读入配置到内存（幂等；文件不存在 / 读失败则视为空配置）。 */
+/** Load the config into memory (idempotent; a missing file / read failure is treated as empty config). */
 export function loadAppConfig() {
   try {
     cache = parseIni(fs.readFileSync(configPath(), "utf8"));
@@ -87,7 +88,7 @@ function ensure() {
   return cache;
 }
 
-/** 返回内存中的完整配置对象（供渲染层同步取初始快照）。 */
+/** Return the full in-memory config object (for the renderer to synchronously grab the initial snapshot). */
 export function getAppConfig() {
   return ensure();
 }
@@ -96,11 +97,11 @@ function persist() {
   try {
     fs.writeFileSync(configPath(), serializeIni(cache), "utf8");
   } catch (e) {
-    console.error("[app.config] 写入失败：", e?.message || e);
+    console.error("[app.config] write failed:", e?.message || e);
   }
 }
 
-/** 设置一个键（空值 / null 则删除该键）。写入即落盘，返回最新配置对象。 */
+/** Set a key (an empty value / null deletes the key). Flushed to disk on write; returns the latest config object. */
 export function setAppConfig(section, key, value) {
   const c = ensure();
   if (!section || !key) return c;
@@ -116,16 +117,17 @@ export function setAppConfig(section, key, value) {
   return c;
 }
 
-/** 删除一个键。 */
+/** Delete a key. */
 export function removeAppConfig(section, key) {
   return setAppConfig(section, key, "");
 }
 
 /**
- * 确保某段包含给定键：缺失则以空串补齐并落盘。用于把「需要用户手填」的配置项
- * （如 [google] client_id）预置到 app.config —— 让用户在 dev / 打包后都能直接看到该段
- * 并填写，而不必凭空知道键名。空串值会正常序列化为 `key=`（parse/serialize round-trip
- * 安全），且被读取方（如 googleAuth）当作「未配置」。已存在的键不动（不覆盖用户值）。
+ * Ensure a section contains the given keys: any missing ones are filled with an empty string and flushed.
+ * Used to seed "user must fill in manually" config items (e.g. [google] client_id) into app.config -- so the
+ * user can see the section directly in dev / after packaging and fill it in, without having to guess the key
+ * names out of thin air. An empty-string value serializes normally to `key=` (parse/serialize round-trip
+ * safe) and is treated as "unconfigured" by readers (e.g. googleAuth). Existing keys are left untouched (user values are not overwritten).
  */
 export function ensureAppConfigKeys(section, keys) {
   const c = ensure();

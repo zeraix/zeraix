@@ -5,50 +5,50 @@ import { IUser } from "@/types/auth";
 import STORAGE_KEY from "@/constants/Storage";
 
 /**
- * 用户认证状态类型定义
+ * User authentication state type definition
  */
 type UserState = {
-  /** 是否已登录 */
+  /** Whether the user is logged in */
   isLoggedIn: boolean;
-  /** 是否需要创建账户 */
+  /** Whether the user needs to create an account */
   shouldCreateAccount: boolean;
-  /** 是否已完成引导流程 */
+  /** Whether the user has completed the onboarding process */
   hasCompletedOnboarding: boolean;
-  /** 是否是 VIP 用户 */
+  /** Whether the user is a VIP */
   isVip: boolean;
-  /** 用户基本信息（非敏感） */
+  /** User basic information (non-sensitive) */
   userInfo: IUser | Partial<IUser>;
-  /** 是否已完成 hydration（防止 SSR/客户端状态不一致） */
+  /** Whether the user has completed hydration (to prevent SSR/client-side state inconsistency) */
   _hasHydrated: boolean;
 
   // Actions
-  /** 登录成功 */
+  /** Login successful */
   logIn: (userInfo?: UserState["userInfo"]) => void;
-  /** 登出 */
+  /** Logout */
   logOut: () => void;
-  /** 完成引导流程 */
+  /** Complete onboarding process */
   completeOnboarding: () => void;
-  /** 重置引导状态 */
+  /** Reset onboarding status */
   resetOnboarding: () => void;
-  /** 设置为 VIP */
+  /** Set as VIP */
   logInAsVip: () => void;
-  /** 更新用户信息 */
+  /** Update user information */
   setUserInfo: (userInfo: UserState["userInfo"]) => void;
-  /** 设置 hydration 完成状态 */
+  /** Set hydration completion status */
   setHasHydrated: (value: boolean) => void;
-  /** 检查登录状态（从 localStorage 读取 token 验证） */
+  /** Check login status (read token from localStorage for validation) */
   checkAuthStatus: () => Promise<boolean>;
 };
 
 /**
- * 认证状态管理 Store（纯静态导出兼容版本）
+ * Auth state management store (pure static export compatible version).
  *
- * 安全说明：
- * - Token 存储在 localStorage 的 yingjian.userInfo.auth_token 中
- * - 客户端仅存储非敏感的用户状态信息
+ * Security Note:
+ * - The token is stored in `localStorage` under `yingjian.userInfo.auth_token`.
+ * - The client only stores non-sensitive user state information.
  */
 export const useAuthStore = create<UserState>((set) => ({
-  // 初始状态
+  // Initial state
   isLoggedIn: false,
   shouldCreateAccount: false,
   hasCompletedOnboarding: false,
@@ -96,8 +96,8 @@ export const useAuthStore = create<UserState>((set) => ({
   },
 
   /**
-   * 检查认证状态
-   * 从 localStorage 读取 token，存在则认为已登录并同步用户信息到 Store
+   * Check authentication status
+   * Read token from localStorage, if exists, consider the user logged in and synchronize user information to the Store
    */
   checkAuthStatus: async () => {
     try {
@@ -108,7 +108,7 @@ export const useAuthStore = create<UserState>((set) => ({
         return false;
       }
 
-      // token 存在：从 localStorage 读取用户信息同步到 Store
+      // Token exists: Read user info from localStorage and synchronize it to the Store
       if (typeof window !== "undefined") {
         const data = getStorage(STORAGE_KEY.userInfo);
         if (data) {
@@ -128,7 +128,7 @@ export const useAuthStore = create<UserState>((set) => ({
       set({ isLoggedIn: true });
       return true;
     } catch (error) {
-      console.error("检查认证状态失败:", error);
+      console.error("Check authentication status failed:", error);
       set({ isLoggedIn: false, userInfo: undefined });
       return false;
     }
@@ -136,8 +136,8 @@ export const useAuthStore = create<UserState>((set) => ({
 }));
 
 /**
- * 初始化 hydration 状态
- * 在应用启动时调用，防止 SSR/客户端状态不一致
+ * Initialize hydration status
+ * Called when the application starts, to prevent SSR/client-side state inconsistency
  */
 export const initAuthStore = () => {
   useAuthStore.getState().setHasHydrated(true);

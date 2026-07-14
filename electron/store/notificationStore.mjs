@@ -1,40 +1,40 @@
 /**
- * 系统通知历史的本地持久化（主进程）—— 通知中心（/notifications）的数据层。
+ * Local persistence of system notification history (main process) -- the data layer for the notification center (/notifications).
  *
- * 设计文档建议 SQLite；此处沿用项目既有的 JSON 单文件方案（与 conversationStore 一致），
- * 避免引入原生依赖。通知历史体量小（上限 MAX_RECORDS 条，超出丢弃最旧），JSON 足矣；
- * 如后续需要全文检索 / 大体量，可平滑替换为 SQLite，对外接口不变。
+ * The design doc suggests SQLite; here we stick with the project's existing single-file JSON approach (consistent with conversationStore),
+ * avoiding a native dependency. Notification history is small (capped at MAX_RECORDS entries, discarding the oldest beyond that), so JSON is enough;
+ * if full-text search / large volumes are needed later, it can be smoothly swapped for SQLite without changing the external interface.
  *
- * 布局：userData/notifications/history.json —— { records: NotificationRecord[] }（按时间倒序）
+ * Layout: userData/notifications/history.json -- { records: NotificationRecord[] } (in reverse chronological order)
  *   NotificationRecord = { id, item, read: boolean, createdAt: number }
- * 读失败一律回退为空数组，绝不抛异常拖垮主进程。
+ * A read failure always falls back to an empty array and never throws in a way that takes down the main process.
  */
 import { app } from "electron";
 import fs from "node:fs/promises";
 import path from "node:path";
 
-/** 历史上限：超出后丢弃最旧记录，防止文件无限增长。 */
+/** History cap: beyond this, discard the oldest records to prevent unbounded file growth. */
 const MAX_RECORDS = 500;
 
-let cache = null; // 内存缓存（records 数组，倒序）；惰性加载
+let cache = null; // in-memory cache (records array, reverse order); lazily loaded
 
 function historyFile() {
   return path.join(app.getPath("userData"), "notifications", "history.json");
 }
 
-/** 惰性读盘到内存缓存。 */
+/** Lazily read from disk into the in-memory cache. */
 async function ensureLoaded() {
   if (cache) return cache;
   try {
     const raw = JSON.parse(await fs.readFile(historyFile(), "utf8"));
     cache = Array.isArray(raw?.records) ? raw.records : [];
   } catch {
-    cache = []; // 文件缺失 / 损坏 → 空历史
+    cache = []; // file missing / corrupted -> empty history
   }
   return cache;
 }
 
-/** 整表落盘（防抖：合并同一 tick 内的多次写）。 */
+/** Flush the whole table to disk (debounced: coalesce multiple writes within the same tick). */
 let flushTimer = null;
 function scheduleFlush() {
   if (flushTimer) return;
@@ -50,11 +50,11 @@ async function flush() {
     await fs.mkdir(path.dirname(file), { recursive: true });
     await fs.writeFile(file, JSON.stringify({ records: cache }, null, 2), "utf8");
   } catch (e) {
-    console.error("[notification] 历史落盘失败：", e);
+    console.error("[notification] failed to flush history to disk:", e);
   }
 }
 
-/** 追加一条历史记录（倒序插入队首，裁剪到上限）。返回记录本身。 */
+/** Append a history record (inserted at the front in reverse order, trimmed to the cap). Returns the record itself. */
 export async function appendRecord(item) {
   const records = await ensureLoaded();
   const record = { id: item.id, item, read: false, createdAt: Date.now() };
@@ -64,17 +64,17 @@ export async function appendRecord(item) {
   return record;
 }
 
-/** 列出全部历史（倒序）。 */
+/** List all history (reverse order). */
 export async function listHistory() {
   return (await ensureLoaded()).slice();
 }
 
-/** 未读数量（供徽标）。 */
+/** Unread count (for the badge). */
 export async function unreadCount() {
   return (await ensureLoaded()).filter((r) => !r.read).length;
 }
 
-/** 标记单条已读；不存在则忽略。返回是否命中。 */
+/** Mark a single record as read; ignore if it doesn't exist. Returns whether a record was matched. */
 export async function markRead(id) {
   const records = await ensureLoaded();
   const r = records.find((x) => x.id === id);
@@ -84,7 +84,7 @@ export async function markRead(id) {
   return true;
 }
 
-/** 全部标记已读。返回被标记数量。 */
+/** Mark all as read. Returns the number marked. */
 export async function markAllRead() {
   const records = await ensureLoaded();
   let n = 0;
@@ -93,7 +93,7 @@ export async function markAllRead() {
   return n;
 }
 
-/** 删除单条。返回是否命中。 */
+/** Delete a single record. Returns whether a record was matched. */
 export async function removeRecord(id) {
   const records = await ensureLoaded();
   const idx = records.findIndex((x) => x.id === id);
@@ -103,7 +103,7 @@ export async function removeRecord(id) {
   return true;
 }
 
-/** 清空全部历史。 */
+/** Clear all history. */
 export async function clearHistory() {
   cache = [];
   scheduleFlush();

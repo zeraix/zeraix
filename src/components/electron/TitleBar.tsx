@@ -5,19 +5,19 @@ import { usePathname } from "next/navigation";
 import { Minus, Square, X } from "lucide-react";
 import { minimizeWindow, toggleMaximizeWindow, closeWindow } from "@/lib/electron/windowControls";
 
-/* CSS 拖拽区域（Electron 无边框窗口）。WebkitAppRegion 非标准属性，需 cast。
- * 整条 bar 可拖动；栏内可点击元素需加 noDrag 才能响应点击。 */
+/* CSS drag region (Electron frameless window). WebkitAppRegion is a non-standard property, so it needs a cast.
+ * The whole bar is draggable; clickable elements inside the bar need noDrag to respond to clicks. */
 const drag = { WebkitAppRegion: "drag" } as React.CSSProperties;
 const noDrag = { WebkitAppRegion: "no-drag" } as React.CSSProperties;
 
 /**
- * 旧版页面的自绘标题栏 —— 仅在 Electron 中渲染。
+ * Custom-drawn title bar for legacy pages -- rendered only in Electron.
  *
- * 窗口为无边框（`titleBarStyle: 'hidden'`，且已移除 Windows 的 titleBarOverlay）：
- * - Windows / Linux：本组件右侧自绘「最小化 / 最大化 / 关闭」按钮（走 windowControls IPC）。
- * - macOS：左上角显示原生红绿灯，给标题留出左内边距即可，无需自绘按钮。
+ * The window is frameless (`titleBarStyle: 'hidden'`, with Windows' titleBarOverlay removed):
+ * - Windows / Linux: this component draws the "minimize / maximize / close" buttons on the right (via windowControls IPC).
+ * - macOS: the native traffic lights appear in the top-left; just leave left padding for the title, no custom buttons needed.
  *
- * /agent 模块有自己的窗口控制（侧边栏红绿灯），此处不渲染，避免重复。
+ * The /agent module has its own window controls (sidebar traffic lights), so this isn't rendered there to avoid duplication.
  */
 export default function TitleBar() {
   const pathname = usePathname();
@@ -33,7 +33,7 @@ export default function TitleBar() {
     })();
   }, []);
 
-  // 浏览器（非 Electron）下不渲染；/agent 自带窗口控制，也不渲染。
+  // Not rendered in the browser (non-Electron); /agent has its own window controls, so it isn't rendered there either.
   if (!env.electron) return null;
   if (pathname === "/agent" || pathname.startsWith("/agent/")) return null;
 
@@ -48,7 +48,7 @@ export default function TitleBar() {
       <img src="/image/logo-white.png" alt="" className="h-4 w-4" draggable={false} />
       <span>Zeraix</span>
 
-      {/* Windows / Linux：自绘窗口控制按钮（macOS 用原生红绿灯，无需自绘） */}
+      {/* Windows / Linux: custom-drawn window control buttons (macOS uses native traffic lights, no custom drawing needed) */}
       {!env.mac && (
         <div style={noDrag} className="ml-auto flex h-full items-stretch">
           <button

@@ -59,11 +59,11 @@ yarn-error.log*
 *.tsbuildinfo
 next-env.d.ts
 
-# QEMU 沙箱预置二进制（发版时准备，不入库）；rootfs 首次运行下载到 ~/.operease/vm
+# QEMU sandbox preinstalled binaries (prepared at release time, not committed); rootfs is downloaded to ~/.operease/vm on first run
 resources/bin/*/
 resources/qemu/*/
 
-# Google OAuth 兜底凭据（构建时由本机 .env 生成，勿提交）
+# Google OAuth fallback credentials (generated locally from .env during build; do not commit)
 electron/services/google-defaults.json
 
 build-mac.sh

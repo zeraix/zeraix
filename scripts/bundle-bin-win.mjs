@@ -109,12 +109,12 @@ const du = (dir) => fs.readdirSync(dir, { withFileTypes: true }).reduce((s, d) =
 console.log(`[bundle-bin] ${ver}`);
 console.log(`[bundle-bin] staged: ${SYS} + ${IMG} + ${dllCount} DLLs + ${blobCount} firmware blobs (+keymaps); skipped ${skipped}; ${(du(OUT) / 1048576).toFixed(0)} MB`);
 
-// ── 打包 qemu 为单包 bin/win32-<arch>.zip（zip 内 qemu/ 子目录）并上传；SKIP_UPLOAD=1 只暂存。
-//    llama 不再随包分发，改为运行时动态安装（见 electron/llm/llamaInstaller.mjs、scripts/publish-llama.mjs）。──
+// ── Pack qemu into a single bundle bin/win32-<arch>.zip (with a qemu/ subdirectory inside the zip) and upload it; SKIP_UPLOAD=1 only stages.
+//    llama is no longer distributed with the bundle; it is now installed dynamically at runtime (see electron/llm/llamaInstaller.mjs, scripts/publish-llama.mjs). ──
 const zip = path.join(os.tmpdir(), `bin-win32-${process.arch}.zip`);
 fs.rmSync(zip, { force: true });
 const az = new AdmZip();
-az.addLocalFolder(OUT, "qemu"); // qemu-system + qemu-img + DLLs + share/ → zip 内 qemu/
+az.addLocalFolder(OUT, "qemu"); // qemu-system + qemu-img + DLLs + share/ → qemu/ inside the zip
 az.writeZip(zip);
 console.log(`[publish] zip: ${(fs.statSync(zip).size / 1048576).toFixed(0)} MB → ${zip}`);
 

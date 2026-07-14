@@ -1,13 +1,13 @@
 /**
- * 本地 llama.cpp（llama-server）子进程管理（主进程）。
+ * Local llama.cpp (llama-server) child-process management (main process).
  *
- * 多步流程（设置页向导驱动，避免「预装前猜显存」）：
- *   1) 探测后端（CUDA/Vulkan/CPU/Metal）→ 安装对应运行时 bundle（已装则跳过下载）；
- *   2) 用已装二进制 `--list-devices` 探测真实显存 → 依此推荐模型 + 计算分层卸载(-ngl)；
- *   3) 启动 llama-server（下载 GGUF 权重）→ 轮询 /health 就绪。
- * 就绪后对渲染层暴露 endpoint = http://127.0.0.1:<port>/v1/chat/completions，渲染层据此注册「本地」模型。
+ * Multi-step flow (driven by the settings-page wizard, avoiding "guessing VRAM before install"):
+ *   1) Detect the backend (CUDA/Vulkan/CPU/Metal) -> install the matching runtime bundle (skip the download if already installed);
+ *   2) Probe real VRAM with the installed binary `--list-devices` -> recommend a model from it + compute layer offload (-ngl);
+ *   3) Start llama-server (download GGUF weights) -> poll /health until ready.
+ * Once ready, expose endpoint = http://127.0.0.1:<port>/v1/chat/completions to the renderer, which registers a "local" model from it.
  *
- * status.phase：idle | downloading | extracting | probing | loading | ready | error（pct 为下载百分比）。
+ * status.phase: idle | downloading | extracting | probing | loading | ready | error (pct is the download percentage).
  */
 import http from "node:http";
 import net from "node:net";
@@ -27,15 +27,15 @@ import { getAppConfig, setAppConfig } from "../appConfig.mjs";
 const DEFAULT_PORT = Number(process.env.LLAMA_PORT || 8080);
 const KV_DIR = path.join(os.tmpdir(), "zeraix-llama-kv");
 
-// -hf 拉取 GGUF 的 Hugging Face 端点。启动前实测 huggingface.co 可达性：直连不通（被墙 / DNS 污染 / 超时）
-// 则改用镜像 hf-mirror.com，否则直连 huggingface.co。HF_ENDPOINT 环境变量可强制覆盖。结果缓存至本进程。
+// Hugging Face endpoint used by -hf to fetch GGUF. Before startup, test huggingface.co reachability: if a direct connection fails (blocked / DNS poisoning / timeout)
+// switch to the mirror hf-mirror.com, otherwise connect directly to huggingface.co. The HF_ENDPOINT env var can force an override. The result is cached in this process.
 let _hfEndpoint = null;
 function reachable(url, timeoutMs = 2500) {
   return new Promise((resolve) => {
     let done = false;
     const finish = (ok) => { if (!done) { done = true; resolve(ok); } };
     try {
-      const req = https.get(url, { timeout: timeoutMs }, (res) => { res.resume(); finish(true); }); // 收到任意响应 = 可达
+      const req = https.get(url, { timeout: timeoutMs }, (res) => { res.resume(); finish(true); }); // any response received = reachable
       req.on("error", () => finish(false));
       req.on("timeout", () => { req.destroy(); finish(false); });
     } catch { finish(false); }
@@ -46,7 +46,7 @@ async function resolveHfEndpoint() {
   if (process.env.HF_ENDPOINT) { _hfEndpoint = process.env.HF_ENDPOINT; return _hfEndpoint; }
   const ok = await reachable("https://huggingface.co/");
   _hfEndpoint = ok ? "https://huggingface.co" : "https://hf-mirror.com";
-  pushLog(`[llama] HF 端点：${_hfEndpoint}（huggingface.co ${ok ? "可达，直连" : "不可达 → 用镜像"}）\n`);
+  pushLog(`[llama] HF endpoint: ${_hfEndpoint} (huggingface.co ${ok ? "reachable, connecting directly" : "unreachable -> using mirror"})\n`);
   return _hfEndpoint;
 }
 
@@ -54,25 +54,25 @@ const state = {
   proc: null,
   ready: false,
   phase: "idle", // idle | downloading | extracting | fetching | probing | loading | ready | error
-  pct: 0, // 下载进度百分比（downloading = llama 运行时；fetching = 模型权重）
+  pct: 0, // download progress percentage (downloading = llama runtime; fetching = model weights)
   port: DEFAULT_PORT,
   model: null, // { hf, label, multimodal, id, name }
-  variant: null, // 当前安装/启动的 llama 构建变体
-  installedVariant: null, // 已安装的变体（供探测/启动复用，避免重复下载）
-  probe: null, // { vramGB, device, gpuPresent } —— --list-devices 结果
+  variant: null, // llama build variant currently installed/started
+  installedVariant: null, // installed variant (reused for probe/startup to avoid re-downloading)
+  probe: null, // { vramGB, device, gpuPresent } -- --list-devices result
   ctx: 16384,
   error: null,
   log: [],
-  dlAbort: null, // 模型自下载的 AbortController（stop/reset 时中止）
+  dlAbort: null, // AbortController for the model self-download (aborted on stop/reset)
 };
 
 const listeners = new Set();
 let healthTimer = null;
-// 运行日志文件：把安装/探测/下载/llama-server 全部输出落盘，供用户排查（内存里只留最近 300 行，见 pushLog）。
-// start() 开新会话写入表头，pushLog 同步追加，stop()/退出时关闭；超 5MB 自动清空重来。
+// Run-log file: persist all install/probe/download/llama-server output to disk for user troubleshooting (only the most recent 300 lines are kept in memory, see pushLog).
+// start() opens a new session and writes a header, pushLog appends in sync, stop()/exit closes it; auto-cleared and restarted when it exceeds 5MB.
 let logStream = null;
 function logFilePath() { return path.join(localFilesBase(), "logs", "llama-server.log"); }
-// 惰性打开追加流：首次 pushLog 即建，使「安装 / 探测 / 下载」阶段（start 之前）的输出也落盘。超 5MB 清空重来。
+// Lazily open the append stream: created on the first pushLog, so output from the "install / probe / download" phases (before start) is persisted too. Cleared and restarted past 5MB.
 function ensureLog() {
   if (logStream) return;
   try {
@@ -84,20 +84,20 @@ function ensureLog() {
 }
 function openLog(header) { ensureLog(); if (logStream) { try { logStream.write(`\n===== ${header} =====\n`); } catch { /* ignore */ } } }
 function closeLog() { if (logStream) { try { logStream.end(); } catch { /* ignore */ } logStream = null; } }
-// 保证日志文件存在（哪怕还没跑过模型），使「运行日志」按钮总能打开（打开的是当前文件夹下的日志）。
+// Ensure the log file exists (even if no model has run yet), so the "run log" button can always open it (it opens the log under the current folder).
 function ensureLogFile() {
   try { const p = logFilePath(); fs.mkdirSync(path.dirname(p), { recursive: true }); if (!fs.existsSync(p)) fs.writeFileSync(p, ""); } catch { /* ignore */ }
   return logFilePath();
 }
-// 每次 start()/stop() 自增：进行中的 launch() 在每个 await 点后核对，若已过期（用户在
-// 「下载中/加载中」重新启动或停止）则不再 spawn，避免泄漏出第二个 llama-server 进程。
+// Incremented on each start()/stop(): an in-progress launch() checks after every await point, and if stale (the user
+// restarted or stopped during "downloading/loading") it no longer spawns, avoiding leaking a second llama-server process.
 let launchGen = 0;
-// 设备名(小写) → uma 真伪：一旦某次真跑模型从 stderr 读到权威 uma:，即缓存，供后续探测/推荐直接采用
-// （比 --list-devices 无 uma 时的名字启发式更准）。见 docs/vulkan-uma-windows.md。
+// device name (lowercase) -> uma truth value: once a real model run reads the authoritative uma: from stderr, cache it for later probe/recommend to use directly
+// (more accurate than the name heuristic when --list-devices has no uma). See docs/vulkan-uma-windows.md.
 const umaCache = new Map();
-let umaScanned = false; // 每次 launch 内是否已从 stderr 抓到 uma（抓到即停扫，避免重复解析）
+let umaScanned = false; // whether uma has already been captured from stderr within this launch (stop scanning once captured, to avoid re-parsing)
 
-/** 当前对外状态快照（可结构化克隆，供 IPC 传给渲染层）。 */
+/** Current outward-facing status snapshot (structured-cloneable, for IPC to the renderer). */
 export function status() {
   return {
     running: !!state.proc,
@@ -114,36 +114,36 @@ export function status() {
     probe: state.probe,
     error: state.error,
     tail: state.log.slice(-12).join(""),
-    logFile: logFilePath(), // 完整运行日志文件路径（供 UI「运行日志」按钮打开）
+    logFile: logFilePath(), // full run-log file path (for the UI "run log" button to open)
   };
 }
 
 function emit() { const st = status(); for (const cb of listeners) { try { cb(st); } catch { /* ignore */ } } }
-/** 主进程注册一个状态监听（转发给渲染层）。返回取消订阅。 */
+/** Main process registers a status listener (forwarded to the renderer). Returns an unsubscribe function. */
 export function onStatus(cb) { listeners.add(cb); return () => listeners.delete(cb); }
 
 function pushLog(s) { state.log.push(s); if (state.log.length > 300) state.log.shift(); ensureLog(); if (logStream) { try { logStream.write(s); } catch { /* ignore */ } } }
 
-// ── 硬件 / 推荐 ──────────────────────────────────────────────
-/** 粗探测（预装前，向导第 0/1 步）：硬件 + 可用内存 + CUDA 可用性 + 是否满足最低门槛。 */
+// ── Hardware / recommendation ──────────────────────────────────────────────
+/** Coarse detection (before install, wizard step 0/1): hardware + available memory + CUDA availability + whether the minimum threshold is met. */
 export function getHardware() {
-  migrateLegacyLayout(); // 首次以新布局启动时把旧 models/bin/logs 归入专用文件夹（同盘 rename，秒级）
-  ensureLogFile();       // 保证「运行日志」按钮总能打开当前文件夹下的日志文件
+  migrateLegacyLayout(); // on first launch with the new layout, move legacy models/bin/logs into the dedicated folder (same-disk rename, sub-second)
+  ensureLogFile();       // ensure the "run log" button can always open the log file under the current folder
   const hw = detectHardware();
   return { hw, cuda: detectCuda(), supported: localSupported(hw), minMemGB: MIN_LOCAL_MEM_GB };
 }
 
-// ── 存储位置（llama 运行时 + GGUF 模型；体积大，Windows C 盘常紧张，可自定义） ─────────────
+// ── Storage location (llama runtime + GGUF models; large, Windows C: drive is often tight, customizable) ─────────────
 function freeGB(dir) {
   try {
     let p = dir;
-    while (p && !fs.existsSync(p)) { const parent = path.dirname(p); if (parent === p) break; p = parent; } // 新目录未建 → 取最近已存在祖先
+    while (p && !fs.existsSync(p)) { const parent = path.dirname(p); if (parent === p) break; p = parent; } // new dir not yet created -> take the nearest existing ancestor
     const s = fs.statfsSync(p);
     return Math.round((s.bavail * s.bsize) / 1e9);
   } catch { return null; }
 }
 
-// Windows：C 盘紧张（<30GB）且有更空的固定盘时，建议改到那张盘。其余平台默认本地数据目录即可（无建议）。
+// Windows: when the C: drive is tight (<30GB) and a roomier fixed disk exists, suggest moving to that disk. Other platforms just use the default local data dir (no suggestion).
 function suggestStorageDir() {
   if (process.platform !== "win32") return null;
   try {
@@ -151,7 +151,7 @@ function suggestStorageDir() {
     for (const L of "CDEFGHIJKLMNOPQRSTUVWXYZ") {
       const root = `${L}:\\`;
       if (!fs.existsSync(root)) continue;
-      try { const s = fs.statfsSync(root); drives.push({ drive: L, freeGB: Math.round((s.bavail * s.bsize) / 1e9) }); } catch { /* 跳过不可访问盘 */ }
+      try { const s = fs.statfsSync(root); drives.push({ drive: L, freeGB: Math.round((s.bavail * s.bsize) / 1e9) }); } catch { /* skip inaccessible drives */ }
     }
     const c = drives.find((d) => d.drive === "C");
     const best = drives.reduce((a, b) => (b.freeGB > a.freeGB ? b : a), { freeGB: -1 });
@@ -160,75 +160,75 @@ function suggestStorageDir() {
   } catch { return null; }
 }
 
-/** 本地文件存储位置信息（设置 UI 用）：当前目录 / 是否自定义 / 剩余空间 / Windows 磁盘建议。 */
+/** Local file storage location info (for the settings UI): current dir / whether custom / free space / Windows disk suggestion. */
 export function storageInfo() {
   const base = localFilesBase();
   return { dir: base, custom: !!getAppConfig()?.local?.dir, freeGB: freeGB(base), suggestion: suggestStorageDir() };
 }
 
-/** 设置本地文件存储位置（空 = 恢复默认）。仅改配置、不搬数据（供程序化调用；UI 改文件夹请用 migrateStorageTo）。 */
+/** Set the local file storage location (empty = restore default). Only changes config, does not move data (for programmatic use; for UI folder changes use migrateStorageTo). */
 export function setStorageDir(dir) {
   setAppConfig("local", "dir", dir ? String(dir).trim() : "");
   return storageInfo();
 }
 
 /**
- * 迁移到新文件夹：停服 → 把当前文件夹下的内容（<version>/ 运行时、models/、logs/）搬到 newDir → 更新配置。
- * 同盘走 rename（秒级）；跨盘走异步 cp + rm（会耗时，UI 需显示迁移中）。已存在的同名项跳过（不覆盖）。
- * 返回 { ok, dir?, error? }。
+ * Migrate to a new folder: stop the service -> move the contents under the current folder (<version>/ runtime, models/, logs/) to newDir -> update config.
+ * Same-disk uses rename (sub-second); cross-disk uses async cp + rm (slow, the UI must show "migrating"). Existing items with the same name are skipped (not overwritten).
+ * Returns { ok, dir?, error? }.
  */
 export async function migrateStorageTo(newDir) {
   const dst = String(newDir || "").trim();
-  if (!dst) return { ok: false, error: "空目录" };
+  if (!dst) return { ok: false, error: "empty directory" };
   const src = localFilesBase();
   const rSrc = path.resolve(src), rDst = path.resolve(dst);
-  if (rDst === rSrc) return { ok: true, dir: src }; // 未变
-  // 拒绝「嵌套」：新文件夹是当前文件夹的子目录（或反之）——会把 models 自搬进自身子目录、中途报错，遗留 bin/logs。
+  if (rDst === rSrc) return { ok: true, dir: src }; // unchanged
+  // Reject "nesting": the new folder is a subdirectory of the current folder (or vice versa) -- would move models into its own subdirectory, error midway, and leave bin/logs behind.
   if ((rDst + path.sep).startsWith(rSrc + path.sep) || (rSrc + path.sep).startsWith(rDst + path.sep)) {
-    return { ok: false, error: "新文件夹不能是当前文件夹的子目录或其父目录" };
+    return { ok: false, error: "the new folder cannot be a subdirectory or a parent of the current folder" };
   }
-  // 仅空闲时允许：运行时安装 / 模型下载 / 模型在跑或加载 时拒绝（避免搬动正被写入/占用的文件）。
+  // Allowed only when idle: reject during runtime install / model download / model running or loading (to avoid moving files being written or in use).
   if (state.proc || state.dlAbort || ["downloading", "extracting", "fetching", "loading", "probing"].includes(state.phase)) {
-    return { ok: false, error: "请先停止模型并等待下载/安装完成，再更改文件夹" };
+    return { ok: false, error: "please stop the model and wait for the download/install to finish before changing the folder" };
   }
   try {
     fs.mkdirSync(dst, { recursive: true });
     const entries = fs.existsSync(src) ? fs.readdirSync(src) : [];
-    // 阶段 1：搬动每一项。同盘 renameSync（原子，源即刻移走）；跨盘 cp（先只拷贝，源保留到阶段 2）。
-    // 关键：跨盘时「拷贝完成前绝不删源」；单项 cp 失败即清掉半成品并中止，源全部完好（不会丢/劈半）。
+    // Phase 1: move each item. Same-disk renameSync (atomic, source moved away instantly); cross-disk cp (copy only first, source kept until phase 2).
+    // Key: cross-disk "never delete the source before the copy completes"; if a single cp fails, clean up the half-done copy and abort, leaving all sources intact (nothing lost or split).
     for (const name of entries) {
       const s = path.join(src, name), d = path.join(dst, name);
-      if (fs.existsSync(d)) continue; // 目标已有（含上次中断已拷好的）→ 跳过，不覆盖
+      if (fs.existsSync(d)) continue; // target already exists (including one fully copied by a prior interrupted run) -> skip, do not overwrite
       try {
         fs.renameSync(s, d);
       } catch (e) {
         if (e && e.code === "EXDEV") {
           try { await fs.promises.cp(s, d, { recursive: true }); }
-          catch (ce) { try { await fs.promises.rm(d, { recursive: true, force: true }); } catch { /* ignore */ } throw ce; } // 清半成品后中止
+          catch (ce) { try { await fs.promises.rm(d, { recursive: true, force: true }); } catch { /* ignore */ } throw ce; } // abort after cleaning up the half-done copy
         } else throw e;
       }
     }
-    // 阶段 2：源里凡在目标已有完整副本者删除（跨盘拷贝所致；同盘 rename 已把源移走，此处判空跳过）。全部拷贝成功后才执行。
+    // Phase 2: delete each source that already has a complete copy at the destination (from the cross-disk copy; same-disk rename already moved the source away, so this finds nothing and skips). Runs only after all copies succeed.
     for (const name of entries) {
       const s = path.join(src, name);
       if (fs.existsSync(s) && fs.existsSync(path.join(dst, name))) { try { await fs.promises.rm(s, { recursive: true, force: true }); } catch { /* ignore */ } }
     }
-    setAppConfig("local", "dir", dst); // 切到新文件夹
+    setAppConfig("local", "dir", dst); // switch to the new folder
     return { ok: true, dir: dst };
   } catch (e) {
     return { ok: false, error: String(e?.message ?? e) };
   }
 }
 
-/** GGUF 模型下载目录（models/<repo_>/<quant>/）。 */
+/** GGUF model download directory (models/<repo_>/<quant>/). */
 export function modelsDir() { return path.join(localFilesBase(), "models"); }
 
-/** llama 运行时信息：版本 / 已安装版本 / 是否可更新（versions.json 的 llama 版本与已装不一致）/ 目录。 */
+/** llama runtime info: version / installed versions / whether updatable (the llama version in versions.json differs from the installed one) / directory. */
 export function llamaInfo() {
   const versions = installedLlamaVersions();
   const upToDate = versions.includes(LLAMA_VERSION);
   let variant = state.installedVariant || null;
-  if (!variant && upToDate) { // state 尚未 populate 时从磁盘找当前版本已装的变体
+  if (!variant && upToDate) { // when state is not yet populated, find the installed variant of the current version from disk
     try { variant = fs.readdirSync(path.join(llamaRootDir(), LLAMA_VERSION)).find((v) => !!installedBin(v)) || null; } catch { /* ignore */ }
   }
   return {
@@ -236,14 +236,14 @@ export function llamaInfo() {
     installedVersions: versions,
     installed: versions.length > 0,
     upToDate,
-    updatable: !upToDate && versions.length > 0, // 装了旧版本 llama，目标是新版 → 可更新
+    updatable: !upToDate && versions.length > 0, // an old llama version is installed and the target is a newer one -> updatable
     variant,
     binDir: variant ? installDir(variant) : llamaRootDir(),
     root: llamaRootDir(),
   };
 }
 
-/** 依「模型 + 量化 + 上下文 + KV + 视觉」估算内存占用（GB），供 UI 随选项实时显示。 */
+/** Estimate memory usage (GB) from "model + quantization + context + KV + vision", for the UI to display live as options change. */
 export function estimate(opts = {}) {
   const model = MODELS.find((m) => m.id === opts.modelId);
   if (!model) return null;
@@ -252,14 +252,14 @@ export function estimate(opts = {}) {
   const kvBits = Number(opts.kvBits || 8);
   const vision = !!opts.vision && !!model.vision;
   const fit = computeFit(model, { bpw }, ctx, kvBits, vision);
-  // MTP 独立 drafter（Gemma，约百 MB 常驻）；Qwen 内置 MTP 头已计入权重，额外开销忽略。
+  // MTP standalone drafter (Gemma, ~hundred MB resident); Qwen's built-in MTP head is already counted in the weights, so extra overhead is ignored.
   const mtpGB = opts.mtp !== false && model.mtp && !model.mtpEmbedded ? 0.2 : 0;
   return { totalGB: Math.round((fit.totalGB + mtpGB) * 10) / 10, weightGB: fit.weightGB, kvGB: fit.kvGB };
 }
 
-/** 附属文件（不算主权重）：mmproj 视觉投影、MTP drafter（mtp-*.gguf 或 *-MTP.gguf）。 */
+/** Auxiliary files (not counted as main weights): mmproj vision projector, MTP drafter (mtp-*.gguf or *-MTP.gguf). */
 const isAuxFile = (f) => /mmproj/i.test(f) || /^mtp-/i.test(f) || /-mtp\.gguf$/i.test(f);
-/** 某目录里已就绪（最终名，非 .part）的模型文件分类。 */
+/** Classify the ready (final names, not .part) model files in a directory. */
 function localModelFiles(dir) {
   let files = [];
   try { files = fs.readdirSync(dir); } catch { return { weights: [], mmproj: null, mtp: null, hasPart: false }; }
@@ -270,19 +270,19 @@ function localModelFiles(dir) {
     hasPart: files.some((f) => /\.part$/i.test(f)),
   };
 }
-/** 模型某量化是否「完整安装」：主权重齐全、无 .part，且模型具备视觉时 mmproj 也在。
- *  MTP drafter 视作可选加速件（不计入「完整」）：缺失时启动前按需补拉（约百 MB），避免给已装模型「反安装」。 */
+/** Whether a model's quantization is "fully installed": main weights complete, no .part, and mmproj present when the model has vision.
+ *  The MTP drafter is treated as an optional accelerator (not counted toward "complete"): when missing, fetch on demand before startup (~hundred MB), to avoid "un-installing" an already installed model. */
 function isModelInstalled(model, quant) {
   const dir = path.join(modelsDir(), (model.hf || "").replace(/\//g, "_"), quant);
   const f = localModelFiles(dir);
   if (f.hasPart || !f.weights.length) return false;
-  if (model.vision && !f.mmproj) return false; // 需视觉投影
+  if (model.vision && !f.mmproj) return false; // vision projector required
   return true;
 }
 
 /**
- * 已安装的本地模型列表（按目录版）：只列「完整安装」的目录（含 mmproj/mtp），逐条对应目录的 catalog 模型。
- * 返回 [{ modelId, name, repo, quant, dir, sizeBytes, running }]（running=当前正在服务的那个）。
+ * Installed local model list (by directory): lists only "fully installed" directories (including mmproj/mtp), each mapped to the catalog model for that directory.
+ * Returns [{ modelId, name, repo, quant, dir, sizeBytes, running }] (running = the one currently being served).
  */
 export function listDownloaded() {
   const running = state.model?.dir || "";
@@ -299,7 +299,7 @@ export function listDownloaded() {
   return out;
 }
 
-/** 删除一个已下载的本地模型目录（dir 必须在 models/ 下；正在运行的拒绝删除）。返回 { ok, error? }。 */
+/** Delete a downloaded local model directory (dir must be under models/; a running one is refused). Returns { ok, error? }. */
 export function deleteLocalModel(opts = {}) {
   const dir = String(opts.dir || "");
   const base = modelsDir();
@@ -309,14 +309,14 @@ export function deleteLocalModel(opts = {}) {
   catch (e) { return { ok: false, error: String(e?.message ?? e) }; }
 }
 
-/** 依 useCuda 选定的构建变体及是否已安装（向导第 1 步：显示「安装 / 已安装」，避免重复下载）。 */
+/** The build variant selected per useCuda and whether it is installed (wizard step 1: show "install / installed", to avoid re-downloading). */
 export function installInfo(opts = {}) {
   const hw = detectHardware();
   const variant = llamaVariant(hw, { preferCuda: !!opts.useCuda });
   return { variant, installed: !!installedBin(variant), version: LLAMA_VERSION };
 }
 
-/** 含 / 不含 CUDA 两个候选变体的安装状态，供向导默认选中「已安装」的那个（避免多余下载）。版本随 LLAMA_VERSION，升级即视为未装。 */
+/** Install status of the two candidate variants, with / without CUDA, so the wizard defaults to the "installed" one (to avoid a redundant download). Version follows LLAMA_VERSION; an upgrade counts as not installed. */
 export function installStatus() {
   const hw = detectHardware();
   const cuda = detectCuda();
@@ -327,10 +327,10 @@ export function installStatus() {
   return { version: LLAMA_VERSION, cuda, variants };
 }
 
-/** 推荐模型：把探测到的真实显存（opts.vramGB）并入 hw，得到分层卸载感知的推荐。
- *  共享内存(集显 UMA)：GPU 用的就是系统内存 → 按统一内存对待（预算只算系统内存，绝不把这段「显存」再加一遍），
- *  否则会重复计入而高估容量、推荐放不下的量化。opts.shared 显式给出时以其为准，否则据 uma/名字判定。
- *  见 docs/vulkan-uma-windows.md。 */
+/** Recommend a model: merge the probed real VRAM (opts.vramGB) into hw to get a layer-offload-aware recommendation.
+ *  Shared memory (integrated-GPU UMA): the GPU uses system memory itself -> treat it as unified memory (the budget counts system memory only, never adding this "VRAM" a second time),
+ *  otherwise it would be double-counted, overestimating capacity and recommending a quantization that does not fit. When opts.shared is given explicitly it takes precedence, otherwise it is decided by uma/name.
+ *  See docs/vulkan-uma-windows.md. */
 export function recommend(opts = {}) {
   const hw = detectHardware();
   const shared = opts.shared != null
@@ -339,32 +339,32 @@ export function recommend(opts = {}) {
   if (opts.vramGB && opts.vramGB > 0) {
     hw.gpu = { name: opts.device || (hw.gpu && hw.gpu.name) || "GPU", vramGB: opts.vramGB };
   }
-  if (shared) { hw.unified = true; hw.shared = true; } // 集显：显存即系统内存，容量/卸载按 Apple Silicon 统一内存那套走
+  if (shared) { hw.unified = true; hw.shared = true; } // integrated GPU: VRAM is system memory, capacity/offload follow the Apple Silicon unified-memory approach
   const budget = usableModelMemoryGB(hw, opts.budgetGB);
   return recommendModels(hw, budget, { ctx: opts.ctx || 16384, vision: opts.vision !== false });
 }
 
-// ── 第 1 步：安装运行时 bundle ────────────────────────────────
-/** 安装选定变体（已装秒回）；下载失败逐级回退 CUDA→Vulkan→CPU。返回实际安装的 { variant, bin }。 */
+// ── Step 1: install the runtime bundle ────────────────────────────────
+/** Install the selected variant (returns instantly if already installed); on download failure, fall back level by level CUDA->Vulkan->CPU. Returns the actually installed { variant, bin }. */
 async function installVariant(variant, onProgress) {
   try {
     const bin = await ensureInstalled(onProgress, variant);
     return { variant, bin };
   } catch (e) {
     const fb = fallbackVariant(variant);
-    if (fb) { pushLog(`[llama] 安装 ${variant} 失败（${String(e?.message ?? e)}）→ 回退 ${fb}\n`); return installVariant(fb, onProgress); }
+    if (fb) { pushLog(`[llama] install of ${variant} failed (${String(e?.message ?? e)}) -> falling back to ${fb}\n`); return installVariant(fb, onProgress); }
     throw e;
   }
 }
 
-/** 向导第 1 步：确保运行时已安装（已装跳过下载）。异步；进度经 onStatus 推送。 */
+/** Wizard step 1: ensure the runtime is installed (skip the download if already installed). Async; progress is pushed via onStatus. */
 export async function install(opts = {}) {
-  if (state.proc) return status(); // 运行中不重装
+  if (state.proc) return status(); // do not reinstall while running
   const hw = detectHardware();
   const variant = llamaVariant(hw, { preferCuda: !!opts.useCuda });
   state.variant = variant;
   state.error = null;
-  if (installedBin(variant)) { // 已安装：无需下载
+  if (installedBin(variant)) { // already installed: no download needed
     state.installedVariant = variant;
     if (state.phase !== "ready") state.phase = "idle";
     emit();
@@ -382,24 +382,24 @@ export async function install(opts = {}) {
     emit();
   } catch (e) {
     state.phase = "error";
-    state.error = `安装 llama 失败：${String(e?.message ?? e)}`;
+    state.error = `Failed to install llama: ${String(e?.message ?? e)}`;
     emit();
   }
   return status();
 }
 
-// ── 第 2 步：探测显存（--list-devices）─────────────────────────
-/** 向导第 2 步：用已安装二进制探测 GPU 显存/设备。返回 { vramGB, device, gpuPresent }；读不到则 vramGB=null。 */
+// ── Step 2: probe VRAM (--list-devices) ─────────────────────────
+/** Wizard step 2: probe GPU VRAM/device with the installed binary. Returns { vramGB, device, gpuPresent }; vramGB=null if unreadable. */
 export async function probe(opts = {}) {
   const variant = state.installedVariant || llamaVariant(detectHardware(), { preferCuda: !!opts.useCuda });
   const bin = installedBin(variant);
-  if (!bin) { const p = { vramGB: null, device: null, gpuPresent: false, variant, error: "未安装" }; state.probe = p; emit(); return p; }
+  if (!bin) { const p = { vramGB: null, device: null, gpuPresent: false, variant, error: "not installed" }; state.probe = p; emit(); return p; }
   state.phase = "probing";
   emit();
   const p = await probeDevices(bin);
   p.variant = variant;
-  // UMA 判定（集显 vs 独显）：优先此前真跑模型缓存到的权威 uma；否则用 --list-devices stderr 里的（通常没有）；
-  // 再否则按设备名启发式。仅对 Vulkan 有意义；CUDA(独显)/无 GPU 恒为非共享。见 docs/vulkan-uma-windows.md。
+  // UMA decision (integrated vs discrete GPU): prefer the authoritative uma cached from a prior real model run; otherwise use the one in --list-devices stderr (usually absent);
+  // otherwise fall back to the device-name heuristic. Only meaningful for Vulkan; CUDA (discrete) / no GPU is always non-shared. See docs/vulkan-uma-windows.md.
   const hw = detectHardware();
   if (hw.backend === "vulkan" && p.gpuPresent) {
     const cached = p.device ? umaCache.get(p.device.toLowerCase()) : undefined;
@@ -410,18 +410,18 @@ export async function probe(opts = {}) {
   }
   state.probe = p;
   if (state.phase === "probing") state.phase = "idle";
-  pushLog(`[llama] probe ${variant}: ${p.device || "无 GPU"}${p.vramGB ? ` ${p.vramGB}GB` : ""}${p.shared ? "（共享内存/集显）" : ""}\n`);
+  pushLog(`[llama] probe ${variant}: ${p.device || "no GPU"}${p.vramGB ? ` ${p.vramGB}GB` : ""}${p.shared ? " (shared memory/integrated GPU)" : ""}\n`);
   emit();
   return p;
 }
 
-/** 异步跑 `llama-server --list-devices`（不阻塞主进程；GPU 后端初始化可能耗时 1-3s），解析显存最大的设备。 */
+/** Asynchronously run `llama-server --list-devices` (without blocking the main process; GPU backend init can take 1-3s), and parse the device with the most VRAM. */
 function probeDevices(bin) {
   return new Promise((resolve) => {
     let out = "", done = false;
     const finish = () => { if (done) return; done = true; resolve(parseDevices(out)); };
     try {
-      const p = spawn(bin, ["--list-devices"], { stdio: ["ignore", "pipe", "pipe"] }); // 仅枚举设备，不下载，无需 HF 端点
+      const p = spawn(bin, ["--list-devices"], { stdio: ["ignore", "pipe", "pipe"] }); // only enumerate devices, no download, no HF endpoint needed
       p.stdout.on("data", (d) => { out += d.toString(); });
       p.stderr.on("data", (d) => { out += d.toString(); });
       p.on("error", finish);
@@ -432,83 +432,83 @@ function probeDevices(bin) {
 }
 
 /**
- * 解析 --list-devices 输出，形如：
+ * Parse --list-devices output, of the form:
  *   Available devices:
  *     Vulkan0: AMD Radeon RX 7900 XTX (24560 MiB, 24000 MiB free)
- * 取显存最大的设备，优先「free」。读不到（旧版无此选项 / 无 GPU）返回 gpuPresent:false。
+ * Take the device with the most VRAM, preferring "free". If unreadable (old version lacks this option / no GPU), return gpuPresent:false.
  */
 function parseDevices(out) {
   let bestMiB = 0, device = null;
   for (const line of out.split(/\r?\n/)) {
     const m = line.match(/(\S.*?)\s*\((\d+)\s*MiB(?:,\s*(\d+)\s*MiB\s*free)?/i);
     if (!m) continue;
-    const mib = Number(m[3] || m[2]); // 有 free 用 free，否则用总量
+    const mib = Number(m[3] || m[2]); // use free if present, otherwise use the total
     if (mib > bestMiB) { bestMiB = mib; device = m[1].replace(/^[A-Za-z]+\d+:\s*/, "").trim(); }
   }
-  const uma = parseUma(out); // --list-devices 通常不含此行 → null；个别构建/真跑模型时才有
+  const uma = parseUma(out); // --list-devices usually lacks this line -> null; only present in some builds / real model runs
   return bestMiB > 0
     ? { vramGB: Math.round((bestMiB / 1024) * 10) / 10, device, gpuPresent: true, uma }
     : { vramGB: null, device: null, gpuPresent: false, uma };
 }
 
 /**
- * 从 ggml Vulkan 初始化日志解析 uma 标志（stderr）：`ggml_vulkan: 0 = <name> | uma: X | fp16: ...`。
- * 返回 true（uma:1，集显/共享系统内存）、false（uma:0，独显/专用显存）、或 null（无此行，如裸 --list-devices）。
- * 见 docs/vulkan-uma-windows.md。
+ * Parse the uma flag from the ggml Vulkan init log (stderr): `ggml_vulkan: 0 = <name> | uma: X | fp16: ...`.
+ * Returns true (uma:1, integrated GPU/shared system memory), false (uma:0, discrete GPU/dedicated VRAM), or null (no such line, e.g. a bare --list-devices).
+ * See docs/vulkan-uma-windows.md.
  */
 function parseUma(out) {
   const m = String(out).match(/ggml_vulkan:\s*\d+\s*=.*?\buma:\s*([01])/i);
   return m ? m[1] === "1" : null;
 }
 
-/** 真跑模型时从 llama stderr 抓权威 uma：缓存并回填当前 probe（校准显存预算/卸载）。每次 launch 抓到一次即止。 */
+/** During a real model run, capture the authoritative uma from llama stderr: cache and backfill the current probe (calibrating the VRAM budget/offload). Captured once per launch, then stops. */
 function maybeCaptureUma() {
   if (umaScanned) return;
-  const uma = parseUma(state.log.slice(-80).join("")); // 跨块拼接近期日志，避免 ggml 行被切分漏读
+  const uma = parseUma(state.log.slice(-80).join("")); // join recent logs across chunks, to avoid missing a ggml line split across chunks
   if (uma == null) return;
   umaScanned = true;
   const dev = state.probe && state.probe.device;
   if (dev) umaCache.set(dev.toLowerCase(), uma);
   if (state.probe) { state.probe.uma = uma; state.probe.shared = isSharedGpu(dev, uma); }
-  pushLog(`[llama] uma=${uma ? 1 : 0} → ${uma ? "共享内存(集显)" : "独显"}（依此校准显存预算/卸载）\n`);
+  pushLog(`[llama] uma=${uma ? 1 : 0} -> ${uma ? "shared memory (integrated GPU)" : "discrete GPU"} (calibrating the VRAM budget/offload from this)\n`);
   emit();
 }
 
-// ── 第 3 步：启动 llama-server ─────────────────────────────────
-/** 解析 opts → { hf, repo, quant, label, vision, mtp, id, name, model, bpw }。未给 hf 时按 modelId + quantId 从目录取。
- *  repo/quant 供自主下载（hfDownload）用；vision = 该模型是否具备视觉投影能力（是否真正开启由 start 结合用户开关决定）。 */
+// ── Step 3: start llama-server ─────────────────────────────────
+/** Parse opts -> { hf, repo, quant, label, vision, mtp, id, name, model, bpw }. When hf is not given, derive from the catalog by modelId + quantId.
+ *  repo/quant are used by the self-download (hfDownload); vision = whether the model has vision-projection capability (whether it is actually enabled is decided by start together with the user toggle). */
 function resolveHf(opts, hw) {
   if (opts.hf) {
-    const i = opts.hf.lastIndexOf(":"); // 自定义 "user/repo:QUANT"；无 ":" 则只有 repo（无 quant → 不自下载，回退 -hf）
+    const i = opts.hf.lastIndexOf(":"); // custom "user/repo:QUANT"; without ":" there is only repo (no quant -> no self-download, fall back to -hf)
     const repo = i > 0 ? opts.hf.slice(0, i) : opts.hf;
     const quant = i > 0 ? opts.hf.slice(i + 1) : "";
     return { hf: opts.hf, repo, quant, label: opts.label || opts.hf, vision: !!opts.multimodal, mtp: !!opts.mtp, id: opts.model || opts.hf, name: opts.label || opts.hf, model: null, bpw: null };
   }
   const model = MODELS.find((m) => m.id === opts.modelId);
   if (!model) return null;
-  // 量化标签直接透传（可能是分档模型的 UD 标签，不在通用 QUANTS 里 —— 不要用 QUANTS 过滤）；未指定时按内存自动选。
+  // Pass the quantization label through directly (may be a tiered model's UD label, not in the generic QUANTS -- do not filter with QUANTS); auto-select by memory when unspecified.
   const quantId = opts.quantId || autoQuantId(model, hw, Number(opts.ctx || 16384));
   return { hf: `${model.hf}:${quantId}`, repo: model.hf, quant: quantId, label: model.name, vision: !!model.vision, mtp: model.mtp, id: model.id, name: model.name, model, bpw: quantBpw(model, quantId) };
 }
 
-/** 决定 -ngl：统一内存(Metal)/共享内存(集显)/未知 → 全卸载；CPU 构建 → 0；独显 → 按探测显存分层卸载。 */
+/** Decide -ngl: unified memory (Metal)/shared memory (integrated GPU)/unknown -> offload all; CPU build -> 0; discrete GPU -> layer offload per probed VRAM. */
 function computeNgl(variant, r, ctx, kvBits, hw) {
   if (variant.includes("macos") || (hw && hw.unified)) return 999;
-  if (state.probe && state.probe.shared) return 999; // 集显共享系统内存：全卸载即可，不做「按专用显存分层」估算
-  if (!/cuda|vulkan/.test(variant)) return 0; // CPU 构建
+  if (state.probe && state.probe.shared) return 999; // integrated GPU shares system memory: just offload all, no "layer by dedicated VRAM" estimation
+  if (!/cuda|vulkan/.test(variant)) return 0; // CPU build
   const vram = (state.probe && state.probe.vramGB) || (hw.gpu && hw.gpu.vramGB) || 0;
   return gpuLayers(r.model, r.bpw, ctx, kvBits, vram);
 }
 
 /**
- * 启动本地模型（异步：必要时先安装 llama，再拉起 llama-server）。立即返回当前状态；
- * 后续 downloading/loading/ready/error 经 onStatus 推送。
+ * Start a local model (async: install llama first if needed, then bring up llama-server). Returns the current status immediately;
+ * subsequent downloading/loading/ready/error are pushed via onStatus.
  * opts: { modelId?, quantId?, hf?, ctx?, port?, useCuda?, vision?, mmproj? }
- *   vision（默认 true）：模型具备视觉能力时是否加载视觉投影（关闭则 --no-mmproj，省 ~1GB 内存）。
+ *   vision (default true): whether to load the vision projector when the model has vision capability (off -> --no-mmproj, saving ~1GB memory).
  */
-// 残留清理：应用被强杀（未走 before-quit → stop）时 llama-server 会成孤儿并占住端口，下次启动 bind 失败退出。
-// 用 pidfile 记录本进程 PID；下次启动前若该 PID 仍是 llama-server 就杀掉（校验命令行含 llama-server，避免 PID 复用误杀）。
-// 让内核分配一个空闲端口（listen 0 → 取端口 → 关闭），随机端口避免固定 8080 冲突。
+// Leftover cleanup: when the app is force-killed (skipping before-quit -> stop), llama-server becomes an orphan holding the port, and the next start exits with a bind failure.
+// Record this process's PID in a pidfile; before the next start, if that PID is still llama-server, kill it (verify the command line contains llama-server, to avoid a PID-reuse mis-kill).
+// Have the kernel allocate a free port (listen 0 -> take port -> close); a random port avoids a fixed 8080 conflict.
 function findFreePort() {
   return new Promise((resolve) => {
     const srv = net.createServer();
@@ -527,47 +527,47 @@ function killOrphanServer() {
       ? execSync(`wmic process where processid=${pid} get commandline`, { stdio: ["ignore", "pipe", "ignore"] }).toString()
       : execSync(`ps -p ${pid} -o command=`, { stdio: ["ignore", "pipe", "ignore"] }).toString();
     if (/llama-server/i.test(cmd)) { try { process.kill(pid, "SIGKILL"); } catch { /* ignore */ } }
-  } catch { /* 进程已不在 */ }
+  } catch { /* process no longer exists */ }
 }
 
 export function start(opts = {}) {
   stop();
-  killOrphanServer(); // 清理上次强杀残留的 llama-server（否则占住端口导致本次 bind 失败）
-  openLog(`会话开始 ${new Date().toISOString()} · model=${opts.modelId || opts.hf || "?"}`); // 本次启动全程输出落盘
+  killOrphanServer(); // clean up the llama-server left over from a prior force-kill (otherwise it holds the port and causes this bind to fail)
+  openLog(`Session start ${new Date().toISOString()} · model=${opts.modelId || opts.hf || "?"}`); // persist all output for this startup
   const hw = detectHardware();
   const r = resolveHf(opts, hw);
   if (!r) { state.phase = "error"; state.error = "unknown modelId"; emit(); return status(); }
 
-  const visionOn = r.vision && opts.vision !== false; // 仅在模型支持视觉且开关未关时为真
-  const mtpOn = !!r.mtp && opts.mtp !== false;  // MTP 投机解码（模型支持且开关未关，默认开）
-  // 上下文 / KV 量化自动分档：未显式指定时按「模型 + 量化 + 设备内存」选放得下的最大 -c（封顶原生窗口），
-  // 优先 KV q8，放不下自动降 q4 解锁更大上下文（见 localModels.pickCtxKv）。自定义 -hf（无目录条目）回退 16K/q8。
+  const visionOn = r.vision && opts.vision !== false; // true only when the model supports vision and the toggle is not off
+  const mtpOn = !!r.mtp && opts.mtp !== false;  // MTP speculative decoding (model supports it and the toggle is not off, on by default)
+  // Context / KV quantization auto-tiering: when not explicitly specified, pick the largest -c that fits per "model + quantization + device memory" (capped at the native window),
+  // preferring KV q8, and automatically dropping to q4 when it does not fit to unlock a larger context (see localModels.pickCtxKv). Custom -hf (no catalog entry) falls back to 16K/q8.
   const pick = !opts.ctx && r.model ? pickCtxKv(r.model, r.bpw, hw, usableModelMemoryGB(hw), visionOn) : null;
   const ctx = Number(opts.ctx || (pick ? pick.ctx : 16384));
   const kvBits = Number(opts.kvBits || (pick ? pick.kvBits : 8));
-  state.port = Number(opts.port || 0); // 0 = launch 里向内核申请随机空闲端口
+  state.port = Number(opts.port || 0); // 0 = request a random free port from the kernel inside launch
   state.ctx = ctx;
   const modelDir = r.repo && r.quant ? path.join(localFilesBase(), "models", r.repo.replace(/\//g, "_"), r.quant) : null;
-  state.model = { hf: r.hf, label: r.label, multimodal: visionOn, id: r.id, name: r.name, ctx, dir: modelDir, repo: r.repo || null, quant: r.quant || null }; // ctx = 启动时 -c，渲染层用作该模型的真实上下文窗口；dir/repo/quant 供模型库匹配「运行中」
+  state.model = { hf: r.hf, label: r.label, multimodal: visionOn, id: r.id, name: r.name, ctx, dir: modelDir, repo: r.repo || null, quant: r.quant || null }; // ctx = the -c at startup, used by the renderer as the model's real context window; dir/repo/quant let the model library match "running"
   state.ready = false;
   state.error = null;
   state.log = [];
   state.pct = 0;
   try { fs.mkdirSync(KV_DIR, { recursive: true }); } catch { /* ignore */ }
 
-  // 优先复用向导第 1 步已安装的变体；否则按 useCuda 现选（launch 内再确保安装）。
+  // Prefer reusing the variant installed in wizard step 1; otherwise choose now per useCuda (launch will ensure it is installed).
   const variant = state.installedVariant || llamaVariant(hw, { preferCuda: !!opts.useCuda });
-  const gen = ++launchGen; // 本次启动代号；launch 内 await 后核对，过期即放弃 spawn
+  const gen = ++launchGen; // this startup's generation id; checked after awaits inside launch, abandon spawn if stale
   launch(variant, { r, hw, ctx, kvBits, visionOn, mtpOn, gen });
   emit();
   return status();
 }
 
-/** 安装（必要时下载）指定变体 → 拉起 llama-server；GPU 构建就绪前失败自动回退下一级（CPU 变体无回退，不会无限递归）。 */
+/** Install (download if needed) the given variant -> bring up llama-server; if a GPU build fails before ready, automatically fall back to the next level (the CPU variant has no fallback, so no infinite recursion). */
 async function launch(variant, cfg) {
   const { r, hw, ctx, kvBits = 8, visionOn, mtpOn, gen } = cfg;
-  const stale = () => gen != null && gen !== launchGen; // 本次启动已被后续 start/stop 取代
-  const mtpSeparate = !!r.model?.mtp && !r.model?.mtpEmbedded; // Gemma：独立 MTP drafter 文件（需下载 + -md）
+  const stale = () => gen != null && gen !== launchGen; // this startup has been superseded by a later start/stop
+  const mtpSeparate = !!r.model?.mtp && !r.model?.mtpEmbedded; // Gemma: standalone MTP drafter file (needs download + -md)
   state.variant = variant;
   let bin;
   try {
@@ -578,99 +578,99 @@ async function launch(variant, cfg) {
     state.installedVariant = variant;
   } catch (e) {
     const fb = fallbackVariant(variant);
-    if (fb) { pushLog(`[llama] 安装 ${variant} 失败（${String(e?.message ?? e)}）→ 回退 ${fb}\n`); return launch(fb, cfg); }
-    state.phase = "error"; state.error = `安装 llama 失败：${String(e?.message ?? e)}`; emit(); return;
+    if (fb) { pushLog(`[llama] install of ${variant} failed (${String(e?.message ?? e)}) -> falling back to ${fb}\n`); return launch(fb, cfg); }
+    state.phase = "error"; state.error = `Failed to install llama: ${String(e?.message ?? e)}`; emit(); return;
   }
 
-  // 自主下载模型权重（带进度/断点续传/镜像）；成功用 -m 启动，失败回退 -hf 让 llama 自己拉，用户中止则不再启动。
-  const hfEnd = await resolveHfEndpoint(); // 启动前实测 huggingface.co 可达性，不通则用镜像
-  const modelsDir = path.join(localFilesBase(), "models"); // GGUF 权重目录（自下载落地于此；回退 -hf 时也用作 LLAMA_CACHE）
+  // Self-download the model weights (with progress/resume/mirror); on success start with -m, on failure fall back to -hf and let llama fetch it itself, and if the user aborts, do not start.
+  const hfEnd = await resolveHfEndpoint(); // test huggingface.co reachability before startup, use the mirror if unreachable
+  const modelsDir = path.join(localFilesBase(), "models"); // GGUF weights directory (self-download lands here; also used as LLAMA_CACHE when falling back to -hf)
   try { fs.mkdirSync(modelsDir, { recursive: true }); } catch { /* ignore */ }
   let modelPath = null, mmprojPath = null, mtpPath = null;
   if (r.repo && r.quant) {
     const destDir = path.join(modelsDir, r.repo.replace(/\//g, "_"), r.quant);
     const local = localModelFiles(destDir);
-    const drafterMissing = mtpSeparate && !local.mtp; // 需独立 drafter 但本地没有 → 需补拉（约百 MB）
+    const drafterMissing = mtpSeparate && !local.mtp; // needs a standalone drafter but not present locally -> needs to be fetched (~hundred MB)
     if (r.model && isModelInstalled(r.model, r.quant) && !drafterMissing) {
-      // 已完整安装（且不缺 drafter）：直接用本地文件，跳过下载阶段（不显示「下载中」）。
+      // Fully installed (and no missing drafter): use the local files directly, skipping the download phase (do not show "downloading").
       modelPath = path.join(destDir, local.weights[0]);
       mmprojPath = local.mmproj ? path.join(destDir, local.mmproj) : null;
       mtpPath = local.mtp ? path.join(destDir, local.mtp) : null;
-      pushLog(`[llama] 已安装，直接加载：${path.basename(modelPath)}\n`);
+      pushLog(`[llama] already installed, loading directly: ${path.basename(modelPath)}\n`);
     } else {
       const ac = new AbortController();
       state.dlAbort = ac;
       try {
         state.phase = "fetching"; state.pct = 0; emit();
-        // 始终下载 mmproj（模型具备视觉时）与独立 MTP drafter（Gemma），使运行时可自由切换视觉/MTP 而无需重下；
-        // 已装模型只缺 drafter 时，downloadModel 会跳过已有权重/视觉投影、仅补拉 drafter。Qwen 为内置 MTP（无独立文件）。
+        // Always download mmproj (when the model has vision) and the standalone MTP drafter (Gemma), so the runtime can freely toggle vision/MTP without re-downloading;
+        // when an installed model is only missing the drafter, downloadModel skips the existing weights/vision projector and fetches only the drafter. Qwen has a built-in MTP (no standalone file).
         const out = await downloadModel(
           { endpoint: hfEnd, repo: r.repo, quant: r.quant, vision: !!r.vision, mtp: mtpSeparate, destDir },
           (pct) => { if (pct !== state.pct) { state.pct = pct; emit(); } },
           ac.signal,
         );
         modelPath = out.modelPath; mmprojPath = out.mmprojPath; mtpPath = out.mtpPath || null;
-        pushLog(`[llama] 模型就绪：${path.basename(modelPath)}${mmprojPath ? ` + ${path.basename(mmprojPath)}` : ""}${mtpPath ? ` + ${path.basename(mtpPath)}` : ""}\n`);
+        pushLog(`[llama] model ready: ${path.basename(modelPath)}${mmprojPath ? ` + ${path.basename(mmprojPath)}` : ""}${mtpPath ? ` + ${path.basename(mtpPath)}` : ""}\n`);
       } catch (e) {
-        if (ac.signal.aborted) { pushLog("[llama] 已取消模型下载\n"); return; } // 用户 stop：不再拉起服务
-        // 不回退 -hf（会落到 HF 缓存布局、不可控）：自下载失败即报错。
-        state.phase = "error"; state.error = `模型下载失败：${String(e?.message ?? e)}`; pushLog(`[llama] 模型下载失败：${String(e?.message ?? e)}\n`); emit(); return;
+        if (ac.signal.aborted) { pushLog("[llama] model download cancelled\n"); return; } // user stop: do not bring up the service
+        // Do not fall back to -hf (would land in the HF cache layout, uncontrollable): a self-download failure is an error.
+        state.phase = "error"; state.error = `Model download failed: ${String(e?.message ?? e)}`; pushLog(`[llama] model download failed: ${String(e?.message ?? e)}\n`); emit(); return;
       } finally {
         if (state.dlAbort === ac) state.dlAbort = null;
       }
     }
   }
 
-  if (stale()) { pushLog("[llama] 启动已被新的启动/停止取代，放弃本次\n"); return; } // 下载/安装期间用户又点了启动或停止
+  if (stale()) { pushLog("[llama] startup superseded by a new start/stop, abandoning this one\n"); return; } // the user pressed start or stop again during download/install
   state.phase = "loading";
   state.pct = 0;
   emit();
-  if (!state.port) state.port = await findFreePort(); // 随机空闲端口（避免固定 8080 冲突）
-  if (stale()) { pushLog("[llama] 启动已被取代，放弃 spawn\n"); return; }
+  if (!state.port) state.port = await findFreePort(); // random free port (to avoid a fixed 8080 conflict)
+  if (stale()) { pushLog("[llama] startup superseded, abandoning spawn\n"); return; }
   const ngl = computeNgl(variant, r, ctx, kvBits, hw);
-  pushLog(`[llama] ${variant} -ngl ${ngl} -c ${ctx} kv=q${kvBits} :${state.port}${state.probe && state.probe.vramGB ? `（显存≈${state.probe.vramGB}GB）` : ""}\n`);
-  // 目录模型必有 quant → 一定走自下载并得到本地权重；无 -hf 分支。视觉关闭则不传 --mmproj（文件仍在，仅不加载）。
-  if (!modelPath) { state.phase = "error"; state.error = "模型权重缺失（自下载未产出）"; emit(); return; }
-  // MTP：内置头（Qwen）→ 仅 --spec-type；独立 drafter（Gemma）→ -md + --spec-type，仅当 drafter 文件确实在。
-  // drafter 缺失（下载失败）时不加开关，降级为无投机解码而非报错。
+  pushLog(`[llama] ${variant} -ngl ${ngl} -c ${ctx} kv=q${kvBits} :${state.port}${state.probe && state.probe.vramGB ? ` (VRAM≈${state.probe.vramGB}GB)` : ""}\n`);
+  // Catalog models always have a quant -> always self-download and get local weights; no -hf branch. When vision is off, do not pass --mmproj (the file remains, just not loaded).
+  if (!modelPath) { state.phase = "error"; state.error = "model weights missing (self-download produced nothing)"; emit(); return; }
+  // MTP: built-in head (Qwen) -> only --spec-type; standalone drafter (Gemma) -> -md + --spec-type, only when the drafter file is actually present.
+  // When the drafter is missing (download failed), do not add the flag, degrading to no speculative decoding rather than erroring.
   const haveMtp = r.model?.mtpEmbedded ? true : (mtpSeparate && !!mtpPath);
   const useMtp = !!mtpOn && haveMtp;
   const mtpDraft = useMtp && mtpSeparate ? mtpPath : null;
-  if (mtpOn && !haveMtp) pushLog("[llama] MTP 已开启但未找到 drafter，本次不启用投机解码\n");
+  if (mtpOn && !haveMtp) pushLog("[llama] MTP is enabled but no drafter found, speculative decoding not enabled this time\n");
   const args = buildServerArgs({ modelPath, mmproj: visionOn ? mmprojPath : null, mtpDraft, specMtp: useMtp, hw, ctx, port: state.port, kvBits, kvCacheDir: KV_DIR, ngl });
-  pushLog(`[llama] argv: ${bin} ${args.join(" ")}\n`); // 完整启动命令（便于排查）
+  pushLog(`[llama] argv: ${bin} ${args.join(" ")}\n`); // full startup command (for troubleshooting)
   let proc;
   try {
     proc = spawn(bin, args, { stdio: ["ignore", "pipe", "pipe"], env: { ...process.env, HF_ENDPOINT: hfEnd, LLAMA_CACHE: modelsDir } });
   } catch (e) {
     const fb = fallbackVariant(variant);
-    if (fb) { pushLog(`[llama] 启动 ${variant} 失败（${String(e?.message ?? e)}）→ 回退 ${fb}\n`); return launch(fb, cfg); }
+    if (fb) { pushLog(`[llama] start of ${variant} failed (${String(e?.message ?? e)}) -> falling back to ${fb}\n`); return launch(fb, cfg); }
     state.phase = "error"; state.error = String(e?.message ?? e); emit(); return;
   }
   state.proc = proc;
-  try { fs.writeFileSync(pidFile(), String(proc.pid)); } catch { /* ignore */ } // 记录 PID，供下次启动清理强杀残留
-  umaScanned = false; // 本次启动重新扫描 stderr 里的权威 uma:
+  try { fs.writeFileSync(pidFile(), String(proc.pid)); } catch { /* ignore */ } // record the PID for the next start to clean up force-kill leftovers
+  umaScanned = false; // rescan the authoritative uma: from stderr for this startup
   const onData = (b) => { pushLog(b.toString()); maybeCaptureUma(); };
   proc.stdout.on("data", onData);
   proc.stderr.on("data", onData);
-  // 「本 proc 是否仍是当前服务进程」：若已被后续 start() 换成新 proc，则旧 proc 的 error/exit
-  // 不得清空全局状态（否则会误杀新 proc 的健康轮询/proc 引用，导致新服务实际就绪却一直显示「启动中」）。
+  // "whether this proc is still the current service process": if a later start() has replaced it with a new proc, the old proc's error/exit
+  // must not clear the global state (otherwise it would wrongly kill the new proc's health poll/proc reference, leaving the new service actually ready but perpetually showing "starting").
   const isCurrent = () => state.proc === proc;
   proc.on("error", (e) => { if (state.proc && !isCurrent()) return; state.error = String(e?.message ?? e); state.phase = "error"; state.proc = null; stopHealthPoll(); emit(); });
   proc.on("exit", (code) => {
-    if (state.proc && !isCurrent()) { pushLog(`[llama] 旧进程退出（code=${code}），已被新启动取代，忽略\n`); return; } // 陈旧 proc：不动全局状态
+    if (state.proc && !isCurrent()) { pushLog(`[llama] old process exited (code=${code}), superseded by a new startup, ignoring\n`); return; } // stale proc: leave global state untouched
     state.proc = null;
-    pushLog(`[llama] 进程退出，code=${code}\n`); // 落盘退出码，便于排查崩溃（日志流留到 stop/下次启动才关闭）
+    pushLog(`[llama] process exited, code=${code}\n`); // persist the exit code to aid crash troubleshooting (the log stream stays open until stop/next start)
     try { fs.rmSync(pidFile(), { force: true }); } catch { /* ignore */ }
     const wasReady = state.ready;
     state.ready = false;
     const fb = fallbackVariant(variant);
     if (code && code !== 0 && !wasReady && fb) {
       stopHealthPoll();
-      pushLog(`[llama] ${variant} 未就绪即退出（code ${code}）→ 回退 ${fb}\n`);
+      pushLog(`[llama] ${variant} exited before ready (code ${code}) -> falling back to ${fb}\n`);
       return launch(fb, cfg);
     }
-    if (code && code !== 0 && !state.error) { state.error = `llama-server 退出（code ${code}）`; state.phase = "error"; }
+    if (code && code !== 0 && !state.error) { state.error = `llama-server exited (code ${code})`; state.phase = "error"; }
     stopHealthPoll();
     emit();
   });
@@ -693,22 +693,22 @@ function startHealthPoll() {
 
 export function stop() {
   stopHealthPoll();
-  launchGen++; // 使任何进行中的 launch 过期（在 spawn 前放弃）
-  if (state.dlAbort) { try { state.dlAbort.abort(); } catch { /* ignore */ } state.dlAbort = null; } // 中止进行中的模型下载
-  // SIGKILL 而非 SIGTERM：llama-server 在加载权重（mmap/warmup）期间会忽略 SIGTERM，
-  // 导致「加载中再次启动」时旧进程杀不掉、占住端口并泄漏。本地推理服务无需优雅退出。
+  launchGen++; // make any in-progress launch stale (abandon before spawn)
+  if (state.dlAbort) { try { state.dlAbort.abort(); } catch { /* ignore */ } state.dlAbort = null; } // abort an in-progress model download
+  // SIGKILL rather than SIGTERM: llama-server ignores SIGTERM while loading weights (mmap/warmup),
+  // so "starting again during loading" cannot kill the old process, which holds the port and leaks. A local inference service needs no graceful shutdown.
   if (state.proc) { const p = state.proc; try { p.kill("SIGKILL"); } catch { /* ignore */ } state.proc = null; }
   try { fs.rmSync(pidFile(), { force: true }); } catch { /* ignore */ }
   closeLog();
-  state.port = 0; // 下次启动重新申请随机端口
+  state.port = 0; // re-request a random port on the next start
   state.ready = false;
   state.phase = "idle";
-  state.model = null; // 清除「运行中」关联，否则模型库列表仍把该模型标为 running（删除按钮会被误禁用）
+  state.model = null; // clear the "running" association, otherwise the model library list still marks the model as running (its delete button would be wrongly disabled)
   emit();
   return status();
 }
 
-/** 「重新开始」：停止服务 + 清除探测/模型结果，回到向导第 1 步；保留已安装运行时（不重复下载）。 */
+/** "Start over": stop the service + clear the probe/model results, returning to wizard step 1; keep the installed runtime (no re-download). */
 export function reset() {
   stop();
   state.probe = null;

@@ -1,15 +1,15 @@
 /**
- * Google Sign-In IPC：渲染层 window.googleAuth.signIn → 主进程运行 RFC 8252 原生流程。
+ * Google Sign-In IPC: renderer window.googleAuth.signIn → main process runs the RFC 8252 native flow.
  *
- * 主进程独占 OAuth 所需的 Node/OS 能力（环回 http 服务、shell.openExternal、PKCE crypto）；
- * 渲染层只经此通道触发并拿到结果（id_token 或取消），再由渲染层 POST /auth/google。
- * 见 electron/services/googleAuth.mjs 与 docs/google-signin-frontend.md。
+ * The main process exclusively holds the Node/OS capabilities OAuth needs (loopback http server, shell.openExternal, PKCE crypto);
+ * the renderer only triggers it through this channel and receives the result (id_token or canceled), then POSTs /auth/google itself.
+ * See electron/services/googleAuth.mjs and docs/google-signin-frontend.md.
  */
 import { ipcMain } from "electron";
 import { runGoogleSignIn } from "../services/googleAuth.mjs";
 
 export function registerGoogleAuth() {
-  // 统一返回结构 { ok, idToken? , canceled? , error? }，渲染层据此走成功/取消/失败分支。
+  // Unified return shape { ok, idToken? , canceled? , error? }; the renderer branches on it for success/canceled/failure.
   ipcMain.handle("google-auth:signin", async () => {
     try {
       const result = await runGoogleSignIn();

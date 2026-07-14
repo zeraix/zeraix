@@ -1,12 +1,12 @@
 "use client";
 
 /**
- * 模型库：本地大模型（llama.cpp）管理。
- *   顶部：本地推理运行时（安装 / 更新 / 重新检测 + 检测到的硬件 + 目录）。
- *   两个标签：推荐模型（全部适配本机的推荐项）/ 已安装（权重 + mmproj/mtp 完整下载的）。
- *   每个模型一张卡片（2 列网格）；点卡片弹出「选项对话框」：量化 / 上下文（可手输 K）/ KV / 视觉，
- *   实时估算占用；启动 / 停止（至多一个）/ 取消下载 / 打开文件夹 / 删除 / 重置。
- * 全部文案走 i18n（ml.* / local.note.*）。状态与进度来自主进程 window.localLlm。
+ * Model library: local large-model (llama.cpp) management.
+ *   Top: local inference runtime (install / update / re-detect + detected hardware + directory).
+ *   Two tabs: recommended models (all recommendations that fit this machine) / installed (weights + fully downloaded mmproj/mtp).
+ *   One card per model (2-column grid); clicking a card opens an "options dialog": quant / context (K can be typed) / KV / vision,
+ *   with live usage estimation; start / stop (at most one) / cancel download / open folder / delete / reset.
+ * All copy goes through i18n (ml.* / local.note.*). Status and progress come from the main process window.localLlm.
  */
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { ChevronDown, Cpu, Play, Square, Trash2, FolderOpen, Loader2, Download, Check, Sparkles, RotateCcw, X, RefreshCw, HardDrive, Copy, FileText, FolderSync } from "lucide-react";
@@ -28,7 +28,7 @@ const OPTS_KEY = "zeraix.modelLibrary.opts";
 const HW_KEY = "zeraix.modelLibrary.hw";
 const fmtGB = (bytes: number) => `${(bytes / 1073741824).toFixed(1)} GB`;
 const fmtK = (n: number) => `${Math.round(n / 1024)}K`;
-// OpenAI 兼容基址（去掉 /chat/completions）——三方 Agent 应用里通常填这个 base URL。
+// OpenAI-compatible base URL (strip /chat/completions) — this is the base URL you usually enter in third-party Agent apps.
 const apiBase = (ep?: string) => (ep || "").replace(/\/chat\/completions\/?$/, "");
 const openFolder = (p: string) =>
   (window as unknown as { shellApi?: { openPath?: (p: string) => void } }).shellApi?.openPath?.(p);
@@ -87,7 +87,7 @@ export default function ModelLibrary() {
     if (!bridge) return;
     return bridge.onStatus((st) => {
       setStatus(st);
-      // 就绪/停止 → 聊天清单同步交给全局 LocalModelSync；此处只刷新已安装列表。
+      // ready/stopped → syncing the chat list is handled by the global LocalModelSync; here we only refresh the installed list.
       if (st.phase === "ready" || st.phase === "idle" || st.phase === "error") bridge.listModels().then(setDownloaded);
     });
   }, [bridge]);
@@ -109,8 +109,8 @@ export default function ModelLibrary() {
     return () => { cancelled = true; };
   }, [bridge, rec, optsKey, opts]);
 
-  const installing = status?.phase === "downloading" || status?.phase === "extracting"; // 运行时安装
-  // 仅在「空闲」时允许更改/迁移文件夹：无运行时安装、无模型下载、无模型在跑/加载（否则会与正写入的文件冲突）。
+  const installing = status?.phase === "downloading" || status?.phase === "extracting"; // runtime install
+  // Only allow changing/migrating the folder when "idle": no runtime install, no model download, no model running/loading (otherwise it would conflict with files being written).
   const busyPhase = status ? (status.running || ["downloading", "extracting", "fetching", "loading", "probing"].includes(status.phase)) : false;
   const migrateBlocked = migrating || busy || busyPhase;
   const cudaAvailable = !!hw?.cuda?.available;
@@ -124,14 +124,14 @@ export default function ModelLibrary() {
 
   const options = rec?.options ?? [];
   const installedIds = new Set(downloaded.map((d) => d.modelId));
-  // 推荐 = 尚未安装的推荐项；已安装 = 已装的。每个模型只出现在一个标签里。
+  // recommended = recommendations not yet installed; installed = the installed ones. Each model appears in only one tab.
   const shown = tab === "installed" ? options.filter((o) => installedIds.has(o.model.id)) : options.filter((o) => !installedIds.has(o.model.id));
   const dlgOpt = options.find((o) => o.model.id === dialogId) ?? null;
 
-  // 单个模型的运行态派生。
+  // Derive the runtime state of a single model.
   const stateOf = (o: Opt) => {
     const mo = opts[o.model.id] ?? defaults[o.model.id] ?? { quant: o.quant.id, ctx: o.ctx ?? 16384, kvBits: o.kvBits ?? 8, vision: true };
-    const dl = downloaded.find((d) => d.modelId === o.model.id && d.quant === mo.quant); // 选中量化是否已装
+    const dl = downloaded.find((d) => d.modelId === o.model.id && d.quant === mo.quant); // whether the selected quant is already installed
     const anyDl = downloaded.find((d) => d.modelId === o.model.id) ?? null;
     const isThis = status?.model?.id === o.model.id;
     const isRunning = !!isThis && !!status?.ready && !installing;
@@ -142,14 +142,14 @@ export default function ModelLibrary() {
 
   const start = (o: Opt, mo: ModelOpts) => { setBusy(true); bridge.start({ modelId: o.model.id, quantId: mo.quant, ctx: mo.ctx, kvBits: mo.kvBits, vision: mo.vision, mtp: mo.mtp, useCuda }).finally(() => setBusy(false)); };
   const stop = () => { setBusy(true); bridge.stop().finally(() => setBusy(false)); };
-  // 更改存储文件夹：原生选目录 → 迁移已下载的运行时/模型/日志到新位置（同盘秒级，跨盘拷贝）。
+  // Change storage folder: native directory picker → migrate the downloaded runtime/models/logs to the new location (instant on the same drive, copy across drives).
   const changeFolder = async () => {
     setMigrating(true);
     try { const r = await bridge.chooseStorageDir(); if (r?.migrateError) alert(t("ml.migrateFailed", { err: r.migrateError })); await refresh(); }
     finally { setMigrating(false); }
   };
 
-  // 卡片上的启停/进度按钮（card 与 dialog 共用）。
+  // Start/stop/progress button on the card (shared by card and dialog).
   const ActionButton = ({ o, size = "sm" }: { o: Opt; size?: "sm" | "lg" }) => {
     const s = stateOf(o);
     const cls = size === "lg" ? "px-3 py-1.5 text-sm" : "px-2.5 py-1 text-xs";
@@ -162,7 +162,7 @@ export default function ModelLibrary() {
     <div className="space-y-5">
       <p className="text-sm text-ink-subtle">{t("ml.pageDesc")}</p>
 
-      {/* ── 运行时（含存储文件夹 + 更改/迁移 + 运行日志） ── */}
+      {/* ── Runtime (incl. storage folder + change/migrate + run log) ── */}
       <section className="rounded-xl border border-line bg-surface px-4 py-3">
         <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
           <Cpu className="size-4 text-ink-muted" />
@@ -187,7 +187,7 @@ export default function ModelLibrary() {
           <span className="inline-flex items-center gap-1"><HardDrive className="size-3" /> {t("ml.detected", { mem: hw?.hw?.totalMemGB ?? "…" })}{hw?.hw?.unified ? t("ml.unifiedMem") : ""} · {status?.probe?.device || hw?.hw?.gpu?.name || (hw?.hw?.backend === "cpu" ? "CPU" : hw?.hw?.backend)}{status?.probe?.vramGB || hw?.hw?.gpu?.vramGB ? ` · ${t("ml.vram", { gb: status?.probe?.vramGB || hw?.hw?.gpu?.vramGB || 0 })}` : ""}</span>
           {cudaAvailable && <label className="ml-auto flex items-center gap-1"><input type="checkbox" checked={useCuda} disabled={busy || installing} onChange={(e) => setUseCuda(e.target.checked)} /> {t("ml.nvidiaAccel")}</label>}
         </div>
-        {/* 存储文件夹（运行时 + 模型 + 日志同处）+ 运行日志 + 更改文件夹（迁移；仅空闲可点）。 */}
+        {/* Storage folder (runtime + models + logs together) + run log + change folder (migrate; clickable only when idle). */}
         <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1.5 border-t border-line pt-2">
           {storage && (
             <button onClick={() => openFolder(storage.dir)} title={t("ml.openStorageDir")}
@@ -207,7 +207,7 @@ export default function ModelLibrary() {
         </div>
       </section>
 
-      {/* ── 标签 ── */}
+      {/* ── Tabs ── */}
       <div className="flex items-center gap-1 border-b border-line">
         {(["recommended", "installed"] as const).map((k) => (
           <button key={k} onClick={() => setTab(k)} className={`relative -mb-px border-b-2 px-3 py-2 text-sm transition ${tab === k ? "border-primary font-medium text-ink" : "border-transparent text-ink-subtle hover:text-ink"}`}>
@@ -217,7 +217,7 @@ export default function ModelLibrary() {
         ))}
       </div>
 
-      {/* ── 卡片网格 ── */}
+      {/* ── Card grid ── */}
       {shown.length === 0 ? (
         <p className="py-6 text-center text-sm text-ink-subtle">{tab === "installed" ? t("ml.noInstalled") : t("ml.noModels")}</p>
       ) : (
@@ -251,7 +251,7 @@ export default function ModelLibrary() {
         </div>
       )}
 
-      {/* ── 选项对话框 ── */}
+      {/* ── Options dialog ── */}
       <Dialog open={!!dlgOpt} onOpenChange={(v) => { if (!v) setDialogId(null); }}>
         <DialogContent className="sm:max-w-lg">
           {dlgOpt && (() => {

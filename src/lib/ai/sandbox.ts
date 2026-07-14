@@ -38,9 +38,9 @@ export function isSandboxEngine(active: string | null | undefined): boolean {
 export function sandboxEnvHint(st: SandboxStatus | null): string {
   if (st && isSandboxEngine(st.active)) {
     return (
-      "【命令执行环境】run_command / check_project 当前在隔离的 Linux（Debian，bash）沙箱内执行：" +
-      "使用 Linux 命令（ls、grep、curl 等），不要使用 Windows 命令；文件工具与命令共享同一工作目录" +
-      "（宿主目录已挂载进沙箱）。若工具结果中出现【执行环境切换】提示，按提示改用匹配的命令。"
+      "【Command Execution Environment】`run_command` / `check_project` are currently executed inside an isolated Linux (Debian, bash) sandbox: " +
+      "Use Linux commands (ls, grep, curl, etc.) instead of Windows commands. File tools and terminal commands share the same working directory " +
+      "(the host directory has been mounted into the sandbox). If an 【Execution Environment Switch】 notice appears in the tool output, switch to the matching commands as instructed."
     );
   }
   const p = st?.hostPlatform ?? "";
@@ -51,10 +51,10 @@ export function sandboxEnvHint(st: SandboxStatus | null): string {
         ? "macOS（zsh/bash）"
         : p === "linux"
           ? "Linux（bash）"
-          : "宿主机";
+          : "Host Machine";
   return (
-    `【命令执行环境】run_command / check_project 当前直接在宿主机 ${osName} 上执行，` +
-    "请使用与该系统匹配的命令。若工具结果中出现【执行环境切换】提示，按提示改用匹配的命令。"
+    `【Command Execution Environment】run_command / check_project are currently executed directly on the ${osName},` +
+    "Please use commands that match the system. If an 【Execution Environment Switch】 notice appears in the tool output, switch to the matching commands as instructed."
   );
 }
 

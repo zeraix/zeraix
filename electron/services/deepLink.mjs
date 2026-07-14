@@ -1,33 +1,38 @@
 /**
- * 自定义协议（Deep Link）注册与解析。
+ * Custom protocol (Deep Link) registration and parsing.
  *
- * 用途：Google 登录在系统浏览器里完成后，回调页放一个 `zeraix://…` 按钮，用户点一下
- * 由操作系统把这个 URL 路由回本应用（把窗口带到前台）。RFC 8252 的环回流程已在应用内
- * 拿到 id_token，深链的职责只是「把用户从浏览器带回应用」，不承载令牌。
+ * Purpose: after Google login completes in the system browser, the callback page shows a
+ * `zeraix://…` button; when the user clicks it, the OS routes this URL back to this app
+ * (bringing the window to the foreground). The RFC 8252 loopback flow has already obtained the
+ * id_token inside the app, so the deep link's only job is to "bring the user back from the
+ * browser to the app" — it does not carry any token.
  *
- * 平台差异（由 main.mjs 消费本模块的解析结果）：
- *   - macOS：系统发 `open-url` 事件，URL 直接给到；
- *   - Windows/Linux：系统以「新进程 + argv 带上 URL」方式唤起，靠单实例锁把它交回首个实例，
- *     再从 argv 里捞出这个 URL（见 findDeepLink）。
+ * Platform differences (main.mjs consumes this module's parse result):
+ *   - macOS: the system fires an `open-url` event and hands the URL over directly;
+ *   - Windows/Linux: the system launches it as a "new process + URL in argv", relying on the
+ *     single-instance lock to hand it back to the first instance, then extracts the URL from
+ *     argv (see findDeepLink).
  *
- * 打包分发时协议在 electron-builder.yml 的 protocols 段声明（写入 Info.plist / 注册表）；
- * 开发态（electron .）由 setAsDefaultProtocolClient 动态登记，需显式把入口脚本路径传给系统，
- * 否则系统不知道用哪个参数重新拉起 Electron。
+ * When packaged for distribution, the protocol is declared in the protocols section of
+ * electron-builder.yml (written into Info.plist / the registry); in dev mode (electron .),
+ * setAsDefaultProtocolClient registers it dynamically and must be explicitly passed the entry
+ * script path, otherwise the system won't know which argument to use to relaunch Electron.
  */
 import { app } from "electron";
 import path from "node:path";
 
-/** 自定义协议名（不含 ://）。改这里需同步 electron-builder.yml 的 protocols 段。 */
+/** Custom protocol name (without ://). Changing this requires syncing the protocols section of electron-builder.yml. */
 export const DEEP_LINK_SCHEME = "zeraix";
 
 /**
- * 把本应用登记为 `zeraix://` 的默认处理程序。
- * 打包态直接登记；开发态（process.defaultApp 为真，即 `electron .`）必须把入口脚本路径
- * 作为附加参数传入，系统才能用「electron <入口>」的形式在点击深链时把应用重新拉起。
+ * Register this app as the default handler for `zeraix://`.
+ * When packaged, register it directly; in dev mode (process.defaultApp is true, i.e. `electron .`)
+ * the entry script path must be passed as an extra argument so the system can relaunch the app in
+ * the form "electron <entry>" when a deep link is clicked.
  */
 export function registerProtocolClient() {
   if (process.defaultApp) {
-    // 开发态：argv 形如 [electron, <入口脚本>, …]；把入口脚本绝对路径登记进去。
+    // Dev mode: argv looks like [electron, <entry script>, …]; register the entry script's absolute path.
     if (process.argv.length >= 2) {
       app.setAsDefaultProtocolClient(DEEP_LINK_SCHEME, process.execPath, [
         path.resolve(process.argv[1]),
@@ -39,8 +44,8 @@ export function registerProtocolClient() {
 }
 
 /**
- * 从一组命令行参数里找出 `zeraix://…` 深链（Windows/Linux 唤起时 URL 就在 argv 里）。
- * 找不到返回 null。
+ * Find the `zeraix://…` deep link within a set of command-line arguments (on Windows/Linux the
+ * URL is right there in argv when launched). Returns null if not found.
  */
 export function findDeepLink(argv) {
   if (!Array.isArray(argv)) return null;

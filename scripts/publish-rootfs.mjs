@@ -33,10 +33,10 @@ function loadEnv() {
 const env = loadEnv();
 const { OSS_BUCKET: bucket, OSS_ENDPOINT: endpoint, OSS_ACCESS_KEY_ID: keyId, OSS_ACCESS_KEY_SECRET: keySecret } = env;
 if (!bucket || !endpoint || !keyId || !keySecret) throw new Error("missing OSS config (OSS_BUCKET/OSS_ENDPOINT/OSS_ACCESS_KEY_ID/OSS_ACCESS_KEY_SECRET in sandbox/qemu/.env)");
-const vmArch = env.VMARCH || guestArch(); // 默认跟随主机（mac=arm64 / win=amd64 / linux 随架构），与 build/runtime 一致
+const vmArch = env.VMARCH || guestArch(); // defaults to following the host (mac=arm64 / win=amd64 / linux follows the arch), consistent with build/runtime
 const version = VM_VERSION[vmArch];
-if (!version) throw new Error(`VM_VERSION.${vmArch} 为空 —— 先 npm run build:rootfs（会依 docker 镜像 ID 写入版本）`);
-const vd = vmDir(appNameFromPackage(), vmArch, env.ZERAIX_VMDIR); // 与 dev 运行时 / 构建脚本同一位置（本地应用数据目录）
+if (!version) throw new Error(`VM_VERSION.${vmArch} is empty — run npm run build:rootfs first (it writes the version from the docker image ID)`);
+const vd = vmDir(appNameFromPackage(), vmArch, env.ZERAIX_VMDIR); // same location as the dev runtime / build scripts (local app-data directory)
 const CDN = (env.OSS_CDN || "https://docker.zeraix.com").replace(/\/+$/, "");
 const FILES = ["rootfs.qcow2", "Image", "initrd.img"];
 for (const f of FILES) if (!fs.existsSync(path.join(vd, f))) throw new Error(`missing ${f} in ${vd} — build it first (sandbox/qemu/build-rootfs-local.sh)`);

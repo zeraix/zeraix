@@ -19,9 +19,9 @@ export interface DrawerProps {
 
   direction?: DrawerDirection;
 
-  /** 默认的标准头部标题 */
+  /** Default standard header title */
   title?: React.ReactNode;
-  /** 完全由外部控制的头部内容（优先级高于 title） */
+  /** Fully externally controlled header content (takes priority over title) */
   header?: React.ReactNode;
   footer?: React.ReactNode;
   children: React.ReactNode;
@@ -31,9 +31,9 @@ export interface DrawerProps {
   style?: React.CSSProperties;
   maskStyle?: React.CSSProperties;
 
-  /** 点击遮罩层或外部是否关闭 */
+  /** Whether clicking the mask or outside closes the drawer */
   maskClosable?: boolean;
-  /** 是否显示遮罩层 */
+  /** Whether to show the mask */
   mask?: boolean;
 }
 
@@ -111,7 +111,7 @@ const DrawerEl = forwardRef<DrawerRef, DrawerProps>((props, ref) => {
   };
 
   // =========================================
-  // 点击外部关闭的全局监听
+  // Global listener for click-outside-to-close
   // =========================================
 
   useEffect(() => {
@@ -365,10 +365,10 @@ const DrawerEl = forwardRef<DrawerRef, DrawerProps>((props, ref) => {
   };
 
   // =========================================
-  // 核心变更：Header 与 Title 的优先级条件渲染
+  // Core change: priority-based conditional rendering of Header vs Title
   // =========================================
   const renderHeader = () => {
-    // 1. 如果传了 header，无条件采用外部控制（header 优先级最高）
+    // 1. If header is provided, use external control unconditionally (header has the highest priority)
     if (header) {
       return (
         <div className="shrink-0" style={{ ...getHeaderRadiusStyle() }}>
@@ -377,7 +377,7 @@ const DrawerEl = forwardRef<DrawerRef, DrawerProps>((props, ref) => {
       );
     }
 
-    // 2. 如果没传 header 但传了 title，使用带有关闭按钮的标准头部布局
+    // 2. If header isn't provided but title is, use the standard header layout with a close button
     if (title) {
       return (
         <div
@@ -406,7 +406,7 @@ const DrawerEl = forwardRef<DrawerRef, DrawerProps>((props, ref) => {
       );
     }
 
-    // 3. 两个都没传，则不渲染头部
+    // 3. If neither is provided, render no header
     return null;
   };
 
@@ -458,7 +458,7 @@ const DrawerEl = forwardRef<DrawerRef, DrawerProps>((props, ref) => {
             ...getRadiusStyle(),
           }}
         >
-          {/* 渲染头部 */}
+          {/* Render header */}
           {renderHeader()}
 
           {/* content */}

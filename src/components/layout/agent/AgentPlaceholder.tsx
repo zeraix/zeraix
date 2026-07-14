@@ -1,14 +1,14 @@
 import type { LucideIcon } from "lucide-react";
 
 /**
- * 次级页面通用脚手架：标题 + 描述 + 空状态卡片。
- * 供 技能 / 自动化 / 模型库 等尚未填充内容的页面复用，保持视觉一致。
+ * Generic scaffold for secondary pages: title + description + empty-state card.
+ * Reused by not-yet-filled pages like Skills / Automation / Model Library to keep the visuals consistent.
  */
 export default function AgentPlaceholder({
   icon: Icon,
   title,
   description,
-  emptyText = "暂无内容",
+  emptyText = "No content yet",
 }: {
   icon: LucideIcon;
   title: string;

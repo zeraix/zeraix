@@ -3,7 +3,7 @@
 import { flushSync } from "react-dom";
 
 /**
- * View Transitions API 的最小类型（TS DOM lib 可能尚未内置）
+ * Minimal type for the View Transitions API (may not yet be built into the TS DOM lib)
  */
 type DocumentWithViewTransition = Document & {
   startViewTransition?: (callback: () => void) => {
@@ -12,24 +12,24 @@ type DocumentWithViewTransition = Document & {
   };
 };
 
-/** 动画扩散原点（视口坐标，通常取点击位置） */
+/** Animation expansion origin (viewport coordinates, usually the click position) */
 export interface TransitionOrigin {
   x: number;
   y: number;
 }
 
 /**
- * 带过渡动画的主题切换（View Transitions API + clip-path 圆形扩散）
+ * Theme switch with a transition animation (View Transitions API + clip-path circular expansion)
  *
- * - 切到亮色：新（亮色）视图从原点以圆形扩散展开覆盖
- * - 切到暗色：旧（亮色）视图以圆形收缩消失，露出下方的暗色视图
- * - 浏览器不支持 startViewTransition 或用户偏好减弱动效时，直接切换无动画
+ * - Switching to light: the new (light) view expands in a circle from the origin to cover the screen
+ * - Switching to dark: the old (light) view shrinks away in a circle, revealing the dark view underneath
+ * - When the browser doesn't support startViewTransition, or the user prefers reduced motion, switch directly with no animation
  *
- * 配套的 ::view-transition-*(root) 层级规则定义在 globals.css 中。
+ * The accompanying ::view-transition-*(root) layer rules are defined in globals.css.
  *
- * @param toDark 切换后的目标是否为暗色（用于决定动画方向与作用层）
- * @param apply  实际执行主题切换的回调（内部会用 flushSync 同步刷新 DOM）
- * @param origin 扩散原点（视口坐标，如点击位置）；缺省为视口中心
+ * @param toDark Whether the target after switching is dark (determines the animation direction and target layer)
+ * @param apply  The callback that actually performs the theme switch (uses flushSync internally to synchronously flush the DOM)
+ * @param origin The expansion origin (viewport coordinates, e.g. the click position); defaults to the viewport center
  */
 export function applyThemeWithTransition(
   toDark: boolean,
@@ -46,15 +46,15 @@ export function applyThemeWithTransition(
     return;
   }
 
-  // 标记"正在进行主题切换过渡"：
-  // chat 页面的 view-transitions.css 给部分元素设置了 view-transition-name（页面导航过渡用），
-  // 这些元素会脱离 root 快照、各自独立分组，导致整页擦除只作用于剩余部分（如侧边栏）。
-  // globals.css 中通过 html.theme-transition 在主题切换期间取消这些分组并屏蔽 root 淡入淡出。
+  // Mark that a theme-switch transition is in progress:
+  // The chat page's view-transitions.css sets view-transition-name on some elements (used for page-navigation transitions),
+  // which pulls those elements out of the root snapshot into their own separate groups, so the full-page wipe only affects the rest (e.g. the sidebar).
+  // globals.css uses html.theme-transition to cancel those groups and suppress the root fade during a theme switch.
   const root = document.documentElement;
   root.classList.add("theme-transition");
 
-  // 主题切换必须在 startViewTransition 回调内同步完成，
-  // 否则快照截取不到新状态 —— 因此用 flushSync 强制同步渲染。
+  // The theme switch must complete synchronously inside the startViewTransition callback,
+  // otherwise the snapshot won't capture the new state -- so use flushSync to force synchronous rendering.
   const transition = doc.startViewTransition!(() => {
     flushSync(apply);
   });
@@ -63,15 +63,15 @@ export function applyThemeWithTransition(
     root.classList.remove("theme-transition");
   });
 
-  // 扩散原点：优先使用传入的点击位置，否则取视口中心
+  // Expansion origin: prefer the passed-in click position, otherwise use the viewport center
   const x = origin?.x ?? innerWidth / 2;
   const y = origin?.y ?? innerHeight / 2;
-  // 终止半径：原点到视口最远角的距离，保证圆形完全覆盖视口
+  // End radius: distance from the origin to the farthest viewport corner, ensuring the circle fully covers the viewport
   const endRadius = Math.hypot(
     Math.max(x, innerWidth - x),
     Math.max(y, innerHeight - y),
   );
-  // clip-path 的圆形百分比半径以 √(宽²+高²)/√2 为参照基准
+  // The clip-path circle's percentage radius is measured against sqrt(w^2+h^2)/sqrt(2) as the reference baseline
   const ratioX = (100 * x) / innerWidth;
   const ratioY = (100 * y) / innerHeight;
   const referR = Math.hypot(innerWidth, innerHeight) / Math.SQRT2;
@@ -90,7 +90,7 @@ export function applyThemeWithTransition(
         duration: 400,
         easing: "ease-in",
         fill: "both",
-        // 切到暗色时收缩旧视图（亮色在上），切到亮色时扩散新视图（亮色在上）
+        // When switching to dark, shrink the old view (light on top); when switching to light, expand the new view (light on top)
         pseudoElement: toDark
           ? "::view-transition-old(root)"
           : "::view-transition-new(root)",

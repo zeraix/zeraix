@@ -20,7 +20,7 @@ import { shortImageId, writeVmVersion } from "./vmVersion.mjs";
 
 const REPO = process.cwd();
 const isWin = process.platform === "win32";
-const archDeb = process.env.ARCH_DEB || guestArch(); // 与 publish/runtime 同一推导（mac=arm64 / win=amd64 / linux 随架构）
+const archDeb = process.env.ARCH_DEB || guestArch(); // same derivation as publish/runtime (mac=arm64 / win=amd64 / linux follows the host arch)
 const suite = process.env.SUITE || "trixie";
 const imgTag = `zx-vm-${archDeb}`;
 
@@ -31,7 +31,7 @@ const toWsl = (p) => {
 };
 
 const vmRoot = path.join(localDataDir(appNameFromPackage()), "vm");
-const staging = path.join(vmRoot, `.build-${archDeb}`); // 版本（镜像 ID）构建后才知，先建到暂存目录，再改名到 .../vm/<version>/
+const staging = path.join(vmRoot, `.build-${archDeb}`); // the version (image ID) is only known after building, so build into a staging dir first, then rename to .../vm/<version>/
 fs.rmSync(staging, { recursive: true, force: true });
 
 console.log(`[build-rootfs] building ARCH_DEB=${archDeb} SUITE=${suite} → ${staging}`);
@@ -45,18 +45,18 @@ if (isWin) {
   execFileSync("bash", [script, staging], { stdio: "inherit", env: { ...process.env, ARCH_DEB: archDeb, SUITE: suite } });
 }
 
-// 版本 = 刚构建的 docker 镜像 ID（per-arch）。Windows 上 docker 在 WSL 内。
+// version = the docker image ID just built (per-arch). On Windows, docker lives inside WSL.
 const inspectArgs = ["image", "inspect", "--format", "{{.Id}}", imgTag];
 const rawId = (isWin
   ? execFileSync("wsl.exe", ["-e", "docker", ...inspectArgs], { encoding: "utf8" })
   : execFileSync("docker", inspectArgs, { encoding: "utf8" })).trim();
 const version = shortImageId(rawId);
 
-// staging → .../vm/<version>/（原子替换；version 已隐含 arch，无需 arch 段）。
+// staging → .../vm/<version>/ (atomic replace; version already implies arch, so no arch segment needed).
 const out = path.join(vmRoot, version);
 fs.rmSync(out, { recursive: true, force: true });
 fs.renameSync(staging, out);
 
 const updated = writeVmVersion(archDeb, version);
-console.log(`[build-rootfs] VM_VERSION.${archDeb} = ${version}${updated ? "（已写入 electron/versions.json，请提交）" : "（未变）"}`);
+console.log(`[build-rootfs] VM_VERSION.${archDeb} = ${version}${updated ? " (written to electron/versions.json, please commit)" : " (unchanged)"}`);
 console.log(`[build-rootfs] OK — rootfs built to ${out}`);

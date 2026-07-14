@@ -1,15 +1,18 @@
 /**
- * 内置终端的 PTY 后端（主进程）。
+ * PTY backend for the built-in terminal (main process).
  *
- * 用 node-pty 起一个「真实伪终端」，桥接到渲染层的 xterm.js，达到与系统原生终端一致的交互：
- * 全屏 TUI（vim / top / less）、真彩色、Ctrl-C 等信号、Tab 补全、行编辑等——这些是 child_process
- * 管道方案（如 run_command）做不到的，因此终端另起一套 PTY，不复用命令执行引擎。
+ * Uses node-pty to start a "real pseudo-terminal", bridged to xterm.js in the renderer, to achieve interaction
+ * identical to the system's native terminal: full-screen TUIs (vim / top / less), true color, signals such as
+ * Ctrl-C, Tab completion, line editing, etc. -- things the child_process pipe approach (like run_command) cannot
+ * do, which is why the terminal spins up its own PTY instead of reusing the command-execution engine.
  *
- * 每个会话一个自增 id。PTY 输出经 webContents.send("terminal:data", {id,data}) 推给「发起该会话
- * 的渲染窗口」；退出经 "terminal:exit" 推送。会话按发起窗口归类，窗口销毁时一并清理，避免泄漏 shell。
+ * One auto-incrementing id per session. PTY output is pushed via webContents.send("terminal:data", {id,data}) to
+ * "the renderer window that started the session"; exit is pushed via "terminal:exit". Sessions are grouped by the
+ * window that started them and cleaned up together when that window is destroyed, to avoid leaking shells.
  *
- * 说明：node-pty 是原生模块，须随主进程打包并从 asar 解出（见 electron-builder.yml 的 files /
- * asarUnpack），且按目标平台的 Electron ABI 重新编译（electron-builder 默认 npmRebuild）。
+ * Note: node-pty is a native module that must be bundled with the main process and unpacked from asar (see the
+ * files / asarUnpack settings in electron-builder.yml), and recompiled for the target platform's Electron ABI
+ * (electron-builder does npmRebuild by default).
  */
 import os from "node:os";
 import process from "node:process";
@@ -17,7 +20,7 @@ import fs from "node:fs";
 import nodePty from "node-pty";
 import { getWorkingDir } from "./aiToolkit.mjs";
 
-/** id -> { pty, webContents }。全部在位会话。 */
+/** id -> { pty, webContents }. All live sessions. */
 const sessions = new Map();
 let seq = 0;
 
@@ -37,9 +40,9 @@ const isFile = (p) => {
 };
 
 /**
- * 选一个「确实存在且可执行」的 shell，避免 posix_spawnp 因 shell 路径无效而失败：
- *  - Windows：优先 PowerShell（COMSPEC 通常是 cmd，这里显式取更现代的 PowerShell），走 PATH 解析；
- *  - *nix：依次尝试 $SHELL → /bin/zsh（macOS 默认）→ /bin/bash → /bin/sh，取第一个真实存在的可执行文件。
+ * Pick a shell that "actually exists and is executable" to avoid posix_spawnp failing due to an invalid shell path:
+ *  - Windows: prefer PowerShell (COMSPEC is usually cmd; here we explicitly pick the more modern PowerShell), resolved via PATH;
+ *  - *nix: try $SHELL -> /bin/zsh (macOS default) -> /bin/bash -> /bin/sh in order, taking the first executable that actually exists.
  */
 function resolveShell() {
   if (process.platform === "win32") return process.env.COMSPEC || "powershell.exe";
@@ -50,8 +53,9 @@ function resolveShell() {
 }
 
 /**
- * 选一个「确实存在」的工作目录：目标目录不存在时先尝试创建（默认工作目录 ~/zeraix-workspace
- * 在 macOS 上可能尚未建立，直接用它 spawn 会 posix_spawnp 失败），仍不行则回退到用户主目录 / cwd。
+ * Pick a working directory that "actually exists": if the target directory does not exist, try creating it first
+ * (the default working dir ~/zeraix-workspace may not yet exist on macOS, and spawning directly with it would make
+ * posix_spawnp fail); if that still fails, fall back to the user's home directory / cwd.
  */
 function resolveCwd(preferred) {
   let dir = preferred || getWorkingDir() || os.homedir();
@@ -59,7 +63,7 @@ function resolveCwd(preferred) {
     try {
       fs.mkdirSync(dir, { recursive: true });
     } catch {
-      /* 无权限 / 非法路径：下面回退 */
+      /* no permission / invalid path: fall back below */
     }
   }
   if (!isDir(dir)) dir = os.homedir();
@@ -68,9 +72,9 @@ function resolveCwd(preferred) {
 }
 
 /**
- * 新建一个 PTY 会话，绑定到发起窗口的 webContents（用于回推输出）。
- * cwd 默认取当前工作目录（与文件树 / AI 工具一致），落在用户所选项目目录下。
- * 返回会话 id，供后续 write / resize / kill 引用。spawn 失败时抛出清晰错误（供渲染层提示，不静默崩溃）。
+ * Create a new PTY session bound to the starting window's webContents (used to push output back).
+ * cwd defaults to the current working directory (consistent with the file tree / AI tools), under the project directory the user selected.
+ * Returns the session id for later write / resize / kill references. On spawn failure, throws a clear error (for the renderer to surface, rather than crashing silently).
  */
 export function createTerminal(webContents, opts = {}) {
   const shell = opts.shell || resolveShell();
@@ -85,12 +89,12 @@ export function createTerminal(webContents, opts = {}) {
       cols,
       rows,
       cwd,
-      // 继承主进程环境，并声明 256 色终端类型，令交互程序输出彩色 / 走 TUI 分支。
+      // Inherit the main process environment and declare a 256-color terminal type so interactive programs output color / take the TUI branch.
       env: { ...process.env, TERM: "xterm-256color" },
     });
   } catch (e) {
-    // 抛出可读错误（含 shell/cwd），渲染层 catch 后在终端里提示，而非「Uncaught (in promise)」。
-    throw new Error(`无法启动终端（shell=${shell}, cwd=${cwd}）：${e instanceof Error ? e.message : String(e)}`);
+    // Throw a readable error (including shell/cwd); the renderer catches it and shows it in the terminal, rather than "Uncaught (in promise)".
+    throw new Error(`Failed to start terminal (shell=${shell}, cwd=${cwd}): ${e instanceof Error ? e.message : String(e)}`);
   }
 
   const id = ++seq;
@@ -103,63 +107,63 @@ export function createTerminal(webContents, opts = {}) {
     sessions.delete(id);
     if (!webContents.isDestroyed()) webContents.send("terminal:exit", { id, exitCode, signal });
   });
-  // 渲染窗口销毁（关闭 / 刷新）→ 清理其名下所有会话。
+  // Renderer window destroyed (closed / refreshed) -> clean up all sessions under it.
   webContents.once("destroyed", () => killByWebContents(webContents));
 
   return id;
 }
 
-/** 写入用户输入（原样透传给 PTY，含控制字符 / 组合键序列）。 */
+/** Write user input (passed through to the PTY as-is, including control characters / key-combination sequences). */
 export function writeTerminal(id, data) {
   const s = sessions.get(id);
   if (s && typeof data === "string") s.pty.write(data);
 }
 
-/** 调整 PTY 尺寸（xterm fit 后同步，供 TUI 正确重排）。 */
+/** Resize the PTY (synced after xterm fit, so TUIs reflow correctly). */
 export function resizeTerminal(id, cols, rows) {
   const s = sessions.get(id);
   if (s && cols > 0 && rows > 0) {
     try {
       s.pty.resize(Math.floor(cols), Math.floor(rows));
     } catch {
-      /* 尺寸非法 / 会话已退出，忽略 */
+      /* invalid size / session already exited, ignore */
     }
   }
 }
 
-/** 结束单个会话。 */
+/** Terminate a single session. */
 export function killTerminal(id) {
   const s = sessions.get(id);
   if (!s) return;
   try {
     s.pty.kill();
   } catch {
-    /* 已退出，忽略 */
+    /* already exited, ignore */
   }
   sessions.delete(id);
 }
 
-/** 结束某窗口名下的全部会话（窗口销毁时调用）。 */
+/** Terminate all sessions under a given window (called when the window is destroyed). */
 export function killByWebContents(wc) {
   for (const [id, s] of sessions) {
     if (s.webContents === wc) {
       try {
         s.pty.kill();
       } catch {
-        /* 忽略 */
+        /* ignore */
       }
       sessions.delete(id);
     }
   }
 }
 
-/** 结束所有会话（应用退出前清理）。 */
+/** Terminate all sessions (cleanup before app exit). */
 export function killAllTerminals() {
   for (const [, s] of sessions) {
     try {
       s.pty.kill();
     } catch {
-      /* 忽略 */
+      /* ignore */
     }
   }
   sessions.clear();

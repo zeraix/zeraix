@@ -1,11 +1,11 @@
 /**
- * 系统通知 IPC（设计文档 §3.2 / §10）：渲染层 window.notification.* → 主进程服务。
+ * System notification IPC (design doc §3.2 / §10): renderer window.notification.* -> main-process service.
  *
- * 安全（§10）：
- *   - 字段白名单：仅接受 ALLOWED_FIELDS，其余一律剔除
- *   - 长度限制：title / body 截断，防止超长通知刷屏
- *   - scheme 限制：route 必须是应用内路径（/ 开头）或 notify://；url 仅允许 http(s)
- *   - 频率限制：由 NotificationService 的队列 + 限流承担（maxPerSecond / maxBurst）
+ * Security (§10):
+ *   - Field allowlist: accept only ALLOWED_FIELDS, strip everything else
+ *   - Length limits: truncate title / body to prevent overly long notifications from flooding the screen
+ *   - Scheme restriction: route must be an in-app path (starting with /) or notify://; url allows only http(s)
+ *   - Rate limiting: handled by the NotificationService's queue + throttle (maxPerSecond / maxBurst)
  */
 import { ipcMain, BrowserWindow } from "electron";
 import { randomUUID } from "node:crypto";
@@ -26,20 +26,20 @@ const MAX_BODY = 500;
 const TYPES = new Set(["info", "success", "warning", "error"]);
 const PRIORITIES = new Set(["low", "normal", "high"]);
 
-/** 截断到指定长度并转字符串。 */
+/** Truncate to the given length and convert to a string. */
 function clampStr(v, max) {
   const s = typeof v === "string" ? v : String(v ?? "");
   return s.length > max ? s.slice(0, max) : s;
 }
 
-/** route 净化：仅允许应用内路径或 notify://；否则丢弃。 */
+/** Sanitize route: allow only in-app paths or notify://; otherwise drop. */
 function sanitizeRoute(route) {
   if (typeof route !== "string") return undefined;
   if (route.startsWith("/") || route.startsWith("notify://open/")) return route.slice(0, 300);
   return undefined;
 }
 
-/** url 净化：仅允许 http(s)；否则丢弃。 */
+/** Sanitize url: allow only http(s); otherwise drop. */
 function sanitizeUrl(url) {
   if (typeof url !== "string") return undefined;
   try {
@@ -50,7 +50,7 @@ function sanitizeUrl(url) {
   }
 }
 
-/** 动作按钮净化：最多 3 个，仅保留 text/actionId。 */
+/** Sanitize action buttons: at most 3, keep only text/actionId. */
 function sanitizeActions(actions) {
   if (!Array.isArray(actions)) return undefined;
   const out = actions.slice(0, 3).map((a) => ({
@@ -61,12 +61,12 @@ function sanitizeActions(actions) {
 }
 
 /**
- * 把渲染层传入的原始 payload 净化为受信 NotificationItem。
- * 非法 / 空 title 直接返回 null（拒绝该通知）。
+ * Sanitize the raw payload passed in from the renderer into a trusted NotificationItem.
+ * An invalid / empty title returns null immediately (the notification is rejected).
  */
 function sanitize(raw) {
   if (!raw || typeof raw !== "object") return null;
-  // 字段白名单
+  // Field allowlist
   const src = {};
   for (const k of ALLOWED_FIELDS) if (k in raw) src[k] = raw[k];
 
@@ -84,13 +84,13 @@ function sanitize(raw) {
     priority: PRIORITIES.has(src.priority) ? src.priority : "normal",
     groupKey: typeof src.groupKey === "string" ? src.groupKey.slice(0, 120) : undefined,
     actions: sanitizeActions(src.actions),
-    // 前置条件开关：仅当窗口在后台/最小化时才弹（notification-t.md）。
+    // Precondition switch: only pop when the window is in the background / minimized (notification-t.md).
     whenBackground: !!src.whenBackground,
   };
 }
 
 /**
- * 注册系统通知 IPC，并返回 NotificationService（供主进程内部直接推送，如 AI 任务完成通知）。
+ * Register the system notification IPC and return the NotificationService (for the main process to push directly, e.g. AI task-completion notifications).
  * @param {{ getWindow: () => (Electron.BrowserWindow|null), iconPath?: string }} opts
  */
 export function registerNotifications({ getWindow, iconPath }) {
@@ -100,7 +100,7 @@ export function registerNotifications({ getWindow, iconPath }) {
   };
   const service = new NotificationService({ adapter, getWindow, broadcast });
 
-  // 发送：返回 { ok, id?, supported }。非法 payload → ok:false。
+  // Send: returns { ok, id?, supported }. An invalid payload -> ok:false.
   ipcMain.handle("notify:send", (_e, payload) => {
     const item = sanitize(payload);
     if (!item) return { ok: false, error: "invalid payload", supported: isNotificationSupported() };
@@ -108,7 +108,7 @@ export function registerNotifications({ getWindow, iconPath }) {
     return { ok: true, id, merged, skipped, supported: isNotificationSupported() };
   });
 
-  // 通知中心数据接口
+  // Notification center data interfaces
   ipcMain.handle("notify:list", () => listHistory());
   ipcMain.handle("notify:unread-count", () => unreadCount());
   ipcMain.handle("notify:mark-read", (_e, id) => markRead(id));

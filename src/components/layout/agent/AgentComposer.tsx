@@ -26,13 +26,13 @@ import {
 import { LOCAL_PROVIDER_ID } from "@/lib/ai/localModel";
 import { useT } from "@/lib/i18n";
 
-/** 设计稿中的品牌粉色（发送按钮 / 强调）。 */
+/** Brand pink from the design mockup (send button / accent). */
 const ACCENT = "#f5327d";
 
 /**
- * 任务输入框（新建对话首页用）。
- * 顶部多行输入 + 附件预览 + 底部工具条（添加文件 / 模型选择 / 发送）。
- * 提交时把文本与附件一并交给 onSubmit（图片已上传 OSS，带 url）。
+ * Task input box (used on the new-conversation home page).
+ * Multi-line input on top + attachment preview + bottom toolbar (add file / model selection / send).
+ * On submit, hands the text and attachments together to onSubmit (images are already uploaded to OSS, with url).
  */
 export default function AgentComposer({
   placeholder,
@@ -44,14 +44,14 @@ export default function AgentComposer({
   placeholder?: string;
   autoFocus?: boolean;
   className?: string;
-  /** 为 true 时禁止发送（如开发模式下尚未选择工作目录）；保留已输入文本。 */
+  /** When true, disables sending (e.g. no working directory chosen yet in dev mode); preserves entered text. */
   disabled?: boolean;
   onSubmit?: (text: string, attachments: Attachment[]) => void;
 }) {
   const t = useT();
   const router = useRouter();
   const [value, setValue] = useState("");
-  // 可选模型清单（在设置里维护）+ 当前选中项；选中即持久化，供聊天页发送时读取。
+  // Selectable model list (maintained in settings) + current selection; persisted on selection, read by the chat page when sending.
   const [models, setModels] = useState<AgentModel[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [attachments, setAttachments] = useState<Attachment[]>([]);
@@ -62,18 +62,18 @@ export default function AgentComposer({
   const uploading = attachments.some((a) => a.kind === "image" && a.uploading);
   const canSend = (value.trim().length > 0 || attachments.length > 0) && !disabled && !uploading;
 
-  // 载入模型清单与当前选中项；从设置页返回时（focus）刷新。
+  // Load the model list and current selection; refresh when returning from the settings page (focus).
   useEffect(() => {
     const refresh = () => {
       ensureModelListSeeded();
       setModels(loadModelList());
-      const sel = getSelectedModel(); // 缺失时回退清单首项
+      const sel = getSelectedModel(); // fall back to the first item in the list when missing
       setSelectedId(sel?.id ?? null);
-      if (sel) setSelectedModelId(sel.id); // 固化回退值，聊天页据此发送
+      if (sel) setSelectedModelId(sel.id); // solidify the fallback value, the chat page sends based on it
     };
     refresh();
     window.addEventListener("focus", refresh);
-    window.addEventListener(MODEL_LIST_CHANGE_EVENT, refresh); // 本地模型就绪/停止等同页清单变更即时刷新
+    window.addEventListener(MODEL_LIST_CHANGE_EVENT, refresh); // local model ready/stopped and other same-page list changes refresh immediately
     return () => { window.removeEventListener("focus", refresh); window.removeEventListener(MODEL_LIST_CHANGE_EVENT, refresh); };
   }, []);
 
@@ -83,7 +83,7 @@ export default function AgentComposer({
   };
   const selectedLabel = models.find((m) => m.id === selectedId)?.label ?? null;
 
-  // 按类别分组：官方 / 本地模型 / 第三方 / 自定义。
+  // Group by category: official / local models / third-party / custom.
   const modelGroups = [
     {
       key: "official",
@@ -145,7 +145,7 @@ export default function AgentComposer({
         addFiles(e.dataTransfer.files);
       }}
     >
-      {/* 附件预览 */}
+      {/* Attachment preview */}
       {attachments.length > 0 && (
         <div className="mb-2 flex flex-wrap gap-2">
           {attachments.map((a) => (
@@ -161,7 +161,7 @@ export default function AgentComposer({
                   )}
                   {a.uploadError && (
                     <div className="absolute inset-0 flex items-center justify-center bg-destructive/70 text-[10px] font-semibold text-white">
-                      失败
+                      Failed
                     </div>
                   )}
                 </div>
@@ -180,7 +180,7 @@ export default function AgentComposer({
               <button
                 type="button"
                 onClick={() => removeAttachment(a.id)}
-                title="移除"
+                title="Remove"
                 className="absolute -right-1.5 -top-1.5 flex h-5 w-5 items-center justify-center rounded-full bg-neutral-800 text-[11px] font-bold text-white shadow transition hover:bg-neutral-900"
               >
                 ✕
@@ -205,7 +205,7 @@ export default function AgentComposer({
       {error && <p className="mb-1 text-[11px] text-destructive">{error}</p>}
 
       <div className="mt-1 flex items-center gap-2">
-        {/* 添加文件 */}
+        {/* Add file */}
         <input
           ref={fileInputRef}
           type="file"
@@ -226,7 +226,7 @@ export default function AgentComposer({
           <Plus className="size-5" />
         </button>
 
-        {/* 模型选择 */}
+        {/* Model selection */}
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
             <button
@@ -261,12 +261,12 @@ export default function AgentComposer({
           </DropdownMenuContent>
         </DropdownMenu>
 
-        {/* 发送 */}
+        {/* Send */}
         <button
           type="button"
           onClick={submit}
           disabled={!canSend}
-          aria-label="发送"
+          aria-label="Send"
           title={uploading ? t("composer.uploading") : undefined}
           className="ml-auto flex size-9 items-center justify-center rounded-full text-white transition-opacity disabled:opacity-40"
           style={{ backgroundColor: ACCENT }}

@@ -1,9 +1,9 @@
 "use client";
 
 /**
- * 全局：把本地 llama-server 的状态镜像到聊天模型清单——就绪时加入清单并设为默认，停止时移除。
- * 挂在 AgentShell 里（layout 级，跨 /agent 子页面持续存在），独立于「模型库 / 聊天」页面生命周期：
- * 用户在模型库点启动后切到聊天，模型 ~8s 后才就绪；若注册逻辑只在模型库页，切走即丢失就绪事件。
+ * Global: mirror the local llama-server's status into the chat model list — add it to the list and set it as default when ready, remove it when stopped.
+ * Mounted inside AgentShell (layout level, persists across /agent subpages), independent of the "model library / chat" page lifecycle:
+ * after the user clicks start in the model library and switches to chat, the model only becomes ready ~8s later; if the registration logic lived only on the model library page, navigating away would lose the ready event.
  */
 import { useEffect } from "react";
 import { localLlm, activateLocalModel, deactivateLocalModel } from "@/lib/ai/localModel";
@@ -11,7 +11,7 @@ import { localLlm, activateLocalModel, deactivateLocalModel } from "@/lib/ai/loc
 export default function LocalModelSync() {
   useEffect(() => {
     const bridge = localLlm();
-    if (!bridge) return; // 非 Electron
+    if (!bridge) return; // not Electron
     const register = (st: import("@/lib/ai/localModel").LocalLlmStatus) => {
       if (st.ready && st.model) {
         activateLocalModel({
@@ -25,7 +25,7 @@ export default function LocalModelSync() {
         deactivateLocalModel();
       }
     };
-    bridge.status().then(register); // 挂载时补齐当前状态
+    bridge.status().then(register); // backfill the current status on mount
     return bridge.onStatus(register);
   }, []);
   return null;

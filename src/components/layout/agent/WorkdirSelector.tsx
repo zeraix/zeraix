@@ -1,11 +1,11 @@
 "use client";
 
 /**
- * 工作目录选择行（首页 /agent 用）：运行环境（本地）+ 选择文件夹。
- * 在进入对话「前一阶段」选定工作目录：
- *   - 开发模式：必须选择一个文件夹，否则向上汇报 blocking=true（首页据此禁用发送）；
- *   - 日常模式：可选；不选则由对话页回退到默认目录（userData/agent 下，与数据存储位置一致）。
- * 选定后即设为 Electron 工作目录并持久化（AGENT_WORKDIR_KEY），对话页 /agent/chat 会沿用。
+ * Working-directory selector row (used on the /agent home page): runtime environment (local) + choose folder.
+ * Pick the working directory in the stage "before" entering the conversation:
+ *   - Dev mode: a folder must be chosen, otherwise report blocking=true upward (the home page disables sending accordingly);
+ *   - Daily mode: optional; if none is chosen, the conversation page falls back to the default directory (under userData/agent, matching where data is stored).
+ * Once chosen, it is set as the Electron working directory and persisted (AGENT_WORKDIR_KEY); the conversation page /agent/chat reuses it.
  */
 import { useEffect, useRef, useState } from "react";
 import { ChevronDown, FolderSymlink, Monitor } from "lucide-react";
@@ -33,7 +33,7 @@ import {
 import { putStorage } from "@/lib/ai/agentStorage";
 import { useT } from "@/lib/i18n";
 
-/** 取路径最后一段作为文件夹名（兼容 Windows \ 与 POSIX /）。 */
+/** Take the last path segment as the folder name (handles both Windows \ and POSIX /). */
 function folderName(p: string): string {
   const segs = p.split(/[\\/]/).filter(Boolean);
   return segs[segs.length - 1] || p;
@@ -42,7 +42,7 @@ function folderName(p: string): string {
 export default function WorkdirSelector({
   onBlockingChange,
 }: {
-  /** blocking=true 表示「开发模式且未选目录」，调用方据此禁用发送。 */
+  /** blocking=true means "dev mode with no directory chosen"; the caller disables sending accordingly. */
   onBlockingChange?: (blocking: boolean) => void;
 }) {
   const t = useT();
@@ -52,7 +52,7 @@ export default function WorkdirSelector({
   const [chosen, setChosen] = useState(false);
   const [msg, setMsg] = useState<string | null>(null);
 
-  // 挂载：探测工具 + 回填已持久化的工作目录（并同步到主进程）。
+  // On mount: probe tools + restore the persisted working directory (and sync it to the main process).
   useEffect(() => {
     const ready = isToolkitAvailable();
     setToolsReady(ready);
@@ -66,7 +66,7 @@ export default function WorkdirSelector({
     }
   }, []);
 
-  // 同步侧边栏的「日常 / 开发」模式（同标签自定义事件）。
+  // Sync the sidebar's "daily / dev" mode (same-tab custom event).
   useEffect(() => {
     const read = () => {
       const v = getStorage(AGENT_MODE_KEY);
@@ -77,16 +77,18 @@ export default function WorkdirSelector({
       const v = (e as CustomEvent).detail;
       if (v === "daily" || v === "dev") setMode(v);
     };
-    // 切换模式 / 新建对话会清空已选目录 → 重置本组件的选择状态。
+    // Switching mode / starting a new conversation clears the chosen directory -> reset this component's selection state.
     const onClear = () => {
       setChosen(false);
       setWorkdir("");
       setMsg(null);
     };
-    // 侧栏「点击项目」/ 右键「在项目内新建对话」会广播已选目录 → 本组件回填并解除开发模式阻塞。
-    // 关键：从日常切到开发（未选项目）会先经 onClear 清空并阻塞，随后右键项目「新建对话」时若已在
-    // /agent 首页，router.push("/agent") 是空跳转、本组件不会重挂载去重读 storage；不监听此事件就会一直
-    // 停在「需先选择文件夹」的阻塞态，导致输入框禁用、无法发送。
+    // The sidebar's "click a project" / right-click "new conversation in project" broadcasts the chosen directory ->
+    // this component restores it and lifts the dev-mode block. Key point: switching from daily to dev (no project
+    // chosen) first goes through onClear, which clears and blocks; then, on right-click project "new conversation",
+    // if already on the /agent home page, router.push("/agent") is a no-op navigation and this component won't
+    // remount to re-read storage. Without listening for this event it would stay stuck in the "must choose a folder
+    // first" blocked state, disabling the input and preventing sending.
     const onSet = (e: Event) => {
       const dir = (e as CustomEvent).detail;
       if (typeof dir !== "string" || !dir) return;
@@ -105,7 +107,7 @@ export default function WorkdirSelector({
     };
   }, []);
 
-  // 向上汇报「是否阻塞发送」（用 ref 持有回调，避免其引用变化触发额外 effect）。
+  // Report "whether sending is blocked" upward (hold the callback in a ref so its reference changes don't trigger extra effects).
   const blocking = toolsReady && mode === "dev" && !chosen;
   const cbRef = useRef(onBlockingChange);
   cbRef.current = onBlockingChange;
@@ -118,22 +120,24 @@ export default function WorkdirSelector({
     setMsg(null);
     try {
       const dir = await chooseWorkingDir();
-      if (!dir) return; // 用户取消
+      if (!dir) return; // User cancelled
       setWorkdir(dir);
       setChosen(true);
-      putStorage(AGENT_WORKDIR_KEY, dir); // 持久化，供对话页沿用
-      // 广播已选目录：对话页据此把 workdirChosen 置真并应用到工具沙箱。缺此事件时，即使这里选了目录，
-      // 常驻挂载的对话页仍不知情（storage 变更不跨组件通知），开发模式发送会误报「需先选择工作目录」。
+      putStorage(AGENT_WORKDIR_KEY, dir); // Persist for the conversation page to reuse
+      // Broadcast the chosen directory: the conversation page sets workdirChosen to true and applies it to the tool
+      // sandbox. Without this event, even if a directory is chosen here, the persistently-mounted conversation page
+      // wouldn't know (storage changes aren't notified across components) and dev-mode sending would wrongly report
+      // "must choose a working directory first".
       window.dispatchEvent(new CustomEvent(WORKDIR_SET_EVENT, { detail: dir }));
     } catch (e) {
-      setMsg(`选择失败：${e instanceof Error ? e.message : String(e)}`);
+      setMsg(`Selection failed: ${e instanceof Error ? e.message : String(e)}`);
     }
   };
 
   return (
     <div className="mt-2">
       <div className="flex items-center gap-1.5">
-        {/* 运行环境：本地（占位下拉，后续可扩展云端等） */}
+        {/* Runtime environment: local (placeholder dropdown, extensible later to cloud, etc.) */}
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
             <button
@@ -155,7 +159,7 @@ export default function WorkdirSelector({
           </DropdownMenuContent>
         </DropdownMenu>
 
-        {/* 选择文件夹：日常可选 / 开发必选；已选则显示文件夹名 */}
+        {/* Choose folder: optional in daily / required in dev; shows the folder name once chosen */}
         <button
           type="button"
           onClick={() => void browse()}
@@ -179,7 +183,7 @@ export default function WorkdirSelector({
       </div>
       {/* {blocking && (
         <p className="mt-1 px-0.5 text-[11px] text-amber-600 dark:text-amber-400">
-          开发模式：请先选择一个文件夹，再开始对话。
+          Dev mode: please choose a folder before starting the conversation.
         </p>
       )} */}
       {msg && <p className="mt-1 px-0.5 text-[11px] text-amber-600 dark:text-amber-400">{msg}</p>}

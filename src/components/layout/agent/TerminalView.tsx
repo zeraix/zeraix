@@ -1,9 +1,10 @@
 "use client";
 
 /**
- * 内置终端视图：xterm.js 前端 ⇄ 主进程 node-pty 会话（见 src/lib/terminal.ts）。
- * 挂载即新建一个 PTY 会话（起始目录为当前工作目录），卸载时结束会话。fit 插件 + ResizeObserver
- * 令终端随面板尺寸自适应重排，并把尺寸同步给 PTY，使 vim/top 等 TUI 正确布局。
+ * Built-in terminal view: xterm.js frontend <-> main-process node-pty session (see src/lib/terminal.ts).
+ * Mounting spawns a new PTY session (starting in the current working directory); unmounting ends it. The fit
+ * addon + ResizeObserver reflow the terminal to fit the panel size and sync the size to the PTY, so TUIs like
+ * vim/top lay out correctly.
  */
 import { useEffect, useRef, useState } from "react";
 import { Terminal } from "@xterm/xterm";
@@ -14,7 +15,7 @@ import { useT } from "@/lib/i18n";
 import { terminalBridge, isTerminalAvailable } from "@/lib/terminal";
 import { toast } from "sonner";
 
-/** xterm 明/暗配色（与应用表面色调大致协调，细节沿用 VS Code 风格）。 */
+/** xterm light/dark color scheme (roughly matches the app's surface tones, styling follows VS Code). */
 const THEMES = {
   dark: {
     background: "#1e1e1e",
@@ -38,7 +39,7 @@ export default function TerminalView({ active = true }: { active?: boolean }) {
   const termRef = useRef<Terminal | null>(null);
   const fitRef = useRef<FitAddon | null>(null);
 
-  // 初始化 xterm + 建立 PTY 会话（仅一次）。
+  // Initialize xterm + establish the PTY session (once only).
   useEffect(() => {
     const bridge = terminalBridge();
     const host = hostRef.current;
@@ -49,7 +50,7 @@ export default function TerminalView({ active = true }: { active?: boolean }) {
       fontSize: 13,
       fontFamily: "'Cascadia Code', 'Fira Code', Consolas, Menlo, 'Courier New', monospace",
       cursorBlink: true,
-      // 让底部留白顺滑；scrollback 给足回溯行数。
+      // Keep the bottom padding smooth; give scrollback plenty of history lines.
       scrollback: 5000,
       theme: isDark ? THEMES.dark : THEMES.light,
       allowProposedApi: true,
@@ -60,7 +61,7 @@ export default function TerminalView({ active = true }: { active?: boolean }) {
     try {
       fit.fit();
     } catch {
-      /* 容器尚无尺寸，稍后由 ResizeObserver 兜底 */
+      /* Container has no size yet; ResizeObserver will handle it later */
     }
     termRef.current = term;
     fitRef.current = fit;
@@ -70,17 +71,18 @@ export default function TerminalView({ active = true }: { active?: boolean }) {
     let offData = () => {};
     let offExit = () => {};
 
-    // 用户输入 → 透传给 PTY。
+    // User input -> pass through to the PTY.
     const inputSub = term.onData((d) => {
       if (id != null) bridge.write(id, d);
     });
-    // 尺寸变化 → 同步给 PTY。
+    // Size change -> sync to the PTY.
     const resizeSub = term.onResize(({ cols, rows }) => {
       if (id != null) bridge.resize(id, cols, rows);
     });
-    // 选中即复制（copy-on-select）：选择变化且非空时自动写入系统剪贴板（与多数系统终端一致）。
-    // onSelectionChange 在拖拽期间会连续触发，故防抖——待选择稳定后再复制一次，并弹一次「已复制」提示，
-    // 避免每次 mousemove 都写剪贴板 / 刷提示。用固定 toast id，重复复制时原地更新而非堆叠。
+    // Copy-on-select: when the selection changes and is non-empty, automatically write it to the system
+    // clipboard (like most system terminals). onSelectionChange fires continuously during a drag, so debounce
+    // it -- copy once after the selection settles and show a single "copied" toast, avoiding a clipboard write /
+    // toast refresh on every mousemove. Use a fixed toast id so repeated copies update in place rather than stack.
     let copyTimer: ReturnType<typeof setTimeout> | null = null;
     const selSub = term.onSelectionChange(() => {
       if (copyTimer) clearTimeout(copyTimer);
@@ -91,7 +93,7 @@ export default function TerminalView({ active = true }: { active?: boolean }) {
           .writeText(sel)
           .then(() => toast.success(t("terminal.copied"), { id: "terminal-copy", duration: 1500 }))
           .catch(() => {
-            /* 剪贴板不可用 / 无权限时静默忽略 */
+            /* Silently ignore when the clipboard is unavailable / permission denied */
           });
       }, 120);
     });
@@ -101,7 +103,7 @@ export default function TerminalView({ active = true }: { active?: boolean }) {
       try {
         sid = await bridge.create({ cols: term.cols, rows: term.rows });
       } catch (err) {
-        // spawn 失败（如 macOS posix_spawnp）：在终端里给出可读提示，而非未捕获的 Promise 异常。
+        // spawn failure (e.g. macOS posix_spawnp): show a readable message in the terminal rather than an uncaught Promise rejection.
         if (!disposed) {
           const msg = err instanceof Error ? err.message : String(err);
           term.write(`\r\n\x1b[31m${t("terminal.startFailed")}\x1b[0m\r\n${msg}\r\n`);
@@ -122,15 +124,15 @@ export default function TerminalView({ active = true }: { active?: boolean }) {
       term.focus();
     })();
 
-    // 容器尺寸变化 → 重新 fit（并借 onResize 同步 PTY）。
+    // Container size change -> re-fit (and sync the PTY via onResize).
     const ro = new ResizeObserver(() => {
-      // 隐藏（display:none → 0 尺寸）时不要 fit：否则字符度量 / 行列会被算成 0，
-      // 令 PTY 被 resize 成异常尺寸，下次显示时渲染错位。
+      // Don't fit while hidden (display:none -> 0 size): otherwise char metrics / cols&rows compute to 0,
+      // resizing the PTY to a bad size and causing misaligned rendering the next time it's shown.
       if (host.offsetWidth === 0 || host.offsetHeight === 0) return;
       try {
         fit.fit();
       } catch {
-        /* 忽略 */
+        /* ignore */
       }
     });
     ro.observe(host);
@@ -149,19 +151,20 @@ export default function TerminalView({ active = true }: { active?: boolean }) {
       termRef.current = null;
       fitRef.current = null;
     };
-    // 仅初始化一次；主题变化由下方独立 effect 更新，避免重建终端丢失会话。
+    // Initialize once only; theme changes are handled by the separate effect below, avoiding a terminal rebuild that would lose the session.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // 主题切换：只更新配色，不重建终端。
+  // Theme switch: only update the colors, don't rebuild the terminal.
   useEffect(() => {
     const term = termRef.current;
     if (term) term.options.theme = resolvedTheme === "dark" ? THEMES.dark : THEMES.light;
   }, [resolvedTheme]);
 
-  // 从隐藏切回可见（底部终端重新展开）时：等容器完成布局（有真实尺寸）再 fit，并强制整屏重绘，
-  // 清除隐藏期间遗留的陈旧 / 错位渲染，最后聚焦。单帧不够（display:none→flex 后布局尚未落地），
-  // 故轮询到有尺寸为止。
+  // When switching from hidden back to visible (the bottom terminal re-expands): wait for the container to
+  // finish layout (has a real size), then fit and force a full redraw to clear stale / misaligned rendering
+  // left over while hidden, and finally focus. A single frame isn't enough (layout hasn't settled after
+  // display:none->flex), so poll until it has a size.
   useEffect(() => {
     if (!active) return;
     let r1 = 0;
@@ -172,15 +175,15 @@ export default function TerminalView({ active = true }: { active?: boolean }) {
       const term = termRef.current;
       if (!host || !fit || !term) return;
       if (host.offsetWidth === 0 || host.offsetHeight === 0) {
-        r2 = requestAnimationFrame(run); // 布局未就绪，下一帧再试
+        r2 = requestAnimationFrame(run); // Layout not ready, retry next frame
         return;
       }
       try {
         fit.fit();
       } catch {
-        /* 忽略 */
+        /* ignore */
       }
-      term.refresh(0, Math.max(0, term.rows - 1)); // 整屏重绘，修正隐藏期间的错位
+      term.refresh(0, Math.max(0, term.rows - 1)); // Full redraw to fix misalignment from while hidden
       term.focus();
     };
     r1 = requestAnimationFrame(run);
@@ -198,6 +201,6 @@ export default function TerminalView({ active = true }: { active?: boolean }) {
     );
   }
 
-  // 深色底，四周留一点内边距，避免文本贴边。
+  // Dark background, a little padding on all sides so text doesn't touch the edges.
   return <div ref={hostRef} className="h-full w-full overflow-hidden bg-[#ffffff] px-2 py-1.5 dark:bg-[#1e1e1e]" />;
 }

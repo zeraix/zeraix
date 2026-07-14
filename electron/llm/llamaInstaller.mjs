@@ -1,12 +1,13 @@
 /**
- * llama.cpp 运行时动态安装（主进程）。
+ * Dynamic installation of the llama.cpp runtime (main process).
  *
- * llama 二进制不再随包分发（构建变体多：Metal/CUDA/Vulkan/CPU × 架构，且体积大）。
- * 首次启动本地模型时，按平台/架构选择对应构建，从 docker.zeraix.com（公共 CDN，只读、无凭据）
- * 下载 `llama/<version>/<variant>.tar.gz`，解压到 <本地应用数据>/llama/<version>/<variant>/（Windows %LOCALAPPDATA%），
- * localServer 从此处启动 llama-server。发布见 scripts/publish-llama.mjs。
- * （qemu 仍随包分发：其 HVF 需构建期签名+权限，见 scripts/bundle-bin-mac.mjs +
- *   electron-builder.yml 的 entitlementsInherit（含 com.apple.security.hypervisor）。）
+ * The llama binary is no longer shipped in the bundle (many build variants: Metal/CUDA/Vulkan/CPU × architecture, and large in size).
+ * On first launch of a local model, pick the matching build by platform/architecture and download
+ * `llama/<version>/<variant>.tar.gz` from docker.zeraix.com (public CDN, read-only, no credentials),
+ * extract it to <local app data>/llama/<version>/<variant>/ (Windows %LOCALAPPDATA%),
+ * and localServer starts llama-server from there. For publishing, see scripts/publish-llama.mjs.
+ * (qemu is still bundled: its HVF needs build-time signing + entitlements, see scripts/bundle-bin-mac.mjs +
+ *   entitlementsInherit in electron-builder.yml (including com.apple.security.hypervisor).)
  */
 import https from "node:https";
 import fs from "node:fs";
@@ -18,20 +19,20 @@ import { localDataDir } from "../tools/sandbox/vmpaths.mjs";
 import { LLAMA_VERSION } from "../versions.mjs";
 import { getAppConfig } from "../appConfig.mjs";
 
-// llama.cpp release 版本移至单一来源 electron/versions.mjs（与 VM_VERSION 同处）；此处透传。升级：改那里并重跑 publish:llama。
+// The llama.cpp release version was moved to the single source electron/versions.mjs (alongside VM_VERSION); re-exported here. To upgrade: change it there and re-run publish:llama.
 export { LLAMA_VERSION };
-// 公共 CDN 基址 + 前缀（与 bundle/publish 用的 OSS_CDN / OSS_PREFIX 对应；CDN 对象为只读，无需凭据）。
+// Public CDN base + prefix (corresponds to OSS_CDN / OSS_PREFIX used by bundle/publish; CDN objects are read-only, no credentials needed).
 const CDN_BASE = (process.env.LLAMA_CDN_BASE || "https://docker.zeraix.com").replace(/\/+$/, "");
-const CDN_PREFIX = process.env.LLAMA_CDN_PREFIX || ""; // 若 OSS 桶用了前缀，这里与之保持一致
+const CDN_PREFIX = process.env.LLAMA_CDN_PREFIX || ""; // If the OSS bucket uses a prefix, keep this consistent with it
 
-/** Windows：vulkan-1.dll 由 GPU 驱动装入 System32；存在 ⇔ 有 Vulkan 加载器（几乎所有现代笔记本都有）。 */
+/** Windows: vulkan-1.dll is installed into System32 by the GPU driver; present ⇔ a Vulkan loader exists (almost every modern laptop has one). */
 function hasVulkanWindows() {
   if (process.platform !== "win32") return true;
   const sysroot = process.env.SystemRoot || "C:\\Windows";
   return fs.existsSync(path.join(sysroot, "System32", "vulkan-1.dll"));
 }
 
-/** 探测 NVIDIA CUDA：nvidia-smi 头部含 "CUDA Version: 13.3"（= 驱动支持的最高 CUDA 版本）。仅 Windows 提供 CUDA 构建。 */
+/** Detect NVIDIA CUDA: the nvidia-smi header contains "CUDA Version: 13.3" (= the highest CUDA version the driver supports). CUDA builds are provided only on Windows. */
 export function detectCuda() {
   if (process.platform !== "win32") return { available: false, version: null };
   try {
@@ -41,9 +42,9 @@ export function detectCuda() {
   } catch { return { available: false, version: null }; }
 }
 
-// 按 CUDA 大版本选构建：依赖 CUDA「小版本兼容」——13.x 驱动可跑 cu13.3、12.x 驱动可跑 cu12.4
-// （驱动报告 CUDA 12.x/13.x 即已满足该大版本的最低驱动要求）。极少数失配时有 CUDA→Vulkan→CPU 回退兜底。
-// 太旧（< 12）返回 null，直接用 Vulkan。
+// Pick the build by CUDA major version, relying on CUDA "minor-version compatibility" — a 13.x driver can run cu13.3, a 12.x driver can run cu12.4
+// (a driver reporting CUDA 12.x/13.x already meets that major version's minimum driver requirement). For the rare mismatch there is a CUDA→Vulkan→CPU fallback.
+// Too old (< 12) returns null and uses Vulkan directly.
 function cudaVariant(driverVer) {
   const major = parseInt(driverVer, 10);
   if (major >= 13) return "win-cuda-13.3-x64";
@@ -52,9 +53,9 @@ function cudaVariant(driverVer) {
 }
 
 /**
- * 平台/架构 → llama.cpp 构建变体。
- * Windows x64：opts.preferCuda 且检测到 NVIDIA → 用匹配的 CUDA 构建（最快）；否则有 Vulkan 用 Vulkan
- * （跨 NVIDIA/AMD/Intel）；再否则纯 CPU。mac 用 Metal（按架构），Linux 用 Vulkan。
+ * Platform/architecture → llama.cpp build variant.
+ * Windows x64: opts.preferCuda and NVIDIA detected → use the matching CUDA build (fastest); otherwise use Vulkan when available
+ * (across NVIDIA/AMD/Intel); otherwise pure CPU. mac uses Metal (by architecture), Linux uses Vulkan.
  */
 export function llamaVariant(hw = detectHardware(), opts = {}) {
   const { platform, arch } = hw;
@@ -71,7 +72,7 @@ export function llamaVariant(hw = detectHardware(), opts = {}) {
   return null;
 }
 
-/** GPU 构建启动失败时的回退链：CUDA → Vulkan → CPU（逐级重试）；无回退返回 null。 */
+/** Fallback chain when a GPU build fails to start: CUDA → Vulkan → CPU (retry step by step); returns null when there is no fallback. */
 export function fallbackVariant(variant) {
   const map = {
     "win-cuda-13.3-x64": "win-vulkan-x64",
@@ -85,34 +86,34 @@ export function fallbackVariant(variant) {
 
 const exeName = () => (process.platform === "win32" ? "llama-server.exe" : "llama-server");
 
-// 「本地模型文件夹」：一个专用文件夹，同时放 llama 运行时 + GGUF 模型 + 运行日志。用户可自定义/迁移。
-//   <folder>/bin/<llama-version>/<variant>   运行时二进制（独立 bin/ 子目录，便于清理旧版本）
-//   <folder>/models                           GGUF 模型（LLAMA_CACHE，见 localServer.mjs）
-//   <folder>/logs                             运行日志
-// 默认 = <本地应用数据>/llama（Windows %LOCALAPPDATA%\<App>\llama，大文件不随漫游）；配置存 app.config [local] dir。
+// "Local models folder": a dedicated folder holding the llama runtime + GGUF models + runtime logs together. Users can customize/relocate it.
+//   <folder>/bin/<llama-version>/<variant>   runtime binaries (a separate bin/ subdirectory, for easy cleanup of old versions)
+//   <folder>/models                           GGUF models (LLAMA_CACHE, see localServer.mjs)
+//   <folder>/logs                             runtime logs
+// Default = <local app data>/llama (Windows %LOCALAPPDATA%\<App>\llama, large files do not roam); the setting is stored in app.config [local] dir.
 export function localFilesBase() {
   const dir = getAppConfig()?.local?.dir;
   return dir && String(dir).trim() ? String(dir).trim() : path.join(localDataDir(path.basename(app.getPath("userData"))), "llama");
 }
-// 运行时二进制根 = <folder>/bin（版本目录在其下：<folder>/bin/<version>/<variant>）。独立子目录使
-// 「清理旧版本」只在 bin/ 里扫描，绝不会波及同级的 models/ logs/（曾因二者同级被误删，见 pruneOldVersions）。
+// Runtime binary root = <folder>/bin (version directories live under it: <folder>/bin/<version>/<variant>). The separate subdirectory makes
+// "cleanup of old versions" scan only within bin/, never touching sibling models/ logs/ (which were once wrongly deleted when siblings, see pruneOldVersions).
 function llamaRoot() {
   return path.join(localFilesBase(), "bin");
 }
 
-// 旧布局 → 新布局的一次性迁移（同盘 rename，秒级）。仅在首次以新代码启动时搬动：
-//   默认（未自定义 dir）：旧模型在 <userData>/models → 移进 <userData>/llama/models（bin 本就在 <userData>/llama/<version>，不动）。
-//   自定义 dir：旧 bin 在 <dir>/llama/<version> → 上移到 <dir>/<version>（模型/日志本就在 <dir> 下，不动）。
-/** 某目录是否为「llama 版本目录」（其下某变体子目录含 llama-server 可执行文件）。 */
+// One-time migration from old layout → new layout (same-disk rename, sub-second). Only moved on the first launch with the new code:
+//   Default (dir not customized): old models at <userData>/models → moved into <userData>/llama/models (bin already at <userData>/llama/<version>, untouched).
+//   Custom dir: old bin at <dir>/llama/<version> → moved up to <dir>/<version> (models/logs already under <dir>, untouched).
+/** Whether a directory is a "llama version directory" (one of its variant subdirectories contains the llama-server executable). */
 function isVersionDir(p) {
   try { return fs.statSync(p).isDirectory() && fs.readdirSync(p).some((v) => fs.existsSync(path.join(p, v, exeName()))); }
   catch { return false; }
 }
-// 旧布局 → 新布局（<folder>/bin/<version>）的一次性迁移，全程同盘 rename（秒级）、幂等、只搬需要搬的：
-//   模型：旧默认 <userData>/models → <folder>/models（自定义 dir 时本就在 <folder>/models，不动）。
-//   日志：只搬 llama-server.log（旧 logs/ 目录可能含其它日志，不整体搬）。
-//   bin ：把散落各处的「版本目录」归入 <folder>/bin/<version>——可能在 <folder>/<v>（早前版本/默认）
-//         或 <folder>/llama/<v>（更早的自定义布局）。isVersionDir 判定，绝不误搬 models/logs。
+// One-time migration from old layout → new layout (<folder>/bin/<version>): all same-disk rename (sub-second), idempotent, moving only what needs moving:
+//   Models: old default <userData>/models → <folder>/models (with a custom dir it is already at <folder>/models, untouched).
+//   Logs: move only llama-server.log (the old logs/ directory may contain other logs, not moved wholesale).
+//   bin : gather "version directories" scattered around into <folder>/bin/<version> — possibly at <folder>/<v> (earlier version/default)
+//         or <folder>/llama/<v> (an even older custom layout). isVersionDir decides, never mistakenly moving models/logs.
 let _layoutMigrated = false;
 export function migrateLegacyLayout() {
   if (_layoutMigrated) return;
@@ -122,10 +123,10 @@ export function migrateLegacyLayout() {
     const binDir = path.join(folder, "bin");
     const hasCustom = !!(getAppConfig()?.local?.dir && String(getAppConfig().local.dir).trim());
     if (!hasCustom) {
-      const legacyBase = localDataDir(path.basename(app.getPath("userData"))); // 旧默认 base = userData
+      const legacyBase = localDataDir(path.basename(app.getPath("userData"))); // old default base = userData
       const mSrc = path.join(legacyBase, "models"), mDst = path.join(folder, "models");
       if (fs.existsSync(mSrc)) {
-        // 若新 models 已存在但为空（可能被其它代码先建），删掉空目录让旧 models 搬入，避免旧模型被「空目录」挡住而孤立。
+        // If new models already exists but is empty (possibly created earlier by other code), remove the empty directory so old models can move in, avoiding old models being blocked by an "empty directory" and orphaned.
         let blocked = fs.existsSync(mDst);
         if (blocked) { try { if (fs.readdirSync(mDst).length === 0) { fs.rmdirSync(mDst); blocked = false; } } catch { /* ignore */ } }
         if (!blocked) { try { fs.mkdirSync(folder, { recursive: true }); fs.renameSync(mSrc, mDst); } catch { /* ignore */ } }
@@ -133,7 +134,7 @@ export function migrateLegacyLayout() {
       const lSrc = path.join(legacyBase, "logs", "llama-server.log"), lDst = path.join(folder, "logs", "llama-server.log");
       if (fs.existsSync(lSrc) && !fs.existsSync(lDst)) { try { fs.mkdirSync(path.join(folder, "logs"), { recursive: true }); fs.renameSync(lSrc, lDst); } catch { /* ignore */ } }
     }
-    // 版本目录 → <folder>/bin/。两处可能来源：<folder>/<v> 与 <folder>/llama/<v>。
+    // Version directories → <folder>/bin/. Two possible sources: <folder>/<v> and <folder>/llama/<v>.
     for (const srcRoot of [folder, path.join(folder, "llama")]) {
       if (!fs.existsSync(srcRoot) || path.resolve(srcRoot) === path.resolve(binDir)) continue;
       let names = []; try { names = fs.readdirSync(srcRoot); } catch { continue; }
@@ -150,17 +151,17 @@ export function migrateLegacyLayout() {
 export function installDir(variant = llamaVariant()) {
   return path.join(llamaRoot(), LLAMA_VERSION, variant);
 }
-/** 已安装则返回可执行路径，否则 null。 */
+/** Returns the executable path if installed, otherwise null. */
 export function installedBin(variant = llamaVariant()) {
   if (!variant) return null;
   const p = path.join(installDir(variant), exeName());
   return fs.existsSync(p) ? p : null;
 }
 
-/** llama 运行时根目录（.../llama，含各版本/变体）。供 UI 展示 / 打开文件夹。 */
+/** llama runtime root directory (.../llama, containing all versions/variants). For UI display / opening the folder. */
 export function llamaRootDir() { return llamaRoot(); }
 
-/** 已安装的 llama 版本目录名（含任一变体可执行文件）。用于区分「未安装」与「装了旧版可更新」。 */
+/** Names of installed llama version directories (containing any variant's executable). Used to distinguish "not installed" from "an old version is installed and can be updated". */
 export function installedLlamaVersions() {
   try {
     return fs.readdirSync(llamaRoot()).filter((d) => {
@@ -171,16 +172,16 @@ export function installedLlamaVersions() {
   } catch { return []; }
 }
 
-/** 清理「旧的 llama 版本目录」（app 升级会 bump LLAMA_VERSION）：仅保留当前版本，释放磁盘、避免陈旧二进制。
- *  作用域是独立的 <folder>/bin/（只含版本目录，与 models/ logs/ 同级隔离）；仍加 isVersionDir 兜底，双保险。 */
+/** Clean up "old llama version directories" (an app upgrade bumps LLAMA_VERSION): keep only the current version, free disk, avoid stale binaries.
+ *  Scope is the isolated <folder>/bin/ (contains only version directories, isolated from sibling models/ logs/); still adds an isVersionDir guard as a double safeguard. */
 export function pruneOldVersions() {
   try {
     const root = llamaRoot(); // <folder>/bin
     if (!fs.existsSync(root)) return;
     for (const name of fs.readdirSync(root)) {
-      if (name === LLAMA_VERSION) continue; // 保留当前版本
+      if (name === LLAMA_VERSION) continue; // keep the current version
       const vdir = path.join(root, name);
-      if (isVersionDir(vdir)) { try { fs.rmSync(vdir, { recursive: true, force: true }); } catch { /* ignore */ } } // 仅删真正的旧版本 bin 目录
+      if (isVersionDir(vdir)) { try { fs.rmSync(vdir, { recursive: true, force: true }); } catch { /* ignore */ } } // only delete genuine old-version bin directories
     }
   } catch { /* ignore */ }
 }
@@ -204,13 +205,13 @@ function fetchTo(url, dest, onPct, maxRedirs = 5) {
 }
 
 /**
- * 确保本机 llama-server 已安装；缺失则从 CDN 下载解压。返回可执行绝对路径。
- * onProgress(phase, pct)：phase ∈ "downloading" | "extracting"。
- * 解压用系统 tar（mac/win 的 bsdtar、Linux 的 GNU tar 均可解 .tar.gz），运行时无需打包依赖。
+ * Ensure llama-server is installed on this machine; if missing, download and extract it from the CDN. Returns the absolute executable path.
+ * onProgress(phase, pct): phase ∈ "downloading" | "extracting".
+ * Extraction uses the system tar (bsdtar on mac/win, GNU tar on Linux can all unpack .tar.gz), so no bundled dependency is needed at runtime.
  */
 export async function ensureInstalled(onProgress = () => {}, variant = llamaVariant()) {
-  if (!variant) throw new Error(`不支持的平台：${process.platform}/${process.arch}`);
-  pruneOldVersions(); // 升级后清理旧版本目录（当前版本目录含所有变体，不受影响）
+  if (!variant) throw new Error(`Unsupported platform: ${process.platform}/${process.arch}`);
+  pruneOldVersions(); // clean up old-version directories after upgrade (the current version directory holds all variants, unaffected)
   const existing = installedBin(variant);
   if (existing) return existing;
 
@@ -229,7 +230,7 @@ export async function ensureInstalled(onProgress = () => {}, variant = llamaVari
   fs.rmSync(tmp, { force: true });
 
   const bin = installedBin(variant);
-  if (!bin) throw new Error("下载的 llama 包中未找到 llama-server");
+  if (!bin) throw new Error("llama-server not found in the downloaded llama package");
   if (process.platform !== "win32") { try { fs.chmodSync(bin, 0o755); } catch { /* ignore */ } }
   return bin;
 }

@@ -13,19 +13,19 @@ interface TabsProps {
   lineColor?: string;
   padding?: string;
   unmountOnExit?: boolean;
-  // 新增 Slot 属性
+  // New Slot props
   leftSlot?: React.ReactNode;
   rightSlot?: React.ReactNode;
-  className?: string; // 允许外部自定义容器样式
-  // 新增外部控制属性
-  onTabChange?: (id: string) => void; // Tab 切换回调
+  className?: string; // Allows callers to customize the container style
+  // New external control props
+  onTabChange?: (id: string) => void; // Tab change callback
 }
 
 export default function Tabs({
   tabs = [],
   type = "brush",
   orientation = "horizontal",
-  // 默认色改用主题 token，随明/暗模式与强调色切换；调用方仍可传具体色覆盖
+  // Default colors now use theme tokens, switching with light/dark mode and the accent color; callers can still pass specific colors to override
   activeTextColor = "var(--primary)",
   inactiveColor = "var(--ink-muted)",
   pillColor = "var(--surface)",
@@ -48,7 +48,7 @@ export default function Tabs({
   const handleTabClick = (id: string, index: number) => {
     prevIndex.current = currentIndex;
     setActiveTab(id);
-    // 调用外部回调
+    // Invoke external callback
     if (onTabChange) {
       onTabChange(id);
     }
@@ -73,21 +73,21 @@ export default function Tabs({
 
   return (
     <div className={`w-full sticky flex ${isVertical ? "flex-row gap-8" : "flex-col"} ${className}`}>
-      {/* 导航栏外层容器：处理 Slot 布局 */}
+      {/* Nav bar outer container: handles Slot layout */}
       <div 
         className={`flex items-center ${
           isVertical ? "flex-col" : "flex-row  border-line"
         } ${type === "pill" ? "bg-surface-muted p-1 rounded-xl border-none!" : ""}`}
       >
-        {/* 左侧 Slot */}
+        {/* Left Slot */}
         {leftSlot && <div className={`${isVertical ? "mb-2" : "mr-2"} flex-shrink-0`}>{leftSlot}</div>}
 
-        {/* 中间可滚动 Tab 区域 */}
+        {/* Middle scrollable Tab area */}
         <div 
           className={`flex-1 relative flex overflow-x-auto scrollbar-hide transition-all duration-300 ${
             isVertical ? "flex-col pr-2 overflow-y-auto" : "flex-row"
           }`}
-          style={{ scrollbarWidth: 'none', msOverflowStyle: 'none' }} // 隐藏标准滚动条
+          style={{ scrollbarWidth: 'none', msOverflowStyle: 'none' }} // Hide the standard scrollbar
         >
           {tabs.map((tab, index) => {
             const isActive = activeTab === tab.id;
@@ -145,12 +145,12 @@ export default function Tabs({
           })}
         </div>
 
-        {/* 右侧 Slot */}
+        {/* Right Slot */}
         {rightSlot && <div className={`${isVertical ? "mt-2" : "ml-2"} flex-shrink-0`}>{rightSlot}</div>}
       </div>
 
-      {/* 内容区域保持原有逻辑 */}
-      {/* 添加 min-h-0 确保 flex 子元素可以正确收缩 */}
+      {/* Content area keeps the original logic */}
+      {/* Add min-h-0 to ensure flex children can shrink correctly */}
       <div className="flex-1 relative min-h-0 overflow-hidden">
         {unmountOnExit ? (
           <AnimatePresence mode="wait" custom={direction}>

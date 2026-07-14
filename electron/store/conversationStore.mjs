@@ -1,13 +1,13 @@
 /**
- * 对话 / 项目记录的本地持久化（主进程）：按项目分文件 + 索引。
+ * Local persistence of conversation / project records (main process): one file per project + an index.
  *
- * 布局（位于「存储目录」STORE_DIR 下，默认 userData/agent）：
- *   index.json                      —— 项目元数据数组 { projects: [...] }
- *   conversations/<projectId>.json  —— 单个项目的对话 { conversations: [...] }
- * 用户可在设置里改存储目录，所选目录记录于 userData/agent/store-config.json（固定位置）。
+ * Layout (under the "storage directory" STORE_DIR, default userData/agent):
+ *   index.json                      -- array of project metadata { projects: [...] }
+ *   conversations/<projectId>.json  -- a single project's conversations { conversations: [...] }
+ * The user can change the storage directory in settings; the chosen directory is recorded in userData/agent/store-config.json (a fixed location).
  *
- * 兼容：若 index.json 不存在但旧版单文件 conversations.json 存在，则按「工作目录+模式」
- * 重新分组迁移成新布局（不删除旧文件，作备份）。读失败一律回退为空，不抛异常。
+ * Compatibility: if index.json is absent but the legacy single-file conversations.json exists, migrate it into the new
+ * layout by regrouping on "working directory + mode" (the old file is not deleted, kept as a backup). A read failure always falls back to empty and does not throw.
  */
 import { app } from "electron";
 import fs from "node:fs/promises";
@@ -21,7 +21,7 @@ import {
   isEncryptionEnabled,
 } from "../integrity/integrityStore.mjs";
 
-let STORE_DIR = null; // 当前存储目录（惰性初始化）
+let STORE_DIR = null; // current storage directory (lazily initialized)
 
 function defaultDir() {
   return path.join(app.getPath("userData"), "agent");
@@ -31,7 +31,7 @@ function configPath() {
 }
 const indexFile = () => path.join(STORE_DIR, "index.json");
 const convDir = () => path.join(STORE_DIR, "conversations");
-/** 仅允许安全字符的项目 id，防止路径穿越。 */
+/** Allow only safe characters in the project id, to prevent path traversal. */
 const safeId = (id) => String(id ?? "").replace(/[^a-zA-Z0-9_-]/g, "");
 const convFile = (id) => path.join(convDir(), `${safeId(id)}.json`);
 
@@ -44,7 +44,7 @@ function existsSync(p) {
   }
 }
 
-/** 惰性初始化 STORE_DIR（读配置），并按需迁移旧单文件。 */
+/** Lazily initialize STORE_DIR (read the config), and migrate the legacy single file if needed. */
 function ensureInit() {
   if (STORE_DIR) return;
   STORE_DIR = defaultDir();
@@ -52,12 +52,12 @@ function ensureInit() {
     const cfg = JSON.parse(fssync.readFileSync(configPath(), "utf8"));
     if (cfg && typeof cfg.dir === "string" && cfg.dir) STORE_DIR = cfg.dir;
   } catch {
-    /* 无配置 → 默认 */
+    /* no config -> default */
   }
   migrateIfNeeded();
 }
 
-/** 旧版 conversations.json → 新布局（按 工作目录+模式 重新分组）。 */
+/** Legacy conversations.json -> new layout (regrouped by working directory + mode). */
 function migrateIfNeeded() {
   if (existsSync(indexFile())) return;
   const oldFile = path.join(STORE_DIR, "conversations.json");
@@ -77,7 +77,7 @@ function migrateIfNeeded() {
       if (!proj) {
         proj = {
           id: randomUUID(),
-          name: wd ? path.basename(wd) : "默认项目",
+          name: wd ? path.basename(wd) : "Default Project",
           workdir: wd,
           mode,
           createdAt: Date.now(),
@@ -101,13 +101,13 @@ function migrateIfNeeded() {
   }
 }
 
-// ── 路径 ────────────────────────────────────────────────────────────────────
+// ── Paths ────────────────────────────────────────────────────────────────────
 export function getStorePath() {
   ensureInit();
   return STORE_DIR;
 }
 
-/** 设置存储目录：迁移现有数据（新目录无 index 时）并持久化配置，返回新目录。 */
+/** Set the storage directory: migrate existing data (when the new directory has no index) and persist the config; returns the new directory. */
 export async function setStorePath(dir) {
   ensureInit();
   if (!dir || typeof dir !== "string") throw new Error("invalid path");
@@ -135,7 +135,7 @@ export async function setStorePath(dir) {
   return STORE_DIR;
 }
 
-// ── 索引 / 项目 ──────────────────────────────────────────────────────────────
+// ── Index / projects ──────────────────────────────────────────────────────────────
 export async function loadIndex() {
   ensureInit();
   try {
@@ -150,11 +150,11 @@ export async function loadProject(projectId) {
   ensureInit();
   try {
     const raw = JSON.parse(await fs.readFile(convFile(projectId), "utf8"));
-    // 加密信封 → 解密取回 { conversations }；旧版明文 → 原样读取（惰性迁移：下次写入即加密）。
+    // Encrypted envelope -> decrypt to retrieve { conversations }; legacy plaintext -> read as-is (lazy migration: the next write encrypts it).
     const data = isEnvelope(raw) ? decryptEnvelope(raw) : raw;
     return { conversations: Array.isArray(data?.conversations) ? data.conversations : [] };
   } catch (e) {
-    // 文件缺失属正常；解密失败（密钥缺失 / 被篡改）也回退为空，绝不抛出拖垮加载。
+    // A missing file is normal; a decryption failure (missing key / tampering) also falls back to empty and never throws in a way that takes down loading.
     if (e?.code !== "ENOENT") console.error("loadProject failed:", e);
     return { conversations: [] };
   }
@@ -179,7 +179,7 @@ export async function saveProject(projectId, conversations) {
     await fs.mkdir(convDir(), { recursive: true });
     const safe = Array.isArray(conversations) ? conversations : [];
     const payload = { conversations: safe };
-    // 加密可用则落密文信封；否则明文（降级 / 未初始化）。读路径两者都兼容。
+    // If encryption is available, write a ciphertext envelope; otherwise plaintext (degraded / uninitialized). The read path supports both.
     const envelope = isEncryptionEnabled() ? encryptJson(payload) : null;
     const body = envelope
       ? JSON.stringify(envelope)

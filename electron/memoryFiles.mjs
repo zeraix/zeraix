@@ -1,17 +1,17 @@
 /**
- * 基于文件的「记忆」存储（主进程）：每条记忆 = 一个独立的 Markdown 文件。
+ * File-based "memory" storage (main process): each memory = one standalone Markdown file.
  *
- * 无任何模型 / 数据库依赖，纯 fs 读写，轻量。文件位于 userData/memories/<id>.md，
- * 带 YAML 风格 frontmatter（title / id / created / updated），正文为记忆内容（Markdown）。
+ * No model / database dependency, plain fs reads and writes, lightweight. Files live at userData/memories/<id>.md,
+ * with YAML-style frontmatter (title / id / created / updated) and the body as the memory content (Markdown).
  *
- * 供 AI 通过 save_memory 工具写入；渲染层也可列出 / 删除 / 打开目录。
+ * Written by the AI via the save_memory tool; the renderer can also list / delete / open the directory.
  */
 import { app, shell } from "electron";
 import fs from "node:fs";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 
-/** 记忆目录：userData/memories。 */
+/** Memory directory: userData/memories. */
 function memoryDir() {
   return path.join(app.getPath("userData"), "memories");
 }
@@ -21,12 +21,12 @@ function ensureDir() {
   try {
     fs.mkdirSync(d, { recursive: true });
   } catch {
-    /* 已存在或创建失败（写入时会再报错） */
+    /* already exists, or creation failed (writing will report the error again) */
   }
   return d;
 }
 
-/** 生成文件名安全的 slug（保留中英文与数字，其余转连字符）。 */
+/** Generate a filename-safe slug (keeps Chinese/English letters and digits, converts everything else to hyphens). */
 function slugify(s) {
   const base = String(s || "")
     .trim()
@@ -37,7 +37,7 @@ function slugify(s) {
   return base || "memory";
 }
 
-/** 极简 frontmatter 解析：取首个 --- 块内的 key: value，返回 { meta, body }。 */
+/** Minimal frontmatter parsing: takes the key: value pairs inside the first --- block, returns { meta, body }. */
 function parse(raw) {
   const text = String(raw ?? "");
   const m = text.match(/^---\r?\n([\s\S]*?)\r?\n---\r?\n?([\s\S]*)$/);
@@ -51,20 +51,20 @@ function parse(raw) {
   return { meta, body: m[2].trim() };
 }
 
-/** frontmatter 里的单行值：去掉换行，避免破坏结构。 */
+/** A single-line value for frontmatter: strips newlines to avoid breaking the structure. */
 function oneLine(s) {
   return String(s ?? "").replace(/\r?\n/g, " ").trim();
 }
 
 /**
- * 保存一条记忆为独立 Markdown 文件。传入 id 且已存在则更新（保留 created）；否则新建。
+ * Save a memory as a standalone Markdown file. If an id is passed and already exists, update it (keeping created); otherwise create a new one.
  * @param {{title?:string, content?:string, id?:string}} input
  * @returns {{id:string, title:string, file:string, created:string, updated:string}}
  */
 export function saveMemoryFile({ title, content, id } = {}) {
   const dir = ensureDir();
   const now = new Date().toISOString();
-  const theTitle = oneLine(title) || "未命名记忆";
+  const theTitle = oneLine(title) || "Untitled memory";
   const theId = (id && slugify(id)) || `${slugify(theTitle)}-${Date.now().toString(36)}`;
   const file = path.join(dir, `${theId}.md`);
 
@@ -72,7 +72,7 @@ export function saveMemoryFile({ title, content, id } = {}) {
   try {
     if (fs.existsSync(file)) created = parse(fs.readFileSync(file, "utf8")).meta.created || now;
   } catch {
-    /* 读旧文件失败则视为新建 */
+    /* if reading the old file fails, treat it as a new file */
   }
 
   const md =
@@ -87,14 +87,14 @@ export function saveMemoryFile({ title, content, id } = {}) {
   return { id: theId, title: theTitle, file, created, updated: now };
 }
 
-/** 列出全部记忆（按更新时间倒序）。 */
+/** List all memories (in descending order of update time). */
 export function listMemoryFiles() {
   const dir = memoryDir();
   let names = [];
   try {
     names = fs.readdirSync(dir).filter((f) => f.toLowerCase().endsWith(".md"));
   } catch {
-    return []; // 目录不存在 → 无记忆
+    return []; // directory does not exist -> no memories
   }
   const rows = [];
   for (const name of names) {
@@ -110,14 +110,14 @@ export function listMemoryFiles() {
         file,
       });
     } catch {
-      /* 跳过无法读取的文件 */
+      /* skip files that cannot be read */
     }
   }
   rows.sort((a, b) => String(b.updated).localeCompare(String(a.updated)));
   return rows;
 }
 
-/** 删除一条记忆文件。返回是否删除成功。 */
+/** Delete a memory file. Returns whether the deletion succeeded. */
 export function deleteMemoryFile(id) {
   if (!id) return false;
   const file = path.join(memoryDir(), `${slugify(id)}.md`);
@@ -130,8 +130,8 @@ export function deleteMemoryFile(id) {
 }
 
 /**
- * 从若干外部文件路径导入记忆：每个文件解析 frontmatter（有则用其 title/id），
- * 否则以文件名为标题、整篇为正文，逐个保存为独立记忆。返回导入成功的记忆列表。
+ * Import memories from several external file paths: each file's frontmatter is parsed (using its title/id if present),
+ * otherwise the filename becomes the title and the whole file becomes the body, saving each as a standalone memory. Returns the list of successfully imported memories.
  * @param {string[]} paths
  */
 export function importFromPaths(paths = []) {
@@ -143,23 +143,23 @@ export function importFromPaths(paths = []) {
       const base = path.basename(String(p)).replace(/\.(md|markdown|txt)$/i, "");
       const title = meta.title || base;
       const content = body || raw.trim();
-      if (!content) continue; // 空文件跳过
+      if (!content) continue; // skip empty files
       out.push(saveMemoryFile({ title, content, id: meta.id }));
     } catch {
-      /* 跳过无法读取的文件 */
+      /* skip files that cannot be read */
     }
   }
   return out;
 }
 
-/** 用系统文件管理器打开记忆目录（不存在则先创建）。 */
+/** Open the memory directory in the system file manager (creating it first if it does not exist). */
 export function openMemoryDir() {
   const dir = ensureDir();
   void shell.openPath(dir);
   return dir;
 }
 
-/** 当前记忆条目数（.md 文件数）。 */
+/** Current number of memory entries (count of .md files). */
 export function countMemoryFiles() {
   try {
     return fs.readdirSync(memoryDir()).filter((f) => f.toLowerCase().endsWith(".md")).length;
@@ -168,33 +168,33 @@ export function countMemoryFiles() {
   }
 }
 
-/** 记忆模板文件的内容：id 随机、created/updated 为「下载时刻」。 */
+/** Content of the memory template file: random id, created/updated set to the "download moment". */
 function buildTemplateMarkdown() {
   const now = new Date().toISOString();
   const id = `tpl-${randomUUID()}`;
   return (
     `---\n` +
-    `title: 示例记忆标题\n` +
+    `title: Example memory title\n` +
     `id: ${id}\n` +
     `created: ${now}\n` +
     `updated: ${now}\n` +
     `---\n\n` +
-    `在此填写记忆内容（Markdown）。每条记忆保存为一个独立的 .md 文件。\n\n` +
-    `- title：记忆的简短标题；\n` +
-    `- id：唯一标识（本模板已随机生成，导入时保留则按 id 覆盖，删除该行则导入时新建）；\n` +
-    `- created / updated：时间戳（本模板取下载时刻）。\n\n` +
-    `填好后可在「设置 → 记忆 → 导入」中导入。\n`
+    `Enter the memory content here (Markdown). Each memory is saved as a standalone .md file.\n\n` +
+    `- title: a short title for the memory;\n` +
+    `- id: a unique identifier (this template generates one at random; keep it on import to overwrite by id, or delete this line to create a new entry on import);\n` +
+    `- created / updated: timestamps (this template uses the download moment).\n\n` +
+    `Once filled in, import it via "Settings -> Memory -> Import".\n`
   );
 }
 
-/** 把记忆模板写入指定路径（供「下载模板」用）。返回随机生成的模板 id。 */
+/** Write the memory template to the given path (used by "download template"). Returns the randomly generated template id. */
 export function saveTemplateFile(targetPath) {
   const content = buildTemplateMarkdown();
   fs.writeFileSync(targetPath, content, "utf8");
   return content.match(/^id:\s*(.+)$/m)?.[1] ?? "";
 }
 
-// ── 极简 ZIP 打包（store 存储，无压缩，无第三方依赖）────────────────────────────
+// ── Minimal ZIP packaging (store method, no compression, no third-party dependency) ────────────────────────────
 let CRC_TABLE = null;
 function crc32(buf) {
   if (!CRC_TABLE) {
@@ -210,7 +210,7 @@ function crc32(buf) {
   return (crc ^ 0xffffffff) >>> 0;
 }
 
-/** 用 store 方式打包若干 { name, data:Buffer } 为标准 ZIP Buffer。 */
+/** Package several { name, data:Buffer } entries into a standard ZIP Buffer using the store method. */
 function zipStore(entries) {
   const parts = [];
   const central = [];
@@ -221,8 +221,8 @@ function zipStore(entries) {
     const local = Buffer.alloc(30);
     local.writeUInt32LE(0x04034b50, 0);
     local.writeUInt16LE(20, 4);
-    local.writeUInt16LE(0x0800, 6); // UTF-8 文件名
-    local.writeUInt16LE(0, 8); // 存储（不压缩）
+    local.writeUInt16LE(0x0800, 6); // UTF-8 filename
+    local.writeUInt16LE(0, 8); // store (no compression)
     local.writeUInt32LE(crc, 14);
     local.writeUInt32LE(data.length, 18);
     local.writeUInt32LE(data.length, 22);
@@ -251,7 +251,7 @@ function zipStore(entries) {
   return Buffer.concat([...parts, centralBuf, end]);
 }
 
-/** 把所有记忆 .md 打包为 ZIP 写入指定路径。返回打包的条目数。 */
+/** Package all memory .md files into a ZIP written to the given path. Returns the number of packaged entries. */
 export function exportMemoriesZip(targetPath) {
   const dir = memoryDir();
   let names = [];
@@ -265,7 +265,7 @@ export function exportMemoriesZip(targetPath) {
     try {
       entries.push({ name, data: fs.readFileSync(path.join(dir, name)) });
     } catch {
-      /* 跳过读不了的文件 */
+      /* skip files that cannot be read */
     }
   }
   fs.writeFileSync(targetPath, zipStore(entries));

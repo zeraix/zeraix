@@ -84,17 +84,17 @@ import {
 import STORAGE_KEY from "@/constants/Storage";
 
 /**
- * 新版 Agent 侧边栏（独立于旧版 `sidebar.tsx`）。
- * 固定宽度 260px：窗口控制点 + 品牌 + 主导航 + 项目/对话分组 + 底部用户。
+ * New Agent sidebar (independent of the legacy `sidebar.tsx`).
+ * Fixed width 260px: window control dots + brand + main nav + project/conversation groups + bottom user.
  */
 
 interface NavItem {
   id: string;
-  /** i18n 文案键。 */
+  /** i18n text key. */
   labelKey: string;
-  /** 默认（未选中）图标，public/image/agent/sidebar 下的 SVG 路径。 */
+  /** Default (unselected) icon, SVG path under public/image/agent/sidebar. */
   icon: string;
-  /** 选中态图标（xxxx1.svg）。 */
+  /** Selected-state icon (xxxx1.svg). */
   activeIcon: string;
   href: string;
 }
@@ -106,27 +106,27 @@ const NAV_ITEMS: NavItem[] = [
   { id: "models", labelKey: "nav.models", icon: "/image/agent/sidebar/sidebar4.svg", activeIcon: "/image/agent/sidebar/sidebar41.svg", href: "/agent/models" },
 ];
 
-/** 主题模式（与 src/components/theme 一致：明 / 暗 / 跟随系统）。 */
+/** Theme modes (consistent with src/components/theme: light / dark / follow system). */
 const THEME_MODES = [
   { key: "light", labelKey: "theme.light" },
   { key: "dark", labelKey: "theme.dark" },
   { key: "system", labelKey: "theme.system" },
 ] as const;
 
-/** 每个模式记住的「上次选中」项目 / 对话（用于切换模式时恢复，跨重开持久化于 localStorage）。 */
+/** The "last selected" project / conversation remembered per mode (used to restore when switching modes, persisted in localStorage across restarts). */
 type ModeSelection = { projectId: string | null; conversationId: string | null };
 const readModeSelections = (): Partial<Record<AgentMode, ModeSelection>> => {
   const v = getStorage(AGENT_MODE_SELECTION_KEY);
   return v && typeof v === "object" ? (v as Partial<Record<AgentMode, ModeSelection>>) : {};
 };
 const saveModeSelection = (mode: AgentMode, sel: ModeSelection) => {
-  // 对象值：直接用 setStorage（putStorage 仅接受字符串），与 agent.skills / agent.llm.models 一致。
+  // Object value: use setStorage directly (putStorage only accepts strings), consistent with agent.skills / agent.llm.models.
   setStorage(AGENT_MODE_SELECTION_KEY, { ...readModeSelections(), [mode]: sel });
 };
 
 const EASE = [0.4, 0, 0.2, 1] as const;
 
-/** 导航进场：容器逐项错峰，子项淡入并自左微移。 */
+/** Nav entrance: the container staggers items, each child fades in and slides slightly from the left. */
 const NAV_LIST_VARIANTS = {
   hidden: {},
   show: { transition: { staggerChildren: 0.05, delayChildren: 0.04 } },
@@ -137,14 +137,14 @@ const NAV_ITEM_VARIANTS = {
 };
 
 /**
- * macOS 风格窗口控制（红=关闭 / 黄=最小化 / 绿=缩放）。
- * 在 Electron 中可点击并驱动真实窗口（原生红绿灯已在主进程隐藏）；
- * 浏览器 / Web 下退化为纯装饰，且悬停不显示符号。
+ * macOS-style window controls (red = close / yellow = minimize / green = zoom).
+ * In Electron they are clickable and drive the real window (the native traffic lights are hidden in the main process);
+ * in the browser / Web they degrade to pure decoration and show no symbols on hover.
  */
 function TrafficLights() {
   const [state, setState] = useState({ electron: false, mac: false });
 
-  // 仅客户端判断平台，避免水合不一致。
+  // Detect the platform on the client only, to avoid hydration mismatches.
   useEffect(() => {
     void (async () => {
       const ua = typeof navigator !== "undefined" ? navigator.userAgent : "";
@@ -152,16 +152,16 @@ function TrafficLights() {
     })();
   }, []);
 
-  // Windows/Linux 的 Electron 改用右上角窗口控制（见 WindowControls），这里不渲染红绿灯。
+  // On Windows/Linux, Electron uses the top-right window controls (see WindowControls), so we don't render the traffic lights here.
   if (state.electron && !state.mac) return null;
 
-  // 仅 macOS Electron 下可点击控制窗口；浏览器中为纯装饰。
+  // Only under macOS Electron are they clickable to control the window; in the browser they are pure decoration.
   const active = state.electron && state.mac;
 
   const buttons = [
-    { color: "#ff5f57", label: "关闭", glyph: "✕", onClick: closeWindow },
-    { color: "#febc2e", label: "最小化", glyph: "−", onClick: minimizeWindow },
-    { color: "#28c840", label: "缩放", glyph: "+", onClick: () => void toggleMaximizeWindow() },
+    { color: "#ff5f57", label: "Close", glyph: "✕", onClick: closeWindow },
+    { color: "#febc2e", label: "Minimize", glyph: "−", onClick: minimizeWindow },
+    { color: "#28c840", label: "Zoom", glyph: "+", onClick: () => void toggleMaximizeWindow() },
   ];
 
   return (
@@ -189,7 +189,7 @@ function TrafficLights() {
   );
 }
 
-/** 可折叠分组（项目 / 对话）。 */
+/** Collapsible section (projects / conversations). */
 function CollapsibleSection({
   title,
   children,
@@ -199,12 +199,12 @@ function CollapsibleSection({
   title: string;
   children: React.ReactNode;
   className?: string;
-  /** 内容超出可用高度时在本区内滚动（用于会话列表，避免撑破侧栏、无法滚动）。 */
+  /** Scroll within this section when content exceeds the available height (used for the conversation list, to avoid overflowing the sidebar and being unable to scroll). */
   scroll?: boolean;
 }) {
   const [open, setOpen] = useState(true);
   return (
-    // scroll 时本区作为可收缩的 flex 列，标题固定、列表在剩余空间内滚动。
+    // When scroll is set, this section acts as a shrinkable flex column: the title stays fixed and the list scrolls in the remaining space.
     <div className={cn(className, scroll && "flex min-h-0 flex-col")}>
       <button
         type="button"
@@ -235,7 +235,7 @@ export default function AgentSidebar({
   onOpenFiles,
 }: {
   onToggle?: () => void;
-  /** 打开「文件」侧栏：折叠主侧边栏并浮现独立的文件列表侧栏（由 AgentShell 协调）。 */
+  /** Open the "Files" sidebar: collapse the main sidebar and reveal a separate file-list sidebar (coordinated by AgentShell). */
   onOpenFiles?: () => void;
 }) {
   const pathname = usePathname();
@@ -245,12 +245,12 @@ export default function AgentSidebar({
   const t = useT();
 
   // Guests can use the whole app; the account row falls back to a "sign in" label.
-  const name = isLoggedIn ? userInfo?.username || userInfo?.name || "用户名" : t("auth.signIn");
+  const name = isLoggedIn ? userInfo?.username || userInfo?.name || "Username" : t("auth.signIn");
   const avatar = (isLoggedIn && userInfo?.avatar) || "";
-  // 钱包展示：按构建版本切换——国内版显示积分（余额×1000），国际版显示美元（$）。缺失按 0 展示。
+  // Wallet display: switches by build edition — the domestic edition shows credits (balance x1000), the international edition shows US dollars ($). Missing values show as 0.
   const walletText = formatWallet(userInfo?.walletBalance);
 
-  // 项目 / 对话记录（持久化于 JSON 文件，见 agentChatStore）。
+  // Project / conversation records (persisted to a JSON file, see agentChatStore).
   const projects = useAgentChatStore((s) => s.projects);
   const conversations = useAgentChatStore((s) => s.conversations);
   const activeProjectId = useAgentChatStore((s) => s.activeProjectId);
@@ -264,7 +264,7 @@ export default function AgentSidebar({
   const deleteConversation = useAgentChatStore((s) => s.deleteConversation);
   const renameProject = useAgentChatStore((s) => s.renameProject);
   const deleteProjectDeep = useAgentChatStore((s) => s.deleteProjectDeep);
-  // 重命名弹窗（项目 / 对话共用；Electron 屏蔽 window.prompt，故用对话框输入）。
+  // Rename dialog (shared by projects / conversations; Electron blocks window.prompt, so we use a dialog input).
   const [renameState, setRenameState] = useState<{
     kind: "project" | "conversation";
     id: string;
@@ -279,9 +279,9 @@ export default function AgentSidebar({
     }
     setRenameState(null);
   };
-  // 删除确认弹窗（项目 / 对话共用）：改用受控 Dialog 而非 window.confirm。原生弹窗会同步阻塞在右键菜单
-  // （Radix 模态层）的 onSelect 里，确认后被删行连同其菜单被直接从树上移除，Radix 复位 <body> 指针事件的
-  // 清理被跳过 → 整页 pointer-events:none 卡死、点不动。受控 Dialog 由 state 开合、干净卸载，规避此问题。
+  // Delete confirmation dialog (shared by projects / conversations): use a controlled Dialog instead of window.confirm. The native dialog blocks synchronously inside the
+  // context menu's (Radix modal layer) onSelect; after confirming, the deleted row and its menu are removed from the tree directly, so Radix's cleanup that resets <body>
+  // pointer events is skipped -> the whole page gets stuck at pointer-events:none and becomes unclickable. A controlled Dialog opens/closes via state and unmounts cleanly, avoiding this issue.
   const [deleteState, setDeleteState] = useState<{
     kind: "project" | "conversation";
     id: string;
@@ -293,35 +293,35 @@ export default function AgentSidebar({
     else deleteConversation(deleteState.id);
     setDeleteState(null);
   };
-  // 主题（明 / 暗 / 系统）：用 next-themes；mounted 后再显示标签，避免水合不一致。
+  // Theme (light / dark / system): using next-themes; show the label only after mounted, to avoid hydration mismatches.
   const { theme, setTheme, resolvedTheme } = useTheme();
   const [mounted, setMounted] = useState(false);
-  // 暗色模式使用「sidebarD*」图标变体（sidebar1.svg → sidebarD1.svg）；挂载前按浅色，避免水合不一致。
+  // Dark mode uses the "sidebarD*" icon variants (sidebar1.svg -> sidebarD1.svg); before mounting, treat as light to avoid hydration mismatches.
   const isDark = mounted && resolvedTheme === "dark";
   const iconFor = (p: string) => (isDark ? p.replace(/sidebar(\d+\.svg)$/, "sidebarD$1") : p);
   useEffect(() => setMounted(true), []);
-  // i18n：界面语言（翻译函数 t 在组件顶部已声明）。
+  // i18n: UI language (the translation function t is already declared at the top of the component).
   const locale = useLocaleStore((s) => s.locale);
   const setLocale = useLocaleStore((s) => s.setLocale);
   const themeLabel = mounted ? t(THEME_MODES.find((m) => m.key === theme)?.labelKey ?? "theme.system") : "";
 
-  // 首次载入记录。
+  // Load records on first mount.
   useEffect(() => {
     void initStore();
   }, [initStore]);
 
-  // 当前模式（日常 / 开发）：与侧边栏的 AgentModeTab 同步（自定义事件 + 跨标签 storage）。
+  // Current mode (daily / dev): synced with the sidebar's AgentModeTab (custom event + cross-tab storage).
   const [mode, setMode] = useState<AgentMode>("daily");
-  // 已应用模式的镜像：用于在事件处理里判断「是否真正发生了切换」（挂载时的回填不算切换）。
+  // Mirror of the applied mode: used in event handlers to determine "whether a real switch occurred" (the backfill on mount doesn't count as a switch).
   const modeRef = useRef<AgentMode>("daily");
-  // 「本次模式变化跳过默认选中」：右键「在项目内新建对话」会切模式但要开新对话，不应被默认选中打断。
+  // "Skip default selection for this mode change": right-click "New chat in project" switches mode but wants to start a new conversation, and shouldn't be interrupted by the default selection.
   const skipRestoreRef = useRef(false);
-  // 当前路由镜像（供事件处理里读取最新值，避免闭包过期）：仅在对话相关路由才自动跳转到选中对话。
+  // Mirror of the current route (so event handlers can read the latest value, avoiding stale closures): only auto-navigate to the selected conversation on conversation-related routes.
   const pathnameRef = useRef(pathname);
   pathnameRef.current = pathname;
 
   useEffect(() => {
-    // 挂载回填：仅同步模式镜像与状态，不触发默认选中（避免覆盖 URL 直达的会话）。
+    // Backfill on mount: only sync the mode mirror and state, don't trigger the default selection (to avoid overriding a conversation reached directly via URL).
     const read = () => {
       const v = getStorage(AGENT_MODE_KEY);
       if (v === "daily" || v === "dev") {
@@ -338,10 +338,10 @@ export default function AgentSidebar({
       setMode(v);
       const skip = skipRestoreRef.current;
       skipRestoreRef.current = false;
-      // 切换模式后不再自动载入该模式下（上次记住的 / 首个项目的）对话，而是回到「新建对话」首页，
-      // 让用户在目标模式从干净状态开始。skip = 右键「在项目内新建对话」，其自身已跳首页，勿重复跳转。
+      // After switching modes, no longer auto-load that mode's conversation (the last remembered one / the first project's); instead return to the "New chat" home page,
+      // letting the user start fresh in the target mode. skip = right-click "New chat in project", which already navigates home itself, so don't navigate again.
       if (changed && !skip) {
-        useAgentChatStore.getState().setActiveConversation(null); // 清空对话高亮
+        useAgentChatStore.getState().setActiveConversation(null); // clear the conversation highlight
         const path = pathnameRef.current;
         if (path === "/agent" || path.startsWith("/agent/chat")) router.push("/agent");
       }
@@ -357,13 +357,13 @@ export default function AgentSidebar({
     };
   }, [router]);
 
-  // 项目 = 文件夹 + 模式：按当前模式过滤，不同模式的历史相互独立。
+  // Project = folder + mode: filter by the current mode; history of different modes is mutually independent.
   const projectsInMode = projects.filter((p) => p.mode === mode);
   const currentProjectId =
     activeProjectId && projectsInMode.some((p) => p.id === activeProjectId)
       ? activeProjectId
       : (projectsInMode[0]?.id ?? null);
-  // 懒加载当前项目的对话。
+  // Lazy-load the current project's conversations.
   useEffect(() => {
     if (currentProjectId) void ensureProjectLoaded(currentProjectId);
   }, [currentProjectId, ensureProjectLoaded]);
@@ -373,22 +373,22 @@ export default function AgentSidebar({
 
   const openConversation = (id: string, projectId: string) => {
     setActiveConversation(id);
-    saveModeSelection(mode, { projectId, conversationId: id }); // 记住当前模式的选择，供切换模式后恢复
+    saveModeSelection(mode, { projectId, conversationId: id }); // remember the current mode's selection, to restore after switching modes
     router.push(`/agent/chat?c=${id}&p=${projectId}`);
   };
 
-  // 项目对应的实际文件夹：显式项目 = 其 workdir；「默认项目」（日常模式未选文件夹，projectWorkdir 为空，
-  // 故 project.workdir=""）本身不存目录，其真实目录落在各对话上（conv.workdir），取最近一条有目录的对话。
+  // The project's actual folder: an explicit project = its workdir; the "default project" (daily mode with no folder selected, projectWorkdir empty,
+  // so project.workdir="") has no directory of its own — its real directory lives on each conversation (conv.workdir); take the most recent conversation that has a directory.
   const projectFolder = (p: { id: string; workdir?: string }) =>
     p.workdir ||
     conversations.find((c) => c.projectId === p.id && c.workdir)?.workdir ||
     "";
 
-  // 点击项目：设为当前项目，并把该项目的目录设为操作目录（持久化 + 广播，供对话页即时更新）。
-  // 项目目录为空（如日常模式项目）时则清空所选目录。
+  // Click a project: set it as the current project and set that project's directory as the working directory (persist + broadcast, so the conversation page updates immediately).
+  // When the project directory is empty (e.g. a daily-mode project), clear the selected directory.
   const selectProject = (p: { id: string; workdir?: string }) => {
     setActiveProject(p.id);
-    // 记住当前模式选中的项目；切换项目时清空其对话记忆，恢复时默认回到该项目第一条对话。
+    // Remember the project selected in the current mode; when switching projects, clear its conversation memory, so on restore it defaults back to the project's first conversation.
     const prev = readModeSelections()[mode];
     saveModeSelection(mode, {
       projectId: p.id,
@@ -402,12 +402,12 @@ export default function AgentSidebar({
     }
   };
 
-  // 点击「文件」：打开前始终把「目标项目」的目录落地为主进程工作目录，使文件树展示该项目内容。
-  //  - 目标项目 = 活动项目（若属当前模式）；否则回退到当前模式的第一个项目（如刚切换模式后）。
-  // 之所以必须在此显式落地：文件树读取的是主进程 cwd，而点击项目的 selectProject 只派发
-  // WORKDIR_SET_EVENT（仅对话页监听并调用 setWorkingDir）；在其它页面 cwd 不会更新，导致
-  // 「点了项目再点文件，文件树没切过去」。这里直接调用 setWorkingDir 并 await 后再打开，
-  // 确保文件树挂载时 cwd 已指向目标项目——无论当前在哪个页面。
+  // Click "Files": before opening, always land the "target project" directory as the main-process working directory, so the file tree shows that project's contents.
+  //  - Target project = the active project (if it belongs to the current mode); otherwise fall back to the first project of the current mode (e.g. right after switching modes).
+  // Why it must be landed explicitly here: the file tree reads the main-process cwd, but clicking a project's selectProject only dispatches
+  // WORKDIR_SET_EVENT (which only the conversation page listens to and calls setWorkingDir); on other pages the cwd isn't updated, causing
+  // "clicked a project then clicked Files, but the file tree didn't switch over". Here we call setWorkingDir directly and await it before opening,
+  // ensuring that when the file tree mounts, the cwd already points at the target project — regardless of the current page.
   const handleOpenFiles = async () => {
     const target =
       (activeProjectId ? projectsInMode.find((p) => p.id === activeProjectId) : undefined) ??
@@ -427,33 +427,33 @@ export default function AgentSidebar({
     onOpenFiles?.();
   };
 
-  // 右键「新建对话」：取该项目的路径与模式，开启一段归属该项目的新对话。
-  // 沿用「新建对话」的既有流程——预置工作目录 + 模式，清空当前会话后回到首页开始，
-  // 首条消息发送时 createConversation 会按「路径 + 模式」归入该项目。
+  // Right-click "New chat": take that project's path and mode, and start a new conversation belonging to that project.
+  // Follow the existing "New chat" flow — preset the working directory + mode, clear the current conversation, and return to the home page to start;
+  // when the first message is sent, createConversation groups it into that project by "path + mode".
   const newChatInProject = (projectWorkdir: string, projectMode: AgentMode) => {
     if (projectWorkdir) {
       putStorage(AGENT_WORKDIR_KEY, projectWorkdir);
-      // 广播已选目录：常驻挂载的对话页据此把工作目录同步为该项目目录。缺此事件时，即使这里改了 storage，
-      // 对话页仍沿用上一个项目的陈旧目录（storage 变更不跨组件通知），发送时新会话会被错误归入上一个项目。
+      // Broadcast the selected directory: the persistently mounted conversation page uses this to sync its working directory to the project directory. Without this event, even though storage is changed here,
+      // the conversation page keeps using the previous project's stale directory (storage changes aren't notified across components), and on send the new conversation would be wrongly grouped into the previous project.
       window.dispatchEvent(new CustomEvent(WORKDIR_SET_EVENT, { detail: projectWorkdir }));
     } else {
-      clearAgentWorkdir(); // 内部已派发 WORKDIR_CLEAR_EVENT，对话页据此清空目录 → 新会话归入默认项目
+      clearAgentWorkdir(); // internally dispatches WORKDIR_CLEAR_EVENT, so the conversation page clears its directory -> the new conversation is grouped into the default project
     }
     putStorage(AGENT_MODE_KEY, projectMode);
-    // 这次切模式是为了在该项目内开新对话，不要被「默认选中上次对话」打断。
+    // This mode switch is to open a new conversation within the project, so it shouldn't be interrupted by "default-select the last conversation".
     skipRestoreRef.current = true;
     window.dispatchEvent(new CustomEvent(MODE_CHANGE_EVENT, { detail: projectMode }));
     setActiveConversation(null);
     router.push("/agent");
   };
 
-  // macOS：进入 /agent 时隐藏原生红绿灯（由侧边栏自绘按钮接管），离开时恢复。
+  // macOS: hide the native traffic lights when entering /agent (the sidebar's own buttons take over), and restore them on leaving.
   useEffect(() => {
     setNativeWindowButtons(false);
     return () => setNativeWindowButtons(true);
   }, []);
 
-  // 窗口置顶（always-on-top）：仅 Electron 可用。回填当前状态并订阅变化，供顶部置顶按钮显示 / 切换。
+  // Window always-on-top: Electron only. Backfill the current state and subscribe to changes, for the top pin button to display / toggle.
   const [pinAvailable, setPinAvailable] = useState(false);
   const [pinned, setPinned] = useState(false);
   useEffect(() => {
@@ -484,7 +484,7 @@ export default function AgentSidebar({
   };
   return (
     <aside className="m-2 flex h-[calc(100%_-_16px)] w-[260px] shrink-0 flex-col rounded-2xl border border-line bg-surface shadow-[0px_4px_12.3px_0px_#0000000A]">
-      {/* 顶部：窗口控制点 + 品牌 + 折叠按钮（整块作为无边框窗口的拖拽区，交互元素 no-drag） */}
+      {/* Top: window control dots + brand + collapse button (the whole block is the drag region of the frameless window; interactive elements are no-drag) */}
       <div className="px-4 pt-4" style={{ WebkitAppRegion: "drag" } as React.CSSProperties}>
         <TrafficLights />
         <div className="mt-4 flex items-center justify-between">
@@ -499,7 +499,7 @@ export default function AgentSidebar({
             className="flex items-center gap-1"
             style={{ WebkitAppRegion: "no-drag" } as React.CSSProperties}
           >
-            {/* 窗口置顶开关（仅 Electron）：置顶后「回复完成」用应用内提示，否则用系统通知。 */}
+            {/* Window always-on-top toggle (Electron only): when pinned, "reply finished" uses an in-app hint, otherwise a system notification. */}
             {pinAvailable && (
               <button
                 type="button"
@@ -517,7 +517,7 @@ export default function AgentSidebar({
             )}
             <button
               type="button"
-              aria-label="折叠侧边栏"
+              aria-label="Collapse sidebar"
               onClick={onToggle}
               className="flex size-7 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground dark:hover:bg-white/[0.04]"
             >
@@ -527,12 +527,12 @@ export default function AgentSidebar({
         </div>
       </div>
 
-      {/* 模式切换：日常模式 / 开发模式 */}
+      {/* Mode switch: daily mode / dev mode */}
       <div className="mt-4 px-3">
         <AgentModeTab />
       </div>
 
-      {/* 主导航 */}
+      {/* Main nav */}
       <motion.nav
         className="mt-4 space-y-0.5 px-3"
         variants={NAV_LIST_VARIANTS}
@@ -553,7 +553,7 @@ export default function AgentSidebar({
                 onClick={
                   () => {
                     if(item.id === "new-chat") {
-                      // 新建对话：清空已选工作目录，并取消当前对话高亮，从干净状态开始。
+                      // New chat: clear the selected working directory and deselect the current conversation, starting from a clean state.
                       clearAgentWorkdir();
                       setActiveConversation(null);
                     }
@@ -565,7 +565,7 @@ export default function AgentSidebar({
                   active ? "font-medium" : "hover:bg-accent/60 dark:hover:bg-white/[0.04]"
                 )}
               >
-                {/* 选中态背景药丸：随路由切换在各项间滑动 */}
+                {/* Selected-state background pill: slides between items as the route changes */}
                 {active && (
                   <motion.span
                     layoutId="agent-nav-active"
@@ -574,7 +574,7 @@ export default function AgentSidebar({
                   />
                 )}
                 <span className="relative z-10 flex items-center gap-3">
-                  {/* 图标：选中 / 未选中之间交叉淡入 */}
+                  {/* Icon: cross-fades between selected / unselected */}
                   <span className="relative size-[18px] shrink-0">
                     <AnimatePresence initial={false}>
                       <motion.img
@@ -599,8 +599,8 @@ export default function AgentSidebar({
         })}
       </motion.nav>
 
-      {/* 项目分组（= 文件夹，按当前模式过滤）：点击切换当前项目。过多时在本区内滚动（上限 30vh），
-          仅占用所需高度，不挤占会话列表空间 */}
+      {/* Project group (= folders, filtered by the current mode): click to switch the current project. When there are too many, scroll within this section (max 30vh),
+          taking only the height needed, without crowding out the conversation list space */}
       <CollapsibleSection title={t("section.projects")} className="mt-7 max-h-[30vh] px-3" scroll>
         {projectsInMode.length === 0 ? (
           <p className="px-2 py-1 text-xs text-muted-foreground">{t("sidebar.autoCreated")}</p>
@@ -623,7 +623,7 @@ export default function AgentSidebar({
         )}
       </CollapsibleSection>
 
-      {/* 对话分组（撑满剩余空间，把用户区压到底部；列表过多时在本区内滚动） */}
+      {/* Conversation group (fills the remaining space, pushing the user area to the bottom; when the list is too long, scroll within this section) */}
       <CollapsibleSection title={t("section.conversations")} className="mt-7 min-h-0 flex-1 px-3" scroll>
         {projectConversations.length === 0 ? (
           <p className="px-2 py-1 text-xs text-muted-foreground">{t("sidebar.noConversations")}</p>
@@ -640,7 +640,7 @@ export default function AgentSidebar({
                 newChatInProject(proj?.workdir ?? "", proj?.mode ?? c.mode);
               }}
               onOpenFolder={(() => {
-                // 对话优先用自身实际目录（默认项目下每条对话各有真实目录）；缺失再回退项目目录。
+                // A conversation prefers its own actual directory (under the default project each conversation has its own real directory); if missing, fall back to the project directory.
                 const dir = c.workdir || projects.find((pp) => pp.id === c.projectId)?.workdir;
                 return dir ? () => void openPathInShell(dir) : undefined;
               })()}
@@ -659,8 +659,8 @@ export default function AgentSidebar({
         )}
       </CollapsibleSection>
 
-      {/* 文件：点击打开独立的「文件」侧栏（折叠主侧边栏并浮现文件树，见 AgentShell）。
-          仅 Electron 可用；mounted 后再判定，避免静态导出（无 window）与客户端水合不一致。 */}
+      {/* Files: click to open the separate "Files" sidebar (collapse the main sidebar and reveal the file tree, see AgentShell).
+          Electron only; determine only after mounted, to avoid a hydration mismatch between static export (no window) and the client. */}
       {mounted && isToolkitAvailable() && (
         <div className="mt-2 px-3">
           <button
@@ -675,7 +675,7 @@ export default function AgentSidebar({
         </div>
       )}
 
-      {/* 底部用户 */}
+      {/* Bottom user */}
       <div className="border-t border-line p-3">
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
@@ -696,19 +696,19 @@ export default function AgentSidebar({
             </button>
           </DropdownMenuTrigger>
           <DropdownMenuContent align="start" side="top" className="w-[252px] p-1.5">
-            {/* 设置 */}
+            {/* Settings */}
             <DropdownMenuItem onClick={() => router.push("/agent/settings")}>
               <Settings />
               {t("menu.settings")}
             </DropdownMenuItem>
 
-            {/* 帮助与反馈 */}
+            {/* Help & feedback */}
             <DropdownMenuItem onSelect={(e) => e.preventDefault()}>
               <CircleHelp />
               {t("menu.help")}
             </DropdownMenuItem>
 
-            {/* 语言（多语言子菜单） */}
+            {/* Language (multi-language submenu) */}
             <DropdownMenuSub>
               <DropdownMenuSubTrigger>
                 <Languages />
@@ -727,7 +727,7 @@ export default function AgentSidebar({
               </DropdownMenuSubContent>
             </DropdownMenuSub>
 
-            {/* 主题（明 / 暗 / 系统，子菜单） */}
+            {/* Theme (light / dark / system, submenu) */}
             <DropdownMenuSub>
               <DropdownMenuSubTrigger>
                 <SunMoon />
@@ -746,7 +746,7 @@ export default function AgentSidebar({
               </DropdownMenuSubContent>
             </DropdownMenuSub>
 
-            {/* 钱包：国内版=积分余额，国际版=美元余额。高亮卡片 + 立即充值 */}
+            {/* Wallet: domestic edition = credits balance, international edition = US dollar balance. Highlighted card + recharge now */}
             <div className="my-1.5 rounded-xl border border-primary/40 bg-primary/[0.05] px-3 py-2.5">
               <div className="flex items-center gap-1.5 text-xs font-medium text-primary">
                 <Coins className="size-3.5" />
@@ -782,7 +782,7 @@ export default function AgentSidebar({
         </DropdownMenu>
       </div>
 
-      {/* 重命名弹窗（项目 / 对话共用） */}
+      {/* Rename dialog (shared by projects / conversations) */}
       <Dialog open={!!renameState} onOpenChange={(o) => !o && setRenameState(null)}>
         <DialogContent className="sm:max-w-sm">
           <DialogHeader>
@@ -817,7 +817,7 @@ export default function AgentSidebar({
         </DialogContent>
       </Dialog>
 
-      {/* 删除确认弹窗（项目 / 对话共用）：受控 Dialog，替代原生 window.confirm（后者会卡死整页指针事件）。 */}
+      {/* Delete confirmation dialog (shared by projects / conversations): a controlled Dialog replacing the native window.confirm (which freezes the whole page's pointer events). */}
       <Dialog open={!!deleteState} onOpenChange={(o) => !o && setDeleteState(null)}>
         <DialogContent className="sm:max-w-sm">
           <DialogHeader>
@@ -843,7 +843,7 @@ export default function AgentSidebar({
   );
 }
 
-/** 分组内的列表项（项目 / 对话条目）。提供 onNewChat/onRename/onDelete 时支持右键菜单。 */
+/** A list item within a section (project / conversation entry). Supports a context menu when onNewChat/onRename/onDelete are provided. */
 function SidebarLeaf({
   label,
   active = false,
@@ -856,16 +856,16 @@ function SidebarLeaf({
 }: {
   label: string;
   active?: boolean;
-  /** 该会话是否正在生成 AI 输出（是则右侧显示转圈）。 */
+  /** Whether this conversation is currently generating AI output (if so, show a spinner on the right). */
   generating?: boolean;
   onClick?: () => void;
-  /** 右键「新建对话」（取该项目路径，开启新对话）。 */
+  /** Right-click "New chat" (take the project path and start a new conversation). */
   onNewChat?: () => void;
-  /** 右键「打开文件夹」（在系统文件管理器中打开项目目录）；无目录时不提供。 */
+  /** Right-click "Open folder" (open the project directory in the system file manager); not provided when there's no directory. */
   onOpenFolder?: () => void;
-  /** 右键「重命名」。 */
+  /** Right-click "Rename". */
   onRename?: () => void;
-  /** 右键「删除」。 */
+  /** Right-click "Delete". */
   onDelete?: () => void;
 }) {
   const t = useT();
@@ -882,7 +882,7 @@ function SidebarLeaf({
       )}
     >
       <span className="min-w-0 flex-1 truncate">{label}</span>
-      {/* 生成中显示转圈。 */}
+      {/* Show a spinner while generating. */}
       {generating && <Spinner className="size-3.5 shrink-0 text-muted-foreground" />}
     </button>
   );

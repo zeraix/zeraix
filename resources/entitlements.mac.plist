@@ -2,14 +2,14 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-  <!-- 主可执行体（Electron/Chromium + V8）在硬化运行时下的必需项。 -->
+  <!-- Required for the main executable (Electron/Chromium + V8) under the hardened runtime. -->
   <key>com.apple.security.cs.allow-jit</key>
   <true/>
   <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
   <true/>
   <key>com.apple.security.cs.allow-dyld-environment-variables</key>
   <true/>
-  <!-- 原生模块（node-pty 等）与自带 dylib 的加载：关闭库校验。 -->
+  <!-- Loading native modules (node-pty, etc.) and bundled dylibs: disable library validation. -->
   <key>com.apple.security.cs.disable-library-validation</key>
   <true/>
 </dict>

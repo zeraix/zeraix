@@ -11,16 +11,16 @@ export const Loading = ({ size = 100, className = "" }: LoadingProps) => {
     <div className={`flex items-center justify-center ${className}`}>
       <div className="relative flex items-center justify-center h-full">
         
-        {/* 背景呼吸光晕：提供环境氛围 */}
+        {/* Background breathing glow: provides ambient atmosphere */}
         <div 
           className="absolute rounded-full bg-primary/15 blur-3xl animate-pulse"
           style={{ width: size * 1.8, height: size * 1.8 }}
         />
 
-        {/* 主体容器：负责整体的呼吸节奏 */}
+        {/* Main container: drives the overall breathing rhythm */}
         <div className="h-full relative animate-[breath_3s_ease-in-out_infinite] flex items-center justify-center">
           
-          {/* Logo 图片 */}
+          {/* Logo image */}
           <Image 
             src="/logo.png" 
             alt="Loading" 
@@ -30,7 +30,7 @@ export const Loading = ({ size = 100, className = "" }: LoadingProps) => {
             className="relative z-10"
           />
 
-          {/* 扫光层：利用 mask-image 确保扫光只出现在 Logo 形状内部（如果是透明 PNG） */}
+          {/* Shimmer layer: uses mask-image to ensure the shimmer only appears within the Logo shape (if it's a transparent PNG) */}
           <div 
             className="absolute inset-0 z-20 pointer-events-none overflow-hidden"
             style={{
@@ -48,7 +48,7 @@ export const Loading = ({ size = 100, className = "" }: LoadingProps) => {
       </div>
 
       <style jsx>{`
-        /* 呼吸动画：缩放 + 透明度 */
+        /* Breathing animation: scale + opacity */
         @keyframes breath {
           0%, 100% {
             transform: scale(0.92);
@@ -60,7 +60,7 @@ export const Loading = ({ size = 100, className = "" }: LoadingProps) => {
           }
         }
 
-        /* 扫光动画：斜向快速划过 */
+        /* Shimmer animation: a quick diagonal sweep */
         @keyframes shimmer {
           0% { transform: translateX(-150%) skewX(-25deg); }
           50% { transform: translateX(150%) skewX(-25deg); }

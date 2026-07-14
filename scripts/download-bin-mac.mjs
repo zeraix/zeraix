@@ -1,11 +1,11 @@
 #!/usr/bin/env node
 /**
- * DOWNLOAD 单个 macOS 二进制包（内含 qemu + llama 两个子目录）并铺到
- * resources/bin/darwin-<arch>/{qemu,llama}/，供 dist:mac 内置。
- *   - qemu：沙箱命令执行引擎（Apple Silicon 才需要）；
- *   - llama：本地大模型推理（llama-server，Metal 后端）。
- * 一次下载一个 zip（bin/darwin-<arch>.zip），解压后按子目录拆分到各自 resources 目录。
- * CDN 优先（docker.zeraix.com，无凭据），失败回落鉴权 OSS。对应上传见 scripts/bundle-bin-mac.mjs。
+ * DOWNLOAD a single macOS binary package (containing the two subdirectories qemu + llama) and lay it out into
+ * resources/bin/darwin-<arch>/{qemu,llama}/, to be bundled by dist:mac.
+ *   - qemu: the sandbox command-execution engine (only needed on Apple Silicon);
+ *   - llama: local large-model inference (llama-server, Metal backend).
+ * Downloads one zip at a time (bin/darwin-<arch>.zip), then splits it by subdirectory into the respective resources directories.
+ * CDN first (docker.zeraix.com, no credentials), falling back to authenticated OSS on failure. For the corresponding upload see scripts/bundle-bin-mac.mjs.
  *
  *   node scripts/download-bin-mac.mjs
  */
@@ -38,10 +38,10 @@ const cdn = (env.OSS_CDN || "https://docker.zeraix.com").replace(/\/+$/, "");
 const key = env.OSS_BIN_MAC_KEY || `${env.OSS_PREFIX || ""}bin/darwin-${ARCH}.zip`;
 const encKey = key.split("/").map(encodeURIComponent).join("/");
 
-// zip 内两个子目录 → 各自 resources 目录；自测方式不同。
+// The two subdirectories inside the zip → their respective resources directories; the self-test differs for each.
 const PAYLOADS = [
   { name: "qemu", exes: ["qemu-system-aarch64", "qemu-img"], selfTest: { exe: "qemu-system-aarch64", stripDyld: true, hard: true } },
-  // llama 不再随包分发（改为运行时动态安装，见 electron/llm/llamaInstaller.mjs）。
+  // llama no longer ships with the package (now installed dynamically at runtime, see electron/llm/llamaInstaller.mjs).
 ];
 
 function fetchTo(url, dest, maxRedirs = 5) {
@@ -80,7 +80,7 @@ try {
 }
 console.log(`[download-mac] downloaded ${(fs.statSync(zip).size / 1048576).toFixed(0)} MB`);
 
-// 解压到临时目录，再按 qemu/ 与 llama/ 子目录铺到各自 resources 目录。
+// Extract into a temp directory, then lay out the qemu/ and llama/ subdirectories into their respective resources directories.
 const base = path.join(os.tmpdir(), `bin-darwin-${ARCH}.x`);
 fs.rmSync(base, { recursive: true, force: true });
 fs.mkdirSync(base, { recursive: true });
@@ -90,7 +90,7 @@ fs.rmSync(zip, { force: true });
 for (const pl of PAYLOADS) {
   const src = path.join(base, pl.name);
   const OUT = path.join(REPO, "resources", "bin", `darwin-${ARCH}`, pl.name);
-  if (!fs.existsSync(src)) { // 该 arch 未内置此载荷（如 Intel mac 无 qemu）
+  if (!fs.existsSync(src)) { // this arch does not bundle this payload (e.g. Intel mac has no qemu)
     fs.mkdirSync(OUT, { recursive: true });
     console.log(`[download-mac] ${pl.name}: not in bundle for darwin-${ARCH} — skip`);
     continue;

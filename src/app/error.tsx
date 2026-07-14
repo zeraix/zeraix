@@ -32,7 +32,6 @@ export default function Error({
     window.location.reload();
   };
 
-  // 快捷复制错误日志
   const handleCopyLog = () => {
     const logText = `[Error Log]\nMsg: ${rawMessage || 'None'}\nDigest: ${digestId || 'None'}`;
     navigator.clipboard.writeText(logText);
@@ -64,7 +63,6 @@ export default function Error({
           </div>
         </div>
 
-        {/* 质感双按钮 */}
         <div style={styles.controlGroup}>
           <button 
             onClick={handleClearCacheAndReset} 
@@ -78,7 +76,7 @@ export default function Error({
               e.currentTarget.style.transform = "scale(1)";
             }}
           >
-            清理缓存并重构页面
+            Clear the cache and rebuild the page.
           </button>
           
           <button 
@@ -93,7 +91,7 @@ export default function Error({
               e.currentTarget.style.color = "var(--ink-muted)";
             }}
           >
-            直接重试
+            Retry immediately
           </button>
         </div>
       </div>
@@ -101,8 +99,6 @@ export default function Error({
   );
 }
 
-// 高级工业钛金样式表（随主题切换：颜色取自 --surface/--ink/--line/--primary 等 CSS 变量，
-// 警示红为语义色，明暗两种主题下均保留）
 const styles = {
   viewport: {
     display: 'flex',
@@ -152,7 +148,7 @@ const styles = {
   iconCore: {
     width: '8px',
     height: '8px',
-    backgroundColor: '#da3737', // 精准突出的警示红
+    backgroundColor: '#da3737', 
   },
   headline: {
     fontSize: '14px',

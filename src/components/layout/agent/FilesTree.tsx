@@ -8,10 +8,10 @@ import { useT } from "@/lib/i18n";
 import { cn } from "@/lib/utils";
 import { WORKDIR_SET_EVENT, WORKDIR_CLEAR_EVENT } from "@/constants/Agent";
 
-// 子路径拼接（相对工作目录，统一用 /；主进程 resolveInside 会归一化，Windows 也可）。
+// Join a subpath (relative to the working directory, always using /; the main process's resolveInside normalizes it, works on Windows too).
 const join = (parent: string, name: string) => (parent ? `${parent}/${name}` : name);
 
-/** 单个树节点：文件夹点击展开 / 收起（按需拉子项），文件点击在右侧面板打开。 */
+/** A single tree node: clicking a folder expands / collapses it (lazily fetching children); clicking a file opens it in the right-side panel. */
 function TreeNode({ path, name, isDir, depth }: { path: string; name: string; isDir: boolean; depth: number }) {
   const t = useT();
   const [expanded, setExpanded] = useState(false);
@@ -78,12 +78,12 @@ function TreeNode({ path, name, isDir, depth }: { path: string; name: string; is
   );
 }
 
-/** 工作目录文件树（侧栏「文件」分区）。根为当前工作目录；切换项目 / 目录时重挂并重载根。 */
+/** Working-directory file tree (the sidebar's "Files" section). The root is the current working directory; switching project / directory remounts and reloads the root. */
 export default function FilesTree() {
   const t = useT();
   const [root, setRoot] = useState<WsEntry[] | null>(null);
   const [loading, setLoading] = useState(false);
-  const [remountKey, setRemountKey] = useState(0); // 变更时强制重挂子树，收起所有展开态
+  const [remountKey, setRemountKey] = useState(0); // On change, force-remount the subtree, collapsing all expanded state
 
   const loadRoot = useCallback(async () => {
     setLoading(true);
@@ -97,7 +97,7 @@ export default function FilesTree() {
 
   useEffect(() => {
     void loadRoot();
-    // 切项目 / 目录 → 工作目录变了，重载根（稍延后，等主进程 setWorkingDir 落地）。
+    // Switch project / directory -> the working directory changed, reload the root (with a small delay, waiting for the main process's setWorkingDir to take effect).
     const onChange = () => window.setTimeout(() => void loadRoot(), 60);
     window.addEventListener(WORKDIR_SET_EVENT, onChange);
     window.addEventListener(WORKDIR_CLEAR_EVENT, onChange);

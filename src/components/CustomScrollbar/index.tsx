@@ -4,12 +4,12 @@ import React, { useState, useEffect, useRef, useCallback } from "react";
 interface CustomScrollbarProps {
   children: React.ReactNode;
   config?: {
-    thumbWidth?: number;       // 滚动条粗细
-    thumbColorActive?: string; // 点击/悬浮颜色
-    thumbColor?: string;       // 默认颜色
-    alwaysVisible?: boolean;   // 是否始终显示滚动条
+    thumbWidth?: number;       // Scrollbar thickness
+    thumbColorActive?: string; // Color when clicked/hovered
+    thumbColor?: string;       // Default color
+    alwaysVisible?: boolean;   // Whether to always show the scrollbar
   },
-  /** 滚动事件，透传给内部的 div */
+  /** Scroll event, forwarded to the inner div */
   onScroll?: (e: React.UIEvent<HTMLDivElement>) => void;
 }
 
@@ -21,14 +21,14 @@ export default function CustomScrollbar({ children, config, onScroll }: CustomSc
     alwaysVisible = false
   } = config || {};
 
-  // 统一管理所有滚动相关的测量值
+  // Manage all scroll-related measurements in one place
   const [metrics, setMetrics] = useState({
-    hasV: false,    // 是否有纵向滚动
-    hasH: false,    // 是否有横向滚动
-    vThumbH: 0,     // 纵向滑块高度
-    hThumbW: 0,     // 横向滑块宽度
-    vPos: 0,        // 纵向滑块位置
-    hPos: 0,        // 横向滑块位置
+    hasV: false,    // Whether vertical scrolling is present
+    hasH: false,    // Whether horizontal scrolling is present
+    vThumbH: 0,     // Vertical thumb height
+    hThumbW: 0,     // Horizontal thumb width
+    vPos: 0,        // Vertical thumb position
+    hPos: 0,        // Horizontal thumb position
   });
 
   const [show, setShow] = useState(false);
@@ -39,7 +39,7 @@ export default function CustomScrollbar({ children, config, onScroll }: CustomSc
   const startPos = useRef({ x: 0, y: 0, scrollL: 0, scrollT: 0 });
 
   /**
-   * 更新滚动条的大小和位置
+   * Update the scrollbar's size and position
    */
   const updateMetrics = useCallback(() => {
     if (!contentRef.current) return;
@@ -55,20 +55,20 @@ export default function CustomScrollbar({ children, config, onScroll }: CustomSc
     setMetrics({
       hasV,
       hasH,
-      // 计算滑块长度（按比例），最小 30px 保证能点到
+      // Compute the thumb length (proportionally), with a 30px minimum to keep it clickable
       vThumbH: hasV ? Math.max((clientHeight / scrollHeight) * clientHeight, 30) : 0,
       hThumbW: hasH ? Math.max((clientWidth / scrollWidth) * clientWidth, 30) : 0,
-      // 计算滑块在轨道上的位置偏移
+      // Compute the thumb's offset along the track
       vPos: (scrollTop / scrollHeight) * clientHeight,
       hPos: (scrollLeft / scrollWidth) * clientWidth,
     });
   }, []);
-  // 滚动事件处理
+  // Scroll event handler
   const handleScroll = useCallback((e: React.UIEvent<HTMLDivElement>) => {
     updateMetrics();
     onScroll?.(e);
   }, [updateMetrics, onScroll]);
-  // 监听容器大小变化和初始加载
+  // Watch for container size changes and the initial load
   useEffect(() => {
     updateMetrics();
     const observer = new ResizeObserver(updateMetrics);
@@ -81,7 +81,7 @@ export default function CustomScrollbar({ children, config, onScroll }: CustomSc
   }, [updateMetrics]);
 
   /**
-   * 鼠标拖拽逻辑处理
+   * Mouse drag handling
    */
   useEffect(() => {
     const onMouseMove = (e: MouseEvent) => {
@@ -138,13 +138,13 @@ export default function CustomScrollbar({ children, config, onScroll }: CustomSc
       onMouseEnter={() => setShow(true)}
       onMouseLeave={() => !isAnyDragging && setShow(false)}
     >
-      {/* 隐藏原生滚动条的样式注入 */}
+      {/* Injected styles to hide the native scrollbar */}
       <style jsx>{`
         .no-scrollbar::-webkit-scrollbar { display: none; }
         .no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
       `}</style>
 
-      {/* 内容承载容器 */}
+      {/* Content container */}
       <div
         ref={contentRef}
         onScroll={handleScroll}
@@ -153,7 +153,7 @@ export default function CustomScrollbar({ children, config, onScroll }: CustomSc
         {children}
       </div>
 
-      {/* --- 纵向自定义滚动条 --- */}
+      {/* --- Vertical custom scrollbar --- */}
       {metrics.hasV && (
         <div
           className={`absolute right-0 top-0 bottom-0 z-30 transition-opacity duration-300 pointer-events-none ${
@@ -174,7 +174,7 @@ export default function CustomScrollbar({ children, config, onScroll }: CustomSc
         </div>
       )}
 
-      {/* --- 横向自定义滚动条 --- */}
+      {/* --- Horizontal custom scrollbar --- */}
       {metrics.hasH && (
         <div
           className={`absolute bottom-0 left-0 right-0 z-30 transition-opacity duration-300 pointer-events-none ${

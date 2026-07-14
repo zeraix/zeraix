@@ -66,14 +66,14 @@ function ResizableHandleLight({
       )}
       {...props}
       onPointerDown={() => {
-        console.log('[ResizableHandleLight] Pointer down - 开始调整大小')
-        // 这里可以添加自定义逻辑，例如：
-        // - 播放音效
-        // - 显示提示
-        // - 触发动画
+        console.log('[ResizableHandleLight] Pointer down - start resizing')
+        // Custom logic can be added here, for example:
+        // - Play a sound effect
+        // - Show a hint
+        // - Trigger an animation
       }}
     >
-      {/* 注入关键帧样式 */}
+      {/* Inject keyframe styles */}
       <style>{`
         @keyframes spread-effect {
           0% { transform: translate(-50%, -50%) scale(0); opacity: 0.8; }
@@ -87,13 +87,13 @@ function ResizableHandleLight({
           pointer-events: none;
           z-index: 5;
         }
-        /* 当用户按下鼠标或触摸时显示（active 状态） */
+        /* Shown when the user presses the mouse or touches (active state) */
         [data-slot="resizable-handle"]:active .handle-light-effect {
           display: block;
         }
       `}</style>
 
-      {/* 扩散光效层 */}
+      {/* Spreading light-effect layer */}
       <div className="handle-light-effect w-px">
         <div></div>
       </div>

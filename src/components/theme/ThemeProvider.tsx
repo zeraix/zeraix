@@ -9,7 +9,7 @@ import {
   type AccentKey,
 } from "./theme-config";
 
-/* ---- 强调色：基于 localStorage 的轻量外部存储（避免 effect 内 setState） ---- */
+/* ---- Accent color: lightweight external store backed by localStorage (avoids setState inside an effect) ---- */
 
 const listeners = new Set<() => void>();
 
@@ -32,7 +32,7 @@ function applyAccent(accent: AccentKey) {
   document.documentElement.dataset.accent = accent;
 }
 
-/** 读取/设置强调色（写入 <html data-accent> 并持久化到 localStorage） */
+/** Read/set the accent color (writes to <html data-accent> and persists to localStorage) */
 export function useAccent() {
   const accent = useSyncExternalStore(subscribe, readAccent, getServerSnapshot);
   const setAccent = (next: AccentKey) => {
@@ -43,7 +43,7 @@ export function useAccent() {
   return { accent, setAccent };
 }
 
-/** 将当前强调色同步到 <html data-accent>（仅更新外部 DOM，不触发 setState） */
+/** Sync the current accent color to <html data-accent> (only updates external DOM, doesn't trigger setState) */
 function AccentSync({ children }: { children: React.ReactNode }) {
   const { accent } = useAccent();
   useEffect(() => {
@@ -53,9 +53,9 @@ function AccentSync({ children }: { children: React.ReactNode }) {
 }
 
 /**
- * 全局主题 Provider：
- * - next-themes 负责明/暗/跟随系统（attribute="class" -> .dark）
- * - AccentSync 负责强调色（data-accent）
+ * Global theme Provider:
+ * - next-themes handles light/dark/follow-system (attribute="class" -> .dark)
+ * - AccentSync handles the accent color (data-accent)
  */
 export default function ThemeProvider({
   children,

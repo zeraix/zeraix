@@ -1,20 +1,21 @@
 /**
- * QEMU 执行引擎：把 run_command 放进「单个长期存活」的 QEMU VM（macOS=HVF / Windows=WHPX /
- * Linux=KVM）里执行。命令经 qemu-guest-agent 在 guest 内以 bubblewrap 限定到挂载集运行。
- * 契约同 native：run 不抛异常。
+ * QEMU execution engine: runs run_command inside a "single long-lived" QEMU VM (macOS=HVF / Windows=WHPX /
+ * Linux=KVM). Commands run inside the guest via qemu-guest-agent, confined to the mount set by bubblewrap.
+ * Same contract as native: run never throws.
  *
- * 长驻服务（dev server 等）在 guest 内运行，并用 QMP hostfwd 把端口「动态转发」到宿主，
- * 从而在宿主可预览。
+ * Long-lived services (dev servers, etc.) run inside the guest, and QMP hostfwd "dynamically forwards" their
+ * ports to the host, so they can be previewed on the host.
  *
- * 机制文件在 sandbox/qemu/：control.mjs（QMP + guest-agent 客户端）、Dockerfile +
- * build-rootfs-local.sh（工具箱镜像 → 可引导 qcow2）。本模块直接拉起 qemu 进程（不经
- * shell），再用 control.mjs 的客户端连上。
+ * Mechanism files live in sandbox/qemu/: control.mjs (QMP + guest-agent client), Dockerfile +
+ * build-rootfs-local.sh (toolbox image -> bootable qcow2). This module spawns the qemu process directly (no
+ * shell), then connects with control.mjs's client.
  *
- * 挂载模型（无需热挂载 / 永不重建）：一次性 9p 共享「宿主根」（posix "/"，Windows 盘符）到
- * guest 的 /mnt/hostfs；任何 cwd 都已覆盖。未信任命令的可见范围由 bwrap 每命令限定到挂载集
- * （homeRoot ∪ 显式 extras），posix 下以「路径同构」bind（宿主路径==guest 路径，工具输出路径两侧一致）。
+ * Mount model (no hot-mount / never rebuild): a one-time 9p share of the "host root" (posix "/", Windows drive
+ * letters) into the guest's /mnt/hostfs; any cwd is already covered. The visible scope of untrusted commands is
+ * confined per-command to the mount set by bwrap (homeRoot ∪ explicit extras), bound on posix as an "isomorphic
+ * path" (host path == guest path, so tool output paths match on both sides).
  *
- * 就绪前 / 失败时降级 native。需实机引导验证（见 sandbox/qemu/README）。
+ * Falls back to native before ready / on failure. Requires real-machine boot verification (see sandbox/qemu/README).
  */
 import fs from "node:fs";
 import os from "node:os";
@@ -32,8 +33,8 @@ import { vmDir, vmVersion, guestArch, localDataDir } from "./vmpaths.mjs";
 
 export const id = "qemu";
 
-let cfg = null; // 由 engine.mjs 注入：{ image, memory, cpus, background, rootfs? }
-let onExitCb = null; // engine.mjs 注入：VM 进程退出时回调（用于把「就绪」状态降级，避免 UI 一直显示运行中）
+let cfg = null; // Injected by engine.mjs: { image, memory, cpus, background, rootfs? }
+let onExitCb = null; // Injected by engine.mjs: callback when the VM process exits (used to downgrade the "ready" state so the UI doesn't keep showing running)
 export function configure(c) {
   cfg = c;
   if (c && typeof c.onExit === "function") onExitCb = c.onExit;
@@ -43,39 +44,39 @@ const HOME = os.homedir();
 const isWin = process.platform === "win32";
 const QMP_PORT = 4444;
 const GA_PORT = 4445;
-const GUEST_MNT = "/mnt/hostfs"; // 宿主根在 guest 内的挂载点（firstboot.sh 以 9p 挂入，须与之一致）
-const shq = (s) => `'${String(s).replace(/'/g, `'\\''`)}'`; // guest 内 bash 单引号转义
-// VM 磁盘/内核首次运行从公共 CDN 下载（docker.zeraix.com 前置 zeraix-docker 桶的公开只读入口）。
+const GUEST_MNT = "/mnt/hostfs"; // Mount point of the host root inside the guest (firstboot.sh mounts it via 9p; must match)
+const shq = (s) => `'${String(s).replace(/'/g, `'\\''`)}'`; // bash single-quote escaping inside the guest
+// VM disk/kernel are downloaded from a public CDN on first run (docker.zeraix.com fronts the public read-only entry of the zeraix-docker bucket).
 const VM_CDN = (process.env.ZERAIX_CDN || "https://docker.zeraix.com").replace(/\/+$/, "");
 
 let vm = null; // { proc, ports, guest }
 let ninep = null; // Windows: in-process 9p-over-TCP server backing the host share
-let homeRoot = ""; // provision 的公共根（会话 workdir 的父目录）
-let extraRoots = []; // 显式选择过的根外文件夹（累积；每命令并入 bwrap bind 集）
-let degraded = ""; // 非空 = 本会话已降级 native，不再尝试
+let homeRoot = ""; // The common root from provision (parent directory of the session workdir)
+let extraRoots = []; // Explicitly selected folders outside the root (accumulated; merged into the bwrap bind set per command)
+let degraded = ""; // Non-empty = this session has degraded to native and will not retry
 let degradeNoticeShown = false;
 const EXTRA_ROOTS_MAX = 16;
 
-// 后台长驻服务表：hostPort → { gpid, hostPort, guestPort, url, command, log }
+// Background long-lived service table: hostPort -> { gpid, hostPort, guestPort, url, command, log }
 const procs = new Map();
 let svcSeq = 0;
 
-// ── 路径 / 目录 ───────────────────────────────────────────────────────────────
-// VM 镜像目录见 ./vmpaths.mjs（各平台本地应用数据目录；运行时与构建/发布脚本共用同一位置）。
-// 应用名取自 userData 的 basename，确保与 llama/userData 同名（dev=Zeraix，打包=OperEase）。
+// ── Paths / directories ───────────────────────────────────────────────────────────────
+// VM image directory: see ./vmpaths.mjs (per-platform local app-data directory; shared by the runtime and the build/publish scripts).
+// The app name is taken from the basename of userData, ensuring it matches llama/userData (dev=Zeraix, packaged=OperEase).
 const VM_FILES = ["rootfs.qcow2", "Image", "initrd.img"];
-// 版本目录根（.../vm）：独立于 ZERAIX_VMDIR 覆盖，始终指默认布局，供版本枚举/清理。
+// Version directory root (.../vm): independent of the ZERAIX_VMDIR override, always points to the default layout, used for version enumeration/cleanup.
 function vmRoot() { return path.join(localDataDir(path.basename(app.getPath("userData"))), "vm"); }
 function versionComplete(v) { return !!v && VM_FILES.every((f) => fs.existsSync(path.join(vmRoot(), v, f))); }
 function installedVersions() {
   try { return fs.readdirSync(vmRoot()).filter((d) => !d.startsWith(".") && versionComplete(d)); } catch { return []; }
 }
 /**
- * 启动使用的版本：
- *   - configured（versions.json 目标）已完整下载 → 用它；
- *   - 否则有其它已下载版本 → 用最新的一个（即用旧镜像启动，不自动下载新版本——交给用户决定更新）；
- *   - 都没有 → configured（首次运行，会触发下载）。
- * forceConfigured=true（用户点「更新」）：强制用 configured（会下载新版本）。
+ * Version used at boot:
+ *   - configured (the versions.json target) is fully downloaded -> use it;
+ *   - otherwise, if another downloaded version exists -> use the latest one (i.e. boot from the old image, do not auto-download the new version -- leave the update decision to the user);
+ *   - none present -> configured (first run, triggers a download).
+ * forceConfigured=true (user clicks "Update"): force use of configured (downloads the new version).
  */
 function bootVersion(forceConfigured = false) {
   const configured = vmVersion(guestArch());
@@ -86,20 +87,20 @@ function bootVersion(forceConfigured = false) {
 }
 
 function dirs(forceConfigured = false) {
-  const override = process.env.ZERAIX_VMDIR; // 自定义目录覆盖：直接用，不套版本布局
+  const override = process.env.ZERAIX_VMDIR; // Custom directory override: use it directly, no version layout applied
   const vd = override ? override : path.join(vmRoot(), bootVersion(forceConfigured));
   return { vd, rootfs: cfg?.rootfs || process.env.ZERAIX_ROOTFS || path.join(vd, "rootfs.qcow2") };
 }
 
-/** VM 镜像目录（rootfs.qcow2 / Image / initrd.img 所在）。静态路径，供 UI 展示 / 打开文件夹，无需 VM 运行。 */
+/** VM image directory (where rootfs.qcow2 / Image / initrd.img live). Static path, for UI display / opening the folder, no running VM required. */
 export function vmImageDir() { return dirs().vd; }
 
 /**
- * VM 镜像版本 / 安装信息，供沙箱弹窗展示与「更新」判断。
- *   version      = 当前启动使用的版本（可能是旧版本）
- *   targetVersion= versions.json 目标版本
- *   complete     = 目标版本已完整下载
- *   updatable    = 正在用旧版本且目标版本尚未下载 → 可由用户触发更新
+ * VM image version / install info, for the sandbox dialog display and the "update" decision.
+ *   version      = version currently used at boot (may be an old version)
+ *   targetVersion= versions.json target version
+ *   complete     = target version is fully downloaded
+ *   updatable    = currently using an old version and the target version is not yet downloaded -> user can trigger an update
  */
 export function sandboxVmInfo() {
   const arch = guestArch();
@@ -120,10 +121,10 @@ function qemuBin() {
   if (process.env.ZERAIX_QEMU) return process.env.ZERAIX_QEMU;
   const sys = isWin ? "qemu-system-x86_64.exe" : `qemu-system-${process.arch === "arm64" ? "aarch64" : "x86_64"}`;
   const archDir = `${process.platform}-${process.arch}`;
-  // 打包版：extraResources 把 resources/bin 铺到 process.resourcesPath 根 → <arch>/qemu/。
-  // dev（`electron .`）：process.resourcesPath 指向 Electron 自身的 resources（无我方二进制），
-  //   改从仓库 resources/bin/<arch>/qemu 取——app.getAppPath()=仓库根，与 main.mjs 的 WEB_ROOT 同源。
-  // 命中即返回全路径：qemu-system spawn、派生的 qemu-img、以及 -L share 固件目录三者一并修正。
+  // Packaged: extraResources lays resources/bin at the root of process.resourcesPath -> <arch>/qemu/.
+  // dev (`electron .`): process.resourcesPath points to Electron's own resources (none of our binaries),
+  //   so read from the repo's resources/bin/<arch>/qemu instead -- app.getAppPath()=repo root, same source as main.mjs's WEB_ROOT.
+  // On a hit, return the full path: qemu-system spawn, the derived qemu-img, and the -L share firmware directory are all fixed up together.
   const candidates = [
     process.resourcesPath && path.join(process.resourcesPath, archDir, "qemu", sys),
     !app.isPackaged && path.join(app.getAppPath(), "resources", "bin", archDir, "qemu", sys),
@@ -132,23 +133,23 @@ function qemuBin() {
   return sys;
 }
 
-/** 宿主路径 → { src: guest 内 9p 路径, dst: bwrap 内目标（posix 保持同构） }。 */
+/** Host path -> { src: 9p path inside the guest, dst: target inside bwrap (posix keeps isomorphism) }. */
 function mapRoot(hostPath) {
   const abs = path.resolve(hostPath);
   if (!isWin) {
     const rel = abs.replace(/^\//, "");
     return { src: path.posix.join(GUEST_MNT, rel), dst: abs };
   }
-  // Windows 多盘：/mnt/hostfs/<盘符>/<其余>（对应 ninep-server 的虚拟多盘根），任意盘符的
-  // workdir（C:、E:…）都能正确映射。
+  // Windows multi-drive: /mnt/hostfs/<drive>/<rest> (matching ninep-server's virtual multi-drive root), so a
+  // workdir on any drive (C:, E:, ...) maps correctly.
   const m = abs.match(/^([A-Za-z]):[\\/]?(.*)$/);
   const drive = m ? m[1].toUpperCase() : "C";
   const rest = (m ? m[2] : "").split(path.sep).join("/");
   const g = path.posix.join(GUEST_MNT, drive, rest);
-  return { src: g, dst: g }; // Windows 不保持同构
+  return { src: g, dst: g }; // Windows does not keep isomorphism
 }
 
-/** cwd 未被挂载集覆盖时并入 extras（广播根已覆盖全盘，无需重建 VM）。 */
+/** When cwd is not covered by the mount set, merge it into extras (the broadcast root already covers the whole disk, no VM rebuild needed). */
 function ensureRoot(cwd) {
   const abs = path.resolve(cwd || homeRoot || HOME);
   const under = (r) => {
@@ -161,9 +162,9 @@ function ensureRoot(cwd) {
   if (extraRoots.length > EXTRA_ROOTS_MAX) extraRoots = extraRoots.slice(-EXTRA_ROOTS_MAX);
 }
 
-/** bubblewrap 参数（不含 argv[0] 与末尾命令）：只把挂载集从 /mnt/hostfs bind 进来，chdir cwd。
- *  网络默认放通（不 --unshare-net）——沙箱内命令可直达互联网：pip / npm / git / curl 等。
- *  DNS 与路由由 guest 的 SLIRP 网络提供（firstboot.sh 配置 10.0.2.x + nameserver）。 */
+/** bubblewrap flags (excluding argv[0] and the trailing command): only bind the mount set from /mnt/hostfs, chdir cwd.
+ *  Network is open by default (no --unshare-net) -- commands inside the sandbox can reach the internet directly: pip / npm / git / curl, etc.
+ *  DNS and routing are provided by the guest's SLIRP network (firstboot.sh configures 10.0.2.x + nameserver). */
 function bwrapFlags(cwd) {
   const binds = [homeRoot, ...extraRoots].filter(Boolean).flatMap((r) => {
     const { src, dst } = mapRoot(r);
@@ -190,13 +191,13 @@ function bwrapFlags(cwd) {
   ];
 }
 
-// ── 引导 ─────────────────────────────────────────────────────────────────────
+// ── Boot ─────────────────────────────────────────────────────────────────────
 function qemuArgs(vd, overlay) {
   const mem = cfg?.memory > 0 ? cfg.memory : 4096;
   const cpus = cfg?.cpus > 0 ? cfg.cpus : 4;
   const shareRoot = isWin ? `${process.env.SystemDrive || "C:"}\\` : "/";
-  // 直接内核引导（无 bootloader / UEFI）：qemu 直接加载内核，整盘 ext4 作为 /dev/vda 根（无分区表）。
-  // Image + initrd.img 由 build-rootfs-local.sh 与 rootfs 一起产出、一起分发（boot() 已校验存在）。
+  // Direct kernel boot (no bootloader / UEFI): qemu loads the kernel directly, whole-disk ext4 as the /dev/vda root (no partition table).
+  // Image + initrd.img are produced and distributed by build-rootfs-local.sh together with rootfs (boot() already verifies they exist).
   const con = !isWin && process.arch === "arm64" ? "ttyAMA0" : "ttyS0"; // virt=pl011 / q35=16550
   const a = [
     "-smp", String(cpus), "-m", String(mem),
@@ -224,13 +225,13 @@ function qemuArgs(vd, overlay) {
     "-append", `root=/dev/vda rw console=${con}${isWin ? " zeraix.share=tcp" : ""} init=/lib/systemd/systemd`,
   ];
   if (isWin) {
-    // 打包后 qemu 位于 process.resourcesPath/<platform>-<arch>/qemu/，需显式 -L 指到随附固件目录（SeaBIOS/option
-    // ROM），否则重定位后的 qemu 找不到数据目录而无法引导（bundle-bin-win.mjs 负责放置 share/）。
+    // After packaging, qemu lives at process.resourcesPath/<platform>-<arch>/qemu/, so an explicit -L must point to the
+    // bundled firmware directory (SeaBIOS/option ROM), otherwise the relocated qemu can't find its data directory and fails to boot (bundle-bin-win.mjs is responsible for placing share/).
     const share = path.join(path.dirname(qemuBin()), "share");
     const L = fs.existsSync(share) ? ["-L", share] : [];
-    // WHPX 对 CPU 模型远比 HVF/KVM 挑剔：`-cpu max` 会暴露 APX/MPX 等冲突特性，guest 在最初几条
-    // 指令即三重故障（WHPX: Unexpected VP exit code 4=UnrecoverableException）。改用具名模型
-    // Haswell（SSE4.2/AVX2/AES 齐备且 WHPX 稳定引导，已实测启到 login）。勿在 Windows 用 max/host。
+    // WHPX is far pickier about the CPU model than HVF/KVM: `-cpu max` exposes conflicting features like APX/MPX, and the guest
+    // triple-faults within the first few instructions (WHPX: Unexpected VP exit code 4=UnrecoverableException). Use the named model
+    // Haswell instead (SSE4.2/AVX2/AES all present and WHPX boots stably, measured booting to login). Do not use max/host on Windows.
     return ["-machine", "q35,accel=whpx,kernel-irqchip=off", "-cpu", "Haswell", ...L, ...a];
   }
   if (process.platform === "darwin") return ["-machine", "virt,accel=hvf,gic-version=3", "-cpu", "host", ...a];
@@ -255,46 +256,46 @@ async function winShareMount(guest) {
     `mkdir -p ${GUEST_MNT} && mount -t 9p -o trans=tcp,port=${ninep.port},version=9p2000.L,msize=524288,aname=${token} 10.0.2.2 ${GUEST_MNT}`]);
 }
 
-// 清理无用的旧版本 VM 目录（释放磁盘）。保留「当前启动版本 keepVersion」与「目标版本 configured」两者：
-// 用旧版本启动时留着旧版本（否则没镜像可用），目标版本留着（用户更新后即用）；其余清理。
-// ZERAIX_VMDIR 覆盖时跳过（避免误删自定义目录同级）。
+// Clean up unused old-version VM directories (free disk). Keep both "the current boot version keepVersion" and "the target version configured":
+// when booting from an old version keep the old version (otherwise no image is available), keep the target version (used right after a user update); prune the rest.
+// Skipped when ZERAIX_VMDIR overrides (to avoid accidentally deleting siblings of the custom directory).
 function pruneOldVmVersions(keepVersion) {
   if (process.env.ZERAIX_VMDIR) return;
   const keep = new Set([keepVersion, vmVersion()].filter(Boolean));
   try {
     for (const name of fs.readdirSync(vmRoot())) {
-      if (!keep.has(name) && !name.startsWith(".")) fs.rmSync(path.join(vmRoot(), name), { recursive: true, force: true }); // 跳过 .build-<arch> 构建暂存
+      if (!keep.has(name) && !name.startsWith(".")) fs.rmSync(path.join(vmRoot(), name), { recursive: true, force: true }); // skip .build-<arch> build staging
     }
   } catch { /* ignore */ }
 }
 
-// 首次运行从 CDN 下载 VM 磁盘 + 内核（rootfs.qcow2 / Image / initrd.img）到 vd（含版本 vm/<id>/，无 arch 段）；已存在则跳过。
-// 版本 = 本机架构的 docker 镜像 ID 短哈希，换 ID 即换目录 → 触发重新下载并清理旧版本（版本失效）。
-// 进度经 onProgress(pct, msg) 上报给 engine.mjs（广播 UI）。.part → rename 原子落盘，中断不留半成品。
+// On first run, download the VM disk + kernel (rootfs.qcow2 / Image / initrd.img) from the CDN into vd (versioned vm/<id>/, no arch segment); skipped if already present.
+// Version = short hash of the docker image ID for this machine's arch; changing the ID changes the directory -> triggers a re-download and prunes old versions (version invalidated).
+// Progress is reported to engine.mjs via onProgress(pct, msg) (broadcast to the UI). .part -> rename for atomic write, so an interruption leaves no half-finished file.
 async function ensureRootfs(onProgress, forceConfigured = false) {
   const arch = guestArch();
   const configured = vmVersion(arch);
-  if (!configured) throw new Error("VM_VERSION 未配置本机架构（先 build:rootfs + publish:rootfs）");
-  const version = bootVersion(forceConfigured); // 用旧镜像启动不下载；首次/更新则 = configured（触发下载）
+  if (!configured) throw new Error("VM_VERSION has no entry for this machine's arch (run build:rootfs + publish:rootfs first)");
+  const version = bootVersion(forceConfigured); // booting from the old image does not download; first run/update = configured (triggers download)
   const vd = path.join(vmRoot(), version);
   const missing = VM_FILES.filter((f) => !fs.existsSync(path.join(vd, f)));
-  if (!missing.length) { pruneOldVmVersions(version); onProgress?.(100, "运行环境已就绪（无需下载）"); return; } // 已下载：清理陈旧后告知 UI
-  // 需下载：仅「首次运行（无任何镜像）」或「用户点更新（forceConfigured）」时发生，此时 version === configured。
+  if (!missing.length) { pruneOldVmVersions(version); onProgress?.(100, "Runtime environment ready (no download needed)"); return; } // already downloaded: prune stale then notify the UI
+  // Download needed: only happens on "first run (no image at all)" or "user clicks update (forceConfigured)", where version === configured.
   fs.mkdirSync(vd, { recursive: true });
   let total = 0;
   for (const f of missing) total += await headSize(`${VM_CDN}/vm/${arch}/${version}/${f}`);
-  // 断点续传：已存在的 .part 计入已完成进度（服务器 206 只回传剩余字节，不再经 onChunk 报告）。
+  // Resumable download: an existing .part counts toward completed progress (the server's 206 only returns the remaining bytes, no longer reported via onChunk).
   let done = 0;
   for (const f of missing) { const p = path.join(vd, f + ".part"); if (fs.existsSync(p)) done += fs.statSync(p).size; }
-  const report = () => onProgress?.(total ? Math.min(99, Math.floor((done / total) * 100)) : null, `下载运行环境 ${(done / 1048576).toFixed(0)}/${(total / 1048576).toFixed(0)} MB`);
-  report(); // 初始进度（含已续传部分）
+  const report = () => onProgress?.(total ? Math.min(99, Math.floor((done / total) * 100)) : null, `Downloading runtime environment ${(done / 1048576).toFixed(0)}/${(total / 1048576).toFixed(0)} MB`);
+  report(); // initial progress (including any already-resumed part)
   for (const f of missing) {
     const tmp = path.join(vd, f + ".part");
     await httpDownload(`${VM_CDN}/vm/${arch}/${version}/${f}`, tmp, (n) => { done += n; report(); });
     fs.renameSync(tmp, path.join(vd, f));
   }
-  pruneOldVmVersions(version); // 下载完成后再清理旧镜像（更新时 version=configured → 删掉旧版本，释放磁盘）
-  onProgress?.(100, "运行环境就绪");
+  pruneOldVmVersions(version); // prune old images after the download completes (on update version=configured -> delete the old version, free disk)
+  onProgress?.(100, "Runtime environment ready");
 }
 function headSize(url, redirs = 5) {
   return new Promise((resolve, reject) => {
@@ -305,7 +306,7 @@ function headSize(url, redirs = 5) {
     }).on("error", reject).end();
   });
 }
-// 断点续传：已有 .part → 发 Range: bytes=<have>-；206 追加写、200（服务器忽略 Range）从头覆盖。
+// Resumable download: existing .part -> send Range: bytes=<have>-; 206 appends, 200 (server ignores Range) overwrites from the start.
 function httpDownload(url, dest, onChunk, redirs = 5) {
   return new Promise((resolve, reject) => {
     const have = fs.existsSync(dest) ? fs.statSync(dest).size : 0;
@@ -313,7 +314,7 @@ function httpDownload(url, dest, onChunk, redirs = 5) {
     https.get(url, opts, (res) => {
       if ([301, 302, 303, 307, 308].includes(res.statusCode) && res.headers.location && redirs > 0) { res.resume(); return resolve(httpDownload(res.headers.location, dest, onChunk, redirs - 1)); }
       if (res.statusCode !== 200 && res.statusCode !== 206) { res.resume(); return reject(new Error(`GET ${url} → ${res.statusCode}`)); }
-      const resuming = res.statusCode === 206; // 服务器接受续传；200 表示忽略 Range，从头覆盖
+      const resuming = res.statusCode === 206; // server accepts resume; 200 means it ignored Range and overwrites from the start
       const ws = fs.createWriteStream(dest, { flags: resuming ? "a" : "w" });
       res.on("data", (c) => onChunk?.(c.length));
       res.pipe(ws);
@@ -324,14 +325,14 @@ function httpDownload(url, dest, onChunk, redirs = 5) {
 }
 
 async function boot(onProgress, forceConfigured = false) {
-  await ensureRootfs(onProgress, forceConfigured); // 首次运行下载镜像；forceConfigured=更新（下载目标版本）
+  await ensureRootfs(onProgress, forceConfigured); // first run downloads the image; forceConfigured=update (downloads the target version)
   const { vd, rootfs } = dirs(forceConfigured);
   if (!fs.existsSync(rootfs)) throw new Error(`rootfs not found: ${rootfs}`);
   if (!fs.existsSync(path.join(vd, "Image")) || !fs.existsSync(path.join(vd, "initrd.img")))
     throw new Error(`kernel not found: need Image + initrd.img next to ${rootfs}`);
-  onProgress?.(null, "正在启动运行环境…"); // 镜像就绪 → 进入启动阶段（QEMU 引导，无细粒度进度，UI 显示不确定态）
+  onProgress?.(null, "Starting the runtime environment..."); // image ready -> enter the boot phase (QEMU boot, no fine-grained progress, UI shows an indeterminate state)
   fs.mkdirSync(vd, { recursive: true });
-  // 抛弃式 overlay：基镜像保持干净，写入停机即弃。
+  // Throwaway overlay: the base image stays clean, writes are discarded on shutdown.
   const overlay = path.join(vd, "run.qcow2");
   const imgBin = qemuBin().replace(/qemu-system-[^/\\]+(\.exe)?$/, isWin ? "qemu-img.exe" : "qemu-img");
   fs.rmSync(overlay, { force: true });
@@ -340,28 +341,28 @@ async function boot(onProgress, forceConfigured = false) {
     p.on("exit", (c) => (c ? rej(new Error(`qemu-img exit ${c}`)) : res()));
     p.on("error", rej);
   });
-  // 捕获 qemu 自身 stdout/stderr 到 vd/qemu.log（原为 stdio:"ignore"，进程崩溃时无从查因）。
-  // 这里是「宿主侧」qemu 的输出（HVF 报错、断言、休眠唤醒失败等）；guest 内核/systemd 输出另见 console.log。
+  // Capture qemu's own stdout/stderr to vd/qemu.log (was stdio:"ignore", leaving no way to diagnose a process crash).
+  // This is the "host-side" qemu output (HVF errors, assertions, sleep/wake failures, etc.); the guest kernel/systemd output is in console.log instead.
   const qlog = fs.createWriteStream(path.join(vd, "qemu.log"), { flags: "a" });
-  try { qlog.write(`\n===== qemu 启动 ${new Date().toISOString()} =====\n`); } catch { /* ignore */ }
+  try { qlog.write(`\n===== qemu started ${new Date().toISOString()} =====\n`); } catch { /* ignore */ }
   const proc = spawn(qemuBin(), qemuArgs(vd, overlay), { stdio: ["ignore", "pipe", "pipe"] });
   proc.stdout.on("data", (b) => { try { qlog.write(b); } catch { /* ignore */ } });
   proc.stderr.on("data", (b) => { try { qlog.write(b); } catch { /* ignore */ } });
-  const exitCb = onExitCb; // 绑定本 proc 启动时的回调（重启后新旧 proc 各自对应，见 engine.disposing 守卫）
+  const exitCb = onExitCb; // bind the callback at the time this proc starts (after a restart, old and new procs each correspond to their own; see the engine.disposing guard)
   proc.on("exit", (code, signal) => {
-    try { qlog.write(`\n===== qemu 退出 code=${code} signal=${signal ?? "-"} @ ${new Date().toISOString()} =====\n`); qlog.end(); } catch { /* ignore */ }
+    try { qlog.write(`\n===== qemu exited code=${code} signal=${signal ?? "-"} @ ${new Date().toISOString()} =====\n`); qlog.end(); } catch { /* ignore */ }
     vm = null; try { ninep?.close(); } catch {} ninep = null;
     try { exitCb?.(code, signal); } catch { /* ignore */ }
   });
   const ports = await qmp({ port: QMP_PORT });
-  const guest = await guestAgent({ port: GA_PORT }); // 内含 guest 就绪等待
+  const guest = await guestAgent({ port: GA_PORT }); // includes waiting for the guest to be ready
   vm = { proc, ports, guest };
   if (isWin) await winShareMount(guest); // Windows host share: 9p-over-tcp (no virtio-9p)
   return vm;
 }
 
-/** engine.mjs 调用：启动长期 VM。onProgress(pct,msg)：首次运行下载 VM 磁盘/内核的进度回调。
- *  forceConfigured=true：用户「更新」——下载 versions.json 目标版本并切换。 */
+/** Called by engine.mjs: start the long-lived VM. onProgress(pct,msg): progress callback for downloading the VM disk/kernel on first run.
+ *  forceConfigured=true: user "update" -- download the versions.json target version and switch to it. */
 export async function provision(rootHost, onProgress, extras = [], forceConfigured = false) {
   homeRoot = path.resolve(rootHost);
   extraRoots = [];
@@ -369,7 +370,7 @@ export async function provision(rootHost, onProgress, extras = [], forceConfigur
   await boot(onProgress, forceConfigured);
 }
 
-// ── 前台执行 ─────────────────────────────────────────────────────────────────
+// ── Foreground execution ─────────────────────────────────────────────────────────────────
 async function degradeRun(cmd, opts, reason) {
   if (!degraded) {
     degraded = reason;
@@ -378,13 +379,13 @@ async function degradeRun(cmd, opts, reason) {
   const r = await native.run(cmd, opts);
   if (!degradeNoticeShown) {
     degradeNoticeShown = true;
-    const hint = `（提示：QEMU 沙箱不可用——${reason}。已在宿主机直接执行本次及后续命令。）`;
+    const hint = `(Note: the QEMU sandbox is unavailable -- ${reason}. This and subsequent commands have been run directly on the host.)`;
     return { ...r, stderr: r.stderr ? `${r.stderr}\n${hint}` : hint };
   }
   return r;
 }
 
-/** 前台执行：guest 内 bwrap 限定到挂载集，bash -c cmd，带超时；不抛异常。 */
+/** Foreground execution: inside the guest, bwrap confined to the mount set, bash -c cmd, with a timeout; never throws. */
 export async function run(cmd, opts = {}) {
   const { cwd, timeoutMs, maxBuffer } = opts;
   if (degraded) return degradeRun(cmd, opts, degraded);
@@ -402,7 +403,7 @@ export async function run(cmd, opts = {}) {
   }
 }
 
-// ── 后台长驻服务：guest 内运行 + QMP hostfwd 转发端口到宿主 ──────────────────────
+// ── Background long-lived services: run inside the guest + QMP hostfwd forwards ports to the host ──────────────────────
 const READY = /(?:localhost|127\.0\.0\.1|0\.0\.0\.0):\d+|listening|compiled|ready|started|running at/i;
 const pickPort = (s) => {
   const m = s.match(/https?:\/\/(?:localhost|127\.0\.0\.1|0\.0\.0\.0):(\d+)/i);
@@ -410,8 +411,8 @@ const pickPort = (s) => {
 };
 
 /**
- * 在 guest 内后台启动长驻命令（bwrap 限定 + 允许网络），扫描早期输出取端口，QMP hostfwd
- * 转发到宿主同端口，返回宿主可达 URL。停止时一并撤销转发。启动通道异常则退回 native。
+ * Start a long-lived command in the background inside the guest (bwrap-confined + network allowed), scan early output for a port, QMP hostfwd
+ * to the same port on the host, and return a host-reachable URL. On stop, the forward is removed too. If the launch channel fails, falls back to native.
  */
 export async function startBackground(cmd, opts = {}) {
   if (degraded || !vm) return native.startBackground(cmd, opts);
@@ -419,7 +420,7 @@ export async function startBackground(cmd, opts = {}) {
   ensureRoot(cwd);
   const log = `/tmp/zx-svc-${++svcSeq}.log`;
   const flags = bwrapFlags(cwd).map(shq).join(" ");
-  // SVC_CMD 经 guest-exec env 传入（execve 直传，不过 shell），"$SVC_CMD" 以整串作为 bash -lc 参数。
+  // SVC_CMD is passed via the guest-exec env (execve directly, no shell), and "$SVC_CMD" is used as a single whole string argument to bash -lc.
   const script =
     `setsid /usr/bin/bwrap ${flags} -- /bin/bash -lc "$SVC_CMD" >${shq(log)} 2>&1 </dev/null & echo $!`;
   let gpid = 0;
@@ -430,7 +431,7 @@ export async function startBackground(cmd, opts = {}) {
     return native.startBackground(cmd, opts);
   }
 
-  // 早期就绪扫描：读日志，命中 READY / 提取端口 / 8s 上限（与 native 相同节奏）。
+  // Early readiness scan: read the log, match READY / extract the port / 8s cap (same cadence as native).
   let out = "";
   let guestPort = 0;
   const t0 = Date.now();
@@ -439,14 +440,14 @@ export async function startBackground(cmd, opts = {}) {
       const r = await vm.guest.exec("/bin/cat", [log]);
       out = r.out || out;
     } catch {
-      /* 日志尚未生成 */
+      /* log not generated yet */
     }
     guestPort = pickPort(out);
     if (guestPort || READY.test(out)) break;
     await new Promise((r) => setTimeout(r, 300));
   }
 
-  // 端口转发：guest 端口 → 宿主同端口（需 guest 监听 0.0.0.0，SLIRP 经网关 10.0.2.x 到达）。
+  // Port forwarding: guest port -> same host port (the guest must listen on 0.0.0.0, reached via the SLIRP gateway 10.0.2.x).
   let url = "";
   if (guestPort) {
     try {
@@ -461,26 +462,26 @@ export async function startBackground(cmd, opts = {}) {
 
   const alive = gpid > 0;
   const headline = alive
-    ? `✅ 服务已在沙箱内后台启动${url ? `，并转发到宿主：${url}` : guestPort ? `（guest 端口 ${guestPort}，转发失败）` : ""}。`
-    : "⚠️ 进程未能启动。";
+    ? `✅ Service started in the background inside the sandbox${url ? `, and forwarded to the host: ${url}` : guestPort ? ` (guest port ${guestPort}, forwarding failed)` : ""}.`
+    : "⚠️ The process failed to start.";
   return (
-    `${headline}\n\n--- 启动输出 ---\n${(out.trim() || "(暂无输出)").slice(-4000)}\n` +
+    `${headline}\n\n--- Startup output ---\n${(out.trim() || "(no output yet)").slice(-4000)}\n` +
     (url
-      ? `\n说明：服务运行在隔离沙箱内，已端口转发，宿主可达 ${url}（用它预览）。若访问不到，请让服务监听 0.0.0.0。请勿重复启动。`
+      ? `\nNote: the service runs inside an isolated sandbox with its port forwarded, so the host can reach ${url} (use it to preview). If it's unreachable, make the service listen on 0.0.0.0. Do not start it again.`
       : alive
-        ? "\n说明：服务在沙箱内后台运行；未探测到端口/未转发。若需宿主访问，请用 expose_port，并让服务监听 0.0.0.0。"
+        ? "\nNote: the service runs in the background inside the sandbox; no port was detected/forwarded. If you need host access, use expose_port and make the service listen on 0.0.0.0."
         : "")
   );
 }
 
-/** 停止后台服务（按 hostPort）：撤销 hostfwd + 结束 guest 进程组。 */
+/** Stop a background service (by hostPort): remove the hostfwd + terminate the guest process group. */
 export function stopProcess(pid) {
   const key = Number(pid);
   const p = procs.get(key);
   if (!p) return false;
   procs.delete(key);
   vm?.ports.removePort(p.hostPort).catch(() => {});
-  // setsid 使 gpid 为进程组长；kill 负号结束整组，失败退回单进程。
+  // setsid makes gpid the process-group leader; a negative kill terminates the whole group, falling back to the single process on failure.
   vm?.guest
     .exec("/bin/kill", ["-TERM", `-${p.gpid}`])
     .catch(() => vm?.guest.exec("/bin/kill", ["-TERM", String(p.gpid)]).catch(() => {}));
@@ -496,7 +497,7 @@ export function stopAll() {
   for (const key of [...procs.keys()]) stopProcess(key);
 }
 
-/** 显式端口转发（供 LLM 的 expose_port 工具调用）：guest 端口 → 宿主端口，返回可达 URL。 */
+/** Explicit port forwarding (for the LLM's expose_port tool): guest port -> host port, returns a reachable URL. */
 export async function exposePort(guestPort, hostPort = guestPort) {
   if (!vm) throw new Error("sandbox not running");
   await vm.ports.addPort(hostPort, guestPort);
@@ -508,16 +509,16 @@ export async function unexposePort(hostPort) {
   return true;
 }
 
-/** 预热：把新目录并入挂载集（无需重建，广播根已全覆盖）。 */
+/** Prewarm: merge a new directory into the mount set (no rebuild needed, the broadcast root already covers everything). */
 export function prewarm(cwd) {
   if (!degraded && cwd) ensureRoot(cwd);
 }
 
-/** 退出清理：撤销所有转发 + 关停 VM。 */
+/** Exit cleanup: remove all forwards + shut down the VM. */
 export function dispose() {
-  try { stopAll(); } catch { /* 尽力而为 */ }
-  try { ninep?.close(); } catch { /* 尽力而为 */ } finally { ninep = null; }
-  try { vm?.ports.quit(); } catch { /* 尽力而为 */ }
-  try { vm?.proc.kill(); } catch { /* 尽力而为 */ }
+  try { stopAll(); } catch { /* best effort */ }
+  try { ninep?.close(); } catch { /* best effort */ } finally { ninep = null; }
+  try { vm?.ports.quit(); } catch { /* best effort */ }
+  try { vm?.proc.kill(); } catch { /* best effort */ }
   vm = null;
 }

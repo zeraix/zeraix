@@ -8,14 +8,14 @@ import { ACCENTS } from "./theme-config";
 import { applyThemeWithTransition } from "./theme-transition";
 
 const MODES = [
-  { key: "light", label: "浅色", icon: Sun },
-  { key: "dark", label: "深色", icon: Moon },
-  { key: "system", label: "系统", icon: Monitor },
+  { key: "light", label: "Light", icon: Sun },
+  { key: "dark", label: "Dark", icon: Moon },
+  { key: "system", label: "System", icon: Monitor },
 ] as const;
 
 /**
- * 是否已在客户端水合完成。基于 useSyncExternalStore：
- * 服务端/水合前返回 false，水合后返回 true —— 无需在 effect 中 setState。
+ * Whether client-side hydration has completed. Based on useSyncExternalStore:
+ * returns false on the server / before hydration, true after hydration -- no need to setState in an effect.
  */
 const noopSubscribe = () => () => {};
 const useMounted = () =>
@@ -26,15 +26,15 @@ const useMounted = () =>
   );
 
 /**
- * 外观设置：主题模式（明/暗/系统）+ 强调色
- * 放在设置抽屉中使用。
+ * Appearance settings: theme mode (light/dark/system) + accent color.
+ * Used inside the settings drawer.
  */
 export default function ThemeSettings() {
   const { theme, setTheme, resolvedTheme } = useTheme();
   const { accent, setAccent } = useAccent();
   const mounted = useMounted();
 
-  /** 带圆形扩散过渡动画的主题切换；明暗外观不变时（如 dark -> system 且系统为暗色）直接切换 */
+  /** Theme switch with a circular-expansion transition animation; switches directly when the light/dark appearance doesn't change (e.g. dark -> system while the system is dark) */
   const changeTheme = (
     key: (typeof MODES)[number]["key"],
     e: React.MouseEvent<HTMLButtonElement>,
@@ -48,7 +48,7 @@ export default function ThemeSettings() {
       setTheme(key);
       return;
     }
-    // 扩散原点取按钮中心（键盘触发时 clientX/Y 为 0，用元素位置更稳定）
+    // Use the button center as the expansion origin (clientX/Y is 0 when triggered by keyboard, so the element position is more reliable)
     const rect = e.currentTarget.getBoundingClientRect();
     applyThemeWithTransition(targetDark, () => setTheme(key), {
       x: rect.left + rect.width / 2,
@@ -56,16 +56,16 @@ export default function ThemeSettings() {
     });
   };
 
-  // 避免明暗状态在客户端水合前不一致导致的闪烁/告警
+  // Avoid the flicker/warning caused by the light/dark state being inconsistent before client-side hydration
   if (!mounted) return null;
 
   return (
     <div className="drawer-section">
-      <h4 className="text-sm font-semibold mb-3">外观</h4>
+      <h4 className="text-sm font-semibold mb-3">Appearance</h4>
 
-      {/* 主题模式 */}
+      {/* Theme mode */}
       <div className="mb-4">
-        <p className="text-xs text-gray-500 mb-2">主题模式</p>
+        <p className="text-xs text-gray-500 mb-2">Theme mode</p>
         <div className="grid grid-cols-3 gap-2">
           {MODES.map(({ key, label, icon: Icon }) => (
             <button
@@ -85,9 +85,9 @@ export default function ThemeSettings() {
         </div>
       </div>
 
-      {/* 强调色 */}
+      {/* Accent color */}
       <div>
-        <p className="text-xs text-gray-500 mb-2">主题色</p>
+        <p className="text-xs text-gray-500 mb-2">Accent color</p>
         <div className="flex items-center gap-3">
           {ACCENTS.map((a) => (
             <button

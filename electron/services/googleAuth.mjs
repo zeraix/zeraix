@@ -1,18 +1,18 @@
 /**
- * Google Sign-In —— 主进程 OAuth 流程（设计文档 docs/google-signin-frontend.md）。
+ * Google Sign-In — main-process OAuth flow (design doc docs/google-signin-frontend.md).
  *
- * 桌面客户端是「公开客户端」，Google 禁止在内嵌 webview 里跑登录（disallowed_useragent），
- * 因此走 RFC 8252 原生应用授权码流程：系统浏览器 + 环回地址回跳 + PKCE。
+ * The desktop client is a "public client"; Google forbids running the login inside an embedded webview (disallowed_useragent),
+ * so we use the RFC 8252 native-app authorization-code flow: system browser + loopback redirect + PKCE.
  *
- * 本模块只负责「拿到 Google 的 id_token」：
- *   1. 生成 PKCE code_verifier/code_challenge 与随机 state；
- *   2. 在 127.0.0.1:0 起一个一次性环回 http 服务，由分配到的端口推出 redirect_uri；
- *   3. shell.openExternal 打开 Google 同意页（scope: openid email profile）；
- *   4. 环回回调里校验 state、取 code，带 code_verifier 到 token 端点换取 id_token；
- *   5. 关闭环回服务，把 id_token 交回渲染层（渲染层再 POST /auth/google）。
+ * This module is only responsible for "obtaining Google's id_token":
+ *   1. Generate the PKCE code_verifier/code_challenge and a random state;
+ *   2. Start a one-shot loopback http server on 127.0.0.1:0, and derive the redirect_uri from the assigned port;
+ *   3. shell.openExternal opens Google's consent page (scope: openid email profile);
+ *   4. In the loopback callback, verify state, take the code, and exchange it (with code_verifier) at the token endpoint for an id_token;
+ *   5. Close the loopback server and hand the id_token back to the renderer (which then POSTs /auth/google).
  *
- * 安全：PKCE + 环回防本机授权码截获；state 防 CSRF；不在包体里放机密——桌面客户端本就公开，
- * 真正的保护是 PKCE 与后端对 id_token 的独立校验，而非「随包发出的 secret」。
+ * Security: PKCE + loopback prevent local authorization-code interception; state guards against CSRF; no secrets are shipped in the bundle—the desktop client is public by nature,
+ * the real protection is PKCE plus the backend's independent validation of the id_token, not a "secret shipped with the package".
  */
 import http from "node:http";
 import crypto from "node:crypto";
@@ -25,33 +25,33 @@ import { DEEP_LINK_SCHEME } from "./deepLink.mjs";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
-/** 读取随包分发的 Google 凭据兜底 JSON（构建前由 scripts/gen-google-defaults.mjs 生成；缺失则空）。 */
+/** Read the bundled Google credential fallback JSON (generated before build by scripts/gen-google-defaults.mjs; empty if missing). */
 function readBundledGoogleDefaults() {
   try {
     return JSON.parse(fs.readFileSync(path.join(__dirname, "google-defaults.json"), "utf8")) || {};
   } catch {
-    return {}; // 文件不存在 / 解析失败：视为无兜底
+    return {}; // File missing / parse failure: treat as no fallback
   }
 }
 
 const AUTH_ENDPOINT = "https://accounts.google.com/o/oauth2/v2/auth";
 const TOKEN_ENDPOINT = "https://oauth2.googleapis.com/token";
 const SCOPE = "openid email profile";
-/** 环回服务等待用户在浏览器里完成授权的上限，超时即拆除并按取消处理。 */
+/** Upper bound for the loopback server to wait for the user to finish authorizing in the browser; on timeout, tear down and treat as canceled. */
 const FLOW_TIMEOUT_MS = 5 * 60 * 1000;
 
 /**
- * Desktop 客户端凭据。客户端 id 仅用于构造授权 URL 与换取 code —— 不是机密（PKCE 才是保护，
- * 后端另行校验 id_token 的 aud），因此可安全放入随包分发的 app.config。
+ * Desktop client credentials. The client id is used only to build the authorization URL and exchange the code — it is not a secret (PKCE is the protection,
+ * and the backend separately validates the id_token's aud), so it can safely live in the bundled app.config.
  *
- * 取值优先级：环境变量（dev 下经 loadEnv 从 .env* 灌入）> app.config 的 [google] 段 >
- * 随包兜底 JSON（google-defaults.json，构建时由本机 .env 生成——让打包版开箱即用）。
- * 前二者便于本地开发 / 用户覆盖；未配置 client_id 时抛错。
+ * Resolution order: environment variable (in dev, injected from .env* via loadEnv) > the [google] section of app.config >
+ * bundled fallback JSON (google-defaults.json, generated at build time from the local machine's .env — so packaged builds work out of the box).
+ * The first two are convenient for local development / user overrides; throws when client_id is not configured.
  *
- * client_secret：Google 的「Desktop app」客户端仍会签发 secret，且其 token 端点在换取
- * authorization code 时【要求】带上（即便配合 PKCE）。该 secret 对已分发的桌面客户端
- * 「不作机密处理」（无法真正保密，安全性由 PKCE + redirect 限制 + 后端校验 id_token 承担），
- * 故可随包放入 app.config。缺失时 token 交换会以 invalid_client 失败。
+ * client_secret: Google's "Desktop app" clients still issue a secret, and its token endpoint [requires] it
+ * when exchanging the authorization code (even together with PKCE). For an already-distributed desktop client this secret
+ * is "not treated as a secret" (it cannot truly be kept secret; security is carried by PKCE + redirect restriction + backend validation of the id_token),
+ * so it can be shipped in app.config. When missing, the token exchange fails with invalid_client.
  */
 function readClientConfig() {
   const google = getAppConfig()?.google || {};
@@ -62,18 +62,18 @@ function readClientConfig() {
     process.env.GOOGLE_OAUTH_CLIENT_SECRET || google.client_secret || bundled.client_secret || "";
   if (!clientId) {
     throw new Error(
-      "未配置 Google OAuth 客户端 id（设置环境变量 GOOGLE_OAUTH_CLIENT_ID，或 app.config 的 [google] client_id）",
+      "Google OAuth client id is not configured (set the GOOGLE_OAUTH_CLIENT_ID environment variable, or [google] client_id in app.config)",
     );
   }
   return { clientId, clientSecret };
 }
 
-/** base64url 编码（无填充），PKCE / state 用。 */
+/** base64url encoding (no padding), used for PKCE / state. */
 function base64url(buf) {
   return buf.toString("base64").replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 }
 
-/** 生成 PKCE 参数与随机 state。 */
+/** Generate the PKCE parameters and a random state. */
 function createPkce() {
   const codeVerifier = base64url(crypto.randomBytes(32));
   const codeChallenge = base64url(crypto.createHash("sha256").update(codeVerifier).digest());
@@ -81,22 +81,22 @@ function createPkce() {
   return { codeVerifier, codeChallenge, state };
 }
 
-/** 回调页面：授权完成后浏览器里显示，提示用户回到应用。 */
+/** Callback page: shown in the browser after authorization completes, prompting the user to return to the app. */
 function callbackHtml(ok) {
   const title = ok ? "Sign-in successful" : "Sign-in not completed";
   const tip = ok ? "You're all set! Return to the Zeraix app to continue." : "Authorization was not completed. Please return to the app and try again.";
-  // 成功：品牌蓝绿色勾；失败：琥珀色感叹号。图标用内联 SVG，自包含无外链。
+  // Success: brand teal check; failure: amber exclamation. Icons use inline SVG, self-contained with no external links.
   const accent = ok ? "#34d3a6" : "#f5a524";
   const icon = ok
     ? `<path d="M5 13.5l4.5 4.5L19 8" fill="none" stroke="currentColor" stroke-width="2.4"
         stroke-linecap="round" stroke-linejoin="round"/>`
     : `<path d="M12 7.5v6" fill="none" stroke="currentColor" stroke-width="2.4"
         stroke-linecap="round"/><circle cx="12" cy="17" r="1.4" fill="currentColor"/>`;
-  // 「打开应用」按钮指向自定义协议深链，点击由操作系统把 Zeraix 带到前台。
-  // 浏览器多会拦截无用户手势的自动协议跳转，故以按钮为主要入口（不做 onload 自动跳转）。
+  // The "Open app" button points to a custom-protocol deep link; clicking it lets the OS bring Zeraix to the foreground.
+  // Browsers usually block automatic protocol redirects without a user gesture, so the button is the primary entry point (no automatic onload redirect).
   const btnLabel = ok ? "Open Zeraix" : "Return to Zeraix";
   const deepLink = `${DEEP_LINK_SCHEME}://auth-complete?ok=${ok ? "1" : "0"}`;
-  return `<!doctype html><html lang="zh"><head><meta charset="utf-8">
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>${title} · Zeraix</title>
 <style>
@@ -142,7 +142,7 @@ p{font-size:14px;line-height:1.6;opacity:.62;margin:0}
 </div></body></html>`;
 }
 
-/** 用 authorization code + code_verifier 到 Google token 端点换取 id_token。 */
+/** Exchange the authorization code + code_verifier at Google's token endpoint for an id_token. */
 async function exchangeCode({ code, codeVerifier, redirectUri, clientId, clientSecret }) {
   const body = new URLSearchParams({
     client_id: clientId,
@@ -151,7 +151,7 @@ async function exchangeCode({ code, codeVerifier, redirectUri, clientId, clientS
     grant_type: "authorization_code",
     redirect_uri: redirectUri,
   });
-  // Desktop 客户端若签发了非机密 secret，token 交换需带上；未配置则省略。
+  // If the Desktop client was issued a non-secret secret, the token exchange must include it; omit when not configured.
   if (clientSecret) body.set("client_secret", clientSecret);
 
   const res = await fetch(TOKEN_ENDPOINT, {
@@ -162,18 +162,18 @@ async function exchangeCode({ code, codeVerifier, redirectUri, clientId, clientS
   const data = await res.json().catch(() => ({}));
   if (!res.ok || !data.id_token) {
     const detail = data.error_description || data.error || `HTTP ${res.status}`;
-    throw new Error(`换取 id_token 失败：${detail}`);
+    throw new Error(`Failed to exchange id_token: ${detail}`);
   }
   return data.id_token;
 }
 
-// 单飞：同一时刻只允许一个 OAuth 流程（防止双击按钮起多个环回服务 / 多个浏览器窗口）。
+// Single-flight: only one OAuth flow is allowed at a time (prevents a double-clicked button from starting multiple loopback servers / browser windows).
 let activeFlow = null;
 
 /**
- * 运行一次 Google 登录流程，解析为 { idToken }。用户关闭浏览器 / 超时 / 拒绝授权时，
- * 解析为 { canceled:true }；配置缺失或换取失败时 reject（Error）。
- * 重复调用（已有流程在跑）时复用同一个 Promise。
+ * Run one Google sign-in flow, resolving to { idToken }. When the user closes the browser / times out / declines authorization,
+ * resolves to { canceled:true }; rejects (Error) when config is missing or the exchange fails.
+ * Repeated calls (while a flow is already running) reuse the same Promise.
  */
 export function runGoogleSignIn() {
   if (activeFlow) return activeFlow;
@@ -183,7 +183,7 @@ export function runGoogleSignIn() {
     try {
       ({ clientId, clientSecret } = readClientConfig());
     } catch (err) {
-      // 配置缺失属早退失败：必须先解除单飞，否则后续调用会复用这个已拒绝的 Promise。
+      // Missing config is an early-exit failure: single-flight must be cleared first, otherwise later calls would reuse this already-rejected Promise.
       activeFlow = null;
       reject(err);
       return;
@@ -194,7 +194,7 @@ export function runGoogleSignIn() {
     let timer = null;
 
     const server = http.createServer(async (req, res) => {
-      // 只处理带 code/state 的回调路径，忽略浏览器的 favicon 等杂项请求。
+      // Only handle callback paths carrying code/state; ignore the browser's favicon and other miscellaneous requests.
       const url = new URL(req.url, "http://127.0.0.1");
       if (!url.searchParams.has("code") && !url.searchParams.has("error")) {
         res.statusCode = 204;
@@ -206,20 +206,20 @@ export function runGoogleSignIn() {
       const code = url.searchParams.get("code");
       const returnedState = url.searchParams.get("state");
 
-      // 用户在同意页取消 / 拒绝：Google 回跳带 error（如 access_denied）。
+      // User canceled / declined on the consent page: Google redirects back with error (e.g. access_denied).
       if (error) {
-        console.warn("[google-auth] Google 回跳错误：", error);
+        console.warn("[google-auth] Google redirect error:", error);
         res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
         res.end(callbackHtml(false));
         finish({ canceled: true });
         return;
       }
-      // state 不匹配：疑似 CSRF，拒绝。
+      // state mismatch: suspected CSRF, reject.
       if (!returnedState || returnedState !== state) {
-        console.warn("[google-auth] state 校验失败：", { expected: state, got: returnedState });
+        console.warn("[google-auth] state validation failed:", { expected: state, got: returnedState });
         res.writeHead(400, { "Content-Type": "text/html; charset=utf-8" });
         res.end(callbackHtml(false));
-        finishError(new Error("state 校验失败（可能的 CSRF）"));
+        finishError(new Error("state validation failed (possible CSRF)"));
         return;
       }
 
@@ -236,16 +236,16 @@ export function runGoogleSignIn() {
         res.end(callbackHtml(true));
         finish({ idToken });
       } catch (err) {
-        // 换取 id_token 失败：把 Google 的具体错误打到主进程终端，便于定位
-        // （最常见：Desktop 客户端未带 client_secret → invalid_client / client_secret is missing）。
-        console.warn("[google-auth] 换取 id_token 失败：", err?.message || err);
+        // Failed to exchange id_token: print Google's specific error to the main-process terminal for easier diagnosis
+        // (most common: the Desktop client did not include client_secret → invalid_client / client_secret is missing).
+        console.warn("[google-auth] Failed to exchange id_token:", err?.message || err);
         res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
         res.end(callbackHtml(false));
         finishError(err instanceof Error ? err : new Error(String(err)));
       }
     });
 
-    // 清理：关闭环回服务、清超时、解除单飞。幂等。
+    // Cleanup: close the loopback server, clear the timeout, release single-flight. Idempotent.
     const cleanup = () => {
       if (timer) {
         clearTimeout(timer);
@@ -254,7 +254,7 @@ export function runGoogleSignIn() {
       try {
         server.close();
       } catch {
-        /* 已关闭 */
+        /* already closed */
       }
       activeFlow = null;
     };
@@ -273,7 +273,7 @@ export function runGoogleSignIn() {
 
     server.on("error", (err) => finishError(err));
 
-    // 环回地址必须显式绑 127.0.0.1（不用 localhost，避免 IPv6/hosts 解析差异）。
+    // The loopback address must bind 127.0.0.1 explicitly (not localhost, to avoid IPv6/hosts resolution differences).
     server.listen(0, "127.0.0.1", () => {
       const port = server.address().port;
       const redirectUri = `http://127.0.0.1:${port}`;
@@ -285,14 +285,14 @@ export function runGoogleSignIn() {
         code_challenge: codeChallenge,
         code_challenge_method: "S256",
         state,
-        // 每次都让用户选账号，避免静默复用上一个 Google 会话。
+        // Always let the user pick an account, to avoid silently reusing the previous Google session.
         prompt: "select_account",
       }).toString()}`;
 
-      // 超时兜底：用户迟迟不完成（关了浏览器 / 走开了）就拆除并按取消返回。
+      // Timeout fallback: if the user never finishes (closed the browser / walked away), tear down and return as canceled.
       timer = setTimeout(() => finish({ canceled: true }), FLOW_TIMEOUT_MS);
 
-      // 在系统浏览器打开同意页；打开失败（无可用浏览器）按错误返回。
+      // Open the consent page in the system browser; if opening fails (no available browser), return as an error.
       shell.openExternal(authUrl).catch((err) => finishError(err));
     });
   });
@@ -300,7 +300,7 @@ export function runGoogleSignIn() {
   return activeFlow;
 }
 
-/** 是否有正在进行的登录流程（渲染层做按钮禁用等 UI 状态时可用）。 */
+/** Whether a sign-in flow is in progress (useful for the renderer's UI state, e.g. disabling the button). */
 export function isGoogleSignInActive() {
   return activeFlow !== null;
 }

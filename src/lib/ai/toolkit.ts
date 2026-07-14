@@ -105,14 +105,14 @@ export function wsReadDir(relPath = ""): Promise<WsEntry[]> {
 export function wsReadFile(relPath: string): Promise<WsReadFileResult> {
   return (
     window.aiTools?.wsReadFile?.(relPath) ??
-    Promise.resolve({ ok: false as const, reason: "仅 Electron 应用内可用" })
+    Promise.resolve({ ok: false as const, reason: "Only available in the Electron app" })
   );
 }
 /** Save a workspace file (the user's direct edit in the editor). Returns failure outside Electron. */
 export function wsWriteFile(relPath: string, content: string): Promise<WsWriteResult> {
   return (
     window.aiTools?.wsWriteFile?.(relPath, content) ??
-    Promise.resolve({ ok: false, error: "仅 Electron 应用内可用" })
+    Promise.resolve({ ok: false, error: "Only available in the Electron app" })
   );
 }
 

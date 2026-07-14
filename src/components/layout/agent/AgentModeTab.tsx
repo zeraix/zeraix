@@ -10,9 +10,9 @@ import { clearAgentWorkdir, migrateLegacyAgentStorage, putStorage } from "@/lib/
 import { useT } from "@/lib/i18n";
 
 /**
- * 侧边栏顶部的模式切换：日常模式 / 开发模式。
- * 分段控件，带滑动指示器（参考 src/app/app/chat/components/ModeTab.tsx 的实现）。
- * 选择持久化到 localStorage，便于跨页面 / 重开后保留。
+ * Mode switch at the top of the sidebar: daily mode / dev mode.
+ * A segmented control with a sliding indicator (based on the implementation in src/app/app/chat/components/ModeTab.tsx).
+ * The selection is persisted to localStorage so it survives across pages / reopening.
  */
 
 const MODES: { id: AgentMode; labelKey: string; icon: React.ReactNode }[] = [
@@ -32,14 +32,14 @@ export default function AgentModeTab({
   const [indicator, setIndicator] = useState({ left: 0, width: 0 });
   const tabRefs = useRef<(HTMLButtonElement | null)[]>([]);
 
-  // 回填上次选择。
+  // Restore the last selection.
   useEffect(() => {
     migrateLegacyAgentStorage();
     const saved = getStorage(AGENT_MODE_KEY);
     if (saved === "daily" || saved === "dev") setActive(saved);
   }, []);
 
-  // 计算滑动指示器位置（DOM 更新后再测量）。
+  // Compute the sliding indicator position (measure after the DOM updates).
   useEffect(() => {
     requestAnimationFrame(() => {
       const i = MODES.findIndex((m) => m.id === active);
@@ -49,20 +49,20 @@ export default function AgentModeTab({
   }, [active]);
 
   const pick = (id: AgentMode) => {
-    if (id === active) return; // 仅在真正切换模式时处理
+    if (id === active) return; // Only act when the mode actually changes
     setActive(id);
     if (typeof window !== "undefined") {
       putStorage(AGENT_MODE_KEY, id);
-      // 通知同一标签页内的其它组件（如对话页）：storage 事件不会在本标签触发，故用自定义事件。
+      // Notify other components in the same tab (e.g. the conversation page): the storage event doesn't fire in the same tab, so use a custom event.
       window.dispatchEvent(new CustomEvent(MODE_CHANGE_EVENT, { detail: id }));
     }
-    clearAgentWorkdir(); // 切换模式 → 清空已选工作目录
+    clearAgentWorkdir(); // Switching mode -> clear the chosen working directory
     onChange?.(id);
   };
 
   return (
     <div className="relative flex rounded-xl bg-surface-muted p-1">
-      {/* 滑动背景指示器 */}
+      {/* Sliding background indicator */}
       <motion.div
         className="absolute top-1 bottom-1 rounded-lg bg-surface shadow-sm"
         animate={{ left: indicator.left, width: indicator.width }}

@@ -28,16 +28,18 @@ const fileNameOf = (url: string): string => {
 };
 
 export interface HoverVideoPlayerProps {
-  /** 视频地址 */
+  /** Video source URL */
   src: string;
-  /** 外层容器额外类名（默认填满父级、黑底） */
+  /** Extra class name for the outer container (fills the parent with a black background by default) */
   className?: string;
 }
 
 /**
- * 悬停播放视频卡片：默认展示首帧封面，鼠标悬停时加载并播放，移开后暂停回到封面。
- * 自带主题金色控制条（播放/进度/时间/静音/倍速/画中画/下载/全屏），替代浏览器原生控制条，
- * 在 Chromium/Electron 下外观一致。双击视频切换全屏。
+ * Hover-to-play video card: shows the first frame as a cover by default, loads and plays on hover,
+ * then pauses and returns to the cover when the pointer leaves.
+ * Comes with a themed gold control bar (play/progress/time/mute/speed/picture-in-picture/download/fullscreen)
+ * that replaces the browser's native controls for a consistent look under Chromium/Electron.
+ * Double-click the video to toggle fullscreen.
  */
 export default function HoverVideoPlayer({
   src,
@@ -50,10 +52,10 @@ export default function HoverVideoPlayer({
   const volHudTimerRef = useRef<number | null>(null);
   const rafRef = useRef<number | null>(null);
   const trackRef = useRef<HTMLDivElement>(null);
-  // 拖拽进度条时的标记：让 rAF 不要用视频实际时间覆盖拖拽位置
+  // Flag set while dragging the progress bar: keeps rAF from overwriting the drag position with the video's actual time
   const draggingRef = useRef(false);
   const [dragging, setDragging] = useState(false);
-  // 记录拖拽前是否在播放，松手后据此恢复播放
+  // Records whether playback was active before the drag, so it can be resumed on release
   const wasPlayingRef = useRef(false);
   const menuOpenRef = useRef(false);
   const [hovering, setHovering] = useState(false);
@@ -65,14 +67,14 @@ export default function HoverVideoPlayer({
   const [rate, setRate] = useState(1);
   const [menuOpen, setMenuOpen] = useState(false);
   const [pipOk, setPipOk] = useState(false);
-  // active：近期有鼠标活动（显示控制条与光标）；无活动 3 秒后置否
+  // active: recent mouse activity (shows the control bar and cursor); set to false after 3 seconds of inactivity
   const [active, setActive] = useState(true);
   const [volume, setVolume] = useState(1);
-  // volHud：调节音量时短暂显示的音量指示
+  // volHud: the volume indicator shown briefly while adjusting the volume
   const [volHud, setVolHud] = useState(false);
 
-  // 初始静音：悬停自动播放受浏览器策略限制，必须静音才允许无手势播放。
-  // React 的 muted 属性不一定生效，这里用命令式设置确保到位。同时探测画中画可用性。
+  // Initially muted: hover autoplay is subject to browser policy, which only allows gesture-free playback when muted.
+  // React's muted attribute doesn't always take effect, so set it imperatively to be sure. Also probe picture-in-picture availability.
   useEffect(() => {
     if (videoRef.current) videoRef.current.muted = true;
     setPipOk(
@@ -87,7 +89,7 @@ export default function HoverVideoPlayer({
     return () => document.removeEventListener("fullscreenchange", onFs);
   }, []);
 
-  // 卸载时清掉未触发的计时器，避免泄漏
+  // Clear any pending timers on unmount to avoid leaks
   useEffect(() => {
     return () => {
       if (clickTimerRef.current != null) clearTimeout(clickTimerRef.current);
@@ -96,7 +98,7 @@ export default function HoverVideoPlayer({
     };
   }, []);
 
-  // 短暂显示音量指示（1.2 秒后淡出）
+  // Briefly show the volume indicator (fades out after 1.2 seconds)
   const showVolHud = () => {
     setVolHud(true);
     if (volHudTimerRef.current != null) clearTimeout(volHudTimerRef.current);
@@ -106,13 +108,13 @@ export default function HoverVideoPlayer({
     }, 1200);
   };
 
-  // 让计时器回调读到最新的菜单开关状态（避免闭包过期）
+  // Keep the timer callback reading the latest menu-open state (avoids stale closures)
   useEffect(() => {
     menuOpenRef.current = menuOpen;
   }, [menuOpen]);
 
-  // 播放期间用 requestAnimationFrame 按帧读取真实进度，逐帧推进进度条，
-  // 比 timeupdate（每秒仅 ~4 次、会出现台阶感）平滑得多；暂停时停止以省资源。
+  // During playback, use requestAnimationFrame to read the real progress each frame and advance the progress bar frame by frame,
+  // which is far smoother than timeupdate (only ~4 times per second, which looks steppy); stop when paused to save resources.
   useEffect(() => {
     if (!playing) return;
     const tick = () => {
@@ -129,8 +131,8 @@ export default function HoverVideoPlayer({
     };
   }, [playing]);
 
-  // 标记鼠标活动：显示控制条与光标，并重置 3 秒空闲计时器。
-  // 仅在播放中、且菜单未打开时，空闲到时才隐藏。
+  // Mark mouse activity: show the control bar and cursor, and reset the 3-second idle timer.
+  // Only hide on idle timeout while playing and when the menu is not open.
   const markActive = () => {
     setActive(true);
     if (idleTimerRef.current != null) clearTimeout(idleTimerRef.current);
@@ -151,7 +153,7 @@ export default function HoverVideoPlayer({
   const handleEnter = () => {
     setHovering(true);
     markActive();
-    // 悬停即取得焦点（不滚动页面），让方向键无需额外点击即可生效
+    // Grab focus on hover (without scrolling the page) so the arrow keys work without an extra click
     wrapRef.current?.focus({ preventScroll: true });
     const v = videoRef.current;
     if (!v) return;
@@ -159,8 +161,8 @@ export default function HoverVideoPlayer({
     v.play().catch(() => {});
   };
   const handleLeave = () => {
-    if (isFs) return; // 全屏时不因鼠标移出而暂停
-    if (draggingRef.current) return; // 拖拽进度时不暂停/复位，避免打断拖动
+    if (isFs) return; // In fullscreen, don't pause just because the mouse left
+    if (draggingRef.current) return; // While dragging the progress bar, don't pause/reset so the drag isn't interrupted
     setHovering(false);
     setMenuOpen(false);
     clearIdle();
@@ -171,7 +173,7 @@ export default function HoverVideoPlayer({
     try {
       v.currentTime = 0;
     } catch {
-      // 元数据未就绪时设置 currentTime 可能抛错，忽略
+      // Setting currentTime before metadata is ready can throw; ignore it
     }
   };
 
@@ -188,7 +190,7 @@ export default function HoverVideoPlayer({
     setMuted(v.muted);
     showVolHud();
   };
-  // 统一设置音量：钳制到 [0,1]，音量为 0 即静音，>0 则取消静音
+  // Set the volume uniformly: clamp to [0,1]; a volume of 0 means muted, >0 unmutes
   const applyVolume = (next: number) => {
     const v = videoRef.current;
     if (!v) return;
@@ -198,7 +200,7 @@ export default function HoverVideoPlayer({
     setVolume(vol);
     setMuted(vol === 0);
   };
-  // 滚轮调节音量：上滚增大、下滚减小，每格 5%
+  // Adjust volume with the wheel: scroll up to increase, down to decrease, 5% per notch
   const onVolumeWheel = (e: React.WheelEvent) => {
     e.preventDefault();
     const base = muted ? 0 : volume;
@@ -206,7 +208,7 @@ export default function HoverVideoPlayer({
     showVolHud();
     markActive();
   };
-  // 根据指针横坐标定位到对应时间：立即更新显示进度（不等视频缓冲），让进度条跟手
+  // Seek to the time matching the pointer's x position: update the displayed progress immediately (without waiting for buffering) so the bar tracks the pointer
   const seekToClientX = (clientX: number) => {
     const v = videoRef.current;
     const el = trackRef.current;
@@ -219,12 +221,12 @@ export default function HoverVideoPlayer({
     v.currentTime = t;
     setCurrent(t);
   };
-  // 按下即开始拖拽，并把后续移动/松开挂到 window 上，
-  // 这样指针移出轨道（甚至移出播放器）也能继续跟手，松手即结束
+  // Start dragging on pointer-down and attach the subsequent move/up handlers to window,
+  // so the drag keeps tracking even when the pointer leaves the track (or the player), ending on release
   const onTrackPointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
     e.preventDefault();
     const v = videoRef.current;
-    // 拖拽期间暂停，避免边播边频繁 seek 导致音画错乱；松手后恢复
+    // Pause during the drag to avoid audio/video glitches from frequent seeks while playing; resume on release
     wasPlayingRef.current = !!v && !v.paused;
     if (v && !v.paused) v.pause();
     draggingRef.current = true;
@@ -240,7 +242,7 @@ export default function HoverVideoPlayer({
       setDragging(false);
       window.removeEventListener("pointermove", onMove);
       window.removeEventListener("pointerup", onUp);
-      // 松手后从拖拽落点继续播放，声音也从该处开始
+      // On release, resume playback from where the drag landed, with audio also starting there
       if (wasPlayingRef.current) videoRef.current?.play().catch(() => {});
     };
     window.addEventListener("pointermove", onMove);
@@ -252,10 +254,10 @@ export default function HoverVideoPlayer({
     if (document.fullscreenElement) document.exitFullscreen();
     else el.requestFullscreen?.();
   };
-  // 单击播放 / 双击全屏：双击会先派发两次单击，这里把单击延迟 220ms，
-  // 若期间到来双击则取消，避免单击与双击争抢导致播放状态来回切换
+  // Single-click to play / double-click for fullscreen: a double-click fires two clicks first, so delay the single click by 220ms,
+  // canceling it if a double-click arrives, to keep single and double clicks from fighting and toggling playback back and forth
   const handleVideoClick = () => {
-    if (clickTimerRef.current != null) return; // 已有待触发的单击，交给双击处理
+    if (clickTimerRef.current != null) return; // A single click is already pending; let the double-click handle it
     clickTimerRef.current = window.setTimeout(() => {
       clickTimerRef.current = null;
       togglePlay();
@@ -268,22 +270,22 @@ export default function HoverVideoPlayer({
     }
     toggleFs();
   };
-  // ←/→ 的步长：常规 5 秒，短视频按时长按比例缩小（最小 0.5 秒），避免一步跳到结尾
+  // Step size for ←/→: 5 seconds normally, scaled down proportionally for short videos (minimum 0.5 seconds) to avoid jumping straight to the end
   const seekStep = (): number => {
     const d = videoRef.current?.duration || 0;
     if (!d || !isFinite(d)) return 5;
     return Math.min(5, Math.max(0.5, d / 10));
   };
-  // 方向键：←/→ 进退（步长随时长自适应），↑/↓ 调节音量 10%
+  // Arrow keys: ←/→ seek back/forward (step adapts to duration), ↑/↓ adjust volume by 10%
   const handleKeyDown = (e: React.KeyboardEvent) => {
     const v = videoRef.current;
     if (!v) return;
     switch (e.key) {
       case " ":
-      case "Spacebar": // 兼容旧浏览器
+      case "Spacebar": // For older browsers
         e.preventDefault();
         if (v.ended) {
-          // 播放结束后按空格从头重播
+          // After playback ends, Space restarts from the beginning
           v.currentTime = 0;
           v.play().catch(() => {});
         } else {
@@ -300,7 +302,7 @@ export default function HoverVideoPlayer({
       }
       case "ArrowRight": {
         e.preventDefault();
-        // 不直接跳到结尾，留出极小余量避免短视频一步到底即结束
+        // Don't jump straight to the end; leave a tiny margin so a short video doesn't end in a single step
         const end = (v.duration || 0) - 0.01;
         v.currentTime = Math.min(Math.max(0, end), v.currentTime + seekStep());
         setCurrent(v.currentTime);
@@ -310,7 +312,7 @@ export default function HoverVideoPlayer({
       case "ArrowUp":
         e.preventDefault();
         v.volume = Math.min(1, Math.round((v.volume + 0.1) * 10) / 10);
-        v.muted = false; // 调高音量即取消静音
+        v.muted = false; // Raising the volume unmutes
         setMuted(false);
         setVolume(v.volume);
         showVolHud();
@@ -319,7 +321,7 @@ export default function HoverVideoPlayer({
       case "ArrowDown":
         e.preventDefault();
         v.volume = Math.max(0, Math.round((v.volume - 0.1) * 10) / 10);
-        if (v.volume === 0) v.muted = true; // 降到 0 视为静音
+        if (v.volume === 0) v.muted = true; // Dropping to 0 counts as muted
         setMuted(v.muted);
         setVolume(v.volume);
         showVolHud();
@@ -339,7 +341,7 @@ export default function HoverVideoPlayer({
         await v.requestPictureInPicture();
       }
     } catch {
-      // 用户取消或浏览器不支持时忽略
+      // Ignore when the user cancels or the browser doesn't support it
     }
   };
   const changeRate = (r: number) => {
@@ -349,7 +351,7 @@ export default function HoverVideoPlayer({
   };
   const download = async () => {
     const name = fileNameOf(src);
-    // 优先以 blob 强制下载（兼容跨域，避免在新标签打开），失败回退到普通链接下载
+    // Prefer a blob-based forced download (handles cross-origin, avoids opening in a new tab); fall back to a plain link download on failure
     try {
       const res = await fetch(src, { mode: "cors" });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -375,7 +377,7 @@ export default function HoverVideoPlayer({
   };
 
   const progress = duration ? (current / duration) * 100 : 0;
-  // 控制条/光标可见性：悬停或全屏时，且近期有鼠标活动（空闲 3 秒后隐藏）
+  // Control bar / cursor visibility: when hovering or in fullscreen and there was recent mouse activity (hidden after 3 seconds of idle)
   const barVisible = (hovering || isFs) && active;
   const cursorHidden = (hovering || isFs) && !active;
   const iconBtn =
@@ -391,7 +393,7 @@ export default function HoverVideoPlayer({
       onMouseLeave={handleLeave}
       onKeyDown={handleKeyDown}
     >
-      {/* #t=0.1 让浏览器跳到首帧作为封面 */}
+      {/* #t=0.1 makes the browser jump to the first frame to use as the cover */}
       <video
         ref={videoRef}
         src={`${src}#t=0.1`}
@@ -401,7 +403,7 @@ export default function HoverVideoPlayer({
         playsInline
         onLoadedMetadata={(e) => setDuration(e.currentTarget.duration)}
         onTimeUpdate={(e) => {
-          // 拖拽中不要用视频实际时间覆盖跟手位置（seek 时 currentTime 会滞后）
+          // While dragging, don't overwrite the tracked position with the video's actual time (currentTime lags during a seek)
           if (!draggingRef.current) setCurrent(e.currentTarget.currentTime);
         }}
         onPlay={() => {
@@ -420,13 +422,13 @@ export default function HoverVideoPlayer({
         onDoubleClick={handleVideoDoubleClick}
       />
 
-      {/* 居中播放标识：暂停时显示（拖拽进度时临时暂停，不显示以免闪烁） */}
+      {/* Centered play indicator: shown while paused (hidden during the temporary pause while dragging to avoid flicker) */}
       {!playing && !dragging && (
         <button
           type="button"
           onClick={togglePlay}
           className="absolute inset-0 flex items-center justify-center"
-          aria-label="播放"
+          aria-label="Play"
         >
           <span className="flex items-center justify-center w-12 h-12 rounded-full bg-black/45 backdrop-blur-sm transition-transform hover:scale-105">
             <Play className="w-6 h-6 text-white fill-white translate-x-[1px]" />
@@ -434,7 +436,7 @@ export default function HoverVideoPlayer({
         </button>
       )}
 
-      {/* 音量指示：调节音量时短暂居中显示 */}
+      {/* Volume indicator: shown briefly in the center while adjusting the volume */}
       <div
         className={`pointer-events-none absolute inset-0 flex items-center justify-center transition-opacity duration-200 ${
           volHud ? "opacity-100" : "opacity-0"
@@ -460,13 +462,13 @@ export default function HoverVideoPlayer({
         </div>
       </div>
 
-      {/* 自定义控制条 */}
+      {/* Custom control bar */}
       <div
         className={`absolute inset-x-0 bottom-0 px-2.5 pb-2 pt-6 bg-gradient-to-t from-black/70 to-transparent select-none transition-opacity duration-200 ${
           barVisible ? "opacity-100" : "opacity-0 pointer-events-none"
         }`}
       >
-        {/* 进度条 */}
+        {/* Progress bar */}
         <div
           ref={trackRef}
           className="group/track relative h-3 flex items-center cursor-pointer touch-none select-none"
@@ -486,13 +488,13 @@ export default function HoverVideoPlayer({
           />
         </div>
 
-        {/* 按钮行：常用控件留在条上，倍速/画中画/下载收进溢出菜单 */}
+        {/* Button row: common controls stay on the bar; speed/picture-in-picture/download go into the overflow menu */}
         <div className="flex items-center gap-3 mt-1 text-white">
           <button
             type="button"
             onClick={togglePlay}
             className={iconBtn}
-            aria-label={playing ? "暂停" : "播放"}
+            aria-label={playing ? "Pause" : "Play"}
           >
             {playing ? (
               <Pause className="w-4 h-4" />
@@ -500,7 +502,7 @@ export default function HoverVideoPlayer({
               <Play className="w-4 h-4 fill-current" />
             )}
           </button>
-          {/* 音量：默认仅显示图标，悬停时滑块展开；整组支持滚轮调节 */}
+          {/* Volume: shows only the icon by default, with the slider expanding on hover; the whole group supports wheel adjustment */}
           <div
             className="group/vol flex items-center"
             onWheel={onVolumeWheel}
@@ -509,7 +511,7 @@ export default function HoverVideoPlayer({
               type="button"
               onClick={toggleMute}
               className={iconBtn}
-              aria-label={muted ? "取消静音" : "静音"}
+              aria-label={muted ? "Unmute" : "Mute"}
             >
               {muted || volume === 0 ? (
                 <VolumeX className="w-4 h-4" />
@@ -527,8 +529,8 @@ export default function HoverVideoPlayer({
               value={muted ? 0 : volume}
               onChange={(e) => applyVolume(Number(e.target.value))}
               className="h-1 accent-primary cursor-pointer w-0 opacity-0 pointer-events-none transition-[width,opacity,margin] duration-200 group-hover/vol:w-16 group-hover/vol:ml-1.5 group-hover/vol:opacity-100 group-hover/vol:pointer-events-auto"
-              aria-label="音量"
-              title="音量（可滚轮调节）"
+              aria-label="Volume"
+              title="Volume (scroll to adjust)"
             />
           </div>
           <span className="text-[11px] tabular-nums select-none whitespace-nowrap">
@@ -536,19 +538,19 @@ export default function HoverVideoPlayer({
           </span>
 
           <div className="ml-auto flex items-center gap-3">
-            {/* 溢出菜单：倍速 / 画中画 / 下载 */}
+            {/* Overflow menu: speed / picture-in-picture / download */}
             <div className="relative">
               <button
                 type="button"
                 onClick={() => setMenuOpen((o) => !o)}
                 className={iconBtn}
-                aria-label="更多"
+                aria-label="More"
               >
                 <MoreVertical className="w-4 h-4" />
               </button>
               {menuOpen && (
                 <div className="absolute bottom-full right-0 mb-1.5 w-36 rounded-lg bg-black/90 backdrop-blur-sm shadow-lg overflow-hidden text-white">
-                  {/* 倍速 */}
+                  {/* Playback speed */}
                   <div className="grid grid-cols-3 gap-1 p-1.5">
                     {PLAYBACK_RATES.map((r) => (
                       <button
@@ -566,7 +568,7 @@ export default function HoverVideoPlayer({
                     ))}
                   </div>
                   <div className="h-px bg-white/10" />
-                  {/* 画中画 / 下载 并排 */}
+                  {/* Picture-in-picture / download, side by side */}
                   <div className={pipOk ? "grid grid-cols-2" : ""}>
                     {pipOk && (
                       <button
@@ -578,7 +580,7 @@ export default function HoverVideoPlayer({
                         className="flex items-center justify-center gap-1.5 py-2 text-[11px] hover:bg-white/10 transition-colors"
                       >
                         <PictureInPicture2 className="w-3.5 h-3.5" />
-                        画中画
+                        Picture-in-picture
                       </button>
                     )}
                     <button
@@ -590,20 +592,20 @@ export default function HoverVideoPlayer({
                       className="flex items-center justify-center gap-1.5 py-2 text-[11px] hover:bg-white/10 transition-colors"
                     >
                       <Download className="w-3.5 h-3.5" />
-                      下载
+                      Download
                     </button>
                   </div>
                 </div>
               )}
             </div>
 
-            {/* 全屏 */}
+            {/* Fullscreen */}
             <button
               type="button"
               onClick={toggleFs}
               className={iconBtn}
-              aria-label="全屏"
-              title="全屏"
+              aria-label="Fullscreen"
+              title="Fullscreen"
             >
               <Maximize className="w-4 h-4" />
             </button>

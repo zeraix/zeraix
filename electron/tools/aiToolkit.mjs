@@ -62,7 +62,7 @@ function engineSwitchNote(engineId) {
   const first = lastRunEngineId === null;
   lastRunEngineId = engineId;
   if (first) return ""; // No note on the session's first run (the system prompt already describes the current environment)
-  // qemu (HVF/WHPX/KVM VM)：宿主目录挂入的 Debian/bash 隔离沙箱，模型据此改用 Linux 命令。
+  // qemu (HVF/WHPX/KVM VM): an isolated Debian/bash sandbox with the host directory mounted in; the model switches to Linux commands accordingly.
   if (engineId === "qemu") {
     return (
       "[Execution environment switched] From this command on, commands run inside an isolated Linux " +
@@ -126,7 +126,7 @@ let WORKDIR = path.join(os.homedir(), "zeraix-workspace");
  *  is a harmless no-op. */
 export function setWorkingDir(dir) {
   WORKDIR = path.resolve(dir);
-  invalidateWalkCache(); // 目录变了：旧的文件列表缓存作废
+  invalidateWalkCache(); // directory changed: the old file-list cache is now stale
   getEngine().prewarm?.(WORKDIR);
   return WORKDIR;
 }
@@ -134,10 +134,10 @@ export function getWorkingDir() {
   return WORKDIR;
 }
 
-// ── 工作区文件浏览（供侧栏文件树 + 右侧编辑器 UI，非 AI 工具循环）────────────────────────
-// 都限制在 WORKDIR 内（resolveInside）。前端按需逐层展开，故 read_dir 只列一层、不递归。
+// ── Workspace file browsing (for the sidebar file tree + right-hand editor UI, not the AI tool loop) ────────────────────────
+// Everything is confined within WORKDIR (resolveInside). The frontend expands level by level on demand, so read_dir lists only one level and does not recurse.
 
-/** 列出某目录（相对 WORKDIR）的直接子项，结构化返回 [{name,isDir}]（目录在前，按名排序）。 */
+/** List the direct children of a directory (relative to WORKDIR), returned structured as [{name,isDir}] (directories first, sorted by name). */
 export async function wsReadDir(relPath = "") {
   const abs = relPath ? resolveInside(relPath) : WORKDIR;
   const entries = await fs.readdir(abs, { withFileTypes: true });
@@ -148,9 +148,9 @@ export async function wsReadDir(relPath = "") {
 }
 
 /**
- * 读取某文件用于「查看 / 编辑」，并判断是否可打开。返回：
- *  - { ok:true, editable:true, content, size }            —— 文本文件，可查看 / 编辑
- *  - { ok:false, reason, size? }                          —— 不可打开（目录 / 过大 / 二进制 / 读失败），reason 为原因
+ * Read a file for "view / edit" and determine whether it can be opened. Returns:
+ *  - { ok:true, editable:true, content, size }            -- text file, viewable / editable
+ *  - { ok:false, reason, size? }                          -- cannot open (directory / too large / binary / read failure); reason gives the cause
  */
 export async function wsReadFile(relPath) {
   const abs = resolveInside(relPath);
@@ -158,29 +158,29 @@ export async function wsReadFile(relPath) {
   try {
     st = await fs.stat(abs);
   } catch (e) {
-    return { ok: false, reason: `无法读取：${e?.message ?? e}` };
+    return { ok: false, reason: `Unable to read: ${e?.message ?? e}` };
   }
-  if (st.isDirectory()) return { ok: false, reason: "这是一个目录" };
+  if (st.isDirectory()) return { ok: false, reason: "This is a directory" };
   if (st.size > MAX_READ_BYTES)
-    return { ok: false, reason: `文件过大（${st.size} 字节 > ${MAX_READ_BYTES}），暂不支持在编辑器中打开`, size: st.size };
+    return { ok: false, reason: `File too large (${st.size} bytes > ${MAX_READ_BYTES}); opening in the editor is not supported yet`, size: st.size };
   let buf;
   try {
     buf = await fs.readFile(abs);
   } catch (e) {
-    return { ok: false, reason: `无法读取：${e?.message ?? e}`, size: st.size };
+    return { ok: false, reason: `Unable to read: ${e?.message ?? e}`, size: st.size };
   }
-  // 二进制探测：前 8KB 内出现 NUL 字节即视为二进制，不作文本查看 / 编辑。
+  // Binary detection: a NUL byte within the first 8KB marks the file as binary; not for text view / edit.
   if (buf.subarray(0, Math.min(buf.length, 8000)).includes(0))
-    return { ok: false, reason: "二进制文件，无法以文本查看 / 编辑（可用系统默认应用打开）", size: st.size };
+    return { ok: false, reason: "Binary file; cannot view / edit as text (open with the system default app instead)", size: st.size };
   return { ok: true, editable: true, content: buf.toString("utf8"), size: st.size };
 }
 
-/** 保存某文件内容（用户在编辑器里的直接编辑，非 AI 改动）。返回 { ok } 或 { ok:false, error }。 */
+/** Save file content (the user's direct edit in the editor, not an AI change). Returns { ok } or { ok:false, error }. */
 export async function wsWriteFile(relPath, content) {
   try {
     const abs = resolveInside(relPath);
     await fs.writeFile(abs, String(content ?? ""), "utf8");
-    invalidateWalkCache(); // 可能新建了文件，文件列表缓存失效
+    invalidateWalkCache(); // a new file may have been created; invalidate the file-list cache
     return { ok: true };
   } catch (e) {
     return { ok: false, error: e?.message ?? String(e) };
@@ -315,9 +315,9 @@ async function walkFiles(startAbs) {
   return out;
 }
 
-// 文件列表缓存：search_* 原本每次都全量遍历目录，一次调查里几十次搜索 = 几十次全树遍历。
-// 缓存一次遍历结果（仅文件路径列表；内容仍每次现读，故内容变更始终可见）。写 / 删 / 移 / 命令
-// 或切换工作目录时失效（见 runTool 的 MUTATING 判定与 setWorkingDir）。
+// File-list cache: search_* originally walked the whole directory on every call, so dozens of searches in one investigation = dozens of full-tree walks.
+// Cache the result of a single walk (file path list only; content is still read fresh each time, so content changes are always visible). Invalidated on write / delete / move / command
+// or when the working directory changes (see runTool's MUTATING check and setWorkingDir).
 let _walkCache = null; // { workdir, files }
 function invalidateWalkCache() {
   _walkCache = null;
@@ -1112,7 +1112,7 @@ const handlers = {
     if (!needle) throw new Error("query must not be empty");
     const ctx = Number.isFinite(context) ? Math.max(0, Math.min(5, Math.floor(context))) : 2;
     const nameRe = pattern ? globToRegExp(String(pattern)) : null;
-    // 匹配器：regex → 正则（可忽略大小写）；否则子串（可忽略大小写）。
+    // Matcher: regex -> regular expression (case-insensitive optional); otherwise substring (case-insensitive optional).
     let test;
     if (regex) {
       let re;
@@ -1137,7 +1137,7 @@ const handlers = {
       let text;
       try {
         const st = await fs.stat(f);
-        if (st.size > MAX_READ_BYTES) continue; // 跳过超大 / 疑似二进制文件
+        if (st.size > MAX_READ_BYTES) continue; // skip oversized / likely-binary files
         text = await fs.readFile(f, "utf8");
       } catch {
         continue;
@@ -1148,7 +1148,7 @@ const handlers = {
         if (test(lines[i])) hits.push(i);
       }
       if (hits.length === 0) continue;
-      // 命中行按 ±ctx 合并成 hunk（相邻 / 重叠的合并），带行号输出："N:" 为命中行，"N-" 为上下文。
+      // Merge matched lines into hunks by ±ctx (adjacent / overlapping ones are combined), output with line numbers: "N:" for a matched line, "N-" for context.
       const hitSet = new Set(hits);
       const hunks = [];
       for (const h of hits) {
@@ -1382,7 +1382,7 @@ const handlers = {
  * Execute a tool. Catches exceptions uniformly and returns { ok, content }, where content is the
  * result text that can be fed back to the model.
  */
-/** 会改变工作目录文件列表（新增 / 删除 / 移动 / 可能创建文件）的工具：执行后使文件列表缓存失效。 */
+/** Tools that change the working directory's file list (add / delete / move / possibly create files): invalidate the file-list cache after running. */
 const FILE_LIST_MUTATORS = new Set([
   "write_file",
   "append_file",
@@ -1400,7 +1400,7 @@ export async function runTool(name, args = {}) {
   try {
     await ensureWorkdir();
     const content = await handler(args ?? {});
-    if (FILE_LIST_MUTATORS.has(name)) invalidateWalkCache(); // 文件列表可能已变：下次 search_* 重新遍历
+    if (FILE_LIST_MUTATORS.has(name)) invalidateWalkCache(); // the file list may have changed: the next search_* re-walks
     return { ok: true, content: String(content) };
   } catch (e) {
     return { ok: false, content: `Error in ${name}: ${e?.message ?? String(e)}` };

@@ -2,21 +2,23 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-  <!-- entitlementsInherit：electron-builder 用它给「打进包里的嵌套」二进制签名（Chromium 渲染/GPU
-       助手、node-pty，以及资源里的 qemu-system-* / qemu-img / qemu 的 *.dylib）。
-       注：llama 不在包内 —— 运行时从 CDN（llama.cpp GitHub 发布构建）下载到 userData，自带 ad-hoc
-       签名、无隔离属性，作为独立子进程运行，不受本应用签名/公证影响。 -->
+  <!-- entitlementsInherit: electron-builder uses this to sign the "nested-in-bundle" binaries (Chromium
+       renderer/GPU helpers, node-pty, and the qemu-system-* / qemu-img / qemu *.dylib in resources).
+       Note: llama is not in the bundle — at runtime it's downloaded from a CDN (llama.cpp GitHub release builds)
+       into userData, carries its own ad-hoc signature with no quarantine attribute, and runs as a standalone
+       child process unaffected by this app's signing/notarization. -->
   <key>com.apple.security.cs.allow-jit</key>
   <true/>
   <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
   <true/>
   <key>com.apple.security.cs.allow-dyld-environment-variables</key>
   <true/>
-  <!-- 关闭库校验：node-pty 等原生模块 + qemu 加载自带 dylib 所需。 -->
+  <!-- Disable library validation: needed by native modules such as node-pty plus qemu loading its bundled dylibs. -->
   <key>com.apple.security.cs.disable-library-validation</key>
   <true/>
-  <!-- HVF：仅 qemu-system-* 实际使用（沙箱硬件加速）；其余嵌套体带着但不用，无害。
-       这样 electron-builder 正常签名即保留该权限，无需 afterSign 事后重签（否则会破坏公证后的封签）。 -->
+  <!-- HVF: actually used only by qemu-system-* (sandbox hardware acceleration); the other nested binaries
+       carry it but don't use it, which is harmless. This way electron-builder's normal signing preserves the
+       entitlement, with no need for an afterSign re-sign (which would otherwise break the post-notarization seal). -->
   <key>com.apple.security.hypervisor</key>
   <true/>
 </dict>

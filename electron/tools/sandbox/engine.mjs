@@ -1,28 +1,30 @@
 /**
- * 命令执行引擎层：以可插拔方式决定 run_command / check_project 在哪里执行。
+ * Command-execution engine layer: pluggably decides where run_command / check_project execute.
  *
- *   - native  —— 宿主机直接执行（历史行为，默认与兜底，见 native.mjs）
- *   - qemu    —— 单个长期存活的 QEMU VM（macOS=HVF / Windows=WHPX / Linux=KVM）里硬件级隔离
- *                执行；命令经 qemu-guest-agent 在 guest 内以 bubblewrap 限定到挂载集运行，
- *                长驻服务（dev server 等）用 QMP hostfwd 动态转发端口到宿主（见 qemu.mjs）。
+ *   - native  —— executed directly on the host (historical behavior, the default and fallback, see native.mjs)
+ *   - qemu    —— hardware-level isolated execution inside a single long-lived QEMU VM
+ *                (macOS=HVF / Windows=WHPX / Linux=KVM); commands run via qemu-guest-agent inside the
+ *                guest, confined by bubblewrap to the mount set, and long-running services (dev servers,
+ *                etc.) forward ports to the host dynamically via QMP hostfwd (see qemu.mjs).
  *
- * 引擎契约（每个引擎模块导出）：
+ * Engine contract (exported by every engine module):
  *   id
- *   run(cmd, { cwd, timeoutMs, maxBuffer })  → { stdout, stderr, code, killed }（不抛异常）
- *   startBackground(cmd, { cwd })            → Promise<string>（格式化结果文本）
+ *   run(cmd, { cwd, timeoutMs, maxBuffer })  → { stdout, stderr, code, killed } (does not throw)
+ *   startBackground(cmd, { cwd })            → Promise<string> (formatted result text)
  *   stopProcess(pid) / listProcesses() / stopAll()
  *
- * 桌面应用形态：沙箱「后台主动初始化」，全程不阻塞命令（就绪前一律 native），
- * 状态机进度经 onSandboxStatus 广播给 UI：
- *   unsupported(原因) | disabled | starting → ready | error(原因)
- * 初始化直接创建「长期存活」的唯一 VM（挂载公共根 ∪ 历史显式选择过的文件夹）——
- * 启动本身即可用性验证，首条命令零额外等待。ready 且「日常」模式才切沙箱；开发模式
- * 始终 native。VM 二进制随应用分发、rootfs 首次运行下载（见 sandbox/qemu/README）。
+ * Desktop-app shape: the sandbox initializes proactively in the background, never blocking commands
+ * (everything runs native until ready); state-machine progress is broadcast to the UI via onSandboxStatus:
+ *   unsupported(reason) | disabled | starting → ready | error(reason)
+ * Initialization directly creates the single long-lived VM (mounting the shared root ∪ folders explicitly
+ * chosen in the past) —— startup itself is the availability check, so the first command waits nothing extra.
+ * The sandbox is only switched in when ready and in "daily" mode; dev mode always stays native. The VM
+ * binaries ship with the app and the rootfs is downloaded on first run (see sandbox/qemu/README).
  *
- * 配置（app.config 的 [sandbox] 一节，均可缺省）：
- *   engine = auto | native      auto（默认）：有硬件虚拟化则后台启用 qemu；native：完全禁用
- *   image  = <OCI 引用>          工具箱镜像引用，仅用于状态展示
- *   memory / cpus                VM 规格，默认 2048 MiB / 2 vCPU
+ * Configuration (the [sandbox] section of app.config, all optional):
+ *   engine = auto | native      auto (default): enable qemu in the background if hardware virtualization exists; native: fully disabled
+ *   image  = <OCI reference>     toolbox image reference, used only for status display
+ *   memory / cpus                VM spec, defaults to 2048 MiB / 2 vCPU
  */
 
 import fs from "node:fs";
@@ -34,7 +36,7 @@ import * as native from "./native.mjs";
 
 export { setServiceEventHandler } from "./events.mjs";
 
-// 默认沙箱配置（可被 app.config [sandbox] 覆盖）。
+// Default sandbox config (can be overridden by app.config [sandbox]).
 const DEFAULTS = {
   engine: "auto",
   image: "docker.zeraix.com/botshub/sandbox:h-d0c4ebb4cec9",
@@ -42,24 +44,24 @@ const DEFAULTS = {
   cpus: 2,
 };
 
-let sandbox = null; // 就绪后加载的 qemu 引擎模块
+let sandbox = null; // qemu engine module loaded once ready
 let ready = false;
-let mode = "daily"; // 渲染层经 setSandboxMode 同步；沙箱只服务「日常」模式
+let mode = "daily"; // synced from the renderer via setSandboxMode; the sandbox only serves "daily" mode
 let initPromise = null;
-let disposing = false; // 主动停机/重启中：忽略随之而来的 VM 退出回调（不当作异常崩溃）
-const loaded = [native]; // 已加载的引擎实例（停止/清理时全量遍历）
+let disposing = false; // during intentional shutdown/restart: ignore the ensuing VM exit callback (not treated as a crash)
+const loaded = [native]; // loaded engine instances (iterated in full on stop/cleanup)
 
-// ── 状态机 + 进度广播 ─────────────────────────────────────────────────────────
+// ── State machine + progress broadcast ───────────────────────────────────────
 let status = { phase: "idle", reason: "", image: DEFAULTS.image, pct: null };
 const statusListeners = new Set();
 
-/** 订阅沙箱初始化状态变化（main 转发给渲染层）。返回退订函数。 */
+/** Subscribe to sandbox initialization status changes (main forwards to the renderer). Returns an unsubscribe function. */
 export function onSandboxStatus(fn) {
   statusListeners.add(fn);
   return () => statusListeners.delete(fn);
 }
 
-/** 当前沙箱状态（渲染层初始同步 + system 提示语构造用）。 */
+/** Current sandbox status (for the renderer's initial sync + building the system prompt). */
 export function getSandboxStatus() {
   return { ...status, mode, active: getEngine().id, hostPlatform: process.platform };
 }
@@ -70,31 +72,32 @@ function setStatus(phase, extra = {}) {
     try {
       fn(getSandboxStatus());
     } catch {
-      /* 监听方异常不影响状态机 */
+      /* a listener throwing must not affect the state machine */
     }
   }
 }
 
-/** qemu VM 进程意外退出（崩溃 / OOM / 被杀）时由 qemu.mjs 回调：把「就绪」状态降级并广播，
- *  否则 getSandboxStatus 会一直报 ready、UI 弹窗/徽标误显示为「运行中」。主动 dispose/restart
- *  期间 disposing=true 时忽略（那是预期停机）。降级后引擎自动回退 native（getEngine 依 ready）。 */
+/** Called back by qemu.mjs when the qemu VM process exits unexpectedly (crash / OOM / killed):
+ *  downgrade the "ready" status and broadcast it, otherwise getSandboxStatus would keep reporting ready
+ *  and the UI dialog/badge would wrongly show "running". Ignored while disposing=true during an intentional
+ *  dispose/restart (that is an expected shutdown). After downgrading, the engine auto-falls back to native (getEngine depends on ready). */
 function handleVmExit(code, signal) {
   if (disposing || !ready) return;
   ready = false;
   sandbox = null;
-  initPromise = null; // 允许后续重新初始化（如用户点「更新/重启」）
-  const how = signal ? `signal ${signal}` : `code ${code ?? "?"}`; // 被杀/休眠→信号；自退→退出码。详因见 vd/qemu.log
-  setStatus("error", { reason: `运行环境已退出（${how}）——已回退本机执行，详见 qemu.log` });
+  initPromise = null; // allow re-initialization later (e.g. when the user clicks "update/restart")
+  const how = signal ? `signal ${signal}` : `code ${code ?? "?"}`; // killed/suspended → signal; self-exit → exit code. See vd/qemu.log for details
+  setStatus("error", { reason: `Execution environment exited (${how}) — fell back to native execution; see qemu.log for details` });
   console.warn(`[sandbox] VM exited unexpectedly (${how}); falling back to native`);
 }
 
-/** 渲染层同步当前模式（daily / dev）。dev 模式即刻回到 native 路由。 */
+/** The renderer syncs the current mode (daily / dev). dev mode routes back to native immediately. */
 export function setSandboxMode(m) {
   mode = m === "dev" ? "dev" : "daily";
   return getSandboxStatus();
 }
 
-/** 读取 [sandbox] 配置。appConfig.mjs 依赖 electron，这里惰性引入并在非 Electron 环境下回退默认值。 */
+/** Read the [sandbox] config. appConfig.mjs depends on electron, so import it lazily and fall back to defaults outside Electron. */
 async function readConfig() {
   try {
     const { getAppConfig } = await import("../../appConfig.mjs");
@@ -110,10 +113,10 @@ async function readConfig() {
   }
 }
 
-// Windows：WHP（Windows Hypervisor Platform）是否可用。用一次性 PowerShell 探针 P/Invoke
-// WinHvPlatform.dll 的 WHvGetCapability(WHvCapabilityCodeHypervisorPresent=0) —— 即 N-API 方案
-// （docs/windows-appcontainer-sandbox.md 的 whpAvailable）会做的同一检查，但无需编译原生插件。
-// 结果缓存；任何异常（DLL 缺失 / 功能未开启 / 超时）→ false → 始终 native。
+// Windows: whether WHP (Windows Hypervisor Platform) is available. A one-shot PowerShell probe P/Invokes
+// WinHvPlatform.dll's WHvGetCapability(WHvCapabilityCodeHypervisorPresent=0) — the same check the N-API approach
+// (whpAvailable in docs/windows-appcontainer-sandbox.md) would do, but without compiling a native addon.
+// The result is cached; any exception (missing DLL / feature disabled / timeout) → false → always native.
 let whpCache;
 function whpAvailable() {
   if (whpCache !== undefined) return whpCache;
@@ -130,13 +133,13 @@ function whpAvailable() {
   return whpCache;
 }
 
-/** 宿主是否具备所需的硬件虚拟化。darwin/linux 为纯静态检查；Windows 用 WHP 命令探针（见上，缓存）。 */
+/** Whether the host has the required hardware virtualization. darwin/linux is a pure static check; Windows uses the WHP command probe (see above, cached). */
 async function hypervisorPresent() {
-  // 显式覆盖：ZERAIX_FORCE_SANDBOX=1 强制启用（探针误判 / 测试用），=0 强制关闭（始终 native）。
+  // Explicit override: ZERAIX_FORCE_SANDBOX=1 forces it on (probe misdetection / testing), =0 forces it off (always native).
   const force = process.env.ZERAIX_FORCE_SANDBOX;
   if (force === "0") return false;
   if (force && /^(1|true|yes)$/i.test(force)) return true;
-  if (process.platform === "darwin") return process.arch === "arm64"; // Apple Silicon 的 HVF
+  if (process.platform === "darwin") return process.arch === "arm64"; // HVF on Apple Silicon
   if (process.platform === "linux") {
     try {
       fs.accessSync("/dev/kvm", fs.constants.R_OK | fs.constants.W_OK);
@@ -150,8 +153,9 @@ async function hypervisorPresent() {
 }
 
 /**
- * 解析挂载集：公共根（userData/agent/ai-agent，日常模式所有会话 workdir 的父目录；只挂这一层，
- * agent/ 下的对话存储不暴露）∪ 历史显式选择过的文件夹（从项目索引推导）。
+ * Resolve the mount set: the shared root (userData/agent/ai-agent, the parent of every session workdir in
+ * daily mode; only this one level is mounted, so the conversation storage under agent/ is not exposed) ∪
+ * folders explicitly chosen in the past (derived from the project index).
  */
 async function resolveMounts(opts) {
   let mountRoot;
@@ -161,7 +165,7 @@ async function resolveMounts(opts) {
   } catch {
     mountRoot = opts.getWorkdir?.() ?? path.join(os.homedir(), "zeraix-workspace");
   }
-  fs.mkdirSync(mountRoot, { recursive: true }); // bind mount 需要目录已存在
+  fs.mkdirSync(mountRoot, { recursive: true }); // a bind mount requires the directory to already exist
   let extraMounts = [];
   try {
     const { loadIndex } = await import("../../store/conversationStore.mjs");
@@ -172,17 +176,17 @@ async function resolveMounts(opts) {
       .sort((a, b) => (a.createdAt ?? 0) - (b.createdAt ?? 0))
       .map((p) => p.workdir);
   } catch {
-    /* 非 Electron / 存储不可用 → 仅公共根 */
+    /* not Electron / storage unavailable → shared root only */
   }
   return { mountRoot, extraMounts };
 }
 
 /**
- * 启动沙箱后台初始化（幂等、立即返回、绝不抛出）。
- * opts.getWorkdir：取当前工作目录（由 aiToolkit 注入；仅在非 Electron 环境下
- * 作为挂载根的回退——正常运行时挂载 userData/agent 公共根）。
+ * Kick off the sandbox's background initialization (idempotent, returns immediately, never throws).
+ * opts.getWorkdir: gets the current working directory (injected by aiToolkit; used only outside Electron
+ * as the fallback mount root — normal runs mount the userData/agent shared root).
  */
-let lastInitOpts = {}; // 记住首次 init 的 opts（含 getWorkdir），供 restartSandbox 复用
+let lastInitOpts = {}; // remember the first init's opts (incl. getWorkdir) for restartSandbox to reuse
 export function initEngine(opts = {}) {
   lastInitOpts = opts;
   initPromise ??= (async () => {
@@ -205,11 +209,13 @@ export function initEngine(opts = {}) {
         return getSandboxStatus();
       }
 
-      // 直接创建长期驻留的「唯一」QEMU VM：挂载会话工作目录的公共根（userData/agent/ai-agent，
-      // 日常模式所有会话的 workdir 都在其下）∪ 历史显式选择过的文件夹——会话/项目再多也只有这
-      // 一个 VM，按会话仅切换 guest 内 cwd。引导即验证；缺 rootfs 会抛→error 降级 native。
+      // Directly create the single long-lived QEMU VM: mount the shared root of the session working
+      // directories (userData/agent/ai-agent, under which every session's workdir lives in daily mode) ∪
+      // folders explicitly chosen in the past — no matter how many sessions/projects there are, there is
+      // only this one VM, and each session merely switches the guest cwd. Boot is the verification; a
+      // missing rootfs throws → error, downgrading to native.
       const m = await import("./qemu.mjs");
-      m.configure({ ...cfg, onExit: handleVmExit }); // VM 进程退出即降级状态（见 handleVmExit）
+      m.configure({ ...cfg, onExit: handleVmExit }); // downgrade status as soon as the VM process exits (see handleVmExit)
       const { mountRoot, extraMounts } = await resolveMounts(opts);
       setStatus("starting");
       await m.provision(mountRoot, (pct, msg) => setStatus("starting", { pct, reason: msg }), extraMounts, !!opts.forceConfigured);
@@ -229,40 +235,41 @@ export function initEngine(opts = {}) {
 }
 
 /**
- * 重启沙箱引擎：停当前 VM → 复位初始化状态 → 重新 initEngine（provision 会按 versions.json
- * 的目标版本下载缺失镜像）。用于「更新运行环境」：新版本目录为空时重跑即拉取新镜像。
+ * Restart the sandbox engine: stop the current VM → reset the init state → run initEngine again (provision
+ * downloads any missing image per the target version in versions.json). Used for "update the execution
+ * environment": when the new-version directory is empty, re-running pulls the new image.
  */
 export async function restartSandbox(opts = {}) {
-  disposing = true; // 停旧 VM 会触发其退出回调；标记为预期停机，避免 handleVmExit 把状态误置 error
+  disposing = true; // stopping the old VM triggers its exit callback; mark it an expected shutdown so handleVmExit doesn't wrongly set status to error
   try { if (sandbox?.dispose) sandbox.dispose(); } catch { /* ignore */ }
   ready = false;
   sandbox = null;
   initPromise = null;
   setStatus("idle");
-  // 复用首次 init 的 opts（getWorkdir 等）；update=true 时置 forceConfigured 让 provision 下载目标版本。
+  // Reuse the first init's opts (getWorkdir, etc.); when update=true set forceConfigured so provision downloads the target version.
   try {
     return await initEngine({ ...lastInitOpts, forceConfigured: !!opts.update });
   } finally {
-    disposing = false; // 重新就绪/失败后恢复：此后 VM 崩溃才算异常
+    disposing = false; // restore after re-ready/failure: only after this does a VM crash count as abnormal
   }
 }
 
-/** VM 镜像版本 / 安装信息（供 UI 展示与「更新」判断）；按需加载 qemu 模块算静态信息。 */
+/** VM image version / install info (for UI display and the "update" check); lazily load the qemu module to compute the static info. */
 export async function sandboxVmInfo() {
   try { const m = await import("./qemu.mjs"); return m.sandboxVmInfo(); } catch { return null; }
 }
 
-/** 当前引擎（同步）。就绪且处于「日常」模式才是 qemu，其余一律 native。 */
+/** Current engine (synchronous). qemu only when ready and in "daily" mode, otherwise always native. */
 export function getEngine() {
   return ready && sandbox && mode === "daily" ? sandbox : native;
 }
 
-/** 兼容旧诊断接口：{ id, reason }。 */
+/** Backward-compatible legacy diagnostics interface: { id, reason }. */
 export function getEngineInfo() {
   return { id: getEngine().id, reason: status.reason || status.phase };
 }
 
-// ── 跨引擎聚合：后台进程表可能分布在 native 与 guest 两侧 ─────────────────────────
+// ── Cross-engine aggregation: the background-process table may span both native and guest ────
 export function listProcesses() {
   return loaded.flatMap((e) => e.listProcesses());
 }
@@ -279,20 +286,20 @@ export function stopBackgroundProcs() {
     try {
       e.stopAll();
     } catch {
-      /* 尽力而为 */
+      /* best effort */
     }
   }
 }
 
-/** 退出前清理：停后台进程 + 关停 VM（尽力而为，不阻塞退出）。 */
+/** Cleanup before exit: stop background processes + shut down the VM (best effort, does not block exit). */
 export function disposeEngines() {
-  disposing = true; // 退出清理：VM 被停会触发退出回调，属预期停机，不广播 error
+  disposing = true; // exit cleanup: stopping the VM triggers the exit callback, which is an expected shutdown, so don't broadcast error
   stopBackgroundProcs();
   for (const e of loaded) {
     try {
       e.dispose?.();
     } catch {
-      /* 尽力而为 */
+      /* best effort */
     }
   }
 }

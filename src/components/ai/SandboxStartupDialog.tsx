@@ -1,13 +1,13 @@
 "use client";
 
 /**
- * 沙箱启动进度弹窗（仅日常模式）。取代原「正在启动沙箱…」小 toast：
- *   步骤 1 · 运行环境（QEMU VM 镜像）：首次运行从 CDN 下载 → 进度条 + MB；已存在 → 「已下载」；
- *            版本与 versions.json 目标不一致（有旧版本残留）→ 显示「有新版本」+ 更新按钮。
- *            该步骤下方给出镜像所在文件夹（可点击打开）。
- *   步骤 2 · 启动沙箱：QEMU 引导（无细粒度进度）→ 不确定态转圈；就绪打勾后自动关闭。
- * 状态来自主进程 sandbox:status（见 electron/tools/sandbox/{engine,qemu}.mjs 的 setStatus / onProgress）。
- * 可关闭：关闭后本轮不再自动弹出，沙箱继续在后台初始化（命令在就绪前回退宿主执行）。
+ * Sandbox startup progress dialog (daily mode only). Replaces the old "Starting sandbox…" toast:
+ *   Step 1 · Runtime environment (QEMU VM image): first run downloads from the CDN → progress bar + MB; already present → "Downloaded";
+ *            version differs from the versions.json target (a stale old version left over) → shows "New version available" + update button.
+ *            This step shows the folder the image lives in below it (click to open).
+ *   Step 2 · Start sandbox: QEMU boot (no fine-grained progress) → indeterminate spinner; auto-closes once the ready check passes.
+ * Status comes from the main process sandbox:status (see setStatus / onProgress in electron/tools/sandbox/{engine,qemu}.mjs).
+ * Dismissible: once dismissed it won't auto-pop again this round, and the sandbox keeps initializing in the background (commands fall back to host execution until ready).
  */
 import { useEffect, useRef, useState } from "react";
 import { Loader2, Check, AlertTriangle, HardDriveDownload, Cpu, FolderOpen, RefreshCw, Play } from "lucide-react";
@@ -21,7 +21,7 @@ import {
 } from "@/components/ui/dialog";
 import { getSandboxVmInfo, updateSandbox, restartSandbox, type SandboxStatus, type SandboxVmInfo } from "@/lib/ai/sandbox";
 
-// 主进程「初始化进行中」的各阶段（qemu 主要是 starting；另两枚为兼容旧 docker 引擎）。
+// The phases of the main process's "initializing" state (qemu is mainly "starting"; the other two are for compatibility with the old docker engine).
 const ACTIVE = new Set(["starting", "pulling-image", "installing-runtime"]);
 
 type StepState = "pending" | "active" | "done" | "error";
@@ -80,14 +80,14 @@ export default function SandboxStartupDialog({
 }: {
   status: SandboxStatus | null;
   mode: string;
-  /** 外部触发打开（如点击顶部「沙箱执行」徽标）：每次自增即打开当前状态视图。 */
+  /** Externally triggered open (e.g. clicking the top "sandbox execution" badge): each increment opens the current status view. */
   openTick?: number;
 }) {
   const t = useT();
   const [open, setOpen] = useState(false);
-  const dismissedRef = useRef(false); // 用户本轮已关闭：不再自动弹回
-  const manualRef = useRef(false); // 由徽标手动打开：不自动关闭（让用户自行查看/关闭）
-  const [sawDownload, setSawDownload] = useState(false); // 本轮是否发生过下载（区分「已下载」与「下载完成」）
+  const dismissedRef = useRef(false); // User dismissed it this round: don't auto-pop back up
+  const manualRef = useRef(false); // Opened manually via the badge: don't auto-close (let the user view/close it themselves)
+  const [sawDownload, setSawDownload] = useState(false); // Whether a download happened this round (distinguishes "already downloaded" from "download complete")
   const [dl, setDl] = useState<{ pct: number | null; text: string }>({ pct: null, text: "" });
   const [vmInfo, setVmInfo] = useState<SandboxVmInfo | null>(null);
   const [updating, setUpdating] = useState(false);
@@ -98,7 +98,7 @@ export default function SandboxStartupDialog({
   const isDaily = mode === "daily";
   const vmDir = vmInfo?.dir ?? null;
 
-  // 徽标点击：打开弹窗（手动态）。
+  // Badge click: open the dialog (manual state).
   useEffect(() => {
     if (!openTick) return;
     manualRef.current = true;
@@ -106,26 +106,26 @@ export default function SandboxStartupDialog({
     setOpen(true);
   }, [openTick]);
 
-  // 打开时拉取 VM 镜像信息（版本 / 是否可更新 / 目录）；就绪或更新态变化后刷新一次。
+  // On open, fetch VM image info (version / whether updatable / directory); refresh once after ready or update state changes.
   useEffect(() => {
     if (open) getSandboxVmInfo().then((i) => setVmInfo(i));
   }, [open, phase]);
 
   useEffect(() => {
-    if (!isDaily) { if (!manualRef.current) setOpen(false); return; } // 手动打开（徽标）不受模式限制
-    if (phase !== "error") setRestarting(false); // 已离开错误态（开始重启/就绪）→ 复位按钮
+    if (!isDaily) { if (!manualRef.current) setOpen(false); return; } // Manual open (badge) is not restricted by mode
+    if (phase !== "error") setRestarting(false); // Already left the error state (restart started / ready) → reset button
     if (ACTIVE.has(phase)) {
-      if (reason.startsWith("下载运行环境")) {
+      if (reason.startsWith("Downloading runtime environment")) {
         setSawDownload(true);
         setDl({ pct: status?.pct ?? null, text: reason });
-      } else if (reason.includes("运行环境就绪") || reason.includes("已就绪") || status?.pct === 100) {
+      } else if (reason.includes("Runtime environment ready") || status?.pct === 100) {
         setDl({ pct: 100, text: reason });
       }
       if (!dismissedRef.current) setOpen(true);
     } else if (phase === "error") {
       if (!dismissedRef.current) setOpen(true);
     } else {
-      // ready / idle / disabled / unsupported → 本轮结束，复位以备下次
+      // ready / idle / disabled / unsupported → this round is over, reset for next time
       dismissedRef.current = false;
       setSawDownload(false);
       setDl({ pct: null, text: "" });
@@ -133,7 +133,7 @@ export default function SandboxStartupDialog({
     }
   }, [phase, reason, status?.pct, isDaily]);
 
-  // 就绪后短暂展示「已就绪」再自动关闭——仅当是自动弹出（非徽标手动打开）时。
+  // After ready, briefly show "ready" then auto-close — only when auto-popped (not manually opened via the badge).
   useEffect(() => {
     if (phase === "ready" && open && !manualRef.current) {
       const t = setTimeout(() => setOpen(false), 1400);
@@ -142,13 +142,13 @@ export default function SandboxStartupDialog({
   }, [phase, open]);
 
   const onOpenChange = (o: boolean) => {
-    if (!o) { dismissedRef.current = true; manualRef.current = false; } // 记住本轮已被用户关闭
+    if (!o) { dismissedRef.current = true; manualRef.current = false; } // Remember it was dismissed by the user this round
     setOpen(o);
   };
 
-  // 步骤态推导
+  // Step state derivation
   const errored = phase === "error";
-  const imageDone = phase === "ready" || dl.pct === 100 || (errored && !!vmInfo?.version); // VM 崩溃时镜像仍在
+  const imageDone = phase === "ready" || dl.pct === 100 || (errored && !!vmInfo?.version); // The image is still present when the VM crashes
   const downloading = ACTIVE.has(phase) && sawDownload && !imageDone;
   const imageState: StepState = imageDone ? "done" : errored ? "error" : downloading ? "active" : ACTIVE.has(phase) ? "active" : "pending";
   const updatable = !!vmInfo?.updatable && !downloading && !updating;
@@ -158,7 +158,7 @@ export default function SandboxStartupDialog({
       ? sawDownload ? t("sbx.downloadDone") : t("sbx.alreadyDownloaded")
       : errored ? (reason || t("sbx.unknownError")) : downloading ? (dl.text || t("sbx.downloading")) : updating ? t("sbx.preparingUpdate") : t("sbx.checking");
 
-  // VM 退出（error）时：启动步骤标红并给出重启按钮（详因见 reason）。
+  // When the VM exits (error): mark the startup step red and offer a restart button (see reason for details).
   const bootState: StepState = phase === "ready" ? "done" : errored ? "error" : imageDone && ACTIVE.has(phase) ? "active" : "pending";
   const bootDetail = phase === "ready" ? t("sbx.bootReady") : errored ? (reason || t("sbx.unknownError")) : bootState === "active" ? t("sbx.booting") : t("sbx.bootWaiting");
 
@@ -168,12 +168,12 @@ export default function SandboxStartupDialog({
   };
 
   const doUpdate = () => {
-    manualRef.current = true; // 更新时保持弹窗打开看进度
+    manualRef.current = true; // Keep the dialog open during update to watch progress
     setUpdating(true);
     void updateSandbox();
   };
 
-  // VM 退出后重新拉起（用已有镜像，不重新下载）。保持弹窗打开以显示启动进度。
+  // Re-launch after VM exit (using the existing image, no re-download). Keep the dialog open to show startup progress.
   const doRestart = () => {
     manualRef.current = true;
     dismissedRef.current = false;
@@ -193,7 +193,7 @@ export default function SandboxStartupDialog({
           </DialogDescription>
         </DialogHeader>
 
-        {/* VM 退出后同样保留两步式布局：启动步骤标红 + 「启动沙箱」按钮（用已有镜像重启）。 */}
+        {/* After VM exit, keep the same two-step layout: startup step marked red + "Start sandbox" button (restart with the existing image). */}
         <div className="min-w-0 space-y-4 py-1">
             <StepRow
               state={updatable ? "active" : imageState}
@@ -202,7 +202,7 @@ export default function SandboxStartupDialog({
               detail={imageDetail}
               pct={downloading ? dl.pct : undefined}
             >
-              {/* 版本 + 更新按钮（版本不一致时）。 */}
+              {/* Version + update button (when versions differ). */}
               {(shortVersion || updatable) && (
                 <div className="mt-1.5 flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-ink-subtle">
                   {shortVersion && <span className="font-mono">{t("sbx.version", { v: shortVersion })}</span>}
@@ -217,7 +217,7 @@ export default function SandboxStartupDialog({
                   )}
                 </div>
               )}
-              {/* 镜像所在文件夹：点击打开（Electron shell）。放在「已下载」下方。 */}
+              {/* Folder the image lives in: click to open (Electron shell). Placed below "Downloaded". */}
               {vmDir && (
                 <button
                   type="button"

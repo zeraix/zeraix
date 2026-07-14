@@ -163,13 +163,13 @@ console.log(`[bundle-bin] bundle size: ${size}   → ${path.relative(REPO, OUT)}
 if (leaks !== "0") { console.error("[bundle-bin] FAILED: homebrew paths leaked"); process.exit(1); }
 console.log("[bundle-bin] OK — self-contained");
 
-// ── 打包 qemu 为单包 bin/darwin-<arch>.zip（zip 内 qemu/ 子目录）并上传；SKIP_UPLOAD=1 只暂存。
-//    llama 不再随包分发，改为运行时动态安装（见 electron/llm/llamaInstaller.mjs、scripts/publish-llama.mjs）。──
+// ── Pack qemu into a single bundle bin/darwin-<arch>.zip (with a qemu/ subdirectory inside the zip) and upload it; SKIP_UPLOAD=1 only stages.
+//    llama is no longer distributed with the bundle; it is now installed dynamically at runtime (see electron/llm/llamaInstaller.mjs, scripts/publish-llama.mjs). ──
 const oss = loadEnv();
 const zipPath = path.join(os.tmpdir(), `bin-darwin-${ARCH}.zip`);
 fs.rmSync(zipPath, { force: true });
 const az = new AdmZip();
-az.addLocalFolder(OUT, "qemu"); // qemu-system-aarch64 + qemu-img + libs/ → zip 内 qemu/
+az.addLocalFolder(OUT, "qemu"); // qemu-system-aarch64 + qemu-img + libs/ → qemu/ inside the zip
 az.writeZip(zipPath);
 console.log(`[publish] zip: ${(fs.statSync(zipPath).size / 1048576).toFixed(0)} MB → ${zipPath}`);
 if (/^(1|true|yes)$/i.test(oss.SKIP_UPLOAD || "")) { console.log("[publish] SKIP_UPLOAD set — staged+zipped only."); process.exit(0); }
