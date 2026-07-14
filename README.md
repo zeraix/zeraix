@@ -7,7 +7,7 @@
 **Born for local models.**
 The AI workspace built around on-device LLMs — not one that treats them as an afterthought.
 
-[English](README.md) | [简体中文](README_zh.md)
+[English](README.md)
 
 [![Discord](https://img.shields.io/badge/Discord-Join%20us-5865F2?style=flat-square&logo=discord&logoColor=white)](https://discord.gg/YOUR_INVITE)
 [![Twitter](https://img.shields.io/badge/X-@YOUR_HANDLE-000000?style=flat-square&logo=x&logoColor=white)](https://x.com/YOUR_HANDLE)
@@ -34,6 +34,14 @@ What that means in practice:
 - 🔧 **Vertical local optimization** — we optimize for local inference continuously, model by model. This is our lane and we're staying in it.
 - 🔒 **Local by default** — conversations with local models never leave your device.
 
+<div align="center">
+
+<img src="assets/screenshot-main.png" alt="Zeraix" width="800" />
+
+<img src="assets/screenshot-dev.png" alt="Zeraix Developer Mode" width="800" />
+
+</div>
+
 ## ✨ Features
 
 ### 📦 Local Models, Two Tracks
@@ -51,10 +59,6 @@ Your everyday AI companion — chat, write, summarize, with built-in tool callin
 - Cross-model memory: switch models mid-conversation without losing context
 - …and more
 
-<div align="center">
-<img src="assets/screenshot-assistant.png" alt="Zeraix Assistant Mode" width="800" />
-</div>
-
 ### 🛠️ Developer Mode
 
 A coding agent that works right on your machine:
@@ -64,10 +68,6 @@ A coding agent that works right on your machine:
 - Search & browse the web for docs and answers
 - Powered by the model of your choice — local or cloud
 - …and more
-
-<div align="center">
-<img src="assets/screenshot-dev.png" alt="Zeraix Developer Mode" width="800" />
-</div>
 
 ### ☁️ Cloud When You Want It
 
