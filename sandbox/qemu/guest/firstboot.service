@@ -1,0 +1,15 @@
+[Unit]
+Description=zeraix sandbox first-boot (mount host 9p share, bring up NIC)
+DefaultDependencies=no
+After=local-fs.target
+# Order the guest agent AFTER firstboot so the NIC is up before qemu.mjs (Windows) drives the
+# post-boot 9p-over-tcp mount — no race, no in-agent NIC bring-up needed.
+Before=multi-user.target qemu-guest-agent.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/firstboot.sh
+
+[Install]
+WantedBy=multi-user.target

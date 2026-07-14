@@ -1,0 +1,124 @@
+# electron-builder 打包配置
+# 文档：https://www.electron.build/configuration
+appId: com.operease.app
+productName: OperEase
+# 产物名带上「版本 / edition」（NEXT_PUBLIC_APP_EDITION：cn / intl），使国内版与国际版安装包各自命名、互不覆盖。
+# 由 dist:* 脚本通过 cross-env 注入该变量（见 package.json）。
+artifactName: ${productName}-${env.NEXT_PUBLIC_APP_EDITION}-${version}.${ext}
+# 把 productName 注入打包后的 package.json，使 app.getName() 在所有平台的打包版都返回 "OperEase"
+# （否则 Win/Linux 会回落到 package.json 的 name "Zeraix"，只有 macOS 靠 CFBundleName 得到 OperEase）。
+# 由此 userData / llama 运行时 / qemu 镜像目录在打包版统一用 OperEase；dev 读源 package.json 仍为 Zeraix。
+extraMetadata:
+  productName: OperEase
+directories:
+  output: dist-electron
+  # /build 已被 gitignore，图标等打包资源放在 resources/（icon.ico / icon.icns）
+  buildResources: resources
+
+# 仅打包 Electron 主进程与 Next.js 静态导出产物，
+# 渲染层是纯静态文件，不需要捆绑 node_modules
+files:
+  - electron/**/*
+  # Next.js 静态导出目录（next.config.ts 中 distDir: "Zeraix"，主进程 app:// 从此目录取文件）
+  - Zeraix/**/*
+  - package.json
+  - "!node_modules"
+  # 主进程用 openai SDK 发起请求（零运行时依赖），需把该模块重新纳入打包
+  - node_modules/openai/**/*
+  # 内置终端的 PTY 后端（原生模块）：随主进程打包，其 .node 二进制须再经 asarUnpack 解出（见下）。
+  # electron-builder 默认 npmRebuild=true，会在目标平台按 Electron ABI 重新编译 node-pty。
+  - node_modules/node-pty/**/*
+  # 注：qemu 运行时依赖 control.mjs / ninep-server.mjs 已并入 electron/tools/sandbox/，
+  # 由上面的 electron/**/* 一并打包（不再单列 sandbox/）。sandbox/ 其余为构建期产物，不入包。
+
+# 关闭原生模块重编译：node-pty 1.1.0 用 node-addon-api（N-API），其预编译产物
+# prebuilds/<platform>-<arch>/pty.node 导出 napi_register_module_v1，ABI 在 Node 与
+# Electron 间稳定，无需按 Electron ABI 重新编译（node-pty 的加载器 lib/utils.js 会回落到
+# prebuilds/ 目录）。默认的 npmRebuild=true 会调 node-gyp rebuild，在缺少 VS C++/Windows SDK
+# 的打包机上失败；关掉后直接打包现成的 N-API 预编译二进制即可。
+npmRebuild: false
+
+asar: true
+
+# 原生模块的 .node 二进制无法从 asar 归档内 dlopen，须解包到 app.asar.unpacked/。
+# node-pty 是内置终端的 PTY 后端，必须解出方可加载。
+asarUnpack:
+  - node_modules/node-pty/**/*
+
+# 自定义协议（Deep Link）：Google 登录回调页的「Open Zeraix」按钮指向 zeraix://…，
+# 由此把已运行的应用带到前台。electron-builder 据此写入 macOS Info.plist（CFBundleURLTypes）
+# 与 Windows 安装器的注册表键。scheme 需与 electron/services/deepLink.mjs 的 DEEP_LINK_SCHEME 一致。
+protocols:
+  - name: Zeraix
+    schemes:
+      - zeraix
+
+# qemu 的 HVF hypervisor 权限改由 entitlementsInherit（resources/entitlements.mac.inherit.plist）在
+# 正常签名阶段直接赋予嵌套二进制 —— 不再事后重签（afterSign）。原因：electron-builder 先公证、后触发
+# afterSign（见 macPackager 签名→公证→afterSign 顺序），afterSign 重签 qemu 会破坏已公证的封签。
+
+# 所有产物构建完成后：对 DMG 做 签名→公证→装订（Gatekeeper 需要 DMG 本身可用签名 + 已公证/装订）。
+# 无凭据（本地/CI 无 secret）时优雅跳过。本应用无自动更新，改写 DMG 不影响 .blockmap。
+afterAllArtifactBuild: scripts/afterAllArtifactBuild.cjs
+
+# 打进包的原生二进制：仅 qemu 沙箱（布局 <platform>-<arch>/qemu/）。
+# download-bin-*.mjs 先铺到 resources/bin/<platform>-<arch>/，此处原样拷进 Contents/Resources/ 根：
+#   qemu.mjs 从 process.resourcesPath/<platform>-<arch>/qemu 取用。
+# llama 推理不随包分发：运行时由 llamaInstaller.mjs 从 CDN（llama.cpp GitHub 发布构建）下载到 userData。
+# （dir 名用 darwin/win32/linux，与 electron-builder 的 ${os} 宏「mac」不同，故按 <os>-* 直拷。）
+# mac 由 `npm run bundle:bin:mac`、Windows 由 `npm run bundle:bin:win` 在打包前生成对应 <arch>/。
+# rootfs.qcow2/Image/initrd.img 体积大，首次运行按 sandbox/qemu/README.md 下载到 ~/.zeraix/vm。
+# 发版签名：electron-builder 用 Developer ID 重签包内嵌套二进制并套用 entitlementsInherit（含 hypervisor），
+# 打进包的 qemu-system-* 因此保留 HVF 权限。llama 不在包内（运行时下载，见下方），不参与本次签名/公证。
+# 硬化运行时 + 公证见下方 mac 配置。
+extraResources:
+  - from: resources/bin
+    filter:
+      - "darwin-*/**"
+      - "win32-*/**"
+
+# 仅保留英文与中文语言包（Chromium locales，节省约 45MB）
+# Windows/Linux 过滤 locales/*.pak，macOS 过滤 .lproj 目录
+electronLanguages:
+  - en-US
+  - zh-CN
+  - zh-TW
+
+win:
+  target:
+    - target: nsis
+      arch: [x64]
+  # 代码签名（分发到其它 Windows 时避免 SmartScreen「未知发布者」拦截）。与 mac 一样，证书凭据不写进仓库：
+  # 由环境变量注入 —— CSC_LINK = .pfx 证书文件路径或其 base64 内容，CSC_KEY_PASSWORD = 证书密码
+  # （electron-builder 自动读取，mac / win 通用）。无凭据（本地 / CI 无 secret）时优雅跳过签名，仍产出未签名安装包。
+  # electron-builder 26 起 Windows 签名选项统一收拢到 signtoolOptions（原先直接挂在 win.* 上的字段已迁移至此）。
+  signtoolOptions:
+    # 证书来源：默认走上面的 CSC_LINK / CSC_KEY_PASSWORD 环境变量；如需在此显式指定，可改用
+    # certificateFile + certificatePassword（.pfx 文件），或 certificateSubjectName / certificateSha1（从 Windows 证书库 / HSM 取）。
+    signingHashAlgorithms:
+      - sha256
+    # RFC 3161 时间戳：让签名在证书过期后依旧长期有效（不加时间戳则证书一过期签名即失效）。
+    rfc3161TimeStampServer: http://timestamp.digicert.com
+nsis:
+  oneClick: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  createStartMenuShortcut: true
+
+mac:
+  # 仅 arm64（Apple Silicon）：x64 版缺 darwin-x64 原生二进制（llama/qemu 只按构建机 arch 内置），
+  # 打出来的 Intel 包本地模型/沙箱不可用，故不再产出。
+  target:
+    - target: dmg
+      arch: [arm64]
+  category: public.app-category.productivity
+  # 硬化运行时 + 签名/公证（分发到其他 Mac 的前提，避免 Gatekeeper「已损坏」拦截）。
+  hardenedRuntime: true
+  gatekeeperAssess: false
+  entitlements: resources/entitlements.mac.plist
+  entitlementsInherit: resources/entitlements.mac.inherit.plist
+  # 公证：关闭 electron-builder 自带的「.app 公证」。改由 afterAllArtifactBuild 钩子对真正分发的
+  # 「DMG」一次性做 签名→公证→装订（见 scripts/afterAllArtifactBuild.cjs，含内部 app）。
+  # 原因：electron-builder 只公证 .app、产出的 DMG 仍未签名 → Gatekeeper 打开时「no usable signature」被拦；
+  # 若同时公证 app 与 DMG 则要上传两次、冗余又慢。故只公证 DMG 这一件分发物。
+  notarize: false

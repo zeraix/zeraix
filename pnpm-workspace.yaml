@@ -1,0 +1,13 @@
+overrides:
+  app-builder-lib>@electron/get: ^3.1.0
+
+patchedDependencies:
+  '@zzcpt/zztool@2.6.4': patches/@zzcpt__zztool@2.6.4.patch
+
+allowBuilds:
+  better-sqlite3-multiple-ciphers: set this to true or false
+  electron-winstaller: true
+  msw: true
+  node-pty: true
+  onnxruntime-node: set this to true or false
+  sharp: true

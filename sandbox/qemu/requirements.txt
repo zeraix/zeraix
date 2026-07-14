@@ -1,0 +1,50 @@
+# BotsHub sandbox — Python PDF / Office toolkit.
+# Pin these (pip freeze) before publishing the image to your CDN for reproducible builds.
+
+# ── PDF: read / extract / transform ─────────────────────────────────────────
+pypdf                 # pure-python: read, merge, split, rotate, metadata
+pdfplumber            # text + TABLE extraction with layout (pdfminer.six + Pillow)
+PyMuPDF               # fitz: fast text/image extract, render-to-image, annotate (best all-rounder)
+pikepdf               # structural transform / repair / encrypt — binds the native qpdf
+
+# ── PDF: generate ────────────────────────────────────────────────────────────
+weasyprint            # HTML/CSS -> PDF (uses native pango/cairo/gdk-pixbuf)
+reportlab             # programmatic PDF generation
+
+# ── OCR (rapidocr = PP-OCRv6; pairs with native ghostscript / poppler) ───────
+pdf2image             # PDF -> images via native poppler (pdftoppm)
+rapidocr              # PP-OCRv6 (small tier by default), strong CJK, ONNX/OpenVINO. Sole OCR engine.
+                      # VERIFIED working via the bundled adapter sandbox/image/rapidocr_v6_api.py:
+                      #   from rapidocr_v6_api import exec_ocr
+                      #   pymupdf4llm.to_markdown(pdf, ocr_function=exec_ocr, force_ocr=True)
+                      # (pymupdf4llm's built-in plugin only speaks the legacy rapidocr_onnxruntime
+                      # API, so v6 must go through the adapter.) v6 models are baked at build time.
+                      # For PP-Structure (tables/formulas) install `paddleocr` on demand (heavy).
+
+# ── Office documents ─────────────────────────────────────────────────────────
+python-docx           # .docx read/write (pure python)
+openpyxl              # .xlsx read/write (pure python)
+python-pptx           # .pptx read/write (pure python)
+odfpy                 # ODF (.odt/.ods/.odp)
+pandas                # tabular data + excel/csv IO
+
+# ── Conversion / markup ──────────────────────────────────────────────────────
+pypandoc              # wrapper over native pandoc (md/html/docx/latex/epub...)
+unoserver             # drives a headless LibreOffice for fast any->any conversion
+                      # (uses python3-uno, installed in the image)
+
+# ── Document → Markdown (LLM ingestion) ──────────────────────────────────────
+markitdown[docx,pptx,xlsx,pdf,outlook]  # MIT: broad any-file -> markdown front door
+                      # (avoid [all]: it pulls whisper/torch for audio transcription)
+pymupdf4llm           # best model-free PDF -> markdown (multi-col, tables, OCR)
+                      # NOTE: AGPL-3.0 like PyMuPDF — drop both if you need permissive-only
+mammoth               # BSD: clean .docx -> html/markdown (semantic)
+trafilatura           # Apache: web HTML / article -> markdown
+# Heavy ML converters — do NOT bake; install on demand (network is on, state persists):
+#   docling            # MIT (IBM): high-accuracy PDF + best tables; downloads models on first use
+#   marker-pdf         # GPL-3.0 + restricted model license, 2-4GB models, GPU-oriented — avoid for shipping
+
+# ── Utilities ────────────────────────────────────────────────────────────────
+lxml                  # fast XML/HTML (C ext)
+beautifulsoup4        # HTML parsing
+Pillow                # imaging (dep of several above; pin explicitly)

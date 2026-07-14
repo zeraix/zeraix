@@ -1,0 +1,13 @@
+--- a/lib/module/getUrlParam/getUrlParam.ts
++++ b/lib/module/getUrlParam/getUrlParam.ts
+@@ -20,8 +20,8 @@
+   }
+   // const queryString = window.location.search; 
+   // const urlParams = new URLSearchParams(queryString);
+-  const params:T = (url.match(/([^?=&]+)(=([^&]*))/g) || []).reduce(
+-    (a: any, v) => (
++  const params:T = ((url.match(/([^?=&]+)(=([^&]*))/g) || []) as string[]).reduce(
++    (a: any, v: string) => (
+       (a[v.slice(0, v.indexOf("="))] = v.slice(v.indexOf("=") + 1)), a
+     ),
+     {}
