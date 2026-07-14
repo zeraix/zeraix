@@ -8,7 +8,7 @@ Zeraix is a local-first AI workstation that can read files, execute tools, and i
 
 Instead, report them privately via one of the following channels:
 
-- **Email:** security@zeraix.com
+- **Email:** fergus@zeraix.com
 - **GitHub Private Vulnerability Reporting:** use the ["Report a vulnerability"](../../security/advisories/new) button on this repository (if enabled)
 
 Please include as much of the following as possible:
