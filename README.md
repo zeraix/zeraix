@@ -9,7 +9,7 @@ The AI workspace built around on-device LLMs — not one that treats them as an 
 
 [English](README.md)
 
-[![Discord](https://img.shields.io/badge/Discord-Join%20us-5865F2?style=flat-square&logo=discord&logoColor=white)]((https://discord.gg/PcQ3jr3MfH))
+[![Discord](https://img.shields.io/badge/Discord-Join%20us-5865F2?style=flat-square&logo=discord&logoColor=white)](https://discord.gg/PcQ3jr3MfH)
 [![Twitter](https://img.shields.io/badge/X-@YOUR_HANDLE-000000?style=flat-square&logo=x&logoColor=white)](https://x.com/YOUR_HANDLE)
 
 [![Release](https://img.shields.io/github/v/release/zeraix/Zeraix?style=flat-square&color=2ea44f)](https://github.com/zeraix/Zeraix/releases)
