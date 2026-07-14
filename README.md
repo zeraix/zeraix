@@ -10,7 +10,7 @@ The AI workspace built around on-device LLMs — not one that treats them as an 
 [English](README.md)
 
 [![Discord](https://img.shields.io/badge/Discord-Join%20us-5865F2?style=flat-square&logo=discord&logoColor=white)](https://discord.gg/PcQ3jr3MfH)
-[![Twitter](https://img.shields.io/badge/X-@YOUR_HANDLE-000000?style=flat-square&logo=x&logoColor=white)](https://x.com/YOUR_HANDLE)
+[![Twitter](https://img.shields.io/badge/X-@YOUR_HANDLE-000000?style=flat-square&logo=x&logoColor=white)](https://x.com/ZeraixAI)
 
 [![Release](https://img.shields.io/github/v/release/zeraix/Zeraix?style=flat-square&color=2ea44f)](https://github.com/zeraix/Zeraix/releases)
 [![Downloads](https://img.shields.io/github/downloads/zeraix/Zeraix/total?style=flat-square&color=blue)](https://github.com/zeraix/Zeraix/releases)
@@ -110,8 +110,8 @@ Available in **English, 简体中文, 繁體中文, 日本語, 한국어, Franç
 
 ## 🌍 Community
 
-- 💬 [Join our Discord](https://discord.gg/YOUR_INVITE)
-- 🐦 [Follow us on X](https://x.com/YOUR_HANDLE)
+- 💬 [Join our Discord](https://discord.gg/[PcQ])
+- 🐦 [Follow us on X](https://x.com/ZeraixAI)
 - 🐛 [Report a bug](https://github.com/zeraix/Zeraix/issues/new)
 - 💡 [Request a feature](https://github.com/zeraix/Zeraix/issues/new)
 
