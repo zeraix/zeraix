@@ -115,11 +115,11 @@ Available in **English, 简体中文, 繁體中文, 日本語, 한국어, Franç
 - 🐛 [Report a bug](https://github.com/zeraix/Zeraix/issues/new)
 - 💡 [Request a feature](https://github.com/zeraix/Zeraix/issues/new)
 
-## 📄 License
+## License
 
-This project is licensed under the [GNU Affero General Public License v3.0](LICENSE).
+This project is licensed under the [GNU Affero General Public License v3.0](./LICENSE).
 
-For commercial licensing inquiries, please contact us.
+For commercial licensing or partnership inquiries, contact us at **emma@zeraix.com**.
 
 ---
 
