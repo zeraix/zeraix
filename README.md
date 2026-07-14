@@ -110,7 +110,7 @@ Available in **English, 简体中文, 繁體中文, 日本語, 한국어, Franç
 
 ## 🌍 Community
 
-- 💬 [Join our Discord](https://discord.gg/[PcQ])
+- 💬 [Join our Discord](https://discord.gg/PcQ3jr3MfH)
 - 🐦 [Follow us on X](https://x.com/ZeraixAI)
 - 🐛 [Report a bug](https://github.com/zeraix/Zeraix/issues/new)
 - 💡 [Request a feature](https://github.com/zeraix/Zeraix/issues/new)
