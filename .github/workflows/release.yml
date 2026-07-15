@@ -31,7 +31,10 @@ jobs:
     # binary is fetched during install, electron-builder's tooling during the build).
     env:
       NPM_CONFIG_REGISTRY: https://registry.npmjs.org/
-      NPM_CONFIG_ELECTRON_MIRROR: https://github.com/electron/electron/releases/download/v
+      # No trailing "v" here: @electron/get appends its own "v${version}/" directory, so a
+      # trailing "v" yields .../download/vv42.4.0/... and 404s. (npmmirror's layout in
+      # .npmrc differs, which is why that one carries the "v".)
+      NPM_CONFIG_ELECTRON_MIRROR: https://github.com/electron/electron/releases/download/
       NPM_CONFIG_ELECTRON_BUILDER_BINARIES_MIRROR: https://github.com/electron-userland/electron-builder-binaries/releases/download/
 
     strategy:
