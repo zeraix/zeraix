@@ -626,5 +626,15 @@
   "update.error.generic": "Não foi possível verificar atualizações.",
   "update.error.network": "Sem conexão. Verifique sua rede e tente novamente.",
   "update.error.noRelease": "Nenhuma atualização publicada ainda.",
-  "update.error.unsigned": "Esta versão não é assinada e não pode se atualizar. Baixe a versão mais recente manualmente."
+  "update.error.unsigned": "Esta versão não é assinada e não pode se atualizar. Baixe a versão mais recente manualmente.",
+  "image.generating": "Gerando imagem…",
+  "image.alt": "Imagem gerada",
+  "image.servedBy": "Gerada por {engine}",
+  "image.error.filtered": "O provedor recusou este prompt. Tente descrevê-lo de outra forma.",
+  "image.error.auth": "Falha ao gerar a imagem: a chave de API foi recusada.",
+  "image.error.quota": "Falha ao gerar a imagem: limite de requisições ou cota atingida.",
+  "image.error.network": "Falha ao gerar a imagem: sem conexão com o provedor.",
+  "image.error.timeout": "Tempo esgotado ao gerar a imagem.",
+  "image.error.unsupported": "Nenhum provedor configurado pode gerar imagens. Adicione uma chave de API da Gemini ou OpenAI.",
+  "image.error.unknown": "Falha ao gerar a imagem."
 }

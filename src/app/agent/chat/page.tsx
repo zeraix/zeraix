@@ -124,9 +124,11 @@ import {
   deleteMemoryTool,
   openBrowserTool,
   saveMemoryTool,
+  imageGenerationTool,
   searchMemoryTool,
   updateTodosTool,
 } from "./agentTools";
+import { generate, capabilityAvailable, imageErrorKey } from "@/lib/ai/generation";
 import {
   saveMemoryFile,
   listMemoryFiles,
@@ -1585,6 +1587,37 @@ function ChatAgent() {
     return `${result}.`;
   };
 
+  // image_generation: text-to-image through the user's own provider key. The engine is derived from
+  // the configured keys (their chat vendor first, then any keyed vendor) — never picked by the model
+  // and never shown in the model picker. See docs/generation-capabilities-design.md.
+  const generateImageAction = async (ctx: RunCtx, rawArgs: Record<string, unknown>): Promise<string> => {
+    const prompt = String(rawArgs.prompt ?? "").trim();
+    if (!prompt) return "(image_generation is missing prompt)";
+
+    ctx.status?.(t("image.generating"));
+    const res = await generate({ capability: "image_generation", prompt, chatProviderId: activeModel?.providerId });
+
+    if (!res.ok) {
+      ctx.push({ kind: "tool", name: "image_generation", args: { prompt }, ok: false, result: t(imageErrorKey(res.error.kind)) });
+      // The model relays this to the user in its own words, so it must be plain and actionable.
+      return `Image generation failed (${res.error.kind}): ${res.error.message}`;
+    }
+
+    // The artifact must NOT be fed back to the model: a base64 payload is 1-3 MB and would be
+    // re-sent on every subsequent turn, wrecking the context window and the prompt cache.
+    // The bubble carries the pixels; the model gets metadata only.
+    ctx.push({
+      kind: "tool",
+      name: "image_generation",
+      args: { prompt },
+      ok: true,
+      result: res.artifact.src,
+      image: res.artifact.src,
+      servedBy: res.artifact.servedBy,
+    });
+    return `Generated the image with ${res.artifact.servedBy}. It is already displayed to the user — do not repeat the URL or embed it in markdown.`;
+  };
+
   // save_memory: write a memory as a standalone Markdown file (retained across conversations), show a bubble, and feed the result back to the model.
   const saveMemory = async (ctx: RunCtx, rawArgs: Record<string, unknown>): Promise<string> => {
     const title = String(rawArgs.title ?? "").trim();
@@ -2038,6 +2071,9 @@ function ChatAgent() {
         updateTodosTool(),
         openBrowserTool(),
         browserTool(),
+        // Only offered when some configured key can actually serve it — otherwise the model would
+        // promise an image and then fail. Read fresh each round, since keys can change mid-session.
+        ...(capabilityAvailable("image_generation") ? [imageGenerationTool()] : []),
         ...(isMemoryFilesAvailable()
           ? [saveMemoryTool(), deleteMemoryTool(), searchMemoryTool()]
           : []),
@@ -2198,7 +2234,9 @@ function ChatAgent() {
                     ? openBrowserAction(ctx, args)
                     : tc.function.name === "browser"
                       ? await browserControl(ctx, args)
-                      : tc.function.name === "load_skill"
+                      : tc.function.name === "image_generation"
+                        ? await generateImageAction(ctx, args)
+                        : tc.function.name === "load_skill"
                         ? loadSkill(ctx, args)
                         : tc.function.name === "save_memory"
                           ? await saveMemory(ctx, args)
@@ -2572,18 +2610,21 @@ function ChatAgent() {
             // "thinking process" card, while the rest of the messages (user / reply / usage / todos / choice) are rendered one by one as usual.
             const nodes: React.ReactNode[] = [];
             let i = 0;
-            const inProcess = (k: DisplayMsg["kind"]) =>
-              k === "tool" || k === "reasoning" || k === "phase";
+            // A tool call carrying an artifact (image_generation) is the deliverable, not a step in
+            // the trace: it renders standalone rather than being swallowed into the collapsed
+            // "Thinking process" card, where the user would never see the thing they asked for.
+            const inProcess = (m: DisplayMsg) =>
+              (m.kind === "tool" && !m.image) || m.kind === "reasoning" || m.kind === "phase";
             // The index of the last AI reply: only it shows "regenerate" (regenerating discards everything after it, to avoid an old reply being triggered by mistake).
             let lastAssistantIndex = -1;
             for (let j = display.length - 1; j >= 0; j--) {
               if (display[j].kind === "assistant") { lastAssistantIndex = j; break; }
             }
             while (i < display.length) {
-              if (inProcess(display[i].kind)) {
+              if (inProcess(display[i])) {
                 const start = i;
                 const group: ProcessItem[] = [];
-                while (i < display.length && inProcess(display[i].kind)) {
+                while (i < display.length && inProcess(display[i])) {
                   group.push(display[i] as ProcessItem);
                   i++;
                 }

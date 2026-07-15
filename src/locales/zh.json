@@ -629,5 +629,15 @@
   "update.error.generic": "无法检查更新。",
   "update.error.network": "无网络连接，请检查后重试。",
   "update.error.noRelease": "尚未发布更新。",
-  "update.error.unsigned": "此版本未签名，无法自动更新，请手动下载最新版本。"
+  "update.error.unsigned": "此版本未签名，无法自动更新，请手动下载最新版本。",
+  "image.generating": "正在生成图片…",
+  "image.alt": "生成的图片",
+  "image.servedBy": "由 {engine} 生成",
+  "image.error.filtered": "服务商拒绝了该提示词，请换一种描述方式。",
+  "image.error.auth": "图片生成失败：API Key 被拒绝。",
+  "image.error.quota": "图片生成失败：已达到速率限制或配额上限。",
+  "image.error.network": "图片生成失败：无法连接到服务商。",
+  "image.error.timeout": "图片生成超时。",
+  "image.error.unsupported": "当前没有可用于生成图片的服务商，请先添加Gemini 或 OpenAI 的 API Key。",
+  "image.error.unknown": "图片生成失败。"
 }

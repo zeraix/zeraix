@@ -626,5 +626,15 @@
   "update.error.generic": "Impossibile verificare la presenza di aggiornamenti.",
   "update.error.network": "Nessuna connessione. Controlla la rete e riprova.",
   "update.error.noRelease": "Nessun aggiornamento pubblicato finora.",
-  "update.error.unsigned": "Questa build non è firmata e non può aggiornarsi da sola. Scarica manualmente l'ultima versione."
+  "update.error.unsigned": "Questa build non è firmata e non può aggiornarsi da sola. Scarica manualmente l'ultima versione.",
+  "image.generating": "Generazione dell'immagine…",
+  "image.alt": "Immagine generata",
+  "image.servedBy": "Generata da {engine}",
+  "image.error.filtered": "Il provider ha rifiutato questo prompt. Prova a descriverlo diversamente.",
+  "image.error.auth": "Generazione non riuscita: la chiave API è stata rifiutata.",
+  "image.error.quota": "Generazione non riuscita: limite di richieste o quota raggiunta.",
+  "image.error.network": "Generazione non riuscita: nessuna connessione al provider.",
+  "image.error.timeout": "Timeout durante la generazione dell'immagine.",
+  "image.error.unsupported": "Nessun provider configurato può generare immagini. Aggiungi una chiave API di Gemini o OpenAI.",
+  "image.error.unknown": "Generazione dell'immagine non riuscita."
 }

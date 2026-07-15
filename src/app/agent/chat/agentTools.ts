@@ -101,6 +101,44 @@ export function askUserTool() {
 }
 
 /** Tool declaration for writing a memory (OpenAI-compatible). Handled by the render layer; writes a single memory as its own Markdown file. */
+/**
+ * Tool declaration for text-to-image (OpenAI-compatible).
+ *
+ * Prompt-only by design (docs/generation-capabilities-design.md §4.1): there are no size/quality/
+ * style parameters, so any look the user asks for has exactly one route into the request — the
+ * prompt text. Hence the instruction to fold it in.
+ *
+ * The engine is NOT chosen here. It is derived from the user's configured API keys
+ * (generation/registry.ts selectEngine): their chat vendor first, then any vendor they hold a key
+ * for. The model neither knows nor picks it.
+ */
+export function imageGenerationTool() {
+  return {
+    type: "function" as const,
+    function: {
+      name: "image_generation",
+      description:
+        "Generate an image from a text description. Use this when the user asks you to create, draw, generate, or design a picture, illustration, poster, logo, icon, or any other visual. " +
+        "Do NOT use it to find images that already exist — use web_search for that. " +
+        "Takes 5-20 seconds. Call it once per image the user asks for; do not call it speculatively to 'preview' an idea.",
+      parameters: {
+        type: "object",
+        properties: {
+          prompt: {
+            type: "string",
+            description:
+              "A vivid, self-contained description of the image: subject, setting, lighting, composition and style. " +
+              "Expand the user's request into a full scene rather than quoting it back. " +
+              "There are no separate parameters for shape, quality or style, so fold everything the user asked for into these words " +
+              "(e.g. \"a wide 16:9 cinematic shot of…\", \"in soft watercolour…\", \"photorealistic, shallow depth of field…\").",
+          },
+        },
+        required: ["prompt"],
+      },
+    },
+  };
+}
+
 export function saveMemoryTool() {
   return {
     type: "function" as const,

@@ -62,7 +62,11 @@ export type DisplayMsg =
   // Dev-mode "phase summary": the body of a tool-call round (after cleanup) — shown as one entry in the "thinking process" timeline,
   // collected into the same card alongside deep thinking / the tool trace rather than as its own separate block (avoids splitting one round into multiple "done" reply blocks).
   | { kind: "phase"; content: string }
-  | { kind: "tool"; name: string; args: unknown; ok: boolean; result: string }
+  // `image` / `servedBy` are set by image_generation only: the artifact is rendered here, in the
+  // display layer, and deliberately never enters the model's context (a base64 payload would be
+  // re-sent every turn). `servedBy` names the engine because the vendor may differ from the chat
+  // vendor — see docs/generation-capabilities-design.md §3.
+  | { kind: "tool"; name: string; args: unknown; ok: boolean; result: string; image?: string; servedBy?: string }
   | { kind: "todos"; todos: Todo[] } // the task list archived into the chat after the conversation ends
   | { kind: "usage"; prompt: number; completion: number; total: number; cached: number; estimated: boolean } // this round's token usage (cached = input tokens served from prefix cache)
   | ChoiceMsg;

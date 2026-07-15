@@ -626,5 +626,15 @@
   "update.error.generic": "アップデートを確認できませんでした。",
   "update.error.network": "接続がありません。ネットワークを確認して再試行してください。",
   "update.error.noRelease": "まだアップデートは公開されていません。",
-  "update.error.unsigned": "このビルドは署名されていないため自動更新できません。最新版を手動でダウンロードしてください。"
+  "update.error.unsigned": "このビルドは署名されていないため自動更新できません。最新版を手動でダウンロードしてください。",
+  "image.generating": "画像を生成中…",
+  "image.alt": "生成された画像",
+  "image.servedBy": "{engine} で生成",
+  "image.error.filtered": "プロバイダーがこのプロンプトを拒否しました。表現を変えてお試しください。",
+  "image.error.auth": "画像生成に失敗しました: APIキーが拒否されました。",
+  "image.error.quota": "画像生成に失敗しました: レート制限または上限に達しました。",
+  "image.error.network": "画像生成に失敗しました: プロバイダーに接続できません。",
+  "image.error.timeout": "画像生成がタイムアウトしました。",
+  "image.error.unsupported": "画像を生成できるプロバイダーが設定されていません。Gemini、OpenAI のいずれかの API キーを追加してください。",
+  "image.error.unknown": "画像生成に失敗しました。"
 }

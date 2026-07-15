@@ -626,5 +626,15 @@
   "update.error.generic": "Nach Updates konnte nicht gesucht werden.",
   "update.error.network": "Keine Verbindung. Prüfe dein Netzwerk und versuche es erneut.",
   "update.error.noRelease": "Noch keine Updates veröffentlicht.",
-  "update.error.unsigned": "Dieser Build ist nicht signiert und kann sich nicht selbst aktualisieren. Bitte lade die neueste Version manuell herunter."
+  "update.error.unsigned": "Dieser Build ist nicht signiert und kann sich nicht selbst aktualisieren. Bitte lade die neueste Version manuell herunter.",
+  "image.generating": "Bild wird erzeugt…",
+  "image.alt": "Erzeugtes Bild",
+  "image.servedBy": "Erzeugt von {engine}",
+  "image.error.filtered": "Der Anbieter hat diesen Prompt abgelehnt. Formuliere ihn anders.",
+  "image.error.auth": "Bilderzeugung fehlgeschlagen: Der API-Schlüssel wurde abgelehnt.",
+  "image.error.quota": "Bilderzeugung fehlgeschlagen: Ratenlimit oder Kontingent erreicht.",
+  "image.error.network": "Bilderzeugung fehlgeschlagen: keine Verbindung zum Anbieter.",
+  "image.error.timeout": "Zeitüberschreitung bei der Bilderzeugung.",
+  "image.error.unsupported": "Kein eingerichteter Anbieter kann Bilder erzeugen. Füge einen API-Schlüssel für Zhipu, Gemini oder OpenAI hinzu.",
+  "image.error.unknown": "Bilderzeugung fehlgeschlagen."
 }

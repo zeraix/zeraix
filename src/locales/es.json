@@ -626,5 +626,15 @@
   "update.error.generic": "No se pudo buscar actualizaciones.",
   "update.error.network": "Sin conexión. Comprueba tu red e inténtalo de nuevo.",
   "update.error.noRelease": "Aún no hay actualizaciones publicadas.",
-  "update.error.unsigned": "Esta versión no está firmada y no puede actualizarse sola. Descarga la última versión manualmente."
+  "update.error.unsigned": "Esta versión no está firmada y no puede actualizarse sola. Descarga la última versión manualmente.",
+  "image.generating": "Generando imagen…",
+  "image.alt": "Imagen generada",
+  "image.servedBy": "Generada por {engine}",
+  "image.error.filtered": "El proveedor rechazó esta descripción. Prueba a expresarla de otra forma.",
+  "image.error.auth": "Error al generar la imagen: la clave de API fue rechazada.",
+  "image.error.quota": "Error al generar la imagen: se alcanzó el límite o la cuota.",
+  "image.error.network": "Error al generar la imagen: sin conexión con el proveedor.",
+  "image.error.timeout": "Se agotó el tiempo de generación de la imagen.",
+  "image.error.unsupported": "Ningún proveedor configurado puede generar imágenes. Añade una clave de API de Gemini u OpenAI.",
+  "image.error.unknown": "Error al generar la imagen."
 }

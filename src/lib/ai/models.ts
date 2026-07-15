@@ -41,7 +41,7 @@ export interface AgentModel {
   model: string;
   /** Display name. */
   label: string;
-  /** Custom models only; official ones derive it from provider.endpoint. Already resolved to a full endpoint (including /chat/completions). */
+  /** Custom models only; official ones compose it from provider.baseUrl. Already resolved to a full endpoint (operation path included). */
   endpoint?: string;
   custom: boolean;
   /** API format (currently openai-chat only). */
@@ -128,6 +128,20 @@ export function apiFormatSuffix(apiFormat: string): string {
 }
 
 /**
+ * Compose a provider's chat endpoint from its base URL.
+ *
+ * Provider.baseUrl carries no operation path (a provider is not only a chat endpoint — the same
+ * base also serves /images/generations, /audio/speech, …), so the chat path is appended here:
+ * the provider's own `chatPath` when it is non-standard (MiniMax), otherwise derived from the
+ * model's apiFormat. For any other capability, compose from `baseUrl` the same way.
+ */
+export function providerChatEndpoint(p: Provider, apiFormat = "openai-chat"): string {
+  const base = p.baseUrl.trim().replace(/\/+$/, "");
+  if (!base) return ""; // "custom": the user supplies the whole endpoint
+  return `${base}${p.chatPath ?? apiFormatSuffix(apiFormat)}`;
+}
+
+/**
  * Build a custom endpoint: a full URL is used as-is; otherwise strip trailing slashes and append, per the API format,
  * /chat/completions (Chat Completions) or /responses (Responses API).
  */
@@ -209,6 +223,30 @@ export function normalizeOfficialEndpoints(): void {
     return m;
   });
   if (changed) saveModelList(next);
+}
+
+/**
+ * One-time cleanup for a shipped-then-reverted design.
+ *
+ * An earlier build auto-added image engines (glm-image, cogview-*) to the model list as selectable
+ * entries tagged `type: "image"`. That approach is gone — generation engines are resolved per
+ * capability from src/lib/ai/generation/registry.ts and never appear in the picker
+ * (docs/generation-capabilities-design.md). But the entries were persisted to
+ * agent.llm.modelList / app.config, so deleting the writer is not enough: without this they would
+ * linger in the picker forever, and selecting one would send chat messages to /images/generations.
+ *
+ * Reads `type` off the raw record rather than AgentModel, which no longer declares it.
+ * Idempotent; writes only when something is actually removed. Safe to delete once no installs
+ * predate the change.
+ */
+export function purgeLegacyImageModels(): void {
+  const list = loadModelList();
+  const kept = list.filter((m) => (m as { type?: string }).type !== "image");
+  if (kept.length === list.length) return;
+  saveModelList(kept);
+  // The selection may have pointed at an entry we just dropped.
+  const sel = getSelectedModelId();
+  if (sel && !kept.some((m) => m.id === sel)) setSelectedModelId(kept[0]?.id ?? null);
 }
 
 /** Add an official platform model (from GET /v1/models). Deduplicated by id; auto-selected on first add. */
@@ -323,13 +361,16 @@ export function resolveModel(m: AgentModel): ResolvedModel {
   // Official platform models: Always calculate the endpoint dynamically based on the current NEXT_PUBLIC_API_BASE_URL; never rely on the persisted `m.endpoint`.
   // Endpoints are "frozen" when a model is added. If a model was seeded while a local override was active (e.g., `localhost:10000` in `.env`),
   // the old value remains in `agent.llm.modelList` even after the environment reverts to the production domain, causing AI requests to be sent to an invalid address. Dynamic calculation ensures self-healing.
-  // Custom models continue to use their own endpoints, while others (official catalog models connecting directly to the provider) fall back to `provider.endpoint`.
+  // Custom models continue to use their own endpoints, while others (official catalog models connecting
+  // directly to the provider) compose one from `provider.baseUrl` + the chat path for their apiFormat.
   const endpoint =
     m.providerId === OFFICIAL_PROVIDER_ID
       ? officialPlatformEndpoint()
       : m.endpoint
         ? str(m.endpoint)
-        : (prov?.endpoint ?? "");
+        : prov
+          ? providerChatEndpoint(prov, m.apiFormat)
+          : "";
   return {
     id: m.id,
     label: m.label,
@@ -364,6 +405,8 @@ export function ensureModelListSeeded(): void {
   // Run the official-endpoint normalization every time (idempotent, writes only on a difference): fixes historically stale endpoints,
   // and is unaffected by the "seed only once" flag below (users whose SEEDED_KEY is already set must still self-heal).
   normalizeOfficialEndpoints();
+  // Strip image engines a previous build wrote into the list; they must never appear in the picker.
+  purgeLegacyImageModels();
   // Seed only once: after the flag is set, we no longer auto-migrate back to the old config even if the user empties the list.
   if (getStorage(SEEDED_KEY)) return;
   putStorage(SEEDED_KEY, "1");

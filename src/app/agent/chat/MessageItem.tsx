@@ -113,6 +113,32 @@ function ToolCallBubble({
 /** File-change card: write_file / edit_file / append_file directly show "path + changes".
  *  When the diff exceeds 100 lines, only the first 100 lines are shown, with a click to expand / collapse. */
 const FILE_DIFF_LINE_LIMIT = 100;
+/**
+ * A generated image (image_generation).
+ *
+ * The engine line is not decoration: selectEngine may fall back across vendors, so a user chatting
+ * on DeepSeek can have their Zhipu key spent. Naming the engine is how that stays honest without
+ * interrupting them with a dialog. See docs/generation-capabilities-design.md §3 / §6.1.
+ */
+function GeneratedImageCard({ src, servedBy }: { src: string; servedBy?: string }) {
+  const t = useT();
+  return (
+    <div className="flex justify-center">
+      <div className="w-full max-w-[92%]">
+        <div className="overflow-hidden rounded-lg border border-border bg-background/60">
+          {/* eslint-disable-next-line @next/next/no-img-element -- src is a vendor CDN URL or a data: URL, neither of which next/image can optimise */}
+          <img src={src} alt={t("image.alt")} className="block h-auto w-full" loading="lazy" />
+          {servedBy ? (
+            <div className="border-t border-border px-3 py-1.5 text-xs text-muted-foreground">
+              {t("image.servedBy", { engine: servedBy })}
+            </div>
+          ) : null}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function FileChangeCard({
   name,
   args,
@@ -730,6 +756,9 @@ export const MessageItem = memo(function MessageItem({
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState("");
   if (m.kind === "tool") {
+    // A generated image renders as the artifact itself — a collapsed "image_generation ✓" bubble
+    // would hide the one thing the user asked for.
+    if (m.image) return <GeneratedImageCard src={m.image} servedBy={m.servedBy} />;
     // File-type tools (whose result includes a diff) directly show "path + changes"; other tools use a collapsible bubble.
     const isFileChange = extractDiff(m.result).diff !== null;
     return (

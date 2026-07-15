@@ -626,5 +626,15 @@
   "update.error.generic": "업데이트를 확인할 수 없습니다.",
   "update.error.network": "연결이 없습니다. 네트워크를 확인한 후 다시 시도하세요.",
   "update.error.noRelease": "아직 게시된 업데이트가 없습니다.",
-  "update.error.unsigned": "이 빌드는 서명되지 않아 자동 업데이트할 수 없습니다. 최신 버전을 직접 다운로드하세요."
+  "update.error.unsigned": "이 빌드는 서명되지 않아 자동 업데이트할 수 없습니다. 최신 버전을 직접 다운로드하세요.",
+  "image.generating": "이미지 생성 중…",
+  "image.alt": "생성된 이미지",
+  "image.servedBy": "{engine}(으)로 생성됨",
+  "image.error.filtered": "공급자가 이 프롬프트를 거부했습니다. 다르게 표현해 보세요.",
+  "image.error.auth": "이미지 생성 실패: API 키가 거부되었습니다.",
+  "image.error.quota": "이미지 생성 실패: 요청 한도 또는 할당량에 도달했습니다.",
+  "image.error.network": "이미지 생성 실패: 공급자에 연결할 수 없습니다.",
+  "image.error.timeout": "이미지 생성 시간이 초과되었습니다.",
+  "image.error.unsupported": "이미지를 생성할 수 있는 공급자가 없습니다. Gemini 또는 OpenAI API 키를 추가하세요.",
+  "image.error.unknown": "이미지 생성에 실패했습니다."
 }

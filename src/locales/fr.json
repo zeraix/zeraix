@@ -626,5 +626,15 @@
   "update.error.generic": "Impossible de rechercher des mises à jour.",
   "update.error.network": "Aucune connexion. Vérifiez votre réseau et réessayez.",
   "update.error.noRelease": "Aucune mise à jour publiée pour le moment.",
-  "update.error.unsigned": "Cette version n'est pas signée et ne peut pas se mettre à jour. Veuillez télécharger la dernière version manuellement."
+  "update.error.unsigned": "Cette version n'est pas signée et ne peut pas se mettre à jour. Veuillez télécharger la dernière version manuellement.",
+  "image.generating": "Génération de l'image…",
+  "image.alt": "Image générée",
+  "image.servedBy": "Généré par {engine}",
+  "image.error.filtered": "Le fournisseur a refusé cette invite. Essayez de la reformuler.",
+  "image.error.auth": "Échec de la génération : la clé API a été refusée.",
+  "image.error.quota": "Échec de la génération : limite de débit ou quota atteint.",
+  "image.error.network": "Échec de la génération : impossible de contacter le fournisseur.",
+  "image.error.timeout": "Délai dépassé lors de la génération de l'image.",
+  "image.error.unsupported": "Aucun fournisseur configuré ne peut générer d'images. Ajoutez une clé API  Gemini ou OpenAI.",
+  "image.error.unknown": "Échec de la génération de l'image."
 }
