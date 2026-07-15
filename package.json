@@ -4,6 +4,7 @@
   "private": true,
   "main": "electron/main.mjs",
   "type": "module",
+  "packageManager": "pnpm@10.29.2",
   "pnpm": {
     "overrides": {
       "@electron/get": "5.0.0"

@@ -58,6 +58,13 @@ console.log(
   `[gen-google-defaults] client_id: ${client_id ? "set" : "EMPTY"}, client_secret: ${client_secret ? "set" : "EMPTY"} → ${outPath}`,
 );
 if (!client_id) {
+  // On CI there is no .env* to fall back on (they are gitignored), so an empty client_id means the
+  // secret is missing and the installer would ship with Google sign-in broken. Fail the build instead.
+  if (process.env.CI) {
+    throw new Error(
+      "[gen-google-defaults] GOOGLE_OAUTH_CLIENT_ID is required in CI; set it as a repository secret.",
+    );
+  }
   console.warn(
     "[gen-google-defaults] Warning: GOOGLE_OAUTH_CLIENT_ID was not found in .env* / env vars; the packaged build will lack a default client_id.",
   );

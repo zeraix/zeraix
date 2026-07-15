@@ -1,0 +1,160 @@
+name: Package installers (intl)
+
+# Builds the Windows (.exe / nsis) and macOS (.dmg, arm64) installers for the
+# international edition (NEXT_PUBLIC_APP_EDITION=intl) using the `dist:win` /
+# `dist:mac` scripts in package.json.
+#
+# Triggers:
+#   - pushing a version tag like `v1.2.3`  -> builds + attaches to a GitHub Release
+#   - manual run from the Actions tab (workflow_dispatch)
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+# Allow the release job to create/update a Release and upload assets.
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+
+    # The committed .npmrc points at China mirrors (registry.npmmirror.com + npmmirror's
+    # electron / electron-builder-binaries mirrors) for local dev. GitHub's runners are in
+    # Azure outside mainland China, where those mirrors are slow and intermittently fail.
+    # Env vars take precedence over .npmrc, so this redirects CI to the upstream sources
+    # without touching the local setup. Applies to every step in the job (the Electron
+    # binary is fetched during install, electron-builder's tooling during the build).
+    env:
+      NPM_CONFIG_REGISTRY: https://registry.npmjs.org/
+      NPM_CONFIG_ELECTRON_MIRROR: https://github.com/electron/electron/releases/download/v
+      NPM_CONFIG_ELECTRON_BUILDER_BINARIES_MIRROR: https://github.com/electron-userland/electron-builder-binaries/releases/download/
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: windows
+            os: windows-latest
+            script: dist:win
+            # nsis installer + its blockmap
+            artifact_glob: |
+              dist-electron/*.exe
+              dist-electron/*.exe.blockmap
+          - name: macos
+            os: macos-14 # arm64 runner: mac target is arm64-only
+            script: dist:mac
+            artifact_glob: |
+              dist-electron/*.dmg
+              dist-electron/*.dmg.blockmap
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+
+      # Cache electron + electron-builder downloads (Electron binary, app-builder,
+      # winCodeSign, nsis, etc.) to speed up subsequent runs.
+      - name: Cache electron-builder downloads
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/electron
+            ~/.cache/electron-builder
+            ~/Library/Caches/electron
+            ~/Library/Caches/electron-builder
+            ~/AppData/Local/electron/Cache
+            ~/AppData/Local/electron-builder/Cache
+          key: ${{ runner.os }}-eb-${{ hashFiles('pnpm-lock.yaml') }}
+          restore-keys: |
+            ${{ runner.os }}-eb-
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build installer (${{ matrix.name }})
+        run: pnpm run ${{ matrix.script }}
+        env:
+          # Backend API baked into the client bundle at build time. NOT secret (it
+          # ships inside the installer), so store it as a repository *Variable*.
+          # Required: .env.production is gitignored and never reaches the runner. If unset,
+          # GitHub renders this as "" — which fails the z.string().url() parse in
+          # src/lib/env.ts, so the build errors out rather than shipping a wrong endpoint.
+          NEXT_PUBLIC_API_BASE_URL: ${{ vars.NEXT_PUBLIC_API_BASE_URL }}
+
+          # Google OAuth default credentials baked in by scripts/gen-google-defaults.mjs.
+          GOOGLE_OAUTH_CLIENT_ID: ${{ secrets.GOOGLE_OAUTH_CLIENT_ID }}
+          GOOGLE_OAUTH_CLIENT_SECRET: ${{ secrets.GOOGLE_OAUTH_CLIENT_SECRET }}
+
+          # Code signing (optional). electron-builder reads these automatically.
+          # Windows and macOS need *different* certificates, so they get separate secrets:
+          # WIN_CSC_* is the Authenticode .pfx, CSC_* is the Apple Developer ID .p12.
+          # Store each as base64 (`base64 -w0 cert.p12`).
+          # If unset, signing is gracefully skipped and an unsigned installer is produced.
+          WIN_CSC_LINK: ${{ secrets.WIN_CSC_LINK }}
+          WIN_CSC_KEY_PASSWORD: ${{ secrets.WIN_CSC_KEY_PASSWORD }}
+          CSC_LINK: ${{ secrets.CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
+
+          # macOS notarization (optional) — consumed by scripts/afterAllArtifactBuild.cjs.
+          # Provide EITHER the Apple ID trio OR the App Store Connect API-key trio.
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+
+          # Aliyun OSS fallback for the bundled QEMU binaries (optional). The
+          # download scripts try the public CDN first, so these are only needed
+          # if the CDN is unavailable.
+          OSS_ACCESS_KEY_ID: ${{ secrets.OSS_ACCESS_KEY_ID }}
+          OSS_ACCESS_KEY_SECRET: ${{ secrets.OSS_ACCESS_KEY_SECRET }}
+          OSS_BUCKET: ${{ vars.OSS_BUCKET }}
+          OSS_ENDPOINT: ${{ vars.OSS_ENDPOINT }}
+          OSS_CDN: ${{ vars.OSS_CDN }}
+
+          # Let electron-builder use a token if it ever needs GitHub (avoids anonymous rate limits).
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: installer-${{ matrix.name }}
+          path: ${{ matrix.artifact_glob }}
+          if-no-files-found: error
+          retention-days: 14
+
+  # Attach all installers to a single GitHub Release. Runs only for tag pushes.
+  release:
+    name: Publish GitHub Release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download all installers
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Create / update Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/**/*
+          draft: true # publish manually after you've verified the assets
+          generate_release_notes: true
