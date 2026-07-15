@@ -157,6 +157,11 @@ When you select a cloud model, requests are sent to the endpoint or provider ass
 The interface includes translations for English, 简体中文, 繁體中文, 日本語, 한국어, Français, Español, Italiano, Deutsch, Português, and additional variants represented in the repository.
 
 ## Local and cloud boundaries
+We believe in local AI, but being local-first should not mean pretending that local models have no limits. Today, most personal computers cannot run the largest and most capable models at a practical speed. Some tasks require more memory, longer context, stronger reasoning, better multimodal support, or greater reliability than a local device and model can currently provide. If we forced every task to remain local, we would be protecting a slogan at the expense of the user's actual result.
+
+That is why Zeraix includes cloud models: not to make local use dependent on an account, and not to place basic capabilities behind a paywall, but to provide a fallback when local is genuinely not enough. You can start locally, use a cloud model for the part that needs it, and then return to local without losing the same conversation, memory, files, tools, or workflow.
+
+Our long-term goal remains unchanged: as local models and consumer hardware improve, more and more work should stay on your own device. Until then, we believe the honest and practical approach is to support both. You can connect your own OpenAI-compatible endpoint without a Zeraix account. A Zeraix account is only required if you choose to use hosted services provided by Zeraix.
 
 | Capability | Free | Account required | Offline after setup | Source in this repository |
 |---|:---:|:---:|:---:|:---:|
