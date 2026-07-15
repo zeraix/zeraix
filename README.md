@@ -4,7 +4,7 @@
 
 # Zeraix
 
-### Open-source AI workspace, built local-first.
+### AI workspace, built local-first.
 
 Run local models, work with files, use terminal tools, and execute AI agents on your own computer — without an account or subscription.
 
@@ -13,10 +13,9 @@ Run local models, work with files, use terminal tools, and execute AI agents on 
 [Download](https://github.com/zeraix/Zeraix/releases/latest)
 · [Getting Started](#-getting-started)
 · [Report a Bug](https://github.com/zeraix/Zeraix/issues/new)
-· [Discord](https://discord.gg/PcQ3jr3MfH)
 
-[![Release](https://img.shields.io/github/v/release/zeraix/Zeraix?style=flat-square&color=2ea44f)](https://github.com/zeraix/Zeraix/releases)
-[![Downloads](https://img.shields.io/github/downloads/zeraix/Zeraix/total?style=flat-square&color=blue)](https://github.com/zeraix/Zeraix/releases)
+[![Discord](https://img.shields.io/badge/Discord-Join%20us-5865F2?style=flat-square&logo=discord&logoColor=white)](https://discord.gg/PcQ3jr3MfH)
+[![X](https://img.shields.io/badge/X-@ZeraixAI-000000?style=flat-square&logo=x&logoColor=white)](https://x.com/ZeraixAI)
 [![License: AGPL-3.0](https://img.shields.io/badge/License-AGPL--3.0-orange?style=flat-square)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Windows-lightgrey?style=flat-square)](#-download)
 
@@ -27,6 +26,10 @@ Run local models, work with files, use terminal tools, and execute AI agents on 
 <div align="center">
 
 <img src="assets/screenshot-main.png" alt="Zeraix local-first AI workspace" width="800" />
+
+<br />
+
+<img src="assets/screenshot-models.png" alt="Zeraix local model library" width="800" />
 
 </div>
 
@@ -388,7 +391,6 @@ The licenses of third-party models, runtimes, libraries, and other downloaded co
 If that idea resonates with you, consider starring the repository and helping us improve Zeraix.
 
 </div>
-
 
 <div align="center">
 
