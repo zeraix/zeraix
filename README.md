@@ -172,11 +172,11 @@ You are free to connect your own OpenAI-compatible API without creating a Zeraix
 | File and terminal Agent tools | ✅ | No | ✅ | ✅ |
 | QEMU execution sandbox | ✅ | No | ✅ | ✅ |
 | Skills and sub-agents | ✅ | No | ✅ | ✅ |
-| Custom OpenAI-compatible endpoint | ✅¹ | No | Depends on endpoint | ✅ |
+| Custom OpenAI-compatible endpoint | ✅ | No | Depends on endpoint | ✅ |
 | Zeraix hosted models | Optional service | Yes | No | Client only |
 | Zeraix account and cloud files | Optional service | Yes | No | Client only |
 
-¹ Zeraix does not charge for connecting a custom endpoint. The endpoint provider may charge for its service.
+Zeraix does not charge for connecting a custom endpoint. The endpoint provider may charge for its service.
 
 ## 🔒 Privacy and network behavior
 
