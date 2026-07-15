@@ -613,5 +613,18 @@
   "projectSkills.loading": "Wird geladen…",
   "projectSkills.viewAction": "Ansehen",
   "projectSkills.modalTitle": "Erkannte Projekt-Fähigkeiten",
-  "projectSkills.allHandled": "Alle bearbeitet"
+  "projectSkills.allHandled": "Alle bearbeitet",
+  "update.available.title": "Update verfügbar",
+  "update.available.body": "Version {version} steht zum Download bereit.",
+  "update.downloading.title": "Update wird heruntergeladen",
+  "update.downloading.body": "{percent} % abgeschlossen",
+  "update.ready.title": "Update bereit",
+  "update.ready.body": "Version {version} wird beim Neustart installiert.",
+  "update.action.download": "Herunterladen",
+  "update.action.restart": "Jetzt neu starten",
+  "update.action.later": "Später",
+  "update.error.generic": "Nach Updates konnte nicht gesucht werden.",
+  "update.error.network": "Keine Verbindung. Prüfe dein Netzwerk und versuche es erneut.",
+  "update.error.noRelease": "Noch keine Updates veröffentlicht.",
+  "update.error.unsigned": "Dieser Build ist nicht signiert und kann sich nicht selbst aktualisieren. Bitte lade die neueste Version manuell herunter."
 }

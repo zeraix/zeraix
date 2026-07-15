@@ -44,16 +44,23 @@ jobs:
           - name: windows
             os: windows-latest
             script: dist:win
-            # nsis installer + its blockmap
+            # nsis installer + blockmap + latest.yml (the auto-update manifest electron-updater
+            # reads; without it on the release, no client can discover an update).
             artifact_glob: |
               dist-electron/*.exe
               dist-electron/*.exe.blockmap
+              dist-electron/latest.yml
           - name: macos
             os: macos-14 # arm64 runner: mac target is arm64-only
             script: dist:mac
+            # dmg = first install; zip = what Squirrel.Mac actually updates from; latest-mac.yml
+            # = the manifest pointing at the zip. All three must be on the release.
             artifact_glob: |
               dist-electron/*.dmg
               dist-electron/*.dmg.blockmap
+              dist-electron/*.zip
+              dist-electron/*.zip.blockmap
+              dist-electron/latest-mac.yml
 
     steps:
       - name: Checkout

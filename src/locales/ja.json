@@ -613,5 +613,18 @@
   "projectSkills.loading": "読み込み中…",
   "projectSkills.viewAction": "表示",
   "projectSkills.modalTitle": "検出されたプロジェクトスキル",
-  "projectSkills.allHandled": "すべて処理済み"
+  "projectSkills.allHandled": "すべて処理済み",
+  "update.available.title": "アップデートがあります",
+  "update.available.body": "バージョン {version} をダウンロードできます。",
+  "update.downloading.title": "アップデートをダウンロード中",
+  "update.downloading.body": "{percent}% 完了",
+  "update.ready.title": "アップデートの準備ができました",
+  "update.ready.body": "再起動するとバージョン {version} がインストールされます。",
+  "update.action.download": "ダウンロード",
+  "update.action.restart": "今すぐ再起動",
+  "update.action.later": "後で",
+  "update.error.generic": "アップデートを確認できませんでした。",
+  "update.error.network": "接続がありません。ネットワークを確認して再試行してください。",
+  "update.error.noRelease": "まだアップデートは公開されていません。",
+  "update.error.unsigned": "このビルドは署名されていないため自動更新できません。最新版を手動でダウンロードしてください。"
 }

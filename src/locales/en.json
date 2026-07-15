@@ -616,5 +616,18 @@
   "projectSkills.loading": "Loading…",
   "projectSkills.viewAction": "View",
   "projectSkills.modalTitle": "Detected project skills",
-  "projectSkills.allHandled": "All handled"
+  "projectSkills.allHandled": "All handled",
+  "update.available.title": "Update available",
+  "update.available.body": "Version {version} is ready to download.",
+  "update.downloading.title": "Downloading update",
+  "update.downloading.body": "{percent}% complete",
+  "update.ready.title": "Update ready",
+  "update.ready.body": "Version {version} will be installed when you restart.",
+  "update.action.download": "Download",
+  "update.action.restart": "Restart now",
+  "update.action.later": "Later",
+  "update.error.generic": "Could not check for updates.",
+  "update.error.network": "No connection. Check your network and try again.",
+  "update.error.noRelease": "No updates published yet.",
+  "update.error.unsigned": "This build is unsigned, so it cannot update itself. Please download the latest version manually."
 }

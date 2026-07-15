@@ -616,5 +616,18 @@
   "projectSkills.loading": "正在加载……",
   "projectSkills.viewAction": "查看",
   "projectSkills.modalTitle": "检测到的项目技能",
-  "projectSkills.allHandled": "已全部处理"
+  "projectSkills.allHandled": "已全部处理",
+  "update.available.title": "有可用更新",
+  "update.available.body": "版本 {version} 可供下载。",
+  "update.downloading.title": "正在下载更新",
+  "update.downloading.body": "已完成 {percent}%",
+  "update.ready.title": "更新已就绪",
+  "update.ready.body": "重启后将安装版本 {version}。",
+  "update.action.download": "下载",
+  "update.action.restart": "立即重启",
+  "update.action.later": "稍后",
+  "update.error.generic": "无法检查更新。",
+  "update.error.network": "无网络连接，请检查后重试。",
+  "update.error.noRelease": "尚未发布更新。",
+  "update.error.unsigned": "此版本未签名，无法自动更新，请手动下载最新版本。"
 }

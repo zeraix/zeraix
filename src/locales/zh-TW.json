@@ -613,5 +613,18 @@
   "projectSkills.loading": "正在載入……",
   "projectSkills.viewAction": "檢視",
   "projectSkills.modalTitle": "偵測到的專案技能",
-  "projectSkills.allHandled": "已全部處理"
+  "projectSkills.allHandled": "已全部處理",
+  "update.available.title": "有可用更新",
+  "update.available.body": "版本 {version} 可供下載。",
+  "update.downloading.title": "正在下載更新",
+  "update.downloading.body": "已完成 {percent}%",
+  "update.ready.title": "更新已就緒",
+  "update.ready.body": "重新啟動後將安裝版本 {version}。",
+  "update.action.download": "下載",
+  "update.action.restart": "立即重新啟動",
+  "update.action.later": "稍後",
+  "update.error.generic": "無法檢查更新。",
+  "update.error.network": "無網路連線，請檢查後重試。",
+  "update.error.noRelease": "尚未發布更新。",
+  "update.error.unsigned": "此版本未簽署，無法自動更新，請手動下載最新版本。"
 }

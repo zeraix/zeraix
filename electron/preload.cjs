@@ -194,6 +194,28 @@ contextBridge.exposeInMainWorld("sandbox", {
   },
 });
 
+// Auto-update (electron-updater over GitHub Releases). The main process reports state only; all
+// user-facing copy is localized here in the renderer from src/locales/*.json.
+// `supported` is false in dev (unpackaged) — there is no app-update.yml, so nothing can be checked.
+// On macOS an unsigned build reports status "error": Squirrel.Mac refuses updates whose code
+// signature does not match the running app, and there is no way around that without a Developer ID.
+contextBridge.exposeInMainWorld("updater", {
+  /** Current state { status, version, percent, error, supported, currentVersion }. */
+  getState: () => ipcRenderer.invoke("updater:state"),
+  /** Ask the feed whether a newer version exists; result arrives via onState. */
+  check: () => ipcRenderer.invoke("updater:check"),
+  /** Download the pending update; progress arrives via onState (status "downloading", percent). */
+  download: () => ipcRenderer.invoke("updater:download"),
+  /** Quit and install a downloaded update (no-op unless status is "downloaded"). */
+  install: () => ipcRenderer.invoke("updater:install"),
+  /** Subscribe to state transitions incl. download progress; returns an unsubscribe function. */
+  onState: (cb) => {
+    const handler = (_e, st) => cb(st);
+    ipcRenderer.on("updater:state", handler);
+    return () => ipcRenderer.removeListener("updater:state", handler);
+  },
+});
+
 // <webview> automation: runs puppeteer-core (CDP) in a separate utilityProcess; start begins monitoring,
 // onEvent subscribes to status / trigger events (such as detecting an on-site search).
 contextBridge.exposeInMainWorld("automation", {

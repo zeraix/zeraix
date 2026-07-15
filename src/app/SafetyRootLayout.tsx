@@ -8,6 +8,7 @@ import { getStorage, setStorage } from "@zzcpt/zztool";
 import { hydrateAppConfig } from "@/lib/ai/appConfig";
 import { ensurePlatformApiKey } from "@/lib/ai/models";
 import GlobalNotifications from "@/components/layout/GlobalNotifications";
+import UpdateNotifier from "@/components/layout/UpdateNotifier";
 import LoginModal from "@/components/auth/LoginModal";
 import { onNotificationNavigate } from "@/lib/electron/notification";
 
@@ -117,10 +118,13 @@ export default function ClientRootLayout({
   const isPublicPath = PUBLIC_PATHS.includes(pathname);
 
   // Global overlays. The notification bar is desktop + logged-in only, but the
-  // login modal must always be mounted (guests trigger it via gated actions).
+  // login modal must always be mounted (guests trigger it via gated actions),
+  // and the update prompt is ungated for the same reason — login is optional,
+  // and guests need updates as much as anyone. It self-hides outside Electron.
   const overlays = (
     <>
       {authStatus === 'authenticated' ? <GlobalNotifications /> : null}
+      <UpdateNotifier />
       <LoginModal />
     </>
   );

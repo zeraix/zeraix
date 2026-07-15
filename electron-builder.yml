@@ -1,15 +1,29 @@
 # electron-builder Packaging configuration
 # Documentation: https://www.electron.build/configuration
-appId: com.operease.app
-productName: OperEase
+appId: com.zeraix.app
+productName: Zeraix
 # Include "edition" in the product name (NEXT_PUBLIC_APP_EDITION: cn / intl) so that the domestic and international installation packages have distinct names and do not overwrite each other.
 # This variable is injected by the `dist:*` scripts using `cross-env` (see `package.json`).
 artifactName: ${productName}-${env.NEXT_PUBLIC_APP_EDITION}-${version}.${ext}
-# Inject `productName` into the bundled `package.json` so that `app.getName()` returns "OperEase" across all packaged platforms
-# (otherwise, Windows/Linux would fall back to the `package.json` name "Zeraix," whereas macOS relies on `CFBundleName` to yield "OperEase").
-# This ensures that the `userData`, Llama runtime, and QEMU image directories use "OperEase" in the packaged version, while the development environment continues to use "Zeraix" from the source `package.json`.
+# Inject `productName` into the bundled `package.json` so that `app.getName()` returns "Zeraix" across all packaged platforms
+# (otherwise, Windows/Linux would fall back to the `package.json` name "Zeraix," whereas macOS relies on `CFBundleName` to yield "Zeraix").
+# This ensures that the `userData`, Llama runtime, and QEMU image directories use "Zeraix" in the packaged version, while the development environment continues to use "Zeraix" from the source `package.json`.
 extraMetadata:
-  productName: OperEase
+  productName: Zeraix
+# Auto-update feed. Without a `publish` block electron-builder never emits the
+# latest.yml / latest-mac.yml manifests that electron-updater reads, so this is what turns
+# auto-update on. The repo is public, so the app reads the feed anonymously — no token ships
+# in the installer.
+# NOTE: the release must be *published*; electron-updater cannot see draft releases
+# anonymously (.github/workflows/release.yml creates drafts, so publishing is a manual gate).
+# NOTE: artifactName embeds the edition, but latest.yml does NOT — if the `cn` edition is ever
+# published to this same repo it would overwrite intl's manifest. CI only builds intl today;
+# give cn its own `channel` (or its own feed) before publishing both here.
+publish:
+  - provider: github
+    owner: zeraix
+    repo: zeraix
+
 directories:
   output: dist-electron
   # /build has been added to .gitignore; bundled assets such as icons (icon.ico / icon.icns) are located in resources/.
@@ -114,6 +128,11 @@ mac:
   # and the resulting Intel package renders local models and the sandbox unusable, so it is no longer being produced.
   target:
     - target: dmg
+      arch: [arm64]
+    # Required for auto-update: Squirrel.Mac updates from a .zip, never from a .dmg.
+    # The dmg remains the first-install download; the zip is what electron-updater fetches
+    # (it is listed in latest-mac.yml). Dropping this silently disables mac auto-update.
+    - target: zip
       arch: [arm64]
   category: public.app-category.productivity
   # Hardened Runtime + Signing/Notarization (prerequisite for distribution to other Macs; prevents Gatekeeper from blocking the app with a "damaged" error).

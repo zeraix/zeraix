@@ -613,5 +613,18 @@
   "projectSkills.loading": "A carregar…",
   "projectSkills.viewAction": "Ver",
   "projectSkills.modalTitle": "Competências do projeto detetadas",
-  "projectSkills.allHandled": "Tudo tratado"
+  "projectSkills.allHandled": "Tudo tratado",
+  "update.available.title": "Atualização disponível",
+  "update.available.body": "A versão {version} está pronta para download.",
+  "update.downloading.title": "Baixando atualização",
+  "update.downloading.body": "{percent}% concluído",
+  "update.ready.title": "Atualização pronta",
+  "update.ready.body": "A versão {version} será instalada ao reiniciar.",
+  "update.action.download": "Baixar",
+  "update.action.restart": "Reiniciar agora",
+  "update.action.later": "Depois",
+  "update.error.generic": "Não foi possível verificar atualizações.",
+  "update.error.network": "Sem conexão. Verifique sua rede e tente novamente.",
+  "update.error.noRelease": "Nenhuma atualização publicada ainda.",
+  "update.error.unsigned": "Esta versão não é assinada e não pode se atualizar. Baixe a versão mais recente manualmente."
 }

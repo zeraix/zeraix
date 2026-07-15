@@ -47,6 +47,7 @@ import {
 } from "./memoryFiles.mjs";
 import { registerNotifications } from "./ipc/notificationIpc.mjs";
 import { registerGoogleAuth } from "./ipc/googleAuthIpc.mjs";
+import { registerUpdater } from "./ipc/updaterIpc.mjs";
 import { loadEnvFiles } from "./loadEnv.mjs";
 import { registerProtocolClient, findDeepLink } from "./services/deepLink.mjs";
 
@@ -773,6 +774,8 @@ app.whenReady().then(() => {
   registerNotifications({ getWindow: () => mainWindow, iconPath: notificationIconPath() });
   // Google login (RFC 8252 native flow: loopback service + PKCE + system browser -> id_token handed back to the renderer)
   registerGoogleAuth();
+  // Auto-update (GitHub Releases feed; renderer drives check/download/install via window.updater)
+  registerUpdater();
   registerAutomation();
   registerWebviewWindowOpen();
   createWindow();

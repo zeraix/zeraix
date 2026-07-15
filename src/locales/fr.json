@@ -613,5 +613,18 @@
   "projectSkills.loading": "Chargement…",
   "projectSkills.viewAction": "Voir",
   "projectSkills.modalTitle": "Compétences de projet détectées",
-  "projectSkills.allHandled": "Tout est traité"
+  "projectSkills.allHandled": "Tout est traité",
+  "update.available.title": "Mise à jour disponible",
+  "update.available.body": "La version {version} est prête à être téléchargée.",
+  "update.downloading.title": "Téléchargement de la mise à jour",
+  "update.downloading.body": "{percent} % effectué",
+  "update.ready.title": "Mise à jour prête",
+  "update.ready.body": "La version {version} sera installée au redémarrage.",
+  "update.action.download": "Télécharger",
+  "update.action.restart": "Redémarrer maintenant",
+  "update.action.later": "Plus tard",
+  "update.error.generic": "Impossible de rechercher des mises à jour.",
+  "update.error.network": "Aucune connexion. Vérifiez votre réseau et réessayez.",
+  "update.error.noRelease": "Aucune mise à jour publiée pour le moment.",
+  "update.error.unsigned": "Cette version n'est pas signée et ne peut pas se mettre à jour. Veuillez télécharger la dernière version manuellement."
 }

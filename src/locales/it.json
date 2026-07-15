@@ -613,5 +613,18 @@
   "projectSkills.loading": "Caricamento…",
   "projectSkills.viewAction": "Vedi",
   "projectSkills.modalTitle": "Competenze del progetto rilevate",
-  "projectSkills.allHandled": "Tutto gestito"
+  "projectSkills.allHandled": "Tutto gestito",
+  "update.available.title": "Aggiornamento disponibile",
+  "update.available.body": "La versione {version} è pronta per il download.",
+  "update.downloading.title": "Download dell'aggiornamento",
+  "update.downloading.body": "{percent}% completato",
+  "update.ready.title": "Aggiornamento pronto",
+  "update.ready.body": "La versione {version} verrà installata al riavvio.",
+  "update.action.download": "Scarica",
+  "update.action.restart": "Riavvia ora",
+  "update.action.later": "Più tardi",
+  "update.error.generic": "Impossibile verificare la presenza di aggiornamenti.",
+  "update.error.network": "Nessuna connessione. Controlla la rete e riprova.",
+  "update.error.noRelease": "Nessun aggiornamento pubblicato finora.",
+  "update.error.unsigned": "Questa build non è firmata e non può aggiornarsi da sola. Scarica manualmente l'ultima versione."
 }
