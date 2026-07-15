@@ -31,10 +31,10 @@
     "build:rootfs": "node scripts/build-rootfs.mjs",
     "publish:rootfs": "node scripts/publish-rootfs.mjs",
     "image:publish": "npm run build:rootfs && npm run publish:rootfs",
-    "dist:win": "npm run download:bin:win && cross-env NEXT_PUBLIC_APP_EDITION=intl next build && npm run gen:google && cross-env NEXT_PUBLIC_APP_EDITION=intl electron-builder --win",
-    "dist:win:cn": "npm run download:bin:win && cross-env NEXT_PUBLIC_APP_EDITION=cn next build && npm run gen:google && cross-env NEXT_PUBLIC_APP_EDITION=cn electron-builder --win",
-    "dist:mac": "npm run download:bin:mac && cross-env NEXT_PUBLIC_APP_EDITION=intl next build && npm run gen:google && cross-env NEXT_PUBLIC_APP_EDITION=intl electron-builder --mac",
-    "dist:mac:cn": "npm run download:bin:mac && cross-env NEXT_PUBLIC_APP_EDITION=cn next build && npm run gen:google && cross-env NEXT_PUBLIC_APP_EDITION=cn electron-builder --mac",
+    "dist:win": "npm run download:bin:win && cross-env NEXT_PUBLIC_APP_EDITION=intl next build && npm run gen:google && cross-env NEXT_PUBLIC_APP_EDITION=intl electron-builder --win -p never",
+    "dist:win:cn": "npm run download:bin:win && cross-env NEXT_PUBLIC_APP_EDITION=cn next build && npm run gen:google && cross-env NEXT_PUBLIC_APP_EDITION=cn electron-builder --win -p never",
+    "dist:mac": "npm run download:bin:mac && cross-env NEXT_PUBLIC_APP_EDITION=intl next build && npm run gen:google && cross-env NEXT_PUBLIC_APP_EDITION=intl electron-builder --mac -p never",
+    "dist:mac:cn": "npm run download:bin:mac && cross-env NEXT_PUBLIC_APP_EDITION=cn next build && npm run gen:google && cross-env NEXT_PUBLIC_APP_EDITION=cn electron-builder --mac -p never",
     "dist:dir": "npm run download:bin:mac && cross-env NEXT_PUBLIC_APP_EDITION=intl next build && npm run gen:google && cross-env NEXT_PUBLIC_APP_EDITION=intl electron-builder --dir"
   },
   "dependencies": {

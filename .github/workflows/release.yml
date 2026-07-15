@@ -164,6 +164,51 @@ jobs:
             echo "no signing certificate configured — an unsigned installer will be produced"
           fi
 
+      # scripts/afterAllArtifactBuild.cjs signs the DMG by looking up the Developer ID with a
+      # plain `security find-identity`, i.e. against the ambient keychain search list. On a dev
+      # Mac that finds the identity in the login keychain. On CI it finds nothing: electron-builder
+      # imports CSC_LINK into a *temporary* keychain and deletes it when the build finishes
+      # (macPackager.ts registers removeKeychain via disposeOnBuildFinish; packager.ts drains those
+      # disposers inside packager.build(), which resolves before index.ts invokes
+      # afterAllArtifactBuild). The .app is signed by then, but the DMG is not — so the hook would
+      # skip silently and ship an unsigned DMG.
+      #
+      # Importing the same cert into a keychain we own gives the hook an identity that outlives
+      # electron-builder's. This does not collide with electron-builder's own signing: when
+      # CSC_LINK is set it scopes its find-identity to its private keychain (macCodeSign.ts).
+      - name: Import Developer ID into a persistent keychain
+        if: matrix.name == 'macos'
+        shell: bash
+        env:
+          CERT_B64: ${{ secrets.CSC_LINK }}
+          CERT_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
+        run: |
+          if [ -z "$CERT_B64" ]; then
+            echo "no CSC_LINK configured — skipping keychain import (DMG will not be signed)"
+            exit 0
+          fi
+          KEYCHAIN="$RUNNER_TEMP/dmg-signing.keychain-db"
+          KEYCHAIN_PASSWORD="$(uuidgen)"
+          CERT_PATH="$RUNNER_TEMP/dmg-signing-cert.p12"
+          # Fail loudly on a malformed secret rather than importing an empty file.
+          echo "$CERT_B64" | base64 --decode > "$CERT_PATH" || {
+            echo "::error::CSC_LINK is not valid base64"; exit 1; }
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          # Disable the lock-on-idle timeout: notarization can block for >5min inside the hook,
+          # and a relocked keychain would make the later codesign fail.
+          security set-keychain-settings "$KEYCHAIN"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN"
+          security import "$CERT_PATH" -k "$KEYCHAIN" -P "$CERT_PASSWORD" -T /usr/bin/codesign
+          # Let codesign use the key without an interactive prompt (there is no UI on a runner).
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN" >/dev/null
+          # Prepend to the search list, preserving the existing entries (System.keychain etc).
+          security list-keychains -d user -s "$KEYCHAIN" $(security list-keychains -d user | tr -d '"')
+          rm -f "$CERT_PATH"
+          echo "identities visible to the afterAllArtifactBuild hook:"
+          security find-identity -v -p codesigning
+          security find-identity -v -p codesigning | grep -q "Developer ID Application:" || {
+            echo "::error::no Developer ID Application identity after import — is the .p12 missing its private key (exported from 'Certificates' instead of 'My Certificates')?"; exit 1; }
+
       - name: Build installer (${{ matrix.name }})
         run: pnpm run ${{ matrix.script }}
         env:
