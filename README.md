@@ -8,7 +8,7 @@
 
 Run local models, work with files, use terminal tools, and execute AI agents on your own computer — without an account or subscription.
 
-**The local core is free and open source. Cloud services are entirely optional.**
+
 
 [Download](https://github.com/zeraix/Zeraix/releases/latest)
 · [Getting Started](#-getting-started)
