@@ -19,6 +19,11 @@ async function loadPuppeteer() {
 }
 
 const delay = (ms) => new Promise((r) => setTimeout(r, ms));
+// Human-like pacing before an interactive action (navigate / click / type): a short randomized gap so actions do not
+// fire instantly or at machine-regular intervals — the timing pattern anti-bot systems key on. Passive reads
+// (read / links / a11y / eval) are NOT paced, so inspecting the page stays fast. This reduces how often a site
+// challenges the automation; it is deliberately not an attempt to hide that automation is happening.
+const humanPause = () => delay(400 + Math.floor(Math.random() * 800)); // 400–1200ms
 const send = (msg) => {
   try {
     process.parentPort.postMessage(msg);
@@ -213,6 +218,7 @@ async function handleAction({ id, action, params = {} }) {
         const raw = String(params.url || "").trim();
         if (!raw) return reply(false, null, "navigate is missing url");
         const u = /^https?:\/\//.test(raw) ? raw : `https://${raw}`;
+        await humanPause();
         await page.goto(u, { waitUntil: "domcontentloaded", timeout: 30000 });
         return reply(true, `Navigated to ${page.url()}`);
       }
@@ -237,34 +243,46 @@ async function handleAction({ id, action, params = {} }) {
         return reply(true, links);
       }
       case "click": {
+        await humanPause();
         if (params.selector) {
           await page.click(String(params.selector));
           return reply(true, `Clicked ${params.selector}`);
         }
         if (params.text) {
-          const clicked = await page.evaluate((t) => {
+          // Locate the element by visible text, then click it through a real element handle so it dispatches genuine
+          // CDP mouse events (like page.click), not a synthetic DOM el.click(). Fall back to a DOM click only when the
+          // element is not in a clickable position (off-screen / covered), preserving the old robustness.
+          const handle = await page.evaluateHandle((t) => {
             const els = [...document.querySelectorAll("a, button, [role=button], [role=link]")];
-            const el = els.find((e) => ((e.innerText || e.textContent || "").trim()).includes(t));
-            if (!el) return null;
-            el.click();
-            return (el.innerText || el.textContent || "").trim().slice(0, 120);
+            return els.find((e) => ((e.innerText || e.textContent || "").trim()).includes(t)) || null;
           }, String(params.text));
-          return clicked
-            ? reply(true, `Clicked: ${clicked}`)
-            : reply(false, null, `No clickable element containing "${params.text}" was found`);
+          const el = handle.asElement();
+          if (!el) {
+            await handle.dispose().catch(() => {});
+            return reply(false, null, `No clickable element containing "${params.text}" was found`);
+          }
+          const label = await el
+            .evaluate((e) => (e.innerText || e.textContent || "").trim().slice(0, 120))
+            .catch(() => "");
+          const realClicked = await el.click().then(() => true).catch(() => false);
+          if (!realClicked) await el.evaluate((e) => e.click()).catch(() => {});
+          await handle.dispose().catch(() => {});
+          return reply(true, `Clicked: ${label}`);
         }
         return reply(false, null, "click requires selector or text");
       }
       case "type": {
         const sel = String(params.selector || "");
         if (!sel) return reply(false, null, "type requires selector");
+        await humanPause();
         if (params.clear) {
           // clear the input first (select all + delete) before typing
           await page.click(sel, { clickCount: 3 }).catch(() => page.click(sel).catch(() => {}));
         } else {
           await page.click(sel).catch(() => {});
         }
-        await page.type(sel, String(params.text || ""));
+        // Per-keystroke delay so typing arrives at a human cadence rather than as one instantaneous paste.
+        await page.type(sel, String(params.text || ""), { delay: 30 + Math.floor(Math.random() * 50) });
         if (params.submit || params.enter) await page.keyboard.press("Enter");
         return reply(true, `Typed into ${sel}${params.submit || params.enter ? " and submitted with Enter" : ""}`);
       }

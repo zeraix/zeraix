@@ -102,6 +102,8 @@ function isAppKillingCommand(cmd) {
 
 // ── Limits / defaults ────────────────────────────────────────────────────────
 const MAX_READ_BYTES = 2 * 1024 * 1024; // read_file per-file cap: 2MB
+const READ_DEFAULT_MAX_LINES = 2000; // read_file: lines returned when no explicit limit is given
+const READ_MAX_CHARS = 200_000; // read_file per-call ceiling; a line cap cannot bound a minified single-line file
 const MAX_MATCHES = 200; // search_* result cap
 const MAX_LINE_LEN = 400; // search_in_files per-line echo cap
 const CMD_TIMEOUT_MS = 60_000; // run_command timeout
@@ -277,6 +279,59 @@ function resolveInside(p) {
 function rel(abs) {
   const r = path.relative(WORKDIR, abs) || ".";
   return r.split(path.sep).join("/");
+}
+
+// ── Encoding / line-ending preservation ──────────────────────────────────────
+// Writing every edit back as plain "utf8" silently dropped UTF-8 BOMs, flipped CRLF→LF, and turned a GBK/UTF-16
+// file into mojibake (`�`). These helpers let write_file / edit_file / append_file keep a file's original bytes
+// intact outside the actual change — the "preserve encoding / line endings / BOM" guarantees, enforced in code
+// rather than asked for in the prompt (a model cannot reliably deliver them itself).
+
+/** Dominant newline of a text: CRLF only if the file has CRLFs and they are at least as common as bare LFs. */
+function detectNewline(text) {
+  const crlf = (text.match(/\r\n/g) || []).length;
+  const lf = (text.match(/\n/g) || []).length - crlf; // bare LFs (not part of a CRLF)
+  return crlf > 0 && crlf >= lf ? "\r\n" : "\n";
+}
+
+/** Re-emit `content` (held in LF-space) with the given newline style, so an edit never introduces mixed endings. */
+function applyNewline(content, newline) {
+  return newline === "\r\n" ? content.replace(/\n/g, "\r\n") : content;
+}
+
+/** Encode a working string (BOM-free, any newlines) back to bytes, re-attaching the UTF-8 BOM if the original had one. */
+function encodeText(text, hasBom) {
+  return Buffer.from(hasBom ? `﻿${text}` : text, "utf8");
+}
+
+/**
+ * Read a text file for editing, capturing the byte-level traits a write must preserve.
+ * Returns { text (BOM stripped), hasBom, newline }. Refuses non-UTF-8 files (UTF-16 BOM, or bytes that are not
+ * valid UTF-8) instead of decoding them into `�` and clobbering them — surfacing the encoding so the caller can
+ * convert deliberately. A missing file propagates the original ENOENT (code preserved) so callers can treat it as new.
+ */
+async function readTextForEdit(abs) {
+  const buf = await fs.readFile(abs); // ENOENT propagates with .code intact
+  // UTF-16 / UTF-32 BOM → not our encoding; decoding as UTF-8 would corrupt it.
+  if (buf.length >= 2 && ((buf[0] === 0xff && buf[1] === 0xfe) || (buf[0] === 0xfe && buf[1] === 0xff))) {
+    throw new Error(
+      `${rel(abs)} is UTF-16 encoded, not UTF-8. This tool edits UTF-8 text only; editing it here would corrupt it. ` +
+        `Convert it to UTF-8 first if you mean to work with it as text.`,
+    );
+  }
+  const hasBom = buf.length >= 3 && buf[0] === 0xef && buf[1] === 0xbb && buf[2] === 0xbf;
+  let text;
+  try {
+    text = new TextDecoder("utf-8", { fatal: true }).decode(buf); // throws on any non-UTF-8 byte
+  } catch {
+    throw new Error(
+      `${rel(abs)} is not valid UTF-8 (it may be GBK, GB2312, or another legacy encoding). Editing it as text here ` +
+        `would replace its non-ASCII characters with "�". Convert it to UTF-8 first.`,
+    );
+  }
+  // TextDecoder keeps the BOM as a leading U+FEFF; strip it so offsets/diffs/line counts see clean text, re-add on write.
+  if (hasBom && text.charCodeAt(0) === 0xfeff) text = text.slice(1);
+  return { text, hasBom, newline: detectNewline(text) };
 }
 
 /** Compile a glob (* ? and character classes) into a regex that matches the "filename". */
@@ -955,13 +1010,41 @@ const handlers = {
     );
   },
 
-  async read_file({ path: p }) {
+  // Returns a line range rather than always the whole file: a targeted read keeps the model's context
+  // small, and — unlike a downstream character cap — never removes the middle of a file it is reasoning about.
+  async read_file({ path: p, offset, limit }) {
     const abs = resolveInside(p);
     const stat = await fs.stat(abs);
     if (stat.size > MAX_READ_BYTES) {
       throw new Error(`file too large (${stat.size} bytes > ${MAX_READ_BYTES})`);
     }
-    return await fs.readFile(abs, "utf8");
+    const text = await fs.readFile(abs, "utf8");
+
+    const lines = text.split("\n");
+    // A trailing newline yields a final "" element; dropping it keeps the reported total honest.
+    if (lines.length > 1 && lines[lines.length - 1] === "") lines.pop();
+    const total = lines.length;
+
+    const start = Math.max(1, Math.floor(Number(offset) || 1));
+    const count = Math.max(1, Math.floor(Number(limit) || READ_DEFAULT_MAX_LINES));
+    if (start > total) {
+      return `[read_file] offset ${start} is past the end of ${p} — the file has ${total} lines.`;
+    }
+    const end = Math.min(total, start + count - 1);
+
+    let body = lines.slice(start - 1, end).join("\n");
+    let charTrimmed = false;
+    if (body.length > READ_MAX_CHARS) {
+      body = body.slice(0, READ_MAX_CHARS);
+      charTrimmed = true;
+    }
+
+    if (start === 1 && end === total && !charTrimmed) return body;
+
+    const notes = [`showing lines ${start}-${end} of ${total}`];
+    if (charTrimmed) notes.push(`trimmed at ${READ_MAX_CHARS} characters`);
+    if (end < total) notes.push(`read on with offset:${end + 1}`);
+    return `${body}\n\n[read_file] ${p}: ${notes.join("; ")}.`;
   },
 
   // Open a file / folder in the HOST's default application (always runs on the host, never the sandbox).
@@ -977,36 +1060,71 @@ const handlers = {
 
   async write_file({ path: p, content }) {
     const abs = resolveInside(p);
-    const after = String(content ?? "");
-    // Capture the old content before writing, to generate a diff (a missing file is treated as empty = a new file).
+    const toLf = (s) => s.replace(/\r\n/g, "\n");
+    const afterLf = toLf(String(content ?? ""));
+    // Capture the existing file's traits so a rewrite keeps its encoding, BOM, and newline style instead of forcing
+    // LF/no-BOM UTF-8 onto it. A missing file is a new file: LF, no BOM. A non-UTF-8 file is refused (readTextForEdit
+    // throws), because rewriting it as UTF-8 would convert it — exactly what "preserve encoding" forbids.
     let before = "";
+    let hasBom = false;
+    let newline = detectNewline(afterLf);
     try {
-      before = await fs.readFile(abs, "utf8");
-    } catch {
-      before = "";
+      const info = await readTextForEdit(abs);
+      before = info.text;
+      hasBom = info.hasBom;
+      newline = info.newline;
+    } catch (e) {
+      if (e.code !== "ENOENT") throw e;
     }
     await fs.mkdir(path.dirname(abs), { recursive: true });
-    await fs.writeFile(abs, after, "utf8");
+    const bytes = encodeText(applyNewline(afterLf, newline), hasBom);
+    await fs.writeFile(abs, bytes);
     const verb = before ? "Wrote" : "Created";
-    const diff = makeUnifiedDiff(before, after);
-    return `${verb} ${Buffer.byteLength(after)} bytes to ${rel(abs)}.${diff}`;
+    const diff = makeUnifiedDiff(toLf(before), afterLf);
+    return `${verb} ${bytes.length} bytes to ${rel(abs)}.${diff}`;
   },
 
   async edit_file({ path: p, old_string, new_string, replace_all }) {
     const abs = resolveInside(p);
-    const oldStr = String(old_string ?? "");
-    const newStr = String(new_string ?? "");
-    if (oldStr === "") throw new Error("old_string must not be empty");
-    if (oldStr === newStr) throw new Error("old_string and new_string are identical");
+    if (String(old_string ?? "") === "") throw new Error("old_string must not be empty");
 
-    const text = await fs.readFile(abs, "utf8");
+    const { text: rawText, hasBom, newline } = await readTextForEdit(abs);
+    // Match and splice in LF-space, then restore the file's own newline style on write. This means a match succeeds
+    // whether the model supplied "\n" or "\r\n", and the edit never leaves a CRLF file with mixed endings.
+    const toLf = (s) => s.replace(/\r\n/g, "\n");
+    const text = toLf(rawText);
+    const oldStr = toLf(String(old_string ?? ""));
+    const newStr = toLf(String(new_string ?? ""));
+    if (oldStr === newStr) throw new Error("old_string and new_string are identical");
 
     // Literal count (not regex): count how many times old_string occurs.
     let count = 0;
     for (let i = text.indexOf(oldStr); i !== -1; i = text.indexOf(oldStr, i + oldStr.length)) {
       count++;
     }
-    if (count === 0) throw new Error("old_string not found");
+    if (count === 0) {
+      // A bare "not found" gives the model nothing to correct, so it re-guesses and fails the same way. Say which kind
+      // of miss this was: a whitespace mismatch (the text IS there — it just wasn't copied verbatim) is by far the most
+      // common, and needs the opposite fix from text that genuinely isn't in the file.
+      const collapse = (s) => s.replace(/\s+/g, " ").trim();
+      const loose = collapse(oldStr);
+      if (loose && collapse(text).includes(loose)) {
+        // Report where it starts, so the fix is one targeted read away.
+        const firstLine = oldStr.split("\n").find((l) => l.trim()) ?? "";
+        const at = text.indexOf(firstLine.trim());
+        const line = at === -1 ? null : text.slice(0, at).split("\n").length;
+        throw new Error(
+          `old_string not found in ${p}, but the same text IS present with different whitespace` +
+            (line ? ` (starts around line ${line})` : "") +
+            `. Do not retype it: read_file that range and copy the text exactly as returned, keeping its ` +
+            `indentation and line breaks byte-for-byte.`,
+        );
+      }
+      throw new Error(
+        `old_string not found in ${p} — that text is not in the file (the file has ${text.split("\n").length} lines). ` +
+          `Do not guess at another variation: read_file the relevant part first, then copy the exact text to replace.`,
+      );
+    }
     if (!replace_all && count > 1) {
       throw new Error(
         `old_string is not unique (${count} occurrences); set replace_all or add more context`,
@@ -1022,7 +1140,7 @@ const handlers = {
       next = text.slice(0, idx) + newStr + text.slice(idx + oldStr.length);
     }
 
-    await fs.writeFile(abs, next, "utf8");
+    await fs.writeFile(abs, encodeText(applyNewline(next, newline), hasBom));
     const summary = replace_all
       ? `Replaced ${count} occurrence(s) in ${rel(abs)}.`
       : `Replaced 1 occurrence in ${rel(abs)}.`;
@@ -1032,16 +1150,23 @@ const handlers = {
   async append_file({ path: p, content }) {
     const abs = resolveInside(p);
     const add = String(content ?? "");
+    // Only the appended text is normalized to the file's newline style; existing bytes (and any BOM at the start)
+    // are left exactly as they are — an append must not rewrite content it isn't adding.
     let before = "";
+    let newline = detectNewline(add);
     try {
-      before = await fs.readFile(abs, "utf8");
-    } catch {
-      before = "";
+      const info = await readTextForEdit(abs);
+      before = info.text;
+      newline = info.newline;
+    } catch (e) {
+      if (e.code !== "ENOENT") throw e; // non-UTF-8 file: refuse rather than corrupt it
     }
+    const addNorm = applyNewline(add.replace(/\r\n/g, "\n"), newline);
     await fs.mkdir(path.dirname(abs), { recursive: true });
-    await fs.appendFile(abs, add, "utf8");
-    const diff = makeUnifiedDiff(before, before + add);
-    return `Appended ${Buffer.byteLength(add)} bytes to ${rel(abs)}.${diff}`;
+    await fs.appendFile(abs, addNorm, "utf8"); // appends at EOF; existing content and BOM untouched
+    const toLf = (s) => s.replace(/\r\n/g, "\n");
+    const diff = makeUnifiedDiff(toLf(before), toLf(before) + toLf(addNorm));
+    return `Appended ${Buffer.byteLength(addNorm)} bytes to ${rel(abs)}.${diff}`;
   },
 
   async delete_file({ path: p }) {
@@ -1419,8 +1544,12 @@ const fn = (name, description, properties, required) => ({
 
 /** Corresponds one-to-one with the caller's C++ declarations. */
 const TOOLS = [
-  fn("read_file", "Read the UTF-8 text content of a file.",
-     { path: str("File path.") }, ["path"]),
+  fn("read_file",
+     `Read the UTF-8 text content of a file. Small files come back whole. For a large file, read the slice you actually need via offset/limit instead of pulling in the entire file — use search_in_files first to find the line you want, then read around it. The result says which lines you got and whether more remain (up to ${READ_DEFAULT_MAX_LINES} lines per call by default).`,
+     { path: str("File path."),
+       offset: num("First line to read, 1-based. Defaults to 1 (start of file)."),
+       limit: num(`How many lines to read from offset. Defaults to ${READ_DEFAULT_MAX_LINES}.`) },
+     ["path"]),
   fn("open_path",
      "Open a file or folder in the host's DEFAULT APPLICATION for the user to see (view an image, play a video/audio, open a document/PDF, reveal a folder). This runs on the host machine. Use THIS — not run_command — to open/show/play a file: run_command in daily mode runs inside an isolated headless Linux sandbox with no GUI, so it cannot launch the host's apps. Path is resolved inside the working directory.",
      { path: str("Path to the file or folder to open, relative to the working directory.") }, ["path"]),
@@ -1457,7 +1586,7 @@ const TOOLS = [
        context: num("Context lines to show around each match (0–5, default 2).") },
      ["query"]),
   fn("run_command",
-     "Run a shell command in the working directory and return its output. For long-running / persistent processes (dev servers, watchers, `npm run dev`, `pnpm start`, vite/webpack/nodemon, etc.) pass background:true so it keeps running instead of being killed at the 60s timeout — the tool returns early with the startup output (including any http://localhost:PORT), then you can openBrowser that URL. (Such commands are also auto-detected as background.)",
+     "Run a shell command in the working directory and return its output. For long-running / persistent processes (dev servers, watchers, `npm run dev`, `pnpm start`, vite/webpack/nodemon, etc.) pass background:true so it keeps running instead of being killed at the 60s timeout — the tool returns early with the startup output (including any http://localhost:PORT). (Such commands are also auto-detected as background.) Starting a dev server is not a reason to open a browser: report the URL to the user, and only open it if they asked or the work is finished.",
      { command: str("The shell command line to execute."),
        background: bool("Run as a persistent, non-blocking background process (dev servers / watchers / long-running tasks). Not killed at the timeout.") },
      ["command"]),

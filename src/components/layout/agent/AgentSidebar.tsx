@@ -256,6 +256,7 @@ export default function AgentSidebar({
   const activeProjectId = useAgentChatStore((s) => s.activeProjectId);
   const activeConversationId = useAgentChatStore((s) => s.activeConversationId);
   const generating = useAgentChatStore((s) => s.generating);
+  const pendingConsent = useAgentChatStore((s) => s.pendingConsent);
   const initStore = useAgentChatStore((s) => s.init);
   const setActiveProject = useAgentChatStore((s) => s.setActiveProject);
   const setActiveConversation = useAgentChatStore((s) => s.setActiveConversation);
@@ -634,6 +635,7 @@ export default function AgentSidebar({
               label={c.title || t("conversation.untitled")}
               active={c.id === activeConversationId}
               generating={!!generating[c.id]}
+              pendingConsent={!!pendingConsent[c.id]}
               onClick={() => openConversation(c.id, c.projectId)}
               onNewChat={() => {
                 const proj = projects.find((pp) => pp.id === c.projectId);
@@ -848,6 +850,7 @@ function SidebarLeaf({
   label,
   active = false,
   generating = false,
+  pendingConsent = false,
   onClick,
   onNewChat,
   onOpenFolder,
@@ -858,6 +861,8 @@ function SidebarLeaf({
   active?: boolean;
   /** Whether this conversation is currently generating AI output (if so, show a spinner on the right). */
   generating?: boolean;
+  /** Whether this conversation has a sensitive-tool confirmation waiting (show an "approval needed" badge). */
+  pendingConsent?: boolean;
   onClick?: () => void;
   /** Right-click "New chat" (take the project path and start a new conversation). */
   onNewChat?: () => void;
@@ -882,8 +887,16 @@ function SidebarLeaf({
       )}
     >
       <span className="min-w-0 flex-1 truncate">{label}</span>
-      {/* Show a spinner while generating. */}
-      {generating && <Spinner className="size-3.5 shrink-0 text-muted-foreground" />}
+      {/* Approval-needed badge: a pulsing amber dot when this conversation is waiting for the user to confirm a sensitive
+          tool. Takes precedence over the generating spinner (the AI is blocked on the user, not actively producing). */}
+      {pendingConsent ? (
+        <span
+          title={t("sidebar.approvalNeeded")}
+          className="size-2 shrink-0 animate-pulse rounded-full bg-amber-500"
+        />
+      ) : (
+        generating && <Spinner className="size-3.5 shrink-0 text-muted-foreground" />
+      )}
     </button>
   );
 

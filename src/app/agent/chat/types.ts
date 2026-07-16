@@ -68,7 +68,16 @@ export type DisplayMsg =
   // vendor — see docs/generation-capabilities-design.md §3.
   | { kind: "tool"; name: string; args: unknown; ok: boolean; result: string; image?: string; servedBy?: string }
   | { kind: "todos"; todos: Todo[] } // the task list archived into the chat after the conversation ends
-  | { kind: "usage"; prompt: number; completion: number; total: number; cached: number; estimated: boolean } // this round's token usage (cached = input tokens served from prefix cache)
+  // this round's token usage (cached = input tokens served from prefix cache) + the wall-clock time it took
+  | {
+      kind: "usage";
+      prompt: number;
+      completion: number;
+      total: number;
+      cached: number;
+      estimated: boolean;
+      elapsedMs?: number;
+    }
   | ChoiceMsg;
 
 /** To-do item (task list). */

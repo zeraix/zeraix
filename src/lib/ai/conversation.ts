@@ -27,6 +27,11 @@ export interface StoredMessage {
   tool_call_id?: string;
   /** Tool name (only when role==="tool", used to rebuild the UI bubble; not part of the integrity hash). */
   name?: string;
+  /** A generated image's artifact URL and engine (only on an image_generation tool result): used to rebuild the image
+   *  bubble after reload — the tool's text content is only a note, so without this the picture vanishes on switching
+   *  conversations. Display-only, not fed to the model, not part of the integrity hash (same as name / reasoning). */
+  image?: string;
+  servedBy?: string;
   /** The reasoning model's "deep thinking" body (only when role==="assistant"): used only to rebuild the UI thinking block, never fed back to the model, not part of the integrity hash. */
   reasoning?: string;
   /**

@@ -41,6 +41,8 @@ type AgentChatState = {
   pendingSend: PendingSend | null;
   /** Record of conversations that are currently generating (AI output in progress): used by the sidebar to display spinners. Controlled by conversation ID, supports background concurrency. */
   generating: Record<string, boolean>;
+  /** Record of conversations that have a sensitive-tool confirmation waiting for the user: used by the sidebar to show an "approval needed" badge, so a request made in a background conversation is discoverable. Transient (not persisted). */
+  pendingConsent: Record<string, boolean>;
 
   /** Initially loads the project index (idempotent, does not load conversations). */
   init: () => Promise<void>;
@@ -64,6 +66,8 @@ type AgentChatState = {
   setActiveConversation: (id: string | null) => void;
   /** Flags or clears a conversation as "generating" (drives the sidebar loading spinner). Keyed by conversation ID, independent of the active conversation. */
   setConversationGenerating: (id: string, on: boolean) => void;
+  /** Replaces the set of conversations that have a pending sensitive-tool confirmation (drives the sidebar approval-needed badge). */
+  setPendingConsentIds: (ids: Set<string>) => void;
   getConversation: (id: string) => Conversation | undefined;
   /** Binds or clears the model for a conversation (conversation-level model binding; null falls back to global configuration). */
   setConversationModel: (id: string, modelId: string | null) => void;
@@ -117,6 +121,7 @@ export const useAgentChatStore = create<AgentChatState>((set, get) => {
     loaded: false,
     pendingSend: null,
     generating: {},
+    pendingConsent: {},
 
     setPendingSend: (p) => set({ pendingSend: p }),
     consumePendingSend: () => {
@@ -264,6 +269,17 @@ export const useAgentChatStore = create<AgentChatState>((set, get) => {
         if (on) next[id] = true;
         else delete next[id];
         return { generating: next };
+      }),
+
+    setPendingConsentIds: (ids) =>
+      set((s) => {
+        const prev = s.pendingConsent;
+        const prevKeys = Object.keys(prev);
+        // No change (same set of ids) → skip the update to avoid a needless sidebar re-render.
+        if (prevKeys.length === ids.size && prevKeys.every((k) => ids.has(k))) return s;
+        const next: Record<string, boolean> = {};
+        ids.forEach((id) => (next[id] = true));
+        return { pendingConsent: next };
       }),
     getConversation: (id) => get().conversations.find((c) => c.id === id),
 

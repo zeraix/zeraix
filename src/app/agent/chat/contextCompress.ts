@@ -313,11 +313,27 @@ export function buildWireContext(
  * If this turn is interrupted by the user / the backend (such as llama-server) crashes midway, it's possible that only the assistant.tool_calls was stored without its
  * results; when the session is reopened and this history is replayed as-is, the vendor returns 400 with "tool_calls were not each answered". This function fills the gaps
  * before sending, keeping the wire view always valid (it's an identity transform for already-consistent history, not perturbing the prefix cache).
+ *
+ * Also drops any assistant message with neither content nor tool_calls: a reasoning model can return a turn whose only
+ * output was reasoning_content (which is stripped from the wire) and no tool call, leaving an empty assistant message
+ * that the provider rejects with 400 "content or tool_calls must be set". Dropping it here fixes both the live buffer
+ * and already-persisted conversations that carry one.
  */
+function isEmptyAssistantContent(content: ApiMsg["content"]): boolean {
+  if (content == null) return true;
+  if (typeof content === "string") return content.trim() === "";
+  if (Array.isArray(content)) return content.length === 0;
+  return false;
+}
+
 export function sanitizeToolCallPairs(messages: ApiMsg[]): ApiMsg[] {
   const out: ApiMsg[] = [];
   for (let i = 0; i < messages.length; i++) {
     const m = messages[i];
+    if (m.role === "assistant" && (!m.tool_calls || m.tool_calls.length === 0) && isEmptyAssistantContent(m.content)) {
+      // Empty assistant turn (no body, no tool calls) — invalid to send; skip it.
+      continue;
+    }
     if (m.role === "assistant" && m.tool_calls && m.tool_calls.length > 0) {
       out.push(m);
       // Gather the immediately following run of tool results (indexed by tool_call_id), then reorder / fill them in call order.

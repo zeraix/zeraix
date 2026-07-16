@@ -13,8 +13,10 @@ export const MAX_SAME_TOOL_CALLS = 3;
 // Infinite-loop guard: abort the turn after this many consecutive commands are killed by timeout (usually programs that keep running / open a window).
 export const MAX_CONSECUTIVE_TIMEOUTS = 2;
 
-/** "Flat search" read-only tools: calling these many times in a row in the main loop without delegating usually signals a lack of triage and blind rummaging. */
-export const FLAT_SEARCH_TOOLS = new Set([
+/** Read-only tools with no side effects and no UI interaction: when the model issues several of them together,
+ *  they can run concurrently instead of one await at a time. Only consecutive runs are batched, so a read never
+ *  overtakes an edit issued in the same round. */
+export const PARALLEL_SAFE_TOOLS = new Set([
   "read_file",
   "search_files",
   "search_in_files",
@@ -22,22 +24,17 @@ export const FLAT_SEARCH_TOOLS = new Set([
   "file_info",
 ]);
 
-/** When the main loop has made this many "flat search" calls in a turn and still hasn't used run_subagent, inject a one-time delegation reminder. */
-export const FLAT_SEARCH_NUDGE_AT = 8;
+/** Tools exempt from capToolOutput. read_file bounds itself by line range (offset/limit), so its output is already
+ *  the slice the model asked for — running it through a head+tail cap would punch a hole in the middle of the very
+ *  code the model is reasoning about, and the model cannot tell elided code from absent code. Everything else
+ *  (run_command, fetch_url, search_*, browser) is genuinely unbounded and stays capped. */
+export const UNCAPPED_TOOLS = new Set(["read_file"]);
 
 /** Resume-after-interrupt nudge (fed back to the model only; not displayed / not persisted): injected when the user sends again after interrupting the previous turn, to prompt the model to reuse existing analysis and continue. */
 export const RESUME_NUDGE =
   "Your previous response was interrupted by the user before it finished. All tool results and analysis " +
   "already shown above remain valid — reuse them and continue from where you left off. Do NOT re-run tool " +
   "calls or repeat analysis you have already completed; build on the existing results to answer.";
-
-/** Delegation reminder (fed back to the model only; not displayed / not persisted): prompts it to hand off cross-file investigation to the explore sub-agent instead of continuing to search / read by hand. */
-export const DELEGATE_NUDGE =
-  "You have made several direct search/read calls in this turn without delegating. " +
-  "If the answer requires exploring across multiple files, STOP the flat searching and call " +
-  'run_subagent with agent "explore" and a self-contained task — it runs its own investigation ' +
-  "and returns a concise conclusion, keeping this conversation small. Prefer delegation now over " +
-  "more manual search_in_files / read_file calls.";
 
 /** Finalize reminder (fed back to the model only; not displayed / not persisted): a tool has run this turn (e.g. a sub-agent returned a result),
  *  yet the model ended with an empty body (no final reply for the user — often because it wrote the conclusion into reasoning or mistook a tool result for the reply).
@@ -109,6 +106,26 @@ export const SENSITIVE_TOOLS = new Set([
   "run_command",
   "open_path", // Open a file / folder with the system default app: may launch an executable, so it goes through confirmation
 ]);
+
+/**
+ * Consent policy: whether a tool call must be confirmed by the user before it runs, for the given mode. Centralized
+ * here (rather than inline in the run loop) so future rules have one obvious place to grow:
+ *   - per-tool always-confirm entries (e.g. keep delete_file / move_file gated even in daily mode),
+ *   - a user setting to opt back into prompting,
+ *   - additional modes.
+ * Current policy:
+ *   - dev mode: confirm every sensitive tool (it operates on the user's real project files on the host).
+ *   - daily mode: run sensitive tools directly (run_command is sandboxed; the default workdir is app-managed), so
+ *     everyday file/command work stays friction-free.
+ * A tool not in SENSITIVE_TOOLS never needs consent in any mode.
+ */
+export const ALWAYS_CONFIRM_TOOLS = new Set<string>(); // gated in every mode; extend as needed (e.g. "delete_file")
+
+export function toolNeedsConsent(name: string, mode: "daily" | "dev"): boolean {
+  if (ALWAYS_CONFIRM_TOOLS.has(name)) return true;
+  if (!SENSITIVE_TOOLS.has(name)) return false;
+  return mode === "dev";
+}
 
 /** Human-friendly tool labels, used in the progress status text. */
 const TOOL_LABELS: Record<string, string> = {

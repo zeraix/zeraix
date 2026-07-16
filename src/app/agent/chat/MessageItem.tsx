@@ -16,7 +16,7 @@ import {
 } from "lucide-react";
 import { DiffView, extractDiff } from "./DiffView";
 import { Markdown } from "./Markdown";
-import { formatBytes, abbreviateNumber } from "./format";
+import { formatBytes, abbreviateNumber, formatDuration } from "./format";
 import { useT } from "@/lib/i18n";
 import type { ChoiceMsg, DisplayMsg, Todo } from "./types";
 
@@ -732,6 +732,35 @@ function AssistantActions({
 
 /** Single-message rendering (memo): re-renders only when this message's reference changes,
  *  avoiding recomputing all diffs / Markdown on every append once the conversation grows, which would cause stutter during generation. */
+/** One metric in the per-round usage row: label as a light-colored prefix, value in the primary color. Module scope
+ *  rather than inline, so it keeps its identity across renders instead of remounting on every one. */
+const UsageTag = ({
+  label,
+  value,
+  tone = "muted",
+}: {
+  label: string;
+  value: string;
+  tone?: "muted" | "strong" | "cache";
+}) => (
+  <span
+    className={`inline-flex items-center gap-1 rounded-md px-1.5 py-0.5 text-[10px] tabular-nums ${
+      tone === "cache"
+        ? "bg-emerald-500/15 text-emerald-600 dark:text-emerald-400"
+        : "bg-surface-muted text-ink-subtle"
+    }`}
+  >
+    <span className={tone === "cache" ? "opacity-80" : "opacity-70"}>{label}</span>
+    <span
+      className={
+        tone === "strong" ? "font-medium text-ink" : tone === "cache" ? "font-medium" : "text-ink-muted"
+      }
+    >
+      {value}
+    </span>
+  </span>
+);
+
 export const MessageItem = memo(function MessageItem({
   m,
   index,
@@ -788,36 +817,20 @@ export const MessageItem = memo(function MessageItem({
     const exact =
       t("chat.usageExact", { prompt: m.prompt, completion: m.completion, total: m.total }) +
       (m.cached > 0 ? t("chat.usageCachedSuffix", { cached: m.cached }) : "");
-    // Each metric becomes its own tag: label as a light-colored prefix, value in the primary color, together looking like a row of tags.
-    const Tag = ({
-      label,
-      value,
-      tone = "muted",
-    }: {
-      label: string;
-      value: string;
-      tone?: "muted" | "strong" | "cache";
-    }) => (
-      <span
-        className={`inline-flex items-center gap-1 rounded-md px-1.5 py-0.5 text-[10px] tabular-nums ${
-          tone === "cache"
-            ? "bg-emerald-500/15 text-emerald-600 dark:text-emerald-400"
-            : "bg-surface-muted text-ink-subtle"
-        }`}
-      >
-        <span className={tone === "cache" ? "opacity-80" : "opacity-70"}>{label}</span>
-        <span className={tone === "strong" ? "font-medium text-ink" : tone === "cache" ? "font-medium" : "text-ink-muted"}>
-          {value}
-        </span>
-      </span>
-    );
+    // Each metric becomes its own tag (see UsageTag), together looking like a row of tags.
     return (
       <div className="flex flex-wrap items-center justify-center gap-1 py-0.5" title={exact}>
-        <span className="text-[10px] font-medium text-ink-subtle">🔢 {t("chat.usageThisTurn")}</span>
-        <Tag label={t("chat.usageInput")} value={`${approx}${abbreviateNumber(m.prompt)}`} />
-        <Tag label={t("chat.usageOutput")} value={`${approx}${abbreviateNumber(m.completion)}`} />
-        <Tag label={t("chat.usageTotal")} value={`${approx}${abbreviateNumber(m.total)}`} tone="strong" />
-        {m.cached > 0 && <Tag label={t("chat.usageCached")} value={abbreviateNumber(m.cached)} tone="cache" />}
+        <span className="text-[10px] font-medium text-ink-subtle">{t("chat.usageThisTurn")}</span>
+        <span className="text-[10px] font-medium text-ink-subtle">
+          {t("chat.usageInput")}:{abbreviateNumber(m.prompt)}/{t("chat.usageOutput")}:{abbreviateNumber(m.completion)}
+        </span>
+        {/* <UsageTag label={t("chat.usageInput")} value={`${approx}${abbreviateNumber(m.prompt)}`} />
+        <UsageTag label={t("chat.usageOutput")} value={`${approx}${abbreviateNumber(m.completion)}`} /> */}
+        <UsageTag label={t("chat.usageTotal")} value={`${approx}${abbreviateNumber(m.total)}`} tone="strong" />
+        {m.cached > 0 && (
+          <UsageTag label={t("chat.usageCached")} value={abbreviateNumber(m.cached)} tone="cache" />
+        )}
+        {!!m.elapsedMs && <UsageTag label={t("chat.usageTime")} value={formatDuration(m.elapsedMs)} />}
         {m.estimated && <span className="text-[10px] text-ink-subtle/70">{t("chat.usageEstimated")}</span>}
       </div>
     );

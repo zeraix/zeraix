@@ -1,11 +1,15 @@
 /**
  * Context compression: compress overly long tool results into "head + elision notice + tail", then feed them back to the model / persist them.
  *
- * Why: tool output (read_file / run_command / search_in_files, etc.) enters the conversation in full and is
+ * Why: tool output (run_command / search_in_files / fetch_url, etc.) enters the conversation in full and is
  * re-sent on every subsequent turn, making it a primary source of context bloat. Here we only cap the copy that is
  * "sent to the model + persisted to disk"; the full text still remains in the UI bubble for the user to view (UI-only).
- * If the model needs the elided middle section, it can call the tool again with more precise
- * parameters (such as read_file with offset/limit).
+ * If the model needs the elided middle section, it can call the tool again with narrower parameters.
+ *
+ * Not applied to read_file (see UNCAPPED_TOOLS in constants.ts): that tool takes an offset/limit line range, so its
+ * output is already scoped to what was asked for. Eliding the middle of a source file the model is reading is
+ * actively harmful — it cannot distinguish elided code from code that isn't there, so it reasons about a file with
+ * a hole in it and reports conclusions that don't match the real source.
  *
  * Determinism: trimming uses only plain string slicing + a fixed template + raw numbers (no localization / time / randomness),
  * guaranteeing that the same input produces exactly the same result on any device — because the compressed text participates in the integrity hash.
@@ -26,8 +30,9 @@ export function capToolOutput(content: string): string {
   const elided = content.length - HEAD_CHARS - TAIL_CHARS;
   return (
     `${head}\n\n` +
-    `[…… Elided roughly ${elided} characters in the middle (see the UI bubble for the full output). ` +
-    `If you need the elided content, call the tool again with more precise parameters, e.g. read_file with offset/limit to read a specific section ……]\n\n` +
+    `[…… Elided roughly ${elided} characters in the middle. ` +
+    `If you need the elided content, call the tool again with narrower parameters — e.g. a more specific ` +
+    `search_in_files query, or a command that prints less ……]\n\n` +
     `${tail}`
   );
 }

@@ -62,6 +62,8 @@ export interface ResolvedModel {
   apiKey: string;
   providerId: string;
   custom: boolean;
+  /** Whether the model can accept images (multimodal). When false, image_url parts must be stripped from the wire, or a text-only provider rejects the whole request with a 400. */
+  multimodal: boolean;
   /** The entry's own real context window (e.g. a local model's llama-server -c); if absent, inferred by resolveContextWindow. */
   contextWindow?: number;
 }
@@ -379,6 +381,7 @@ export function resolveModel(m: AgentModel): ResolvedModel {
     apiKey: getModelApiKey(m),
     providerId: m.providerId,
     custom: m.custom,
+    multimodal: !!m.multimodal,
     ...(m.contextWindow && m.contextWindow > 0 ? { contextWindow: m.contextWindow } : {}),
   };
 }

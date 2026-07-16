@@ -7,18 +7,33 @@ const SEARCH_URL_EXAMPLE = isCnEdition
   ? "https://www.baidu.com/s?wd=keyword"
   : "https://www.google.com/search?q=keyword";
 
-/** Tool declaration for opening the built-in browser (OpenAI-compatible). Handled by the render layer; expands the browser panel on the right. */
-export function openBrowserTool() {
+/** Tool declaration for opening the built-in browser (OpenAI-compatible). Handled by the render layer; expands the browser panel on the right.
+ *  The description is mode-specific: in dev mode the browser is off-limits unless the user asks for it, because opening it to
+ *  investigate or to show off a fix is pure latency — the model cannot see the page, so it learns nothing the code wouldn't tell it.
+ *  In daily mode it stays available for pages that genuinely cannot be read headlessly (login / interaction / JS rendering). */
+export function openBrowserTool(mode: "daily" | "dev" = "daily") {
+  const description =
+    mode === "dev"
+      ? "Open the app's built-in browser panel and (optionally) visit a given URL. " +
+        "IN THIS MODE THIS TOOL IS OFF-LIMITS. Do not call it unless the user explicitly asked you to open a browser " +
+        "or to show them a page — that request is the ONLY thing that permits it. " +
+        "It is not permitted for investigating a problem, reproducing a bug, checking your progress, confirming a fix " +
+        "looks right, or presenting a finished result. None of those are reasons: you cannot see the page, so it tells " +
+        "you nothing, while the user waits. The code, the file, the error message and check_project give you the real " +
+        "answer, faster. If you believe the user would want to look at the page, finish the work, say so, and let them ask. " +
+        "For looking anything up, use web_search (results come back directly, no browser) and fetch_url to read a result. " +
+        "Under no circumstances use run_command to launch the system browser."
+      : "Open the app's built-in browser panel and (optionally) visit a given URL. " +
+        "Only call this when the user explicitly wants to watch you work in a browser, or when a page genuinely cannot be " +
+        "read any other way (it needs interaction, a login, or JavaScript rendering). " +
+        "Looking something up is NOT a reason to open it: use web_search (results come back directly, no browser), " +
+        "then fetch_url to read a result — that is faster and needs no browser. " +
+        "Under no circumstances use run_command to launch the system browser.";
   return {
     type: "function" as const,
     function: {
       name: "openBrowser",
-      description:
-        "Open the app's built-in browser panel and (optionally) visit a given URL. " +
-        "Use this tool only when the user needs to see the web page with their own eyes, or when the page requires interaction / login / relies on JavaScript rendering. " +
-        "If you just need to look something up or find information, prefer web_search (it returns results directly, without opening a browser), " +
-        "then use fetch_url to read a specific result — do not open the built-in browser every time just to search. " +
-        "Under no circumstances use run_command to launch the system browser.",
+      description,
       parameters: {
         type: "object",
         properties: {

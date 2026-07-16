@@ -167,7 +167,7 @@ export function Composer({
                 <button
                   type="button"
                   title={t("chat.selectModel")}
-                  className="flex max-w-[220px] items-center gap-1 rounded-full border border-line-strong px-3 py-1.5 text-xs font-medium text-ink transition hover:bg-surface-muted"
+                  className="flex min-w-0 max-w-[220px] shrink items-center gap-1 rounded-full border border-line-strong px-3 py-1.5 text-xs font-medium text-ink transition hover:bg-surface-muted"
                 >
                   <span className="truncate">{selectedLabel ?? t("chat.selectModel")}</span>
                   <ChevronDown className="size-3.5 shrink-0 text-ink-muted" />

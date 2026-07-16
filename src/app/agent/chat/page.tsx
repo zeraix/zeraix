@@ -9,7 +9,7 @@ import {
   type KeyboardEvent as ReactKeyboardEvent,
 } from "react";
 import { useSearchParams, useRouter, usePathname } from "next/navigation";
-import { ChevronDown } from "lucide-react";
+import { ChevronDown, Pencil, Eraser } from "lucide-react";
 import { cn } from "@/lib/utils";
 import {
   Dialog,
@@ -19,6 +19,14 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import SandboxStartupDialog from "@/components/ai/SandboxStartupDialog";
 import {
   callTool,
@@ -90,19 +98,18 @@ import {
 } from "@/lib/ai/models";
 import {
   CONSENT_OPTIONS,
-  DELEGATE_NUDGE,
   FEEDBACK_DOWN_NUDGE,
   FEEDBACK_UP_NUDGE,
   FINALIZE_NUDGE,
-  FLAT_SEARCH_NUDGE_AT,
-  FLAT_SEARCH_TOOLS,
   FORCE_REVIEW_NUDGE,
   MUTATING_FILE_TOOLS,
+  PARALLEL_SAFE_TOOLS,
   RATING_DOWN_FEEDBACK,
   RATING_UP_FEEDBACK,
   RESUME_NUDGE,
   RISKY_PATH_PATTERN,
-  SENSITIVE_TOOLS,
+  toolNeedsConsent,
+  UNCAPPED_TOOLS,
   systemPromptFor,
   selCls,
   toolStatusText,
@@ -185,6 +192,38 @@ type RunCtx = {
  * uploaded to OSS by cloud models at send time, with no original bytes to convert. Turning them into `<image url="…"/>` text avoids the error
  * and still lets the model know "there was an image here and its address". It does not modify convoRef / persistence, and only affects this send's wire view.
  */
+/**
+ * Text-only model: remove EVERY image_url part (both inline data: and remote URLs), replacing each with a short text
+ * note. A model without image support rejects the whole request the moment any image appears anywhere in history —
+ * HTTP 400 "unknown variant `image_url`, expected `text`" — even for an image the user sent turns ago to a different,
+ * vision-capable model. Unlike the local-model downgrade, inline images are dropped too: the provider's schema has no
+ * image variant at all. Only affects this send's wire, never convoRef / persistence.
+ */
+function stripAllImagesForText(messages: ApiMsg[]): ApiMsg[] {
+  return messages.map((m) => {
+    if (m.role !== "user" || !Array.isArray(m.content)) return m;
+    const kept: ContentPart[] = [];
+    let imageCount = 0;
+    for (const part of m.content) {
+      if (part.type === "image_url") imageCount++;
+      else kept.push(part);
+    }
+    if (imageCount === 0) return m;
+    const note = `<image note="${imageCount} image(s) omitted — the current model cannot view images" />`;
+    const out: ContentPart[] = [];
+    let appended = false;
+    for (const part of kept) {
+      if (part.type === "text" && !appended) {
+        out.push({ type: "text", text: `${part.text}${part.text ? "\n" : ""}${note}` });
+        appended = true;
+      } else out.push(part);
+    }
+    if (!appended) out.unshift({ type: "text", text: note });
+    if (out.length === 1 && out[0].type === "text") return { ...m, content: out[0].text };
+    return { ...m, content: out };
+  });
+}
+
 function stripRemoteImagesForLocal(messages: ApiMsg[]): ApiMsg[] {
   return messages.map((m) => {
     if (m.role !== "user" || !Array.isArray(m.content)) return m;
@@ -291,6 +330,18 @@ function ChatAgent() {
   const displayRef = useRef<DisplayMsg[]>([]);
   const [loading, setLoading] = useState(false);
   const activeConvId = useAgentChatStore((s) => s.activeConversationId);
+  // Active conversation's title, selected reactively so the header dropdown reflects a rename immediately.
+  const activeConvTitle = useAgentChatStore((s) => {
+    const id = s.activeConversationId;
+    return id ? (s.conversations.find((c) => c.id === id)?.title ?? "") : "";
+  });
+  const renameConversation = useAgentChatStore((s) => s.renameConversation);
+  // Header "Rename" dialog: null = closed; a string is the draft title being edited.
+  const [renameDraft, setRenameDraft] = useState<string | null>(null);
+  // Side-channel for image_generation: the tool returns only a text note (the artifact must not enter the wire), but
+  // the persist step needs the image URL to store it for display rebuild. generateImageAction sets this right before
+  // returning; the persist step consumes it. Safe because image_generation runs serially (its own tool group).
+  const lastImageArtifactRef = useRef<{ image: string; servedBy?: string } | null>(null);
   const [status, setStatus] = useState(""); // While generating, show the user "what it is doing"
   const [error, setError] = useState<string | null>(null);
   const [toolsReady, setToolsReady] = useState(false);
@@ -381,6 +432,9 @@ function ChatAgent() {
   // Token usage: turnUsageRef accumulates all requests of "this round" (including tool rounds and subagents); sessionUsage is the whole-session accumulation.
   // estimated indicates that part of this round / session was estimated with tiktoken (the provider did not return usage).
   const turnUsageRef = useRef({ prompt: 0, completion: 0, total: 0, cached: 0, estimated: false });
+  // Wall-clock start of this round, stamped where turnUsageRef is reset so the reported duration spans exactly the
+  // same window as the token accounting: from send until the loop settles, including every tool round and subagent.
+  const turnStartRef = useRef(0);
   // Current context usage (the input tokens of the most recent request = the compressed wire size), drives the usage progress bar above the input box.
   // Mirror the latest value in a ref, to ease snapshotting the current usage when switching conversations (the state in a closure may be stale).
   const [contextTokens, setContextTokens] = useState(0);
@@ -426,16 +480,24 @@ function ChatAgent() {
     syncQueued(convId);
   };
 
-  // Task list (update_todos): fixed above the input box.
+  // Task list (update_todos): fixed above the input box. Owned per conversation, not globally — the panel belongs to
+  // the conversation that created it, so switching away must take it off screen and switching back must bring it back.
+  // A single shared list also let two conversations generating at once overwrite each other's todos.
   const [todos, setTodos] = useState<Todo[]>([]);
-  const todosRef = useRef<Todo[]>([]); // Mirror, for the async send loop to read the latest value
-  const setTodosBoth = (next: Todo[]) => {
-    todosRef.current = next;
-    setTodos(next);
+  const todosByConvRef = useRef(new Map<string, Todo[]>());
+  const todosFor = (convId: string | null): Todo[] =>
+    (convId ? todosByConvRef.current.get(convId) : undefined) ?? [];
+  /** Write a conversation's list, and mirror it on screen only when that conversation is the one being viewed. */
+  const setTodosFor = (convId: string | null, next: Todo[]) => {
+    if (convId) {
+      if (next.length > 0) todosByConvRef.current.set(convId, next);
+      else todosByConvRef.current.delete(convId);
+    }
+    if (convId === convIdRef.current) setTodos(next);
   };
 
-  // The model calls update_todos: overwrite the current list with the full list, returning a short confirmation.
-  // When ctx.convId is not the active conversation, do not update the on-screen list (a background conversation does not pollute the todo panel of the currently viewed conversation).
+  // The model calls update_todos: overwrite that conversation's list with the full list, returning a short confirmation.
+  // A background conversation's list is kept (keyed by its own id) but not shown, so it is intact when the user switches back.
   const updateTodos = (ctx: RunCtx, rawArgs: Record<string, unknown>): string => {
     const raw = Array.isArray(rawArgs.todos) ? rawArgs.todos : [];
     const parsed: Todo[] = raw
@@ -450,17 +512,17 @@ function ChatAgent() {
         };
       })
       .filter((t) => t.title);
-    if (ctx.convId === convIdRef.current) setTodosBoth(parsed);
+    setTodosFor(ctx.convId, parsed);
     const done = parsed.filter((t) => t.status === "completed").length;
     return `Updated the todo list (${done}/${parsed.length} completed).`;
   };
 
-  // Manual toggle: switch this item between "completed / not completed".
+  // Manual toggle: switch this item between "completed / not completed". Only ever acts on the viewed conversation's list.
   const toggleTodo = (index: number) => {
-    const next = todosRef.current.map((t, i) =>
+    const next = todosFor(convIdRef.current).map((t, i) =>
       i === index ? { ...t, status: t.status === "completed" ? "pending" : "completed" } : t,
     );
-    setTodosBoth(next as Todo[]);
+    setTodosFor(convIdRef.current, next as Todo[]);
   };
 
   // Stop the current generation: abort the in-flight request for the "current active conversation", release any waiting confirmation / choice, and the loop then exits on its own.
@@ -479,6 +541,15 @@ function ChatAgent() {
     }
     dropConsentsFor(cid); // Release this conversation's waits in the confirmation queue (ending them with "reject") and advance the queue
     dropChoicesFor(cid, "The user canceled."); // Release all of this conversation's pending-answer ask_user prompts
+  };
+
+  // Push the set of conversations that currently have a pending confirmation into the store, so the sidebar can badge
+  // them. Called after every queue mutation. This is how a request made in a background conversation stays discoverable
+  // when the user is viewing a different chat.
+  const syncConsentBadges = () => {
+    const ids = new Set<string>();
+    for (const r of consentQueueRef.current) if (r.convId) ids.add(r.convId);
+    useAgentChatStore.getState().setPendingConsentIds(ids);
   };
 
   // Sync the front of the confirmation queue to pending (for rendering); collapse the panel if the queue is empty.
@@ -505,6 +576,7 @@ function ChatAgent() {
     new Promise<ConsentDecision>((resolve) => {
       const wasEmpty = consentQueueRef.current.length === 0;
       consentQueueRef.current.push({ convId, name, args, diff, resolve });
+      syncConsentBadges();
       if (wasEmpty) showFrontConsent(); // Queue was empty → show immediately; otherwise queue and wait for the ones ahead to finish
       // Queued behind: do not change the front of the queue (do not interrupt the current choice), only refresh the "N more pending" count.
       else setPending((p) => (p ? { ...p, queued: consentQueueRef.current.length - 1 } : p));
@@ -526,6 +598,7 @@ function ChatAgent() {
         return true;
       });
     }
+    syncConsentBadges();
     showFrontConsent();
   };
   // Discard all pending-confirmation requests of a conversation in the queue (ending them with "reject") and refresh the panel. Used to unblock it on cancel / clear.
@@ -539,7 +612,10 @@ function ChatAgent() {
       }
       return true;
     });
-    if (changed) showFrontConsent();
+    if (changed) {
+      syncConsentBadges();
+      showFrontConsent();
+    }
   };
   // Auto-focus when the panel appears, so up/down keys and Enter take effect directly.
   useEffect(() => {
@@ -869,7 +945,7 @@ function ChatAgent() {
     setAtBottom(true);
     setQueued([]); // New conversation: clear the queue panel (the new conversation has no queue yet)
     setAttachments([]); // Clear unsent attachments
-    setTodosBoth([]); // Clear the task list
+    setTodosFor(convIdRef.current, []); // Clear this conversation's task list
     turnUsageRef.current = { prompt: 0, completion: 0, total: 0, cached: 0, estimated: false };
     setSessionUsage({ prompt: 0, completion: 0, total: 0, cached: 0, estimated: false }); // Reset the session token stats
     setCtxTokens(0); // New conversation: context usage back to zero
@@ -884,13 +960,36 @@ function ChatAgent() {
     setError(null);
   };
 
-  // Discard the current conversation: revoke the signature + delete local content / metadata, and reset the view to a clean state.
-  // Shared by the "clear conversation" button and "delete tampered conversation" — clearing discards this current one, to avoid it lingering in the sidebar
-  // and coexisting with the newly started conversation as two entries. When there is no current conversation, it only resets the view.
-  const discardActiveConversation = () => {
-    const id = useAgentChatStore.getState().activeConversationId;
-    if (id) useAgentChatStore.getState().deleteConversation(id);
-    clearAll();
+  // "Clear chat": empty the current conversation's messages but KEEP its sidebar entry (only the content is cleared,
+  // the history item stays). Resets the in-memory view like clearAll, but leaves convIdRef on the same (now empty)
+  // conversation instead of starting a new one. With no saved conversation yet, there is nothing to keep — just reset.
+  const clearActiveConversationContent = () => {
+    const id = convIdRef.current;
+    if (!id) {
+      clearAll();
+      return;
+    }
+    dropConsentsFor(id);
+    dropChoicesFor(id, "The user cleared the conversation.");
+    allowedToolsRef.current.clear();
+    interruptedRef.current = false;
+    useAgentChatStore.getState().truncateMessages(id, 0); // empty the messages, keep the conversation entry
+    displayRef.current = [];
+    setDisplay([]);
+    atBottomRef.current = true;
+    setAtBottom(true);
+    setQueued([]);
+    setAttachments([]);
+    setTodosFor(id, []);
+    turnUsageRef.current = { prompt: 0, completion: 0, total: 0, cached: 0, estimated: false };
+    setSessionUsage({ prompt: 0, completion: 0, total: 0, cached: 0, estimated: false });
+    setCtxTokens(0);
+    convoRef.current = [];
+    compactionRef.current = null;
+    manualCompactRef.current = false;
+    setCompacted(false);
+    persistCompaction(id); // drop the persisted compaction snapshot for this conversation
+    setError(null);
   };
 
   // Reset of the permanently-mounted conversation view: the sidebar "new conversation" / right-click "new conversation in project" / mode switch and other "start a new thread" entry points
@@ -952,6 +1051,9 @@ function ChatAgent() {
     snapshotCompaction(convIdRef.current); // Save the old conversation's compaction state before switching away
     interruptedRef.current = false; // Switching conversations: the interrupt-resume flag does not carry across conversations
     convIdRef.current = id;
+    // Swap the todo panel to this conversation's own list (empty unless it has one in flight). Without this the
+    // previous conversation's todos stayed on screen, looking as though they belonged to the conversation just opened.
+    setTodos(todosFor(id));
     store.setActiveConversation(id);
     applyEffectiveModel(); // Loading a conversation → adopt its conversation-level bound model (global if none)
     // Restore this conversation's working directory: set the tools' working directory back to the directory used when the conversation was created (fall back to its owning project's directory if missing).
@@ -1001,7 +1103,15 @@ function ChatAgent() {
         disp.push({ kind: "user", content: m.content, images: m.images, files: m.files });
       } else if (m.role === "tool") {
         const info = m.tool_call_id ? callArgs.get(m.tool_call_id) : undefined;
-        disp.push({ kind: "tool", name: m.name ?? info?.name ?? "tool", args: info?.args ?? {}, ok: true, result: m.content });
+        disp.push({
+          kind: "tool",
+          name: m.name ?? info?.name ?? "tool",
+          args: info?.args ?? {},
+          ok: true,
+          result: m.content,
+          // Restore a generated image so it survives a conversation switch (persisted display-only, see StoredMessage.image).
+          ...(m.image ? { image: m.image, servedBy: m.servedBy } : {}),
+        });
       } else if (m.role === "assistant") {
         // The deep-thinking block is restored before this round's content / tool trace (consistent with the real-time order).
         if (m.reasoning) disp.push({ kind: "reasoning", content: m.reasoning });
@@ -1454,7 +1564,9 @@ function ChatAgent() {
     displayName: string,
   ): Promise<string> => {
     ctx.status(toolStatusText(name, args));
-    if (SENSITIVE_TOOLS.has(name) && !allowedToolsRef.current.has(name)) {
+    // Consent policy lives in toolNeedsConsent (constants.ts) so mode rules can grow in one place. Currently: dev mode
+    // confirms sensitive tools, daily mode runs them directly. The "always" allowance still short-circuits repeat prompts.
+    if (toolNeedsConsent(name, mode) && !allowedToolsRef.current.has(name)) {
       const previewDiff = await buildPreviewDiff(name, args);
       const decision = await requestConsent(ctx.convId, name, args, previewDiff);
       if (decision === "always") allowedToolsRef.current.add(name);
@@ -1518,8 +1630,7 @@ function ChatAgent() {
       convo = [...convo, msg];
 
       if (msg.tool_calls && msg.tool_calls.length > 0) {
-        for (const tc of msg.tool_calls) {
-          if (ctx.signal.aborted) return "(canceled)";
+        const runOne = async (tc: (typeof msg.tool_calls)[number]) => {
           let a: Record<string, unknown> = {};
           try {
             a = JSON.parse(tc.function.arguments || "{}");
@@ -1527,9 +1638,35 @@ function ChatAgent() {
             /* Invalid JSON arguments, call with an empty object */
           }
           const content = await execToolCall(silentCtx, tc.function.name, a, `${agentId}→${tc.function.name}`);
-          if (typeof content === "string") detectServices(content);
-          // Compress overly long tool output, to avoid bloating the subagent context (the subagent conversation is not persisted and only lives for this delegation).
-          convo = [...convo, { role: "tool", tool_call_id: tc.id, content: capToolOutput(content) }];
+          return { tc, content };
+        };
+
+        // Same batching rule as the main loop: consecutive read-only calls run concurrently, everything else serial.
+        const groups: (typeof msg.tool_calls)[] = [];
+        for (const tc of msg.tool_calls) {
+          const prev = groups[groups.length - 1];
+          if (
+            prev &&
+            PARALLEL_SAFE_TOOLS.has(tc.function.name) &&
+            PARALLEL_SAFE_TOOLS.has(prev[0].function.name)
+          ) {
+            prev.push(tc);
+          } else {
+            groups.push([tc]);
+          }
+        }
+
+        for (const group of groups) {
+          if (ctx.signal.aborted) return "(canceled)";
+          const settled =
+            group.length > 1 ? await Promise.all(group.map(runOne)) : [await runOne(group[0])];
+          for (const { tc, content } of settled) {
+            if (typeof content === "string") detectServices(content);
+            // Compress overly long tool output, to avoid bloating the subagent context (the subagent conversation is not persisted and only lives for this delegation).
+            // read_file is exempt for the same reason as the main loop: eliding the middle of a source file makes the subagent's conclusion unreliable.
+            const capped = UNCAPPED_TOOLS.has(tc.function.name) ? content : capToolOutput(content);
+            convo = [...convo, { role: "tool", tool_call_id: tc.id, content: capped }];
+          }
         }
         continue;
       }
@@ -1615,6 +1752,8 @@ function ChatAgent() {
       image: res.artifact.src,
       servedBy: res.artifact.servedBy,
     });
+    // Stash the artifact so the persist step can store it (display-only) and the image survives a conversation switch.
+    lastImageArtifactRef.current = { image: res.artifact.src, servedBy: res.artifact.servedBy };
     return `Generated the image with ${res.artifact.servedBy}. It is already displayed to the user — do not repeat the URL or embed it in markdown.`;
   };
 
@@ -1907,6 +2046,7 @@ function ChatAgent() {
     // This round's AbortController; when sending, the conversation must be the current active one, and it is registered into runsRef at the genConvId point (once the conversation id is determined).
     const ctrl = new AbortController();
     turnUsageRef.current = { prompt: 0, completion: 0, total: 0, cached: 0, estimated: false }; // Reset this round's usage
+    turnStartRef.current = Date.now(); // Start this round's clock (paired with the usage reset above)
 
     // Inject system (local capabilities + working-directory constraint + enabled-skill hints): only when the current conversation has no system message yet,
     // so that continuing to send after loading a historical conversation also backfills system.
@@ -2069,7 +2209,7 @@ function ChatAgent() {
       const tools = [
         askUserTool(),
         updateTodosTool(),
-        openBrowserTool(),
+        openBrowserTool(mode),
         browserTool(),
         // Only offered when some configured key can actually serve it — otherwise the model would
         // promise an image and then fail. Read fresh each round, since keys can change mid-session.
@@ -2080,11 +2220,6 @@ function ChatAgent() {
         ...(skillTool ? [skillTool] : []),
         ...(toolsReady ? [...(await listTools("openai")), subAgentTool()] : []),
       ];
-      // Delegation triage: count the flat searches "since the last delegation". Once the threshold is reached, inject a reminder to nudge the model to hand cross-file investigation to
-      // the explore subagent, or answer directly, rather than blindly search / read in the main loop. Reset to zero and re-arm after a delegation — to avoid
-      // "delegate once token-symbolically, then search by hand endlessly with no further constraint" (a hole in the old logic).
-      let flatSinceDelegate = 0;
-      let delegateNudged = false;
       // Critical-change review guard (dev mode only): when a risky path (auth / data / security …) has been changed but no reviewer was run before wrapping up,
       // inject one forced reminder and continue the loop, nudging the model to delegate a reviewer first. Cleared after a reviewer is delegated; forced at most once per round, to avoid a deadlock.
       let riskyChangePending = false;
@@ -2125,9 +2260,13 @@ function ChatAgent() {
         // Generated with the current activeModel each round (switching the conversation-bound model takes effect immediately); it only enters the wire and is not written back to the buffer / not persisted.
         wire = [...wire, { role: "system", content: userTimeContext(activeModel) }];
         // let wire = buildWireContext(convo, compaction);
-        // Local model: remote http images in history (mostly OSS links uploaded by cloud models) cannot be fetched by llama → downgrade to a textual XML
-        // reference to avoid a 400; inline base64 images are still kept as multimodal images. Continuing a chat across cloud↔local no longer errors on history images.
-        if (isLocalModel) wire = stripRemoteImagesForLocal(wire);
+        // Image handling depends on the active model's capability, applied to the wire only (never the persisted buffer):
+        //  - Text-only model (not multimodal): strip EVERY image_url part. A model with no image support 400s on any
+        //    image anywhere in history ("unknown variant `image_url`"), even one sent earlier to a vision model.
+        //  - Multimodal local model: keep inline base64 images, but downgrade remote http images (llama can't fetch them).
+        //  - Multimodal cloud model: leave images as-is.
+        if (!activeModel?.multimodal) wire = stripAllImagesForText(wire);
+        else if (isLocalModel) wire = stripRemoteImagesForLocal(wire);
         // Interrupt-resume hint: appended only on this round's first request, and only enters the wire, not written back to the buffer, to avoid residue in later rounds / conversations.
         if (resumeFromInterrupt && firstRequest) {
           wire = [...wire, { role: "system", content: RESUME_NUDGE }];
@@ -2208,23 +2347,24 @@ function ChatAgent() {
           }
         }
 
-        // Has tool calls → execute them one by one, feed the results back, and continue to the next round.
+        // Has tool calls → execute them, feed the results back, and continue to the next round.
         if (msg.tool_calls && msg.tool_calls.length > 0) {
           didToolCall = true; // A tool was executed this round: provides the basis for the "empty-content wrap-up" guard
-          for (const tc of msg.tool_calls) {
-            if (ctrl.signal.aborted) break;
+          const calls = msg.tool_calls;
+          type ToolCall = (typeof calls)[number];
+
+          // ask_user: pop a choice card and wait for the user to click.
+          // update_todos: update the task list above the input box.
+          // load_skill: feed back the full instructions of an enabled skill as the tool result (progressive disclosure).
+          // run_subagent: delegate to a subagent and feed back its final conclusion as the tool result.
+          // Other tools: executed through the unified path (including sensitive-operation confirmation).
+          const runToolCall = async (tc: ToolCall) => {
             let args: Record<string, unknown> = {};
             try {
               args = JSON.parse(tc.function.arguments || "{}");
             } catch {
               /* Invalid JSON arguments, call with an empty object */
             }
-
-            // ask_user: pop a choice card and wait for the user to click.
-            // update_todos: update the task list above the input box.
-            // load_skill: feed back the full instructions of an enabled skill as the tool result (progressive disclosure).
-            // run_subagent: delegate to a subagent and feed back its final conclusion as the tool result.
-            // Other tools: executed through the unified path (including sensitive-operation confirmation).
             const content =
               tc.function.name === "ask_user"
                 ? await askUserChoice(ctx, args)
@@ -2247,40 +2387,77 @@ function ChatAgent() {
                               : tc.function.name === "run_subagent"
                             ? await runSubAgent(ctx, args)
                             : await execToolCall(ctx, tc.function.name, args, tc.function.name);
+            return { tc, args, content };
+          };
 
-            // Delegation triage count: a delegation resets to zero and re-arms (if a lot of flat searches happen again later, it will remind again); otherwise accumulate the flat-search count.
-            // Also: delegating to a reviewer is treated as reviewed, clearing the pending-risky-change flag.
-            if (tc.function.name === "run_subagent") {
-              flatSinceDelegate = 0;
-              delegateNudged = false;
-              if (String(args.agent ?? "") === "reviewer") riskyChangePending = false;
-            } else if (FLAT_SEARCH_TOOLS.has(tc.function.name)) {
-              flatSinceDelegate++;
+          // The model is told to issue independent calls together; awaiting them one at a time threw that away and
+          // made every extra read cost another round of latency. Read-only calls the model issued together now run
+          // concurrently. Only *consecutive* ones are batched, so a read can never overtake an edit issued in the
+          // same round, and anything with a side effect, a consent prompt, or UI interaction stays strictly serial.
+          const groups: ToolCall[][] = [];
+          for (const tc of calls) {
+            const prev = groups[groups.length - 1];
+            if (
+              prev &&
+              PARALLEL_SAFE_TOOLS.has(tc.function.name) &&
+              PARALLEL_SAFE_TOOLS.has(prev[0].function.name)
+            ) {
+              prev.push(tc);
+            } else {
+              groups.push([tc]);
             }
-            // Risky-change detection: a tool that modifies source files hitting the risky-path signature (taking path-like args such as path/file/dest) → mark as pending review.
-            if (MUTATING_FILE_TOOLS.has(tc.function.name)) {
-              const pathVals = Object.entries(args)
-                .filter(([k, v]) => typeof v === "string" && /path|file|dir|dest|src|source|target|name/i.test(k))
-                .map(([, v]) => v as string);
-              if (pathVals.some((p) => RISKY_PATH_PATTERN.test(p))) riskyChangePending = true;
+          }
+
+          for (const group of groups) {
+            if (ctrl.signal.aborted) break;
+            // Results are consumed in the original order regardless of which call settled first, so the tool
+            // messages stay aligned with assistant.tool_calls.
+            const settled =
+              group.length > 1
+                ? await Promise.all(group.map(runToolCall))
+                : [await runToolCall(group[0])];
+
+            for (const { tc, args, content } of settled) {
+              // Delegating to a reviewer is treated as reviewed, clearing the pending-risky-change flag.
+              if (tc.function.name === "run_subagent" && String(args.agent ?? "") === "reviewer") {
+                riskyChangePending = false;
+              }
+              // Risky-change detection: a tool that modifies source files hitting the risky-path signature (taking path-like args such as path/file/dest) → mark as pending review.
+              if (MUTATING_FILE_TOOLS.has(tc.function.name)) {
+                const pathVals = Object.entries(args)
+                  .filter(([k, v]) => typeof v === "string" && /path|file|dir|dest|src|source|target|name/i.test(k))
+                  .map(([, v]) => v as string);
+                if (pathVals.some((p) => RISKY_PATH_PATTERN.test(p))) riskyChangePending = true;
+              }
+
+              // Compress overly long tool output before feeding back / persisting (the full text is already in each tool's display bubble, so the UI is unaffected).
+              // read_file is exempt: it returns the line range that was asked for, so there is nothing to elide.
+              const cappedContent = UNCAPPED_TOOLS.has(tc.function.name)
+                ? content
+                : capToolOutput(content);
+              convo = [...convo, { role: "tool", tool_call_id: tc.id, content: cappedContent }];
+              syncView();
+              // A generated image's artifact URL is stored display-only (not in content, so it never re-enters the wire),
+              // so the image bubble can be rebuilt after switching conversations. Consume the side-channel ref.
+              const imageArtifact =
+                tc.function.name === "image_generation" ? lastImageArtifactRef.current : null;
+              lastImageArtifactRef.current = null;
+              // Persist the tool result to this conversation (store the compressed version, to avoid bloating storage / the integrity hash).
+              store.appendMessage(genConvId, {
+                role: "tool",
+                content: cappedContent,
+                tool_call_id: tc.id,
+                name: tc.function.name,
+                ts: Date.now(),
+                ...(imageArtifact
+                  ? { image: imageArtifact.image, servedBy: imageArtifact.servedBy }
+                  : {}),
+              });
+
+              // Detect local service addresses in the tool output (e.g. an http://localhost:5173 printed by a dev server),
+              // using the full output (the elided middle section may also contain a URL). Once registered, the bottom-left floating indicator displays it and polls its health.
+              if (typeof content === "string") detectServices(content);
             }
-
-            // Compress overly long tool output before feeding back / persisting (the full text is already in each tool's display bubble, so the UI is unaffected).
-            const cappedContent = capToolOutput(content);
-            convo = [...convo, { role: "tool", tool_call_id: tc.id, content: cappedContent }];
-            syncView();
-            // Persist the tool result to this conversation (store the compressed version, to avoid bloating storage / the integrity hash).
-            store.appendMessage(genConvId, {
-              role: "tool",
-              content: cappedContent,
-              tool_call_id: tc.id,
-              name: tc.function.name,
-              ts: Date.now(),
-            });
-
-            // Detect local service addresses in the tool output (e.g. an http://localhost:5173 printed by a dev server),
-            // using the full output (the elided middle section may also contain a URL). Once registered, the bottom-left floating indicator displays it and polls its health.
-            if (typeof content === "string") detectServices(content);
           }
           // Wrap-up alignment: for any tool_call with no result yet (this round was cut short early because the user canceled), append a placeholder result,
           // ensuring assistant.tool_calls and tool results correspond one-to-one — otherwise, when continuing the chat / reopening, it would be rejected by the provider because "tool_calls were not answered".
@@ -2302,15 +2479,6 @@ function ChatAgent() {
             });
           }
           if (ctrl.signal.aborted) return;
-          // Delegation reminder: the flat searches since the last delegation have reached the threshold yet there has been no further delegation / no convergence, so inject a system reminder (only fed back to the model,
-          // not displayed and not persisted). This message only enters this round's local buffer, lives in the conversation's memory, and disappears after a reload; some() dedups to avoid stacking.
-          if (!delegateNudged && flatSinceDelegate >= FLAT_SEARCH_NUDGE_AT) {
-            delegateNudged = true;
-            if (!convo.some((mm) => mm.role === "system" && mm.content === DELEGATE_NUDGE)) {
-              convo = [...convo, { role: "system", content: DELEGATE_NUDGE }];
-              syncView();
-            }
-          }
           continue;
         }
 
@@ -2338,10 +2506,13 @@ function ChatAgent() {
 
         // Normal reply → end (the body was already finalized and displayed by renderTurn above, and archiving was done when the message was produced, so it is not repeated here).
         // A background conversation does not write the current view; when switched back to, its display is rebuilt from the store by loadConversation.
-        // End of conversation: archive the task list into the chat record, and collapse the floating panel above the input box (active conversation only).
-        if (active() && todosRef.current.length > 0) {
-          pushDisplay({ kind: "todos", todos: todosRef.current });
-          setTodosBoth([]);
+        // End of conversation: archive this conversation's task list into the chat record, and collapse the floating panel
+        // above the input box. Keyed by genConvId, so a background conversation retires its own list rather than the
+        // viewed conversation's; the archived bubble is only pushed when that conversation is the one on screen.
+        const finishedTodos = todosFor(genConvId);
+        if (finishedTodos.length > 0) {
+          if (active()) pushDisplay({ kind: "todos", todos: finishedTodos });
+          setTodosFor(genConvId, []);
         }
         // Trigger condition 1: the AI reply is complete. Choose the notification channel by "whether the window is always on top":
         //  - Always on top (always-on-top, the window is certainly visible) → in-app hint (toast);
@@ -2376,6 +2547,9 @@ function ChatAgent() {
       }
       // Show this round's token usage (including tool rounds / subagents), and add it to the session total.
       const u = turnUsageRef.current;
+      // Wall-clock time for the whole round. Measured here in `finally`, so it covers the normal path, an error, and a
+      // user cancel alike — i.e. it always reflects how long the user actually waited.
+      const elapsedMs = turnStartRef.current > 0 ? Date.now() - turnStartRef.current : 0;
       if (u.prompt > 0 || u.completion > 0 || u.total > 0) {
         const total = u.total || u.prompt + u.completion;
         if (active())
@@ -2386,6 +2560,7 @@ function ChatAgent() {
             total,
             cached: u.cached,
             estimated: u.estimated,
+            elapsedMs,
           });
         setSessionUsage((s) => ({
           prompt: s.prompt + u.prompt,
@@ -2458,11 +2633,46 @@ function ChatAgent() {
       <div className="border-b border-line bg-surface/90 backdrop-blur">
         <div className="mx-auto w-full px-4 py-3">
           {/* Title row */}
-          <div className="flex items-center gap-2">
-            <span className="flex h-7 w-7 items-center justify-center rounded-xl bg-gradient-to-br from-primary to-primary/70 text-sm font-bold text-white shadow-sm">
-              AI
-            </span>
-            <h1 className="text-base font-bold">{t("chat.title")}</h1>
+          <div className="flex min-w-0 items-center gap-2">
+            {/* Conversation title + dropdown: token usage, rename, clear. The right-side badges/buttons are unchanged. */}
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <button
+                  type="button"
+                  className="flex min-w-0 max-w-[min(45vw,320px)] items-center gap-1 rounded-lg px-1 py-0.5 text-left transition hover:bg-surface-muted"
+                  title={activeConvTitle || t("chat.title")}
+                >
+                  <span className="truncate text-base font-bold">
+                    {activeConvTitle || t("chat.title")}
+                  </span>
+                  <ChevronDown className="size-4 shrink-0 text-ink-muted" />
+                </button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="start" className="min-w-[15rem]">
+                <DropdownMenuLabel className="whitespace-nowrap font-normal text-ink-subtle">
+                  {t("chat.tokenUsageLine", {
+                    approx: sessionUsage.estimated ? "≈" : "",
+                    total: sessionUsage.total,
+                    prompt: sessionUsage.prompt,
+                    completion: sessionUsage.completion,
+                  })}
+                </DropdownMenuLabel>
+                <DropdownMenuSeparator />
+                <DropdownMenuItem
+                  disabled={!activeConvId}
+                  onClick={() => setRenameDraft(activeConvTitle)}
+                >
+                  <Pencil className="size-4" /> {t("ctx.rename")}
+                </DropdownMenuItem>
+                <DropdownMenuItem
+                  disabled={display.length === 0}
+                  onClick={clearActiveConversationContent}
+                  className="text-destructive focus:text-destructive"
+                >
+                  <Eraser className="size-4" /> {t("chat.clearChat")}
+                </DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
             {/* <span
               className={`rounded-full px-2 py-0.5 text-[11px] font-medium ${
                 toolsReady
@@ -2535,21 +2745,8 @@ function ChatAgent() {
               <span className="truncate">{activeModel?.label ?? t("lm.noModelShort")}</span>
             </span>
             <button
-              onClick={() => setSettingsOpen((o) => !o)}
-              className="ml-auto flex shrink-0 items-center gap-1 rounded-lg border border-line-strong bg-surface px-3 py-1.5 text-xs font-medium transition hover:border-line hover:bg-surface-muted active:scale-[0.98]"
-              title={t("chat.settingsTitle")}
-              aria-expanded={settingsOpen}
-            >
-              ⚙ {t("chat.settings")}
-              <span
-                className={`inline-block text-ink-subtle transition-transform ${settingsOpen ? "rotate-180" : ""}`}
-              >
-                ▾
-              </span>
-            </button>
-            <button
               onClick={() => setSkillsOpen(true)}
-              className="shrink-0 rounded-lg border border-line-strong bg-surface px-3 py-1.5 text-xs font-medium transition hover:border-line hover:bg-surface-muted active:scale-[0.98]"
+              className="ml-auto shrink-0 rounded-lg border border-line-strong bg-surface px-3 py-1.5 text-xs font-medium transition hover:border-line hover:bg-surface-muted active:scale-[0.98]"
               title={t("chat.selectSkills")}
             >
               🧩 {t("chat.skills")}
@@ -2561,7 +2758,7 @@ function ChatAgent() {
             </button>
             {display.length > 0 && (
               <button
-                onClick={discardActiveConversation}
+                onClick={clearActiveConversationContent}
                 className="shrink-0 rounded-lg border border-line-strong bg-surface px-3 py-1.5 text-xs font-medium transition hover:border-line hover:bg-surface-muted active:scale-[0.98]"
               >
                 {t("chat.clearChat")}
@@ -2699,6 +2896,42 @@ function ChatAgent() {
 
           {/* Sandbox startup progress dialog (daily mode): downloading the runtime environment image / downloaded + startup progress; can also be opened by clicking the top badge. */}
           <SandboxStartupDialog status={sandboxStatus} mode={mode} openTick={sandboxDialogTick} />
+
+          {/* Rename the current conversation (opened from the header title dropdown). */}
+          <Dialog open={renameDraft !== null} onOpenChange={(o) => !o && setRenameDraft(null)}>
+            <DialogContent className="sm:max-w-sm">
+              <DialogHeader>
+                <DialogTitle>{t("ctx.renameConversation")}</DialogTitle>
+              </DialogHeader>
+              <input
+                autoFocus
+                value={renameDraft ?? ""}
+                onChange={(e) => setRenameDraft(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" && renameDraft?.trim() && activeConvId) {
+                    renameConversation(activeConvId, renameDraft.trim());
+                    setRenameDraft(null);
+                  }
+                }}
+                placeholder={t("ctx.renamePlaceholder")}
+                className={selCls}
+              />
+              <DialogFooter>
+                <button
+                  onClick={() => {
+                    if (renameDraft?.trim() && activeConvId) {
+                      renameConversation(activeConvId, renameDraft.trim());
+                    }
+                    setRenameDraft(null);
+                  }}
+                  disabled={!renameDraft?.trim()}
+                  className="rounded-lg bg-primary px-4 py-1.5 text-sm font-medium text-white transition hover:brightness-105 disabled:opacity-50"
+                >
+                  {t("ctx.save")}
+                </button>
+              </DialogFooter>
+            </DialogContent>
+          </Dialog>
         </div>
 
         {/* Context usage: a frosted-glass bar, sticky-pinned to the bottom of the message area; messages scroll behind its semi-transparent background,
@@ -2778,8 +3011,10 @@ function ChatAgent() {
       />
 
       {/* Sensitive-operation confirmation panel: pops when the model requests operations like writing files / deleting / running commands, requiring the user's approval.
-          Auto-focused on appearance; use ↑/↓ to select, Enter to confirm, Esc to reject. */}
-      {pending && (
+          Auto-focused on appearance; use ↑/↓ to select, Enter to confirm, Esc to reject.
+          Gated to the conversation that issued it: a request made in another chat stays queued and shows as a sidebar badge
+          on that chat instead of following the user into the conversation they are currently viewing. */}
+      {pending && pending.convId === convIdRef.current && (
         <ConsentPanel
           pending={pending}
           currentConvId={convIdRef.current}
@@ -2793,8 +3028,8 @@ function ChatAgent() {
 
       {/* Task list: fixed above the input box, showing progress.
           Lowest priority — it yields and hides when the sensitive-operation confirmation panel is present, to avoid competing for space with it. */}
-      {todos.length > 0 && !pending && (
-        <TodoPanel todos={todos} onToggle={toggleTodo} onClear={() => setTodosBoth([])} />
+      {todos.length > 0 && !(pending && pending.convId === convIdRef.current) && (
+        <TodoPanel todos={todos} onToggle={toggleTodo} onClear={() => setTodosFor(convIdRef.current, [])} />
       )}
 
       {/* Queued messages: messages the user sends again while generating are listed here and auto-sent in order after this round ends. Can be removed one by one. */}
