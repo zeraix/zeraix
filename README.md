@@ -42,8 +42,8 @@ No Zeraix account, subscription, or API key is required for the local core.
 
 | Platform | Requirements | Direct download |
 |---|---|---|
-| 🍎 macOS | macOS 13+ · Apple Silicon | [⬇️ **Download for macOS**](https://github.com/zeraix/zeraix/releases/latest/download/Zeraix-intl-mac-arm64.dmg) |
-| 🪟 Windows | Windows 10/11 · x64 | [⬇️ **Download for Windows**](https://github.com/zeraix/zeraix/releases/latest/download/Zeraix-intl-win-x64.exe) |
+| 🍎 macOS | macOS 13+ · Apple Silicon | [⬇️ **Download for macOS**](https://github.com/zeraix/zeraix/releases/download/v1.0.0/Mac.Zeraix-intl-1.0.0.dmg) |
+| 🪟 Windows | Windows 10/11 · x64 | [⬇️ **Download for Windows**](https://github.com/zeraix/zeraix/releases/download/v1.0.0/Win.Zeraix-intl-1.0.0.exe) |
 
 You can also view the [latest release notes](https://github.com/zeraix/zeraix/releases/latest).
 
