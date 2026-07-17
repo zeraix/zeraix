@@ -728,11 +728,3 @@ Third-party models, runtimes, libraries, and downloaded components remain govern
 
 If that idea resonates with you, consider starring the repository, testing Zeraix on your hardware, and helping us improve local AI.
 
-</div>
-
-- [Discord](https://discord.gg/PcQ3jr3MfH)
-- [X / Twitter](https://x.com/ZeraixAI)
-- [Bug reports](https://github.com/zeraix/zeraix/issues/new)
-- [Feature requests](https://github.com/zeraix/zeraix/issues/new)
-- Commercial and partnership inquiries: **emma@zeraix.com**
-
