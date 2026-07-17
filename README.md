@@ -20,7 +20,6 @@ Alongside the application, we continuously research how modern AI models can run
 [![License: AGPL-3.0](https://img.shields.io/badge/License-AGPL--3.0-orange?style=flat-square)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Windows-lightgrey?style=flat-square)](#-quick-start)
 
-**English** 
 
 </div>
 
