@@ -722,10 +722,12 @@ Third-party models, runtimes, libraries, and downloaded components remain govern
 
 ---
 
-<div align="center">
-
-**Local AI should belong to the person running it — and the models should keep getting better on the hardware they already own.**
-
-If that idea resonates with you, consider starring the repository, testing Zeraix on your hardware, and helping us improve local AI.
-
-</div>
+<table width="100%">
+  <tr>
+    <td align="center">
+      <strong>Local AI should belong to the person running it — and the models should keep getting better on the hardware they already own.</strong>
+      <br /><br />
+      If that idea resonates with you, consider starring the repository, testing Zeraix on your hardware, and helping us improve local AI.
+    </td>
+  </tr>
+</table>
