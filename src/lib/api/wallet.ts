@@ -12,7 +12,8 @@ import type { IUser } from "@/types/auth";
  *   3. the user pays on Stripe's hosted page
  *   4. Stripe's server-to-server webhook credits the wallet — that is the ONLY source of truth.
  *      Coming back from the browser is NOT proof of payment, and the wallet is never credited client-side.
- *   5. poll queryStripeOrder(outTradeNo) until status is "completed" or "failed", then getMe() to refresh the balance.
+ *   5. poll queryStripeOrder(outTradeNo) until status is "completed" or "failed", then refresh the balance
+ *      via useAuthStore.refreshWallet() (POST /auth/refresh-me) — the server is the only source of the number.
  *
  * A closed tab does not lose the payment: the webhook still completes the order, so the UI follows the
  * order status rather than the navigation.

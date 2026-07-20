@@ -1,5 +1,7 @@
 import { ILoginResponse } from "@/types/auth";
 import request from "./request";
+import { getStorage } from "@zzcpt/zztool";
+import STORAGE from "@/constants/Storage";
 
 /**
  * Google sign-in: hand the Google ID token obtained by the main process to the backend to exchange for a site session.
@@ -20,4 +22,43 @@ export async function loginWithGoogle(
     },
     { skipAuthRetry: true },
   );
+}
+
+/**
+ * 获取当前用户信息（刷新 token 并返回最新用户数据）
+ */
+export async function refreshCurrentUser(): Promise<{
+  success: boolean;
+  message: string;
+  data?: {
+    token: string;
+    user: {
+      id: string;
+      phone: string;
+      username?: string;
+      shippingAddresses?: any[];
+      certStatus: string;
+      avatar: string;
+      walletBalance: number;
+    };
+    member: {
+      remainingCredits?: number | undefined;
+      id: string;
+      role: "admin" | "teacher" | "student";
+      classId: string;
+    };
+    institution: {
+      id: string;
+      name: string;
+      code: string;
+    }
+  };
+}> {
+  const currentToken = getStorage(STORAGE.userInfo)?.auth_token;
+  return request("/auth/refresh-me", {
+    method: "POST",
+    body: JSON.stringify({
+      token: currentToken
+    }),
+  });
 }

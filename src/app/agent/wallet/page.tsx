@@ -53,7 +53,6 @@ import {
   createStripeCheckout,
   queryStripeOrder,
   repayStripeOrder,
-  getMe,
   MIN_TOPUP_USD,
   LOW_BALANCE_USD,
   type PaymentOrderStatus,
@@ -96,7 +95,8 @@ const nowMs = () => Date.now();
 export default function WalletPage() {
   const t = useT();
   const router = useRouter();
-  const { userInfo, setUserInfo } = useAuthStore();
+  const userInfo = useAuthStore((s) => s.userInfo);
+  const refreshWallet = useAuthStore((s) => s.refreshWallet);
   const requireLogin = useLoginModalStore((s) => s.requireLogin);
 
   const [amount, setAmount] = useState<number>(DEFAULT_AMOUNT); // selected preset (display unit)
@@ -130,30 +130,22 @@ export default function WalletPage() {
   // Price of a display-unit amount, always in the settlement currency (USD).
   const fmtPrice = (n: number) => usd(isCnEdition ? n / CREDITS_PER_USD : n);
 
-  // Re-fetch the user so walletBalance reflects a completed top-up. Best-effort: a failed /me just leaves
-  // the number stale (the user can hit refresh). `silent` suppresses the toast.
-  // Held in a ref as well so the polling effect can call it without re-subscribing on every userInfo change.
+  // Pull the balance from the server (GET /me) — the one place it can be known, since the credit comes from
+  // Stripe's webhook. `force` skips the store's throttle; `silent` suppresses the toast.
   const refresh = useCallback(
     async (silent = false) => {
       if (!isAuthenticated()) return;
       setRefreshing(true);
       try {
-        const res = await getMe();
-        if (res?.success && res.data) {
-          const stored = (getStorage(STORAGE_KEY.userInfo) as Record<string, unknown>) || {};
-          setStorage(STORAGE_KEY.userInfo, { ...stored, ...res.data });
-          setUserInfo({ ...userInfo, ...res.data });
-          if (!silent) Toast.success(t("wallet.balanceUpdated"));
-        }
-      } catch {
-        /* best-effort refresh; ignore */
+        await refreshWallet({ force: true });
+        if (!silent) Toast.success(t("wallet.balanceUpdated"));
       } finally {
         setRefreshing(false);
       }
     },
-    [setUserInfo, userInfo, t],
+    [refreshWallet, t],
   );
-  // Kept in a ref so the polling effect can call the latest refresh without re-subscribing on every userInfo change.
+  // Kept in a ref so the polling effect can call the latest refresh without re-subscribing on every render.
   const refreshRef = useRef(refresh);
   useEffect(() => {
     refreshRef.current = refresh;

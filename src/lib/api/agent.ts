@@ -1,10 +1,26 @@
 import request from "./request";
 import { getAuthToken } from "../actions/auth.actions";
+import { useAuthStore } from "@/store/authStore";
 import type { ApiResponse } from "@/types/index";
 
 /** Direct API version prefix (defaults to v1). */
 const VERSION = process.env.NEXT_PUBLIC_DIRECTAPIVERSION || "v1";
 const v1 = (path: string) => `/${VERSION}${path}`;
+
+/**
+ * Mark a /v1 call as billable: the platform charges the wallet for it, so pull the new balance as soon as
+ * the call settles. That keeps the balance shown in the UI in step with what was actually spent, request by
+ * request, instead of only at the end of a turn.
+ *
+ * Throttled and de-duped inside the store, so a burst of calls costs at most one extra GET /me.
+ * Free endpoints (models, api-key) are deliberately not wrapped.
+ */
+function billed<T>(call: Promise<T>): Promise<T> {
+  return call.then((res) => {
+    void useAuthStore.getState().refreshWallet();
+    return res;
+  });
+}
 
 // ── OpenAI error shape ────────────────────────────────────────────────────────────
 export interface OpenAIError {
@@ -58,10 +74,12 @@ export interface ChatCompletionResponse {
 export async function createChatCompletion(
   body: ChatCompletionRequest,
 ): Promise<OpenAIResult<ChatCompletionResponse>> {
-  return request<OpenAIResult<ChatCompletionResponse>>(v1("/chat/completions"), {
-    method: "POST",
-    body: JSON.stringify({ ...body, stream: false }),
-  });
+  return billed(
+    request<OpenAIResult<ChatCompletionResponse>>(v1("/chat/completions"), {
+      method: "POST",
+      body: JSON.stringify({ ...body, stream: false }),
+    }),
+  );
 }
 
 /**
@@ -156,18 +174,22 @@ export interface ImageResponse {
 export async function generateImages(
   body: ImageGenerationsRequest,
 ): Promise<OpenAIResult<ImageResponse>> {
-  return request<OpenAIResult<ImageResponse>>(v1("/images/generations"), {
-    method: "POST",
-    body: JSON.stringify(body),
-  });
+  return billed(
+    request<OpenAIResult<ImageResponse>>(v1("/images/generations"), {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  );
 }
 
 /** Image edit (operation: edit) or upscale. */
 export async function editImage(body: ImageEditsRequest): Promise<OpenAIResult<ImageResponse>> {
-  return request<OpenAIResult<ImageResponse>>(v1("/images/edits"), {
-    method: "POST",
-    body: JSON.stringify(body),
-  });
+  return billed(
+    request<OpenAIResult<ImageResponse>>(v1("/images/edits"), {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  );
 }
 
 // ── Videos (async tasks) ─────────────────────────────────────────────────────────────
@@ -214,17 +236,25 @@ export interface VideoTask {
 
 /** Submit a video generation task (async, returns taskId immediately; then poll getVideoTask). */
 export async function createVideo(body: VideoCreateRequest): Promise<OpenAIResult<VideoTask>> {
-  return request<OpenAIResult<VideoTask>>(v1("/videos"), {
-    method: "POST",
-    body: JSON.stringify(body),
-  });
+  return billed(
+    request<OpenAIResult<VideoTask>>(v1("/videos"), {
+      method: "POST",
+      body: JSON.stringify(body),
+    }),
+  );
 }
 
-/** Query a video task (only tasks under your own key; others' tasks return 404). */
+/**
+ * Query a video task (only tasks under your own key; others' tasks return 404).
+ * Billed-adjacent rather than billable: the charge is held at creation and refunded on failure, so each
+ * poll is the moment the balance can change — refresh alongside it.
+ */
 export async function getVideoTask(taskId: string): Promise<OpenAIResult<VideoTask>> {
-  return request<OpenAIResult<VideoTask>>(v1(`/videos/${encodeURIComponent(taskId)}`), {
-    method: "GET",
-  });
+  return billed(
+    request<OpenAIResult<VideoTask>>(v1(`/videos/${encodeURIComponent(taskId)}`), {
+      method: "GET",
+    }),
+  );
 }
 
 // ── API Key management (JWT auth, platform { success, data } envelope) ──────────────────────────────

@@ -1,6 +1,7 @@
 import { create } from "zustand";
-import { getAuthToken } from "@/lib/actions/auth.actions";
-import { getStorage } from "@zzcpt/zztool";
+import { getAuthToken, isAuthenticated, setAuthCookie } from "@/lib/actions/auth.actions";
+import { getStorage, setStorage } from "@zzcpt/zztool";
+import { refreshCurrentUser } from "@/lib/api/auth";
 import { IUser } from "@/types/auth";
 import STORAGE_KEY from "@/constants/Storage";
 
@@ -38,7 +39,18 @@ type UserState = {
   setHasHydrated: (value: boolean) => void;
   /** Check login status (read token from localStorage for validation) */
   checkAuthStatus: () => Promise<boolean>;
+  /** Re-fetch the user (POST /auth/refresh-me) so `walletBalance` reflects what the server just charged. */
+  refreshWallet: (opts?: { force?: boolean }) => Promise<void>;
 };
+
+/**
+ * Wallet-refresh throttle. Official direct-connection models bill per step, and the agent loop refreshes
+ * after every one of them — a burst of tool rounds must not turn into a burst of /me calls. `force` (used by
+ * the manual refresh button and after a completed top-up) bypasses this.
+ */
+const WALLET_REFRESH_MIN_INTERVAL_MS = 3000;
+let walletRefreshAt = 0;
+let walletRefreshInFlight: Promise<void> | null = null;
 
 /**
  * Auth state management store (pure static export compatible version).
@@ -95,6 +107,44 @@ export const useAuthStore = create<UserState>((set) => ({
 
   setHasHydrated: (value) => {
     set({ _hasHydrated: value });
+  },
+
+  /**
+   * Pull the authoritative wallet balance from the server and mirror it into the store + localStorage.
+   *
+   * The balance is only ever server-side truth: official direct-connection calls are billed per step by the
+   * backend, and top-ups are credited by Stripe's webhook — the client never computes it. Callable from
+   * outside React via `useAuthStore.getState().refreshWallet()`.
+   *
+   * Best-effort by design: a failed /me leaves the previous number on screen rather than blanking it, and
+   * never interrupts whatever the caller was doing. Guests are skipped (nothing to fetch).
+   */
+  refreshWallet: async ({ force = false } = {}) => {
+    if (!isAuthenticated()) return;
+    if (walletRefreshInFlight) return walletRefreshInFlight;
+    if (!force && Date.now() - walletRefreshAt < WALLET_REFRESH_MIN_INTERVAL_MS) return;
+
+    walletRefreshInFlight = (async () => {
+      try {
+        const res = await refreshCurrentUser();
+        // /auth/refresh-me nests the account under `data.user` and hands back a renewed `data.token`;
+        // only the user object belongs in `userInfo` — spreading `data` itself would bury token/member/
+        // institution in there and leave walletBalance untouched.
+        const user = res?.data?.user;
+        if (!res?.success || !user) return;
+        const stored = (getStorage(STORAGE_KEY.userInfo) as Record<string, unknown>) || {};
+        setStorage(STORAGE_KEY.userInfo, { ...stored, ...user });
+        // Sliding session: persist the renewed token the same way every other caller does.
+        if (res.data?.token) setAuthCookie(res.data.token);
+        set((s) => ({ userInfo: { ...s.userInfo, ...user } }));
+      } catch {
+        /* best-effort: keep showing the last known balance */
+      } finally {
+        walletRefreshAt = Date.now();
+        walletRefreshInFlight = null;
+      }
+    })();
+    return walletRefreshInFlight;
   },
 
   /**

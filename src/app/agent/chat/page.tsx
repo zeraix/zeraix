@@ -96,6 +96,7 @@ import {
   type ResolvedModel,
   type AgentModel,
 } from "@/lib/ai/models";
+import { useAuthStore } from "@/store/authStore";
 import {
   CONSENT_OPTIONS,
   FEEDBACK_DOWN_NUDGE,
@@ -1458,6 +1459,14 @@ function ChatAgent() {
       turnUsageRef.current.total += p + c;
       turnUsageRef.current.estimated = true;
     }
+
+    // Official direct-connection models are billed by the platform per request, so the balance moves with
+    // every step of a tool loop — not just at the end of the turn. Refresh as each step lands so the
+    // sidebar tracks spending live. Throttled and de-duped inside the store, and a no-op for guests,
+    // local models and BYO-key providers, which never touch the platform wallet.
+    if (activeModel?.providerId === OFFICIAL_PROVIDER_ID) {
+      void useAuthStore.getState().refreshWallet();
+    }
     return data;
   };
 
@@ -2623,6 +2632,11 @@ function ChatAgent() {
           cached: s.cached + u.cached,
           estimated: s.estimated || u.estimated,
         }));
+      }
+      // The per-step refresh above is throttled, so the last step of a fast turn can be missed. Force one
+      // final read to guarantee the number on screen matches what the platform actually charged.
+      if (activeModel?.providerId === OFFICIAL_PROVIDER_ID) {
+        void useAuthStore.getState().refreshWallet({ force: true });
       }
       // Queue resume: after a normal end (not a user interruption), if this conversation still has queued messages and is still the current conversation, auto-send the next one.
       // Interruption (the user clicked "stop") does not resume — cancel() clears this conversation's queue at the same time.
