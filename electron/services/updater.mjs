@@ -37,7 +37,12 @@ let wired = false;
 
 function setState(patch) {
   state = { ...state, ...patch };
-  broadcastFn?.("updater:state", state);
+  // Broadcast the SAME shape the updater:state invoke returns — i.e. including `supported` and
+  // `currentVersion`, which live outside `state`. Pushing the bare object instead meant every
+  // transition after the initial fetch arrived with supported:undefined, and the renderer (which
+  // hides the whole UI when updates are unsupported) blanked the card the instant a download
+  // started: progress vanished mid-download, exactly when it mattered most.
+  broadcastFn?.("updater:state", getUpdaterState());
 }
 
 /** Updates only work from a packaged app: unpackaged, electron-updater has no app-update.yml and throws. */
@@ -119,10 +124,24 @@ export async function downloadUpdate() {
   }
 }
 
-/** Quit and install a downloaded update. No-op unless status is "downloaded". */
+/**
+ * Quit and install a downloaded update. No-op unless status is "downloaded".
+ *
+ * isSilent=true runs the Windows installer with /S: no wizard, no "do you want to install" prompt —
+ * the user already consented by clicking Install now, and asking twice is just friction. NSIS reuses
+ * the install directory recorded at first install, so nothing needs to be chosen again.
+ * isForceRunAfter=true relaunches the app once the swap is done.
+ *
+ * Both flags are ignored on macOS: Squirrel.Mac always replaces the bundle itself, which is why the
+ * Mac side already felt silent. The "Install later" path (autoInstallOnAppQuit) is silent on Windows
+ * too — electron-updater's quit handler installs with isSilent=true and no relaunch.
+ *
+ * One prompt is NOT ours to suppress: if the app was installed per-machine (Program Files), writing
+ * there needs elevation and Windows shows a UAC dialog no matter what /S says. A per-user install
+ * (%LOCALAPPDATA%, electron-builder's default) updates with no prompt at all.
+ */
 export function quitAndInstall() {
   if (state.status !== "downloaded") return { ok: false, error: "no update downloaded" };
-  // isSilent=false so the NSIS UI shows; isForceRunAfter=true reopens the app afterwards.
-  setImmediate(() => autoUpdater.quitAndInstall(false, true));
+  setImmediate(() => autoUpdater.quitAndInstall(true, true));
   return { ok: true };
 }

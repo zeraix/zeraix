@@ -1628,7 +1628,9 @@ function AboutSection({ t }: { t: TFunc }) {
     const bridge = updaterBridge();
     if (!bridge) return; // browser / next dev: no updater at all
     const off = bridge.onState((s) => {
-      setState(s);
+      // Merge, don't replace — `supported` describes the environment, and losing it would swap the
+      // whole updates block for the "not supported here" note while a download is running.
+      setState((prev) => ({ ...prev, ...s }));
       if (s.status !== "checking") setChecking(false);
     });
     let cancelled = false;

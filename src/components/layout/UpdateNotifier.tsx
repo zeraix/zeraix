@@ -46,7 +46,9 @@ export default function UpdateNotifier() {
     if (!bridge) return; // browser / next dev: nothing to do
 
     const off = bridge.onState((s) => {
-      setState(s);
+      // Merge rather than replace: `supported` / `currentVersion` describe the environment, not the
+      // transition, so a push that omitted one must never turn this card off mid-download.
+      setState((prev) => ({ ...prev, ...s }));
       // A newly found update re-opens a card the user dismissed earlier in this session.
       if (s.status === "available" || s.status === "downloaded") setDismissed(false);
       // Main is now driving the display; drop the optimistic flag.
