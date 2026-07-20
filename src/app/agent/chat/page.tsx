@@ -172,6 +172,45 @@ function userTimeContext(model: ResolvedModel | null): string {
 }
 
 /**
+ * Collapse every system message into a SINGLE leading system message (contents joined in original order), rest after.
+ * Local llama.cpp chat templates (Qwen / GLM / …) don't merely require the system message to be positioned first — many
+ * reject *any second* `role:"system"` entry anywhere in the array (their Jinja checks `loop.first`), raising
+ * "System message must be at the beginning." The runtime context + nudges are appended at the end for prefix-cache
+ * stability, and several nudge/rating paths add their own separate system messages, so for local models we both hoist
+ * and merge them into one message[0] just before sending. No-op when there is at most one system message and it is
+ * already at the front. System messages are always string-content per ApiMsg.
+ */
+function hoistSystemToFront(msgs: ApiMsg[]): ApiMsg[] {
+  const sysIdx = msgs.reduce<number[]>((acc, m, i) => (m.role === "system" ? [...acc, i] : acc), []);
+  // Nothing to do: no system message, or exactly one already at index 0.
+  if (sysIdx.length === 0 || (sysIdx.length === 1 && sysIdx[0] === 0)) return msgs;
+  const merged: ApiMsg = {
+    role: "system",
+    content: sysIdx
+      .map((i) => (msgs[i] as { role: "system"; content: string }).content)
+      .filter(Boolean)
+      .join("\n\n"),
+  };
+  const rest = msgs.filter((m) => m.role !== "system");
+  return [merged, ...rest];
+}
+
+/**
+ * Append text to the end of the first system message's content, merging it into the system prompt itself rather than
+ * adding a second system message — so chat templates that require a single leading system message (Qwen / GLM / …) accept it.
+ * System messages are always string-content per ApiMsg. Falls back to a leading system message only if the wire has none
+ * (buildWireContext always includes one, so that branch is defensive).
+ */
+function appendToSystemPrompt(msgs: ApiMsg[], text: string): ApiMsg[] {
+  if (!text) return msgs;
+  const i = msgs.findIndex((m) => m.role === "system");
+  if (i < 0) return [{ role: "system", content: text }, ...msgs];
+  return msgs.map((m, idx) =>
+    idx === i && m.role === "system" ? { ...m, content: m.content ? `${m.content}\n\n${text}` : text } : m,
+  );
+}
+
+/**
  * The run context for a single send (generation). send() and the tool executions / subagents it invokes share it, to support "background concurrent generation":
  *  - convId: the conversation this generation belongs to (captured stably, unchanged when switching conversations); always used for persistence;
  *  - signal: this run's own independent abort signal (one per conversation, mutually isolated);
@@ -1309,10 +1348,22 @@ function ChatAgent() {
         usage: accum.usage,
       };
     };
+    // Local llama-server failures are cryptic (raw llama.cpp text). For local endpoints, map the known template / tool-call
+    // failures to an actionable message; everything else keeps the raw "HTTP <status> — <text>" form.
+    const localErr = (status: number, raw?: string): string => {
+      const base = `HTTP ${status}${raw ? ` — ${raw.slice(0, 300)}` : ""}`;
+      if (!isLocalEndpoint(endpoint)) return base;
+      const r = (raw || "").toLowerCase();
+      if (r.includes("generate parser") || r.includes("raise_exception") || r.includes("chat template") || r.includes("system message must be"))
+        return t("chat.localTemplateError");
+      if (r.includes("peg-native") || r.includes("unparsed") || r.includes("tool call") || r.includes("tool_call"))
+        return t("chat.localToolCallError");
+      return base;
+    };
     const streamErr = (res: { ok: boolean; status: number; error?: string }): ChatResponse | never => {
       if (!res.ok) {
         if (signal?.aborted) return assemble(); // Aborted: return the accumulated part (the caller then exits on aborted and will not use it)
-        throw new Error(`HTTP ${res.status}${res.error ? ` — ${res.error.slice(0, 300)}` : ""}`);
+        throw new Error(localErr(res.status, res.error));
       }
       return assemble();
     };
@@ -1328,7 +1379,7 @@ function ChatAgent() {
       } else {
         const res = await chatViaProxy({ endpoint, apiKey: apiKey.trim() || "local", body });
         if (!res.ok) {
-          throw new Error(`HTTP ${res.status}${res.error ? ` — ${res.error.slice(0, 300)}` : ""}`);
+          throw new Error(localErr(res.status, res.error));
         }
         data = res.data as ChatResponse;
       }
@@ -2255,10 +2306,10 @@ function ChatAgent() {
         let wire = sanitizeToolCallPairs(buildWireContext(convo, compaction));
         // User rating → dynamically injected wire feedback (when reading history, derived to convo from StoredMessage.rating; here it lands in the wire).
         wire = injectRatingFeedback(wire);
-        // The runtime context (user time zone + current date + current model/provider) is appended to the "end of the wire" (§4.4): placed after all
-        // history, so its per-round change (across a day / switching models) only affects the last message and does not invalidate the history prefix → most stable prefix cache.
+        // The runtime context (user time zone + current date + current model/provider) is appended to the END OF THE SYSTEM PROMPT itself
+        // (not a separate system message), so chat templates that require a single leading system message accept it (Qwen / GLM / …).
         // Generated with the current activeModel each round (switching the conversation-bound model takes effect immediately); it only enters the wire and is not written back to the buffer / not persisted.
-        wire = [...wire, { role: "system", content: userTimeContext(activeModel) }];
+        wire = appendToSystemPrompt(wire, userTimeContext(activeModel));
         // let wire = buildWireContext(convo, compaction);
         // Image handling depends on the active model's capability, applied to the wire only (never the persisted buffer):
         //  - Text-only model (not multimodal): strip EVERY image_url part. A model with no image support 400s on any
@@ -2276,6 +2327,9 @@ function ChatAgent() {
           wire = [...wire, { role: "system", content: feedbackNudge }];
         }
         firstRequest = false;
+        // Local models: strict llama.cpp chat templates require every system message at the front, so move the trailing
+        // runtime context / nudges ahead of the user turns (see hoistSystemToFront). Cloud models keep the cache-friendly tail placement.
+        if (isLocalModel) wire = hoistSystemToFront(wire);
         // Two kinds of streaming:
         //  - Daily mode: incrementally render the final reply's content / reasoning chunk by chunk; discard the body of a tool-call round (often containing reasoning remnants).
         //  - Dev-mode "phased streaming": likewise streaming, but show each "tool-call round" body as that phase's summary

@@ -162,6 +162,10 @@ contextBridge.exposeInMainWorld("localLlm", {
   estimate: (opts) => ipcRenderer.invoke("llm:local:estimate", opts),
   /** llama runtime info { version, installed, upToDate, updatable, binDir, root, variant }. */
   llamaInfo: () => ipcRenderer.invoke("llm:local:llama-info"),
+  /** Browse tab: search GGUF repos on the Hub { ok, items, error? }. opts?: { query?, trusted?, limit? }. */
+  hfSearch: (opts) => ipcRenderer.invoke("llm:local:hf-search", opts),
+  /** Browse tab: one repo's quants + gguf metadata + compat verdict { ok, quants, gguf, arch, compat, mmproj, mtp }. opts: { repo }. */
+  hfRepo: (opts) => ipcRenderer.invoke("llm:local:hf-repo", opts),
   /** Subscribe to status changes (loading / ready / exited / error); returns an unsubscribe function. */
   onStatus: (cb) => {
     const handler = (_e, st) => cb(st);

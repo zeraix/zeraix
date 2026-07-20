@@ -88,6 +88,37 @@ export const MODELS = [
   //   hf: "unsloth/Qwen3-1.7B-GGUF", arch: { L: 28, kvH: 8, hd: 128 }, notes: "Runs on low memory / pure CPU. Fast but limited reasoning." },
 ];
 
+/**
+ * Build a MODELS-entry-shaped descriptor for a non-catalog repo from HF's parsed GGUF header (hfDownload.repoDetail().gguf),
+ * so the whole existing sizing/launch pipeline (computeFit / pickCtxKv / gpuLayers / isModelInstalled) runs unchanged on any Hub model.
+ * HF's gguf field reliably carries { architecture, context_length, total = parameter count }; layer/KV-head dims are usually absent,
+ * so those fall back to size-class heuristics — KV estimates are approximate by design (see the file header), this stays within that contract.
+ * extras: { vision, mtp } from the repo's file listing (mmproj / drafter presence).
+ */
+export function descriptorFromGguf(repo, gguf = null, extras = {}) {
+  const name = repo.includes("/") ? repo.slice(repo.indexOf("/") + 1) : repo;
+  // Parameter count: HF gguf.total; fallback: the "NNB" size class in the repo name (e.g. Qwen3-8B-GGUF); last resort 7B.
+  const nameB = name.match(/(\d+(?:\.\d+)?)\s*[bB]\b/);
+  const params = gguf && gguf.total > 0 ? gguf.total / 1e9 : nameB ? Number(nameB[1]) : 7;
+  // MoE: "A3B"-style active-params tag in the name (30B-A3B), else assume dense (HF metadata has no expert count).
+  const activeM = name.match(/[-_]a(\d+(?:\.\d+)?)b/i);
+  // Layer count: gguf.block_count when present, else a dense-transformer size-class heuristic (only feeds the KV/offload estimate).
+  const L = (gguf && gguf.block_count) || (params <= 2 ? 24 : params <= 4 ? 32 : params <= 9 ? 36 : params <= 16 ? 40 : params <= 40 ? 48 : params <= 80 ? 64 : 80);
+  return {
+    id: repo,
+    name,
+    hf: repo,
+    params: Math.round(params * 10) / 10,
+    active: activeM ? Number(activeM[1]) : Math.round(params * 10) / 10,
+    moe: !!activeM,
+    vision: !!extras.vision,
+    mtp: !!extras.mtp,
+    arch: { L, kvH: (gguf && gguf.head_count_kv) || 8, hd: (gguf && gguf.head_dim) || 128 },
+    maxCtx: (gguf && gguf.context_length) || 32768,
+    notes: "",
+  };
+}
+
 const OVERHEAD_BASE_GB = 0.6;
 // Approximate resident VRAM/memory overhead of the vision projector (mmproj): a Qwen-VL-class ViT vision tower is ~0.6–1.4GB, take 1GB. Counted only when vision is on and the model supports it.
 const VISION_OVERHEAD_GB = 1.0;
@@ -328,10 +359,13 @@ export function recommend(hw, budgetGB, { ctx = 16384, kvBits = 8, vision = fals
  *   --mmproj FILE   explicitly specify the multimodal vision-projector file (passed when we auto-download the vision model)
  *   --no-mmproj     vision off: skip the same-repo vision projector that -hf loads automatically (saves ~1GB resident memory)
  *   --jinja         chat template + tool-call parsing (required for agents)
+ *   --chat-template NAME  override the model's embedded chat template with a llama.cpp built-in (chatml / qwen / gemma / llama3 …).
+ *                   Rescues community GGUFs whose embedded Jinja template breaks --jinja's tool-parser generation ("Unable to generate parser for this template");
+ *                   omitted (null) → use the template baked into the GGUF (the default, correct for catalog models).
  * Local first: given modelPath → `-m FILE` (+ explicit `--mmproj FILE` when vision), the weights already downloaded by us (with progress/resume);
  * if not auto-downloaded (fallback path) → `-hf repo:quant` is fetched by llama itself, and only then, when noMmproj=true, is --no-mmproj used to turn off the automatic vision projector.
  */
-export function buildServerArgs({ hf, modelPath = null, hw, ctx = 16384, port = 8080, kvBits = 8, mtpDraft = null, specMtp = false, mmproj = null, noMmproj = false, kvCacheDir = null, ngl = null, extraArgs = [] }) {
+export function buildServerArgs({ hf, modelPath = null, hw, ctx = 16384, port = 8080, kvBits = 8, mtpDraft = null, specMtp = false, mmproj = null, noMmproj = false, kvCacheDir = null, ngl = null, chatTemplate = null, extraArgs = [] }) {
   const args = modelPath ? ["-m", modelPath] : ["-hf", hf];
   args.push(
     "--host", "127.0.0.1",
@@ -342,6 +376,7 @@ export function buildServerArgs({ hf, modelPath = null, hw, ctx = 16384, port = 
     "--jinja",
     "--cache-reuse", "256",
   );
+  if (chatTemplate) args.push("--chat-template", String(chatTemplate)); // override a broken embedded template with a built-in
   const kvType = kvBits === 8 ? "q8_0" : kvBits === 4 ? "q4_0" : "f16";
   if (kvType !== "f16") args.push("-ctk", kvType, "-ctv", kvType);
   if (kvCacheDir) args.push("--slot-save-path", kvCacheDir);

@@ -21,6 +21,135 @@ const isMmproj = (p) => /(^|\/)mmproj[^/]*\.gguf$/i.test(p);
 // MTP / speculative-decoding drafter file: unsloth names them like MTP/gemma-4-12B-it-Q4_0-MTP.gguf or a top-level mtp-<name>.gguf.
 const isMtp = (p) => /(^|\/)mtp-[^/]*\.gguf$/i.test(p) || /-mtp\.gguf$/i.test(p);
 
+/** Match a quant tag at a token boundary (e.g. "Q4_K" must not match "…-Q4_K_M.gguf"; "Q4_K_M" must not match "UD-Q4_K_XL").
+ *  Underscore counts as a tag character (tags contain them), so it cannot serve as a boundary. */
+function hasQuantTag(p, quant) {
+  const esc = String(quant).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return new RegExp(`(^|[^a-z0-9_])${esc}([^a-z0-9_]|$)`, "i").test(p.split("/").pop());
+}
+
+// Sources whose GGUF conversions are consistently reliable; the Browse tab filters to these by default (toggleable to "all").
+export const TRUSTED_AUTHORS = ["ggml-org", "unsloth", "bartowski", "Qwen", "google", "deepseek-ai", "microsoft", "mistralai", "openbmb"];
+
+// First-party model publishers — the "standard" original model sources (not GGUF repackagers). Search results from these
+// rank above third-party GGUF conversion repos (unsloth / bartowski / ggml-org / TheBloke / …), so the canonical model
+// shows before its community repackages. Author = the part of the repo id before "/", matched case-insensitively.
+export const FIRST_PARTY_AUTHORS = [
+  "Qwen", "google", "deepseek-ai", "microsoft", "mistralai", "openbmb", "meta-llama", "ai21labs", "HuggingFaceTB",
+  "allenai", "01-ai", "internlm", "THUDM", "zai-org", "CohereForAI", "cohere", "nvidia", "ibm-granite", "moonshotai",
+  "tencent", "baidu", "inclusionAI", "LiquidAI", "arcee-ai", "NousResearch",
+];
+const FIRST_PARTY_SET = new Set(FIRST_PARTY_AUTHORS.map((a) => a.toLowerCase()));
+// A "standard" (first-party) repo outranks a "GGUF" (repackaged) one; within each group, higher downloads win.
+const isFirstParty = (repoId) => FIRST_PARTY_SET.has(String(repoId).split("/")[0].toLowerCase());
+
+// Non-conversational model types that pollute a chat-model browser (embeddings / rerankers / classifiers …). Even though
+// they ship GGUF (embeddinggemma etc.), they can't be used as a chat model here, so they're dropped from search results.
+const NON_CHAT_PIPELINES = new Set([
+  "sentence-similarity", "feature-extraction", "fill-mask", "text-ranking", "text-classification",
+  "token-classification", "zero-shot-classification", "table-question-answering", "translation", "summarization",
+]);
+// Name-based fallback: many embedding/reranker GGUF repos (e.g. ggml-org/embeddinggemma-300M-GGUF) carry NO pipeline_tag
+// or tags on the Hub, so metadata alone can't exclude them — the repo name is the only signal. Matched at a token boundary
+// on the repo name (not the author), so an "embed"/"rerank" token is required, avoiding false hits inside a longer word.
+const NON_CHAT_NAME = /(^|[-_.])(embed|rerank)/i;
+const isChatModel = (item) => {
+  if (NON_CHAT_NAME.test(String(item.id).split("/").pop() || "")) return false;
+  if (item.pipeline_tag) return !NON_CHAT_PIPELINES.has(item.pipeline_tag);
+  // Some GGUF repos omit pipeline_tag; fall back to the tags array, keeping the repo unless it carries a non-chat tag.
+  return !(Array.isArray(item.tags) ? item.tags : []).some((t) => NON_CHAT_PIPELINES.has(t));
+};
+
+/** Extract the quant tag from a GGUF filename (UD-Q4_K_XL / Q4_K_M / IQ4_XS / Q8_0 / F16 / BF16 …). Returns null when unrecognized. */
+function quantTagOf(p) {
+  const base = p.split("/").pop();
+  const m = base.match(/(UD-)?(I?Q[1-8](?:_[A-Z0-9]+)*|F16|BF16|F32|MXFP4)/i);
+  return m ? `${m[1] ? "UD-" : ""}${m[2].toUpperCase()}` : null;
+}
+
+/**
+ * Search GGUF repos on the Hub: single query, or fan out per author (authors[]) and merge sorted by downloads.
+ * Returns [{ repo, downloads, likes, updatedAt, gated, tags }]. Anonymous access is fine (HF_TOKEN raises the rate limit, see authHeaders).
+ */
+export async function searchModels(endpoint, { query = "", authors = null, limit = 30 } = {}) {
+  const one = async (author) => {
+    const p = new URLSearchParams({ filter: "gguf", sort: "downloads", direction: "-1", limit: String(Math.min(limit, 50)) });
+    if (query) p.set("search", query);
+    if (author) p.set("author", author);
+    const res = await fetch(`${endpoint}/api/models?${p}`, { headers: authHeaders() });
+    if (!res.ok) throw new Error(`HF search ${res.status}`);
+    const list = await res.json();
+    return Array.isArray(list) ? list : [];
+  };
+  // Trusted mode: the list API accepts a single author only → query each in parallel and merge (a failed author is skipped, not fatal).
+  const raw = authors && authors.length
+    ? (await Promise.allSettled(authors.map(one))).flatMap((r) => (r.status === "fulfilled" ? r.value : []))
+    : await one(null);
+  const seen = new Set();
+  return raw
+    .filter((x) => x && typeof x.id === "string" && !seen.has(x.id) && seen.add(x.id))
+    .filter(isChatModel) // drop embeddings / rerankers / classifiers that ship GGUF but aren't chat models
+    // Default browse (no query) shows only standard first-party models; third-party GGUF-repackager repos
+    // (unsloth / bartowski / ggml-org / …) surface only once the user explicitly types a search.
+    .filter((x) => query ? true : isFirstParty(x.id))
+    // Standard (first-party) model repos first, then GGUF-repackager repos; ties broken by downloads.
+    .sort((a, b) => (isFirstParty(b.id) - isFirstParty(a.id)) || (b.downloads || 0) - (a.downloads || 0))
+    .slice(0, limit)
+    .map((x) => ({ repo: x.id, downloads: x.downloads || 0, likes: x.likes || 0, updatedAt: x.lastModified || null, gated: x.gated || false, tags: x.tags || [] }));
+}
+
+/** Keep only the small scalar fields of HF's gguf header (architecture / context_length / total / head dims …):
+ *  the raw object embeds the full Jinja chat template (multi-KB), which would bloat manifest.json and every IPC status push. */
+function pruneGguf(g) {
+  if (!g || typeof g !== "object") return null;
+  const keep = {};
+  for (const [k, v] of Object.entries(g)) {
+    if (typeof v === "number" || typeof v === "boolean" || (typeof v === "string" && v.length <= 64)) keep[k] = v;
+  }
+  return keep;
+}
+
+/**
+ * Full detail of one GGUF repo, for the Browse tab and for launching non-catalog models:
+ *   gguf   — HF-parsed GGUF header (architecture / context_length / total = parameter count …), null when the Hub has none;
+ *   quants — every quant offering with aggregated bytes (shards summed; mmproj/MTP not counted, they download alongside any quant);
+ *   mmproj/mtp — whether the repo ships a vision projector / MTP drafter.
+ * Two parallel calls: model info (metadata) + tree (files with real sizes) — the same endpoints listRepoFiles already relies on.
+ */
+export async function repoDetail(endpoint, repo) {
+  const [infoRes, treeRes] = await Promise.all([
+    fetch(`${endpoint}/api/models/${repo}`, { headers: authHeaders() }),
+    fetch(`${endpoint}/api/models/${repo}/tree/main?recursive=1`, { headers: authHeaders() }),
+  ]);
+  if (!infoRes.ok) throw new Error(`HF model info ${infoRes.status}`);
+  if (!treeRes.ok) throw new Error(`HF tree ${treeRes.status}`);
+  const info = await infoRes.json();
+  const tree = await treeRes.json();
+  const files = (Array.isArray(tree) ? tree : []).filter((x) => x && x.type === "file" && typeof x.path === "string");
+  const sizeOf = (x) => Number((x.lfs && x.lfs.size) || x.size || 0);
+
+  const quants = new Map(); // tag -> { id, bytes, shards }
+  for (const f of files) {
+    if (!/\.gguf$/i.test(f.path) || isMmproj(f.path) || isMtp(f.path)) continue;
+    const tag = quantTagOf(f.path);
+    if (!tag) continue;
+    const q = quants.get(tag) || { id: tag, bytes: 0, shards: 0 };
+    q.bytes += sizeOf(f);
+    q.shards += 1;
+    quants.set(tag, q);
+  }
+  return {
+    repo,
+    downloads: info.downloads || 0,
+    likes: info.likes || 0,
+    gated: info.gated || false,
+    gguf: pruneGguf(info.gguf),
+    quants: [...quants.values()].sort((a, b) => b.bytes - a.bytes),
+    mmproj: files.some((x) => isMmproj(x.path)),
+    mtp: files.some((x) => isMtp(x.path)),
+  };
+}
+
 /**
  * List the GGUF weight shards under a repo matching the quant (with real byte sizes), plus an optional vision projector (mmproj) and MTP drafter.
  * Uses the HF tree API (recursive to cover subdirectories, e.g. unsloth puts some tiers in a <QUANT>/ subdirectory). Mirrors support this path too.
@@ -34,12 +163,11 @@ async function listRepoFiles(endpoint, repo, quant, { vision, mtp } = {}) {
   if (!Array.isArray(list)) throw new Error("HF tree: unexpected payload");
   const files = list.filter((x) => x && x.type === "file" && typeof x.path === "string");
   const sizeOf = (x) => Number((x.lfs && x.lfs.size) || x.size || 0); // an LFS file's real size is in lfs.size
-  const q = String(quant).toLowerCase();
 
-  // Weights: name contains the quant tag, ends with .gguf, and is not an mmproj / MTP (e.g. :Q4_0 would wrongly match *-Q4_0-MTP.gguf).
-  // Shards are naturally sorted by path (00001-of-000NN in order).
+  // Weights: name carries the quant tag at a token boundary (so Q4_K doesn't match Q4_K_M), ends with .gguf, and is not an mmproj / MTP
+  // (e.g. :Q4_0 would wrongly match *-Q4_0-MTP.gguf). Shards are naturally sorted by path (00001-of-000NN in order).
   const weights = files
-    .filter((x) => x.path.toLowerCase().endsWith(".gguf") && x.path.toLowerCase().includes(q) && !isMmproj(x.path) && !isMtp(x.path))
+    .filter((x) => x.path.toLowerCase().endsWith(".gguf") && hasQuantTag(x.path, quant) && !isMmproj(x.path) && !isMtp(x.path))
     .sort((a, b) => a.path.localeCompare(b.path))
     .map((x) => ({ path: x.path, size: sizeOf(x) }));
   if (weights.length === 0) throw new Error(`No GGUF found matching ${quant}`);
@@ -93,8 +221,10 @@ async function downloadFile(endpoint, repo, file, dest, onBytes, signal) {
 /**
  * Download all weights for repo:quant (+ optional mmproj / MTP drafter) into destDir, reporting aggregated progress (integer 0–100, callback only on change).
  * Returns { modelPath, mmprojPath, mtpPath }. Existing files auto-resume/skip. Cancellation (signal.abort) throws, keeping the downloaded portion for the next resume.
+ * `manifest` (optional): extra fields (display name, gguf descriptor, catalog modelId …) persisted to destDir/manifest.json on completion —
+ * the model library lists installed models off these manifests, so non-catalog downloads survive restarts (see localServer.listDownloaded).
  */
-export async function downloadModel({ endpoint, repo, quant, vision, mtp, destDir }, onProgress = () => {}, signal) {
+export async function downloadModel({ endpoint, repo, quant, vision, mtp, destDir, manifest = null }, onProgress = () => {}, signal) {
   const { weights, mmproj, mtp: mtpFile } = await listRepoFiles(endpoint, repo, quant, { vision, mtp });
   const all = [...weights, ...(mmproj ? [mmproj] : []), ...(mtpFile ? [mtpFile] : [])];
   const total = all.reduce((s, f) => s + (f.size || 0), 0);
@@ -107,6 +237,12 @@ export async function downloadModel({ endpoint, repo, quant, vision, mtp, destDi
   };
   for (const f of all) await downloadFile(endpoint, repo, f, path.join(destDir, path.basename(f.path)), bump, signal);
   if (lastPct !== 100) onProgress(100);
+
+  // Written only after every file is finalized (same "complete ⇔ present" convention as the atomic rename above). Failure is non-fatal:
+  // listDownloaded falls back to synthesizing an entry from the directory names.
+  try {
+    fs.writeFileSync(path.join(destDir, "manifest.json"), JSON.stringify({ repo, quant, vision: !!mmproj, mtp: !!mtpFile, bytes: total, ...(manifest || {}) }, null, 2));
+  } catch { /* ignore */ }
 
   return {
     modelPath: path.join(destDir, path.basename(weights[0].path)), // first shard; llama.cpp auto-completes the rest of the shards in the same directory by -00001-of-000NN

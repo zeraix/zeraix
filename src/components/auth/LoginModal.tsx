@@ -14,6 +14,7 @@ import { Toast } from "@/lib/toast";
 import { loginWithGoogle } from "@/lib/api/auth";
 import { googleSignIn, isGoogleSignInAvailable } from "@/lib/electron/googleAuth";
 import { useT } from "@/lib/i18n";
+import { useThemedLogo } from "@/hooks/useThemedLogo";
 import { useLoginModalStore } from "@/store/loginModalStore";
 import { useFinishLogin } from "./useFinishLogin";
 
@@ -31,6 +32,7 @@ export default function LoginModal() {
   const open = useLoginModalStore((s) => s.open);
   const resolveLogin = useLoginModalStore((s) => s.resolveLogin);
   const [loading, setLoading] = useState(false);
+  const logoSrc = useThemedLogo();
 
   const handleGoogleLogin = useCallback(async () => {
     if (loading) return;
@@ -75,7 +77,7 @@ export default function LoginModal() {
     <Dialog open={open} onOpenChange={(o) => !o && resolveLogin(false)}>
       <DialogContent className="sm:max-w-[380px]">
         <DialogHeader className="items-center text-center">
-          <Image src="/image/logo.png" alt="Zeraix" width={44} height={44} priority className="mb-1" />
+          <Image src={logoSrc} alt="Zeraix" width={44} height={40} priority className="mb-1" />
           <DialogTitle className="text-lg">{t("auth.loginRequired")}</DialogTitle>
           <DialogDescription>{t("auth.loginRequiredDesc")}</DialogDescription>
         </DialogHeader>

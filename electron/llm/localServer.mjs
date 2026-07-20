@@ -18,10 +18,11 @@ import https from "node:https";
 import { spawn, execSync } from "node:child_process";
 import {
   detectHardware, usableModelMemoryGB, recommend as recommendModels, buildServerArgs,
-  MODELS, autoQuantId, quantBpw, gpuLayers, localSupported, MIN_LOCAL_MEM_GB, isSharedGpu, pickCtxKv, computeFit,
+  MODELS, autoQuantId, quantBpw, gpuLayers, localSupported, MIN_LOCAL_MEM_GB, isSharedGpu, pickCtxKv, computeFit, descriptorFromGguf,
 } from "./localModels.mjs";
 import { ensureInstalled, installedBin, llamaVariant, fallbackVariant, detectCuda, LLAMA_VERSION, localFilesBase, installDir, llamaRootDir, installedLlamaVersions, migrateLegacyLayout } from "./llamaInstaller.mjs";
-import { downloadModel } from "./hfDownload.mjs";
+import { downloadModel, searchModels, repoDetail, TRUSTED_AUTHORS } from "./hfDownload.mjs";
+import { SUPPORTED_ARCHS } from "../versions.mjs";
 import { getAppConfig, setAppConfig } from "../appConfig.mjs";
 
 const DEFAULT_PORT = Number(process.env.LLAMA_PORT || 8080);
@@ -243,9 +244,11 @@ export function llamaInfo() {
   };
 }
 
-/** Estimate memory usage (GB) from "model + quantization + context + KV + vision", for the UI to display live as options change. */
+/** Estimate memory usage (GB) from "model + quantization + context + KV + vision", for the UI to display live as options change.
+ *  Non-catalog models pass { repo, meta } (HF gguf header) instead of modelId — sized through the same computeFit via descriptorFromGguf. */
 export function estimate(opts = {}) {
-  const model = MODELS.find((m) => m.id === opts.modelId);
+  const model = MODELS.find((m) => m.id === opts.modelId)
+    || (opts.repo ? descriptorFromGguf(opts.repo, opts.meta || null, { vision: !!opts.vision, mtp: !!opts.mtp }) : null);
   if (!model) return null;
   const bpw = quantBpw(model, opts.quant);
   const ctx = Math.max(256, Number(opts.ctx || 16384));
@@ -281,19 +284,48 @@ function isModelInstalled(model, quant) {
 }
 
 /**
- * Installed local model list (by directory): lists only "fully installed" directories (including mmproj/mtp), each mapped to the catalog model for that directory.
- * Returns [{ modelId, name, repo, quant, dir, sizeBytes, running }] (running = the one currently being served).
+ * Installed local model list: scans models/<repo_>/<quant>/ directories for complete downloads (weights final-named, no .part, mmproj present when required),
+ * identified by the manifest.json written by hfDownload on completion; legacy catalog dirs without a manifest are matched back to MODELS by directory name.
+ * Community entries carry custom:true + the persisted gguf header, so the UI can restart them across app restarts without re-querying HF.
+ * Returns [{ modelId, name, repo, quant, dir, sizeBytes, running, custom, vision, mtp, gguf }] (running = the one currently being served).
  */
 export function listDownloaded() {
   const running = state.model?.dir || "";
+  const base = modelsDir();
   const out = [];
-  for (const model of MODELS) {
-    for (const t of model.quantTiers || []) {
-      if (!isModelInstalled(model, t.quant)) continue;
-      const dir = path.join(modelsDir(), model.hf.replace(/\//g, "_"), t.quant);
+  let repoDirs = [];
+  try { repoDirs = fs.readdirSync(base, { withFileTypes: true }).filter((d) => d.isDirectory()); } catch { return out; }
+  for (const rd of repoDirs) {
+    let quantDirs = [];
+    try { quantDirs = fs.readdirSync(path.join(base, rd.name), { withFileTypes: true }).filter((d) => d.isDirectory()); } catch { continue; }
+    for (const qd of quantDirs) {
+      const dir = path.join(base, rd.name, qd.name);
+      const f = localModelFiles(dir);
+      if (f.hasPart || !f.weights.length) continue; // in-progress or empty download
+      let manifest = null;
+      try { manifest = JSON.parse(fs.readFileSync(path.join(dir, "manifest.json"), "utf8")); } catch { /* legacy dir (pre-manifest) */ }
+      // Directory names flatten "/" to "_", which is ambiguous to reverse (repo names may contain "_") → prefer manifest, then catalog match, then first-underscore split.
+      const catalogModel = MODELS.find((m) => m.hf && m.hf.replace(/\//g, "_") === rd.name)
+        || (manifest?.modelId ? MODELS.find((m) => m.id === manifest.modelId) : null);
+      const repo = manifest?.repo || catalogModel?.hf || rd.name.replace("_", "/");
+      const needVision = manifest ? !!manifest.vision : !!catalogModel?.vision;
+      if (needVision && !f.mmproj) continue; // vision projector required but missing → incomplete
       let sizeBytes = 0;
       try { for (const fn of fs.readdirSync(dir)) { if (/\.part$/i.test(fn)) continue; sizeBytes += fs.statSync(path.join(dir, fn)).size; } } catch { /* ignore */ }
-      out.push({ modelId: model.id, name: model.name, repo: model.hf, quant: t.quant, dir, sizeBytes, running: dir === running });
+      out.push({
+        modelId: catalogModel?.id || manifest?.modelId || repo,
+        name: catalogModel?.name || manifest?.name || repo.split("/").pop(),
+        repo,
+        quant: manifest?.quant || qd.name,
+        dir,
+        sizeBytes,
+        running: dir === running,
+        custom: !catalogModel,
+        vision: needVision,
+        mtp: manifest ? !!manifest.mtp : !!catalogModel?.mtp,
+        gguf: manifest?.gguf || null,
+        chatTemplate: manifest?.chatTemplate || null, // persisted built-in template override (from a prior auto-fallback or manual choice)
+      });
     }
   }
   return out;
@@ -342,6 +374,38 @@ export function recommend(opts = {}) {
   if (shared) { hw.unified = true; hw.shared = true; } // integrated GPU: VRAM is system memory, capacity/offload follow the Apple Silicon unified-memory approach
   const budget = usableModelMemoryGB(hw, opts.budgetGB);
   return recommendModels(hw, budget, { ctx: opts.ctx || 16384, vision: opts.vision !== false });
+}
+
+// ── Model browsing (Hub discovery for the Browse tab) ─────────────────
+/** Search GGUF repos on the Hub (trusted authors by default; opts.trusted === false searches everything).
+ *  Same mirror-aware endpoint as downloads (resolveHfEndpoint). Errors return { ok:false } rather than throwing — the Browse tab degrades, the catalog is unaffected. */
+export async function hfSearch(opts = {}) {
+  try {
+    const endpoint = await resolveHfEndpoint();
+    const items = await searchModels(endpoint, {
+      query: String(opts.query || ""),
+      authors: opts.trusted === false ? null : TRUSTED_AUTHORS,
+      limit: Number(opts.limit || 30),
+    });
+    return { ok: true, items };
+  } catch (e) {
+    return { ok: false, error: String(e?.message ?? e), items: [] };
+  }
+}
+
+/** One repo's detail for the Browse tab: quant offerings + gguf header + arch-compat verdict against the pinned llama.cpp build.
+ *  compat: "supported" | "unsupported" (arch known but absent from SUPPORTED_ARCHS — advisory only, may lag upstream) | "unknown" (no gguf metadata). */
+export async function hfRepo(opts = {}) {
+  const repo = String(opts.repo || "");
+  if (!/^[\w.-]+\/[\w.-]+$/.test(repo)) return { ok: false, error: "invalid repo" };
+  try {
+    const endpoint = await resolveHfEndpoint();
+    const d = await repoDetail(endpoint, repo);
+    const arch = d.gguf?.architecture || null;
+    return { ok: true, ...d, arch, compat: arch ? (SUPPORTED_ARCHS.has(arch) ? "supported" : "unsupported") : "unknown" };
+  } catch (e) {
+    return { ok: false, error: String(e?.message ?? e) };
+  }
 }
 
 // ── Step 1: install the runtime bundle ────────────────────────────────
@@ -482,13 +546,16 @@ function resolveHf(opts, hw) {
     const i = opts.hf.lastIndexOf(":"); // custom "user/repo:QUANT"; without ":" there is only repo (no quant -> no self-download, fall back to -hf)
     const repo = i > 0 ? opts.hf.slice(0, i) : opts.hf;
     const quant = i > 0 ? opts.hf.slice(i + 1) : "";
-    return { hf: opts.hf, repo, quant, label: opts.label || opts.hf, vision: !!opts.multimodal, mtp: !!opts.mtp, id: opts.model || opts.hf, name: opts.label || opts.hf, model: null, bpw: null };
+    // Non-catalog repo: build a catalog-shaped descriptor from the HF gguf header (opts.meta, from llm:local:hfRepo; heuristic fallbacks
+    // when absent) so ctx/KV auto-tiering and layer offload work exactly like catalog models instead of the blind 16K/full-offload fallback.
+    const model = descriptorFromGguf(repo, opts.meta || null, { vision: !!opts.multimodal, mtp: !!opts.mtp });
+    return { hf: opts.hf, repo, quant, label: opts.label || model.name, vision: !!opts.multimodal, mtp: !!opts.mtp, id: opts.model || repo, name: opts.label || model.name, model, bpw: quant ? quantBpw(model, quant) : null, meta: opts.meta || null, chatTemplate: opts.chatTemplate || null };
   }
   const model = MODELS.find((m) => m.id === opts.modelId);
   if (!model) return null;
   // Pass the quantization label through directly (may be a tiered model's UD label, not in the generic QUANTS -- do not filter with QUANTS); auto-select by memory when unspecified.
   const quantId = opts.quantId || autoQuantId(model, hw, Number(opts.ctx || 16384));
-  return { hf: `${model.hf}:${quantId}`, repo: model.hf, quant: quantId, label: model.name, vision: !!model.vision, mtp: model.mtp, id: model.id, name: model.name, model, bpw: quantBpw(model, quantId) };
+  return { hf: `${model.hf}:${quantId}`, repo: model.hf, quant: quantId, label: model.name, vision: !!model.vision, mtp: model.mtp, id: model.id, name: model.name, model, bpw: quantBpw(model, quantId), chatTemplate: opts.chatTemplate || null };
 }
 
 /** Decide -ngl: unified memory (Metal)/shared memory (integrated GPU)/unknown -> offload all; CPU build -> 0; discrete GPU -> layer offload per probed VRAM. */
@@ -548,7 +615,7 @@ export function start(opts = {}) {
   state.port = Number(opts.port || 0); // 0 = request a random free port from the kernel inside launch
   state.ctx = ctx;
   const modelDir = r.repo && r.quant ? path.join(localFilesBase(), "models", r.repo.replace(/\//g, "_"), r.quant) : null;
-  state.model = { hf: r.hf, label: r.label, multimodal: visionOn, id: r.id, name: r.name, ctx, dir: modelDir, repo: r.repo || null, quant: r.quant || null }; // ctx = the -c at startup, used by the renderer as the model's real context window; dir/repo/quant let the model library match "running"
+  state.model = { hf: r.hf, label: r.label, multimodal: visionOn, id: r.id, name: r.name, ctx, dir: modelDir, repo: r.repo || null, quant: r.quant || null, chatTemplate: r.chatTemplate || null }; // ctx = the -c at startup, used by the renderer as the model's real context window; dir/repo/quant let the model library match "running"; chatTemplate = optional built-in template override
   state.ready = false;
   state.error = null;
   state.log = [];
@@ -605,7 +672,8 @@ async function launch(variant, cfg) {
         // Always download mmproj (when the model has vision) and the standalone MTP drafter (Gemma), so the runtime can freely toggle vision/MTP without re-downloading;
         // when an installed model is only missing the drafter, downloadModel skips the existing weights/vision projector and fetches only the drafter. Qwen has a built-in MTP (no standalone file).
         const out = await downloadModel(
-          { endpoint: hfEnd, repo: r.repo, quant: r.quant, vision: !!r.vision, mtp: mtpSeparate, destDir },
+          // manifest: identifies the directory for listDownloaded (community models keep their gguf header for restarts, see descriptorFromGguf).
+          { endpoint: hfEnd, repo: r.repo, quant: r.quant, vision: !!r.vision, mtp: mtpSeparate, destDir, manifest: { name: r.name, modelId: r.id, gguf: r.meta || null } },
           (pct) => { if (pct !== state.pct) { state.pct = pct; emit(); } },
           ac.signal,
         );
@@ -637,7 +705,8 @@ async function launch(variant, cfg) {
   const useMtp = !!mtpOn && haveMtp;
   const mtpDraft = useMtp && mtpSeparate ? mtpPath : null;
   if (mtpOn && !haveMtp) pushLog("[llama] MTP is enabled but no drafter found, speculative decoding not enabled this time\n");
-  const args = buildServerArgs({ modelPath, mmproj: visionOn ? mmprojPath : null, mtpDraft, specMtp: useMtp, hw, ctx, port: state.port, kvBits, kvCacheDir: KV_DIR, ngl });
+  const args = buildServerArgs({ modelPath, mmproj: visionOn ? mmprojPath : null, mtpDraft, specMtp: useMtp, hw, ctx, port: state.port, kvBits, kvCacheDir: KV_DIR, ngl, chatTemplate: r.chatTemplate });
+  if (r.chatTemplate) pushLog(`[llama] chat template override: ${r.chatTemplate}\n`);
   pushLog(`[llama] argv: ${bin} ${args.join(" ")}\n`); // full startup command (for troubleshooting)
   let proc;
   try {

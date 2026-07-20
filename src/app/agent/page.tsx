@@ -1,15 +1,15 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import Image from "next/image";
 import { useRouter } from "next/navigation";
-import { useTheme } from "next-themes";
 import AgentComposer from "@/components/layout/agent/AgentComposer";
 import WorkdirSelector from "@/components/layout/agent/WorkdirSelector";
 import { useAuthStore } from "@/store/authStore";
 import { useAgentChatStore } from "@/store/agentChatStore";
 import type { Attachment } from "@/lib/ai/attachments";
 import { useT } from "@/lib/i18n";
+import { useThemedLogo } from "@/hooks/useThemedLogo";
 
 /** Return the i18n key for the greeting based on the current time. */
 function greetingKey(): string {
@@ -33,11 +33,7 @@ export default function AgentHomePage() {
   const setPendingSend = useAgentChatStore((s) => s.setPendingSend);
   // In dev mode, block sending when no working directory is selected (reported by WorkdirSelector).
   const [blocked, setBlocked] = useState(false);
-  // Use Dlogo in dark mode; default to light before mounting to avoid a hydration mismatch.
-  const { resolvedTheme } = useTheme();
-  const [mounted, setMounted] = useState(false);
-  useEffect(() => setMounted(true), []);
-  const logoSrc = mounted && resolvedTheme === "dark" ? "/image/agent/Dlogo.svg" : "/image/agent/logo.svg";
+  const logoSrc = useThemedLogo();
 
   const handleSubmit = (text: string, attachments: Attachment[]) => {
     if (blocked) return; // Fallback: in dev mode a directory must be selected first (sending is already disabled at this point)

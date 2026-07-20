@@ -30,6 +30,8 @@ export interface LocalLlmModelInfo {
   dir?: string | null;
   repo?: string | null;
   quant?: string | null;
+  /** Optional llama.cpp built-in chat-template override in effect (rescues community GGUFs with broken embedded templates). */
+  chatTemplate?: string | null;
 }
 
 /** Installed (fully downloaded) local models (for the model library list). */
@@ -41,6 +43,51 @@ export interface DownloadedLocalModel {
   dir: string;
   sizeBytes: number;
   running: boolean;
+  /** true = non-catalog (Browse-tab) model, listed off its manifest.json. */
+  custom?: boolean;
+  vision?: boolean;
+  mtp?: boolean;
+  /** HF-parsed GGUF header persisted at download time (community models) — passed back as start()/estimate() meta so sizing works across restarts. */
+  gguf?: HfGgufMeta | null;
+  /** Persisted built-in chat-template override (from a prior auto-fallback or manual choice) — reused on restart. */
+  chatTemplate?: string | null;
+}
+
+/** HF-parsed GGUF header (subset; whatever the Hub exposes). total = parameter count. */
+export interface HfGgufMeta {
+  architecture?: string;
+  context_length?: number;
+  total?: number;
+  block_count?: number;
+  head_count_kv?: number;
+  head_dim?: number;
+  [k: string]: unknown;
+}
+
+/** One Hub search hit (Browse tab). */
+export interface HfSearchItem {
+  repo: string;
+  downloads: number;
+  likes: number;
+  updatedAt: string | null;
+  gated: boolean | string;
+  tags: string[];
+}
+
+/** One repo's detail (Browse tab): quant offerings + metadata + arch-compat verdict against the pinned llama.cpp build. */
+export interface HfRepoDetail {
+  ok: boolean;
+  error?: string;
+  repo?: string;
+  downloads?: number;
+  likes?: number;
+  gated?: boolean | string;
+  gguf?: HfGgufMeta | null;
+  quants?: { id: string; bytes: number; shards: number }[];
+  mmproj?: boolean;
+  mtp?: boolean;
+  arch?: string | null;
+  compat?: "supported" | "unsupported" | "unknown";
 }
 
 /** Estimated memory usage based on the options. */
@@ -184,8 +231,10 @@ export interface LocalLlmBridge {
   /** Step 2: probe VRAM using the installed binary. */
   probe(opts?: { useCuda?: boolean }): Promise<LocalLlmProbe>;
   recommend(opts?: { vramGB?: number; device?: string; budgetGB?: number; ctx?: number; vision?: boolean; shared?: boolean; uma?: boolean | null }): Promise<LocalLlmRecommendation>;
-  /** Step 3: start the local model. vision (default true): whether to load the vision projector when the model supports vision (turning it off saves ~1GB of memory). */
-  start(opts: { modelId?: string; quantId?: string; hf?: string; ctx?: number; kvBits?: number; useCuda?: boolean; vision?: boolean; mtp?: boolean }): Promise<LocalLlmStatus>;
+  /** Step 3: start the local model. vision (default true): whether to load the vision projector when the model supports vision (turning it off saves ~1GB of memory).
+   *  Non-catalog models pass hf: "user/repo:QUANT" + label/multimodal + meta (the repo's gguf header) so ctx/offload tiering works like catalog models.
+   *  chatTemplate: optional llama.cpp built-in template name (chatml / qwen / gemma / llama3 …) to override a broken embedded chat template. */
+  start(opts: { modelId?: string; quantId?: string; hf?: string; label?: string; multimodal?: boolean; meta?: HfGgufMeta | null; ctx?: number; kvBits?: number; useCuda?: boolean; vision?: boolean; mtp?: boolean; chatTemplate?: string | null }): Promise<LocalLlmStatus>;
   stop(): Promise<LocalLlmStatus>;
   /** "Start over": stop the server + clear the probe, return to step 1 (keeping the installed runtime). */
   reset(): Promise<LocalLlmStatus>;
@@ -197,10 +246,14 @@ export interface LocalLlmBridge {
   deleteModel(opts: { dir: string }): Promise<{ ok: boolean; error?: string }>;
   /** GGUF model download directory. */
   modelsDir(): Promise<string>;
-  /** Estimate memory usage based on the options. */
-  estimate(opts: { modelId: string; quant: string; ctx: number; kvBits: number; vision: boolean; mtp?: boolean }): Promise<LocalLlmEstimate | null>;
+  /** Estimate memory usage based on the options. Non-catalog models pass { repo, meta } instead of modelId. */
+  estimate(opts: { modelId?: string; repo?: string; meta?: HfGgufMeta | null; quant: string; ctx: number; kvBits: number; vision: boolean; mtp?: boolean }): Promise<LocalLlmEstimate | null>;
   /** llama runtime info. */
   llamaInfo(): Promise<LocalLlmLlamaInfo>;
+  /** Browse tab: search GGUF repos on the Hub (trusted authors by default; trusted:false searches everything). */
+  hfSearch(opts?: { query?: string; trusted?: boolean; limit?: number }): Promise<{ ok: boolean; items: HfSearchItem[]; error?: string }>;
+  /** Browse tab: one repo's quant offerings + gguf metadata + arch-compat verdict. */
+  hfRepo(opts: { repo: string }): Promise<HfRepoDetail>;
 }
 
 declare global {

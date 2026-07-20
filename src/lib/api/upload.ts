@@ -22,7 +22,6 @@ declare global {
  * Get an OSS signed URL.
  * @param fileName file name
  * @param market
- * @see https://api.zeraix.com/api-docs-dev/#/%E6%96%87%E4%BB%B6%E7%AE%A1%E7%90%86%E6%8E%A5%E5%8F%A3/post_api_dev_files_getUploadUrl
  * @returns
  */
 export async function getUploadUrl(

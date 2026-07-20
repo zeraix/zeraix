@@ -9,7 +9,7 @@
  * All copy goes through i18n (ml.* / local.note.*). Status and progress come from the main process window.localLlm.
  */
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { ChevronDown, Cpu, Play, Square, Trash2, FolderOpen, Loader2, Download, Check, Sparkles, RotateCcw, X, RefreshCw, HardDrive, Copy, FileText, FolderSync } from "lucide-react";
+import { ChevronDown, Cpu, Play, Square, Trash2, FolderOpen, Loader2, Download, Check, Sparkles, RotateCcw, X, RefreshCw, HardDrive, Copy, FileText, FolderSync, Search, AlertTriangle } from "lucide-react";
 import { useT } from "@/lib/i18n";
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from "@/components/ui/dialog";
 import {
@@ -20,14 +20,27 @@ import {
   type LocalLlmLlamaInfo,
   type LocalLlmStorage,
   type DownloadedLocalModel,
+  type HfSearchItem,
+  type HfRepoDetail,
 } from "@/lib/ai/localModel";
 
 type Opt = LocalLlmRecommendation["options"][number];
-const CTX_LADDER = [16384, 32768, 65536, 131072, 262144];
+const CTX_LADDER = [16384, 32768, 65536, 131072, 262144, 524288, 1048576];
+/** Context presets for a given native window: the standard rungs at or below it, always ending at the window itself
+ *  (so a non-power-of-2 max like 40960 gets its exact value as the top button). */
+const ctxPresets = (maxCtx: number): number[] => {
+  const rungs = CTX_LADDER.filter((c) => c < maxCtx);
+  return rungs[rungs.length - 1] === maxCtx ? rungs : [...rungs, maxCtx];
+};
 const OPTS_KEY = "zeraix.modelLibrary.opts";
 const HW_KEY = "zeraix.modelLibrary.hw";
+const TMPL_KEY = "zeraix.modelLibrary.tmpl"; // per-repo chat-template override { [repo]: builtinName }
+// llama.cpp built-in chat templates offered as overrides for community GGUFs with broken embedded templates. "" = use the model's own (default).
+// chatml is the safe generic fallback (works for Qwen and most modern models); the rest cover common families.
+const CHAT_TEMPLATES = ["chatml", "chatglm4", "llama3", "gemma", "deepseek3", "mistral-v7", "phi4", "command-r", "granite", "vicuna", "zephyr"];
+const loadTmpl = (): Record<string, string> => { try { return JSON.parse(localStorage.getItem(TMPL_KEY) || "{}"); } catch { return {}; } };
 const fmtGB = (bytes: number) => `${(bytes / 1073741824).toFixed(1)} GB`;
-const fmtK = (n: number) => `${Math.round(n / 1024)}K`;
+const fmtK = (n: number) => (n >= 1024 * 1024 ? `${Math.round((n / (1024 * 1024)) * 10) / 10}M` : `${Math.round(n / 1024)}K`);
 // OpenAI-compatible base URL (strip /chat/completions) — this is the base URL you usually enter in third-party Agent apps.
 const apiBase = (ep?: string) => (ep || "").replace(/\/chat\/completions\/?$/, "");
 const openFolder = (p: string) =>
@@ -49,8 +62,21 @@ export default function ModelLibrary() {
   const [rec, setRec] = useState<LocalLlmRecommendation | null>(null);
   const [status, setStatus] = useState<LocalLlmStatus | null>(null);
   const [downloaded, setDownloaded] = useState<DownloadedLocalModel[]>([]);
-  const [tab, setTab] = useState<"recommended" | "installed">("recommended");
+  const [tab, setTab] = useState<"recommended" | "installed" | "browse">("recommended");
   const [dialogId, setDialogId] = useState<string | null>(null);
+  // Browse tab: Hub search + one repo's detail dialog.
+  const [query, setQuery] = useState("");
+  const [trusted, setTrusted] = useState(true);
+  const [searching, setSearching] = useState(false);
+  const [results, setResults] = useState<HfSearchItem[] | null>(null); // null = not searched yet (auto-searches on first open)
+  const [searchErr, setSearchErr] = useState("");
+  const [repoDlg, setRepoDlg] = useState<string | null>(null);
+  const [repoInfo, setRepoInfo] = useState<HfRepoDetail | null>(null); // null = loading
+  const [repoQuant, setRepoQuant] = useState("");
+  const [repoCtx, setRepoCtx] = useState(32768);
+  const [repoKv, setRepoKv] = useState(8);
+  const [repoTmpl, setRepoTmpl] = useState(""); // chat-template override for the open repo ("" = model's own)
+  const [repoEst, setRepoEst] = useState<number | null>(null);
   const [opts, setOpts] = useState<Record<string, ModelOpts>>({});
   const [defaults, setDefaults] = useState<Record<string, ModelOpts>>({});
   const [est, setEst] = useState<Record<string, number>>({});
@@ -109,6 +135,70 @@ export default function ModelLibrary() {
     return () => { cancelled = true; };
   }, [bridge, rec, optsKey, opts]);
 
+  // ── Browse tab: search + repo detail ──
+  const runSearch = useCallback(async (q: string, tr: boolean) => {
+    if (!bridge) return;
+    setSearching(true);
+    setSearchErr("");
+    try {
+      const r = await bridge.hfSearch({ query: q, trusted: tr });
+      setResults(r.items);
+      if (!r.ok) setSearchErr(r.error || "");
+    } finally {
+      setSearching(false);
+    }
+  }, [bridge]);
+  // First open of the Browse tab: show trending trusted GGUF repos without requiring a query.
+  useEffect(() => { if (tab === "browse" && results === null && !searching) void runSearch(query, trusted); }, [tab, results, searching, query, trusted, runSearch]);
+
+  // Opening a repo dialog fetches its detail and preselects the offering closest to ~Q4 (the catalog's balanced default).
+  useEffect(() => {
+    if (!repoDlg || !bridge) return;
+    setRepoInfo(null);
+    setRepoQuant("");
+    let alive = true;
+    void bridge.hfRepo({ repo: repoDlg }).then((d) => {
+      if (!alive) return;
+      setRepoInfo(d);
+      if (d.ok && d.quants?.length) {
+        const target = d.gguf?.total ? (d.gguf.total * 4.85) / 8 : 0;
+        const pick = target ? [...d.quants].sort((a, b) => Math.abs(a.bytes - target) - Math.abs(b.bytes - target))[0] : d.quants[Math.floor(d.quants.length / 2)];
+        setRepoQuant(pick.id);
+        // Default context: 32K (usable headroom over the ~6K system prompt) but never above the model's native window.
+        setRepoCtx(Math.min(32768, d.gguf?.context_length || 32768));
+        setRepoKv(8);
+      }
+    });
+    // Restore any override for this repo: a persisted manifest value (from a prior auto-fallback) wins over the local choice.
+    setRepoTmpl(downloaded.find((x) => x.repo === repoDlg)?.chatTemplate || loadTmpl()[repoDlg] || "");
+    return () => { alive = false; };
+  }, [repoDlg, bridge]);
+
+  // Persist the per-repo chat-template override so restarts (and startCustom from the Installed tab) reuse it.
+  const setRepoTmplPersist = (repo: string, tmpl: string) => {
+    setRepoTmpl(tmpl);
+    try { const m = loadTmpl(); if (tmpl) m[repo] = tmpl; else delete m[repo]; localStorage.setItem(TMPL_KEY, JSON.stringify(m)); } catch { /* ignore */ }
+  };
+
+  // Live estimate for the selected quant / context / KV.
+  useEffect(() => {
+    if (!bridge || !repoDlg || !repoInfo?.ok || !repoQuant) { setRepoEst(null); return; }
+    let alive = true;
+    void bridge.estimate({ repo: repoDlg, meta: repoInfo.gguf ?? null, quant: repoQuant, ctx: repoCtx, kvBits: repoKv, vision: !!repoInfo.mmproj })
+      .then((e) => { if (alive) setRepoEst(e?.totalGB ?? null); });
+    return () => { alive = false; };
+  }, [bridge, repoDlg, repoInfo, repoQuant, repoCtx, repoKv]);
+
+  const startRepo = (repo: string, info: HfRepoDetail, quant: string) => {
+    setBusy(true);
+    bridge?.start({ hf: `${repo}:${quant}`, label: repo.split("/").pop(), multimodal: !!info.mmproj, mtp: !!info.mtp, meta: info.gguf ?? null, ctx: repoCtx, kvBits: repoKv, chatTemplate: repoTmpl || null, useCuda }).finally(() => setBusy(false));
+  };
+  // Restart an installed community model from its manifest (gguf header persisted at download time); reuse any saved template override.
+  const startCustom = (d: DownloadedLocalModel) => {
+    setBusy(true);
+    bridge?.start({ hf: `${d.repo}:${d.quant}`, label: d.name, multimodal: !!d.vision, mtp: !!d.mtp, meta: d.gguf ?? null, chatTemplate: d.chatTemplate || loadTmpl()[d.repo] || null, useCuda }).finally(() => setBusy(false));
+  };
+
   const installing = status?.phase === "downloading" || status?.phase === "extracting"; // runtime install
   // Only allow changing/migrating the folder when "idle": no runtime install, no model download, no model running/loading (otherwise it would conflict with files being written).
   const busyPhase = status ? (status.running || ["downloading", "extracting", "fetching", "loading", "probing"].includes(status.phase)) : false;
@@ -126,6 +216,8 @@ export default function ModelLibrary() {
   const installedIds = new Set(downloaded.map((d) => d.modelId));
   // recommended = recommendations not yet installed; installed = the installed ones. Each model appears in only one tab.
   const shown = tab === "installed" ? options.filter((o) => installedIds.has(o.model.id)) : options.filter((o) => !installedIds.has(o.model.id));
+  // Community (Browse-tab) downloads: no catalog card, rendered from their manifest in the installed tab.
+  const customInstalled = tab === "installed" ? downloaded.filter((d) => d.custom) : [];
   const dlgOpt = options.find((o) => o.model.id === dialogId) ?? null;
 
   // Derive the runtime state of a single model.
@@ -209,16 +301,59 @@ export default function ModelLibrary() {
 
       {/* ── Tabs ── */}
       <div className="flex items-center gap-1 border-b border-line">
-        {(["recommended", "installed"] as const).map((k) => (
+        {(["recommended", "installed", "browse"] as const).map((k) => (
           <button key={k} onClick={() => setTab(k)} className={`relative -mb-px border-b-2 px-3 py-2 text-sm transition ${tab === k ? "border-primary font-medium text-ink" : "border-transparent text-ink-subtle hover:text-ink"}`}>
-            {k === "recommended" ? t("ml.tabRecommended") : t("ml.tabInstalled")}
+            {k === "recommended" ? t("ml.tabRecommended") : k === "installed" ? t("ml.tabInstalled") : t("ml.tabBrowse")}
             {k === "installed" && installedIds.size > 0 && <span className="ml-1 rounded-full bg-surface-muted px-1.5 text-[10px] text-ink-muted">{installedIds.size}</span>}
           </button>
         ))}
       </div>
 
-      {/* ── Card grid ── */}
-      {shown.length === 0 ? (
+      {/* ── Browse tab: Hub search ── */}
+      {tab === "browse" && (
+        <div className="space-y-3">
+          <form className="flex flex-wrap items-center gap-2" onSubmit={(e) => { e.preventDefault(); void runSearch(query, trusted); }}>
+            <span className="flex min-w-0 flex-1 items-center gap-2 rounded-lg border border-line-strong bg-surface px-2.5 py-1.5">
+              <Search className="size-3.5 shrink-0 text-ink-muted" />
+              <input value={query} onChange={(e) => setQuery(e.target.value)} placeholder={t("ml.searchPlaceholder")}
+                className="min-w-0 flex-1 bg-transparent text-sm text-ink outline-none placeholder:text-ink-muted" />
+            </span>
+            <label className="flex shrink-0 items-center gap-1.5 text-xs text-ink-subtle">
+              <input type="checkbox" checked={trusted} onChange={(e) => { setTrusted(e.target.checked); void runSearch(query, e.target.checked); }} /> {t("ml.trustedOnly")}
+            </label>
+            <button type="submit" disabled={searching} className="inline-flex shrink-0 items-center gap-1 rounded-lg bg-primary px-3 py-1.5 text-xs font-medium text-white shadow-sm transition hover:brightness-105 disabled:opacity-50">
+              {searching ? <Loader2 className="size-3.5 animate-spin" /> : <Search className="size-3.5" />} {t("ml.search")}
+            </button>
+          </form>
+          <p className="text-[11px] text-ink-muted">{t("ml.browseHint")}</p>
+          {searchErr && <p className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-700 dark:text-amber-400">{t("ml.browseError", { err: searchErr })}</p>}
+          {searching && results === null ? (
+            <p className="py-6 text-center text-sm text-ink-subtle"><Loader2 className="mr-1 inline size-3.5 animate-spin" /> {t("ml.searching")}</p>
+          ) : (results ?? []).length === 0 && !searchErr ? (
+            <p className="py-6 text-center text-sm text-ink-subtle">{t("ml.browseEmpty")}</p>
+          ) : (
+            <div className="divide-y divide-line rounded-xl border border-line bg-surface">
+              {(results ?? []).map((r) => {
+                const installedHere = downloaded.some((d) => d.repo === r.repo);
+                return (
+                  <button key={r.repo} onClick={() => setRepoDlg(r.repo)}
+                    className="flex w-full items-center gap-3 px-4 py-2.5 text-left transition hover:bg-surface-muted">
+                    <span className="min-w-0 flex-1">
+                      <span className="block truncate text-sm font-medium text-ink">{r.repo}</span>
+                      <span className="mt-0.5 block text-[11px] text-ink-muted">{t("ml.downloadsN", { n: r.downloads.toLocaleString() })}{r.gated ? ` · ${t("ml.gated")}` : ""}</span>
+                    </span>
+                    {installedHere && <span className="shrink-0 rounded-full bg-emerald-500/15 px-2 py-0.5 text-[10px] font-medium text-emerald-600">{t("ml.installed")}</span>}
+                    <ChevronDown className="size-3.5 shrink-0 -rotate-90 text-ink-muted" />
+                  </button>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* ── Card grid (recommended / installed) ── */}
+      {tab !== "browse" && (shown.length === 0 && customInstalled.length === 0 ? (
         <p className="py-6 text-center text-sm text-ink-subtle">{tab === "installed" ? t("ml.noInstalled") : t("ml.noModels")}</p>
       ) : (
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
@@ -248,8 +383,48 @@ export default function ModelLibrary() {
               </div>
             );
           })}
+          {/* Community models (from Browse): rendered off their manifest; start/stop/delete like catalog cards, options fixed at download time. */}
+          {customInstalled.map((d) => {
+            const isThis = status?.model?.dir === d.dir || status?.model?.id === d.repo;
+            const isRunning = !!isThis && !!status?.ready && !installing;
+            const isFetching = !!isThis && status?.phase === "fetching";
+            const isLoading = !!isThis && !status?.ready && (status?.phase === "fetching" || status?.phase === "loading");
+            return (
+              <div key={d.dir} className={`flex flex-col rounded-xl border bg-surface p-4 text-left transition ${isRunning ? "border-emerald-500/40" : "border-line"}`}>
+                <div className="flex items-center gap-2">
+                  <span className="truncate text-sm font-semibold text-ink">{d.name}</span>
+                  <span className="shrink-0 rounded-full bg-surface-muted px-2 py-0.5 text-[10px] text-ink-muted">{t("ml.community")}</span>
+                </div>
+                <p className="mt-1 truncate font-mono text-[11px] text-ink-subtle">{d.repo} · {d.quant}</p>
+                <div className="mt-2 flex items-center gap-2">
+                  <span className="text-[11px] text-ink-muted">{fmtGB(d.sizeBytes)}</span>
+                  {isRunning && <span className="rounded-full bg-emerald-500/15 px-2 py-0.5 text-[10px] font-medium text-emerald-600">{t("ml.running")}</span>}
+                  <span className="ml-auto flex items-center gap-1.5">
+                    {isRunning ? (
+                      <button onClick={stop} className="inline-flex items-center gap-1 rounded-lg border border-line-strong px-2.5 py-1 text-xs text-ink transition hover:bg-surface-muted"><Square className="size-3" /> {t("ml.stop")}</button>
+                    ) : isLoading ? (
+                      <button onClick={() => bridge.stop()} className="inline-flex items-center gap-1 rounded-lg px-2.5 py-1 text-xs text-primary transition hover:bg-primary/10" title={t("ml.cancel")}>
+                        <Loader2 className="size-3 animate-spin" /> {isFetching ? t("ml.downloadPct", { pct: status?.pct ?? 0 }) : t("ml.loading")} <X className="size-3" />
+                      </button>
+                    ) : (
+                      <button onClick={() => startCustom(d)} className="inline-flex items-center gap-1 rounded-lg bg-primary px-2.5 py-1 text-xs font-medium text-white shadow-sm transition hover:brightness-105"><Play className="size-3" /> {t("ml.start")}</button>
+                    )}
+                    <button onClick={() => openFolder(d.dir)} className="rounded-lg border border-line p-1 text-ink-subtle transition hover:bg-surface-muted" title={t("ml.openWeightsDir")}><FolderOpen className="size-3.5" /></button>
+                    <button onClick={async () => { if (d.running || isRunning) return; setBusy(true); await bridge.deleteModel({ dir: d.dir }); await bridge.listModels().then(setDownloaded); setBusy(false); }} disabled={d.running || isRunning || busy}
+                      className="rounded-lg border border-destructive/30 p-1 text-destructive transition hover:bg-destructive/10 disabled:opacity-40" title={d.running || isRunning ? t("ml.deleteRunningTitle") : t("ml.deleteTitle")}><Trash2 className="size-3.5" /></button>
+                  </span>
+                </div>
+                {isRunning && status?.endpoint && (
+                  <button onClick={() => void navigator.clipboard?.writeText(apiBase(status.endpoint))} title={t("ml.copyUrl")}
+                    className="mt-2 flex max-w-full items-center gap-1 text-[10px] text-ink-muted transition hover:text-ink">
+                    <Copy className="size-2.5 shrink-0" /><span className="truncate font-mono">{apiBase(status.endpoint)}</span>
+                  </button>
+                )}
+              </div>
+            );
+          })}
         </div>
-      )}
+      ))}
 
       {/* ── Options dialog ── */}
       <Dialog open={!!dlgOpt} onOpenChange={(v) => { if (!v) setDialogId(null); }}>
@@ -331,6 +506,114 @@ export default function ModelLibrary() {
               </>
             );
           })()}
+        </DialogContent>
+      </Dialog>
+
+      {/* ── Browse repo dialog: quant offerings + compat + download/start ── */}
+      <Dialog open={!!repoDlg} onOpenChange={(v) => { if (!v) setRepoDlg(null); }}>
+        <DialogContent className="sm:max-w-lg">
+          {repoDlg && (
+            <>
+              <DialogHeader>
+                <DialogTitle className="truncate font-mono text-base">{repoDlg}</DialogTitle>
+              </DialogHeader>
+              {repoInfo === null ? (
+                <p className="py-6 text-center text-sm text-ink-subtle"><Loader2 className="mr-1 inline size-3.5 animate-spin" /> {t("ml.searching")}</p>
+              ) : !repoInfo.ok ? (
+                <p className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-700 dark:text-amber-400">{t("ml.browseError", { err: repoInfo.error || "" })}</p>
+              ) : (() => {
+                const info = repoInfo;
+                const isThis = status?.model?.id === repoDlg;
+                const isRunning = !!isThis && !!status?.ready;
+                const isFetching = !!isThis && status?.phase === "fetching";
+                const isLoading = !!isThis && !status?.ready && (status?.phase === "fetching" || status?.phase === "loading");
+                const budget = rec?.budgetGB ?? null;
+                return (
+                  <div className="space-y-3 py-1">
+                    {/* Metadata line: arch compat + params + native context + capabilities */}
+                    <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-ink-subtle">
+                      {info.compat === "supported" ? (
+                        <span className="inline-flex items-center gap-1 rounded-full bg-emerald-500/15 px-2 py-0.5 text-emerald-600"><Check className="size-3" /> {t("ml.compatOk")}{info.arch ? ` · ${info.arch}` : ""}</span>
+                      ) : info.compat === "unsupported" ? (
+                        <span className="inline-flex items-center gap-1 rounded-full bg-amber-500/15 px-2 py-0.5 text-amber-600 dark:text-amber-400"><AlertTriangle className="size-3" /> {t("ml.compatNo")}{info.arch ? ` · ${info.arch}` : ""}</span>
+                      ) : (
+                        <span className="inline-flex items-center gap-1 rounded-full bg-surface-muted px-2 py-0.5"><AlertTriangle className="size-3" /> {t("ml.compatUnknown")}</span>
+                      )}
+                      {info.gguf?.total ? <span>{t("ml.paramsB", { b: (info.gguf.total / 1e9).toFixed(1) })}</span> : null}
+                      {info.gguf?.context_length ? <span>{fmtK(info.gguf.context_length)} ctx</span> : null}
+                      {info.mmproj && <span>{t("ml.vision")}</span>}
+                      {info.gated ? <span className="text-amber-600 dark:text-amber-400">{t("ml.gated")}</span> : null}
+                    </div>
+                    {(info.quants ?? []).length === 0 ? (
+                      <p className="py-4 text-center text-sm text-ink-subtle">{t("ml.noQuants")}</p>
+                    ) : (() => {
+                      const repoMaxCtx = info.gguf?.context_length || 32768;
+                      return (
+                        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                          <label className="flex flex-col gap-1 text-xs text-ink-subtle">{t("ml.quant")}
+                            <select className="rounded-md border border-line-strong bg-surface px-2 py-1 text-ink disabled:opacity-50" value={repoQuant} disabled={isLoading || isRunning}
+                              onChange={(e) => setRepoQuant(e.target.value)}>
+                              {(info.quants ?? []).map((q) => {
+                                const wontFit = budget != null && q.bytes / 1e9 + 1 > budget;
+                                return <option key={q.id} value={q.id}>{q.id} · {fmtGB(q.bytes)}{wontFit ? t("ml.wontFit") : ""}</option>;
+                              })}
+                            </select>
+                          </label>
+                          <label className="flex flex-col gap-1 text-xs text-ink-subtle">{t("ml.kvQuant")}
+                            <select className="rounded-md border border-line-strong bg-surface px-2 py-1 text-ink disabled:opacity-50" value={repoKv} disabled={isLoading || isRunning} onChange={(e) => setRepoKv(Number(e.target.value))}>
+                              {[8, 4, 16].map((v) => <option key={v} value={v}>{KV_LABEL[v]}</option>)}
+                            </select>
+                          </label>
+                          <label className="flex flex-col gap-1.5 text-xs text-ink-subtle sm:col-span-2">{t("ml.contextLen", { max: fmtK(repoMaxCtx) })}
+                            <span className="inline-flex w-fit items-center rounded-md border border-line-strong bg-surface">
+                              <input type="number" min={1} max={Math.round(repoMaxCtx / 1024)} step={1} value={Math.round(repoCtx / 1024)} disabled={isLoading || isRunning}
+                                onChange={(e) => { const k = Math.max(1, Math.min(Math.round(repoMaxCtx / 1024), Math.floor(Number(e.target.value) || 1))); setRepoCtx(k * 1024); }}
+                                className="w-14 bg-transparent px-2 py-1 text-right text-ink disabled:opacity-50" /><span className="pr-2 text-ink-muted">K</span>
+                            </span>
+                            <div className="flex flex-wrap gap-1">
+                              {ctxPresets(repoMaxCtx).map((c) => <button key={c} type="button" disabled={isLoading || isRunning} onClick={() => setRepoCtx(c)} className={`rounded-md px-1.5 py-0.5 text-[11px] transition ${repoCtx === c ? "bg-primary/15 font-medium text-primary" : "bg-surface-muted text-ink-subtle hover:bg-surface-muted/70"}`}>{fmtK(c)}</button>)}
+                            </div>
+                          </label>
+                          <label className="flex flex-col gap-1 text-xs text-ink-subtle sm:col-span-2">{t("ml.chatTemplate")}
+                            <select className="rounded-md border border-line-strong bg-surface px-2 py-1 text-ink disabled:opacity-50" value={repoTmpl} disabled={isLoading || isRunning}
+                              onChange={(e) => setRepoTmplPersist(repoDlg, e.target.value)}>
+                              <option value="">{t("ml.chatTemplateAuto")}</option>
+                              {CHAT_TEMPLATES.map((tm) => <option key={tm} value={tm}>{tm}</option>)}
+                            </select>
+                            <span className="text-[11px] text-ink-muted">{t("ml.chatTemplateHint")}</span>
+                          </label>
+                        </div>
+                      );
+                    })()}
+                    {repoEst != null && <p className="text-[11px] text-ink-muted">{t("ml.estimate", { gb: repoEst, ctx: fmtK(repoCtx), kv: kvTag(repoKv) })}</p>}
+                    {isFetching && <div className="h-1.5 w-full overflow-hidden rounded-full bg-surface-muted"><div className="h-full rounded-full bg-primary transition-[width] duration-200" style={{ width: `${Math.max(3, status?.pct ?? 0)}%` }} /></div>}
+                    {isRunning && status?.endpoint && (
+                      <div className="flex items-center gap-2 rounded-lg border border-emerald-500/30 bg-emerald-500/5 px-2.5 py-1.5">
+                        <span className="shrink-0 text-[11px] text-ink-subtle">{t("ml.serverUrl")}</span>
+                        <span className="truncate font-mono text-[11px] text-ink">{apiBase(status.endpoint)}</span>
+                        <button onClick={() => void navigator.clipboard?.writeText(apiBase(status.endpoint))} title={t("ml.copyUrl")}
+                          className="ml-auto inline-flex shrink-0 items-center gap-1 text-[11px] text-emerald-600 transition hover:text-emerald-500"><Copy className="size-3" /> {t("ml.copy")}</button>
+                      </div>
+                    )}
+                    <div className="flex flex-wrap items-center gap-2 pt-1">
+                      {isRunning ? (
+                        <button onClick={stop} className="inline-flex items-center gap-1 rounded-lg border border-line-strong px-3 py-1.5 text-sm text-ink transition hover:bg-surface-muted"><Square className="size-3" /> {t("ml.stop")}</button>
+                      ) : isLoading ? (
+                        <button onClick={() => bridge.stop()} className="inline-flex items-center gap-1 rounded-lg px-3 py-1.5 text-sm text-primary transition hover:bg-primary/10" title={t("ml.cancel")}>
+                          <Loader2 className="size-3 animate-spin" /> {isFetching ? t("ml.downloadPct", { pct: status?.pct ?? 0 }) : t("ml.loading")} <X className="size-3" />
+                        </button>
+                      ) : (
+                        <button onClick={() => startRepo(repoDlg, info, repoQuant)} disabled={!repoQuant || busy}
+                          className="inline-flex items-center gap-1 rounded-lg bg-primary px-3 py-1.5 text-sm font-medium text-white shadow-sm transition hover:brightness-105 disabled:opacity-50">
+                          <Play className="size-3" /> {downloaded.some((d) => d.repo === repoDlg && d.quant === repoQuant) ? t("ml.start") : t("ml.downloadStart")}
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                );
+              })()}
+            </>
+          )}
         </DialogContent>
       </Dialog>
     </div>

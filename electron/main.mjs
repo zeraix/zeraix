@@ -479,6 +479,9 @@ function registerLocalLlm() {
   ipcMain.handle("llm:local:models-dir", () => localLlm.modelsDir());
   ipcMain.handle("llm:local:estimate", (_e, opts) => localLlm.estimate(opts));
   ipcMain.handle("llm:local:llama-info", () => localLlm.llamaInfo());
+  // Browse tab: Hub GGUF search / one repo's quants + metadata + arch-compat verdict.
+  ipcMain.handle("llm:local:hf-search", (_e, opts) => localLlm.hfSearch(opts));
+  ipcMain.handle("llm:local:hf-repo", (_e, opts) => localLlm.hfRepo(opts));
 }
 
 /** app.config (an INI file alongside the executable) IPC: renderer window.appConfig.* -> main process reads/writes.
