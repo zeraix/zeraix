@@ -10,6 +10,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { once } from "node:events";
 import { Readable } from "node:stream";
+import { MIN_CTX } from "./localModels.mjs";
 
 /** Request headers with an optional token: not needed for public repos, but HF_TOKEN helps for gated repos / rate limits. */
 function authHeaders() {
@@ -20,6 +21,29 @@ function authHeaders() {
 const isMmproj = (p) => /(^|\/)mmproj[^/]*\.gguf$/i.test(p);
 // MTP / speculative-decoding drafter file: unsloth names them like MTP/gemma-4-12B-it-Q4_0-MTP.gguf or a top-level mtp-<name>.gguf.
 const isMtp = (p) => /(^|\/)mtp-[^/]*\.gguf$/i.test(p) || /-mtp\.gguf$/i.test(p);
+
+/**
+ * Standalone chat-template files, in priority order. Most GGUF repos bake the template into the GGUF header instead, so
+ * these are rare — but when a repo does ship one it is the authoritative template, and llama-server can load it directly
+ * with --chat-template-file (see localModels.buildServerArgs).
+ *   1. chat_template.jinja — the transformers convention, unambiguous.
+ *   2. any other *.jinja at the repo root — some conversions name it after the model.
+ *   3. a bare file named `template` — the unsloth/gemma-style convention (e.g. unsloth/gemma-3-12b-it-GGUF ships a 476-byte `template`).
+ * Root-level only: a .jinja nested in a subdirectory is more likely a build artifact than the model's template.
+ */
+const TEMPLATE_MATCHERS = [
+  (p) => /^chat_template\.jinja$/i.test(p),
+  (p) => /^[^/]+\.jinja$/i.test(p),
+  (p) => /^template$/i.test(p),
+];
+/** Pick the highest-priority chat-template file from a repo file listing; null when the repo ships none. */
+function pickTemplateFile(files) {
+  for (const match of TEMPLATE_MATCHERS) {
+    const hit = files.find((x) => match(x.path));
+    if (hit) return hit;
+  }
+  return null;
+}
 
 /** Match a quant tag at a token boundary (e.g. "Q4_K" must not match "…-Q4_K_M.gguf"; "Q4_K_M" must not match "UD-Q4_K_XL").
  *  Underscore counts as a tag character (tags contain them), so it cannot serve as a boundary. */
@@ -76,6 +100,11 @@ export async function searchModels(endpoint, { query = "", authors = null, limit
     const p = new URLSearchParams({ filter: "gguf", sort: "downloads", direction: "-1", limit: String(Math.min(limit, 50)) });
     if (query) p.set("search", query);
     if (author) p.set("author", author);
+    // expand[]=gguf surfaces the parsed GGUF header (context_length) in the *list* response, so sub-32K models can be
+    // dropped here rather than only at the detail dialog. Caveat: passing any expand[] switches the API to
+    // "return only what was asked for" — tags/likes/lastModified/gated must be requested explicitly or the
+    // isChatModel filter and the result cards silently lose their data.
+    for (const f of ["gguf", "tags", "pipeline_tag", "likes", "downloads", "lastModified", "gated"]) p.append("expand[]", f);
     const res = await fetch(`${endpoint}/api/models?${p}`, { headers: authHeaders() });
     if (!res.ok) throw new Error(`HF search ${res.status}`);
     const list = await res.json();
@@ -89,13 +118,16 @@ export async function searchModels(endpoint, { query = "", authors = null, limit
   return raw
     .filter((x) => x && typeof x.id === "string" && !seen.has(x.id) && seen.add(x.id))
     .filter(isChatModel) // drop embeddings / rerankers / classifiers that ship GGUF but aren't chat models
+    // Drop models whose native window is too small to be usable (see MIN_CTX). Fail open: a missing/zero context_length
+    // means HF has no parsed header for the repo, which is common — keep those and let the detail dialog decide.
+    .filter((x) => { const c = x.gguf && x.gguf.context_length; return !c || c >= MIN_CTX; })
     // Default browse (no query) shows only standard first-party models; third-party GGUF-repackager repos
     // (unsloth / bartowski / ggml-org / …) surface only once the user explicitly types a search.
     .filter((x) => query ? true : isFirstParty(x.id))
     // Standard (first-party) model repos first, then GGUF-repackager repos; ties broken by downloads.
     .sort((a, b) => (isFirstParty(b.id) - isFirstParty(a.id)) || (b.downloads || 0) - (a.downloads || 0))
     .slice(0, limit)
-    .map((x) => ({ repo: x.id, downloads: x.downloads || 0, likes: x.likes || 0, updatedAt: x.lastModified || null, gated: x.gated || false, tags: x.tags || [] }));
+    .map((x) => ({ repo: x.id, downloads: x.downloads || 0, likes: x.likes || 0, updatedAt: x.lastModified || null, gated: x.gated || false, tags: x.tags || [], ctx: (x.gguf && x.gguf.context_length) || null }));
 }
 
 /** Keep only the small scalar fields of HF's gguf header (architecture / context_length / total / head dims …):
@@ -147,6 +179,9 @@ export async function repoDetail(endpoint, repo) {
     quants: [...quants.values()].sort((a, b) => b.bytes - a.bytes),
     mmproj: files.some((x) => isMmproj(x.path)),
     mtp: files.some((x) => isMtp(x.path)),
+    // Path of the standalone chat template, when the repo ships one; downloaded alongside the weights and passed
+    // to llama-server as --chat-template-file, taking priority over the GGUF's embedded template.
+    templateFile: pickTemplateFile(files)?.path || null,
   };
 }
 
@@ -185,7 +220,11 @@ async function listRepoFiles(endpoint, repo, quant, { vision, mtp } = {}) {
     const pick = cands.find((x) => /q4_0/i.test(x.path)) || cands.find((x) => /q8_0/i.test(x.path)) || cands[0] || null;
     if (pick) mtpFile = { path: pick.path, size: sizeOf(pick) };
   }
-  return { weights, mmproj, mtp: mtpFile };
+  // Standalone chat template (a few KB at most): always fetched when present, so the launch path can prefer it over the
+  // embedded template without a second round-trip. Absent in most GGUF repos, which bake the template into the header.
+  const tpl = pickTemplateFile(files);
+  const template = tpl ? { path: tpl.path, size: sizeOf(tpl) } : null;
+  return { weights, mmproj, mtp: mtpFile, template };
 }
 
 /** Download a single file (resumable + per-chunk progress). Writes to <dest>.part and atomically renames to dest only once complete —
@@ -220,13 +259,13 @@ async function downloadFile(endpoint, repo, file, dest, onBytes, signal) {
 
 /**
  * Download all weights for repo:quant (+ optional mmproj / MTP drafter) into destDir, reporting aggregated progress (integer 0–100, callback only on change).
- * Returns { modelPath, mmprojPath, mtpPath }. Existing files auto-resume/skip. Cancellation (signal.abort) throws, keeping the downloaded portion for the next resume.
+ * Returns { modelPath, mmprojPath, mtpPath, templatePath }. Existing files auto-resume/skip. Cancellation (signal.abort) throws, keeping the downloaded portion for the next resume.
  * `manifest` (optional): extra fields (display name, gguf descriptor, catalog modelId …) persisted to destDir/manifest.json on completion —
  * the model library lists installed models off these manifests, so non-catalog downloads survive restarts (see localServer.listDownloaded).
  */
 export async function downloadModel({ endpoint, repo, quant, vision, mtp, destDir, manifest = null }, onProgress = () => {}, signal) {
-  const { weights, mmproj, mtp: mtpFile } = await listRepoFiles(endpoint, repo, quant, { vision, mtp });
-  const all = [...weights, ...(mmproj ? [mmproj] : []), ...(mtpFile ? [mtpFile] : [])];
+  const { weights, mmproj, mtp: mtpFile, template } = await listRepoFiles(endpoint, repo, quant, { vision, mtp });
+  const all = [...weights, ...(mmproj ? [mmproj] : []), ...(mtpFile ? [mtpFile] : []), ...(template ? [template] : [])];
   const total = all.reduce((s, f) => s + (f.size || 0), 0);
   fs.mkdirSync(destDir, { recursive: true });
 
@@ -241,12 +280,13 @@ export async function downloadModel({ endpoint, repo, quant, vision, mtp, destDi
   // Written only after every file is finalized (same "complete ⇔ present" convention as the atomic rename above). Failure is non-fatal:
   // listDownloaded falls back to synthesizing an entry from the directory names.
   try {
-    fs.writeFileSync(path.join(destDir, "manifest.json"), JSON.stringify({ repo, quant, vision: !!mmproj, mtp: !!mtpFile, bytes: total, ...(manifest || {}) }, null, 2));
+    fs.writeFileSync(path.join(destDir, "manifest.json"), JSON.stringify({ repo, quant, vision: !!mmproj, mtp: !!mtpFile, templateFile: template ? path.basename(template.path) : null, bytes: total, ...(manifest || {}) }, null, 2));
   } catch { /* ignore */ }
 
   return {
     modelPath: path.join(destDir, path.basename(weights[0].path)), // first shard; llama.cpp auto-completes the rest of the shards in the same directory by -00001-of-000NN
     mmprojPath: mmproj ? path.join(destDir, path.basename(mmproj.path)) : null,
     mtpPath: mtpFile ? path.join(destDir, path.basename(mtpFile.path)) : null,
+    templatePath: template ? path.join(destDir, path.basename(template.path)) : null,
   };
 }

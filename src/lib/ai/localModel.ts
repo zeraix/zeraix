@@ -51,6 +51,10 @@ export interface DownloadedLocalModel {
   gguf?: HfGgufMeta | null;
   /** Persisted built-in chat-template override (from a prior auto-fallback or manual choice) — reused on restart. */
   chatTemplate?: string | null;
+  /** Absolute path of a standalone Jinja chat template found in the model directory; when present it outranks chatTemplate at launch. */
+  chatTemplateFile?: string | null;
+  /** True when this model's native window is known and below the 32K floor — installed, but refused at start. */
+  belowMinCtx?: boolean;
 }
 
 /** HF-parsed GGUF header (subset; whatever the Hub exposes). total = parameter count. */
@@ -72,6 +76,8 @@ export interface HfSearchItem {
   updatedAt: string | null;
   gated: boolean | string;
   tags: string[];
+  /** Native context window from the HF-parsed GGUF header; null when the Hub has no header for the repo. */
+  ctx?: number | null;
 }
 
 /** One repo's detail (Browse tab): quant offerings + metadata + arch-compat verdict against the pinned llama.cpp build. */
@@ -88,6 +94,12 @@ export interface HfRepoDetail {
   mtp?: boolean;
   arch?: string | null;
   compat?: "supported" | "unsupported" | "unknown";
+  /** Repo-relative path of a standalone Jinja chat template, downloaded with the weights and preferred over the embedded one. */
+  templateFile?: string | null;
+  /** True when the native context window is known and below minCtx — the dialog refuses the download. */
+  belowMinCtx?: boolean;
+  /** Minimum usable context window enforced by the main process (32K). */
+  minCtx?: number;
 }
 
 /** Estimated memory usage based on the options. */

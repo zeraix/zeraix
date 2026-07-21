@@ -214,7 +214,10 @@ export default function AgentComposer({
           if (e.clipboardData.files.length > 0) addFiles(e.clipboardData.files);
         }}
         placeholder={placeholder ?? t("composer.placeholder")}
-        className="min-h-[64px] resize-none border-0 bg-transparent px-0 py-1 text-[15px] shadow-none focus-visible:ring-0 dark:bg-transparent"
+        // The base Textarea sets `field-sizing-content`, which grows the box to fit its content with no upper bound —
+        // a long paste would push the composer past the viewport. Cap it and scroll inside instead, matching the
+        // 30vh ceiling the chat composer already uses (src/app/agent/chat/Composer.tsx).
+        className="min-h-[64px] max-h-[30vh] resize-none overflow-y-auto border-0 bg-transparent px-0 py-1 text-[15px] shadow-none focus-visible:ring-0 dark:bg-transparent"
       />
 
       {error && <p className="mb-1 text-[11px] text-destructive">{error}</p>}

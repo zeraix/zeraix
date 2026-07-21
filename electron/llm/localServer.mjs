@@ -18,7 +18,7 @@ import https from "node:https";
 import { spawn, execSync } from "node:child_process";
 import {
   detectHardware, usableModelMemoryGB, recommend as recommendModels, buildServerArgs,
-  MODELS, autoQuantId, quantBpw, gpuLayers, localSupported, MIN_LOCAL_MEM_GB, isSharedGpu, pickCtxKv, computeFit, descriptorFromGguf,
+  MODELS, autoQuantId, quantBpw, gpuLayers, localSupported, MIN_LOCAL_MEM_GB, isSharedGpu, pickCtxKv, computeFit, descriptorFromGguf, MIN_CTX,
 } from "./localModels.mjs";
 import { ensureInstalled, installedBin, llamaVariant, fallbackVariant, detectCuda, LLAMA_VERSION, localFilesBase, installDir, llamaRootDir, installedLlamaVersions, migrateLegacyLayout } from "./llamaInstaller.mjs";
 import { downloadModel, searchModels, repoDetail, TRUSTED_AUTHORS } from "./hfDownload.mjs";
@@ -262,14 +262,31 @@ export function estimate(opts = {}) {
 
 /** Auxiliary files (not counted as main weights): mmproj vision projector, MTP drafter (mtp-*.gguf or *-MTP.gguf). */
 const isAuxFile = (f) => /mmproj/i.test(f) || /^mtp-/i.test(f) || /-mtp\.gguf$/i.test(f);
+/**
+ * Standalone chat-template file in a model directory, in priority order (mirrors hfDownload's repo-side matcher):
+ * chat_template.jinja, then any *.jinja, then a bare `template`. Detected on every launch rather than trusted from the
+ * manifest, so dropping a corrected template into the model folder by hand takes effect on the next start — the
+ * intended escape hatch for a GGUF whose embedded template breaks --jinja's tool-parser generation.
+ */
+const TEMPLATE_MATCHERS = [
+  (f) => /^chat_template\.jinja$/i.test(f),
+  (f) => /^.+\.jinja$/i.test(f),
+  (f) => /^template$/i.test(f),
+];
+const findTemplateFile = (files) => {
+  for (const match of TEMPLATE_MATCHERS) { const hit = files.find(match); if (hit) return hit; }
+  return null;
+};
+
 /** Classify the ready (final names, not .part) model files in a directory. */
 function localModelFiles(dir) {
   let files = [];
-  try { files = fs.readdirSync(dir); } catch { return { weights: [], mmproj: null, mtp: null, hasPart: false }; }
+  try { files = fs.readdirSync(dir); } catch { return { weights: [], mmproj: null, mtp: null, template: null, hasPart: false }; }
   return {
     weights: files.filter((f) => /\.gguf$/i.test(f) && !isAuxFile(f)).sort(),
     mmproj: files.find((f) => /mmproj.*\.gguf$/i.test(f)) || null,
     mtp: files.find((f) => /^mtp-.*\.gguf$/i.test(f) || /-mtp\.gguf$/i.test(f)) || null,
+    template: findTemplateFile(files),
     hasPart: files.some((f) => /\.part$/i.test(f)),
   };
 }
@@ -324,7 +341,13 @@ export function listDownloaded() {
         vision: needVision,
         mtp: manifest ? !!manifest.mtp : !!catalogModel?.mtp,
         gguf: manifest?.gguf || null,
+        // Native window of an already-installed model (persisted GGUF header, else the catalog entry). Models downloaded
+        // before the 32K floor existed can still be sitting on disk, so the Installed tab must refuse to start them too.
+        // Unknown window => not flagged, same fail-open rule as search.
+        belowMinCtx: (() => { const c = manifest?.gguf?.context_length || catalogModel?.maxCtx || 0; return !!c && c < MIN_CTX; })(),
         chatTemplate: manifest?.chatTemplate || null, // persisted built-in template override (from a prior auto-fallback or manual choice)
+        // Standalone Jinja template present on disk; when set it outranks the built-in override above at launch.
+        chatTemplateFile: f.template ? path.join(dir, f.template) : null,
       });
     }
   }
@@ -402,7 +425,10 @@ export async function hfRepo(opts = {}) {
     const endpoint = await resolveHfEndpoint();
     const d = await repoDetail(endpoint, repo);
     const arch = d.gguf?.architecture || null;
-    return { ok: true, ...d, arch, compat: arch ? (SUPPORTED_ARCHS.has(arch) ? "supported" : "unsupported") : "unknown" };
+    // Sub-32K models are filtered out of search, but a repo can still be opened directly (or its header may only be
+    // parsed at detail time) — flag it so the dialog can refuse the download. Unknown window => not flagged (fail open).
+    const ctx = d.gguf?.context_length || null;
+    return { ok: true, ...d, arch, compat: arch ? (SUPPORTED_ARCHS.has(arch) ? "supported" : "unsupported") : "unknown", belowMinCtx: !!ctx && ctx < MIN_CTX, minCtx: MIN_CTX };
   } catch (e) {
     return { ok: false, error: String(e?.message ?? e) };
   }
@@ -554,7 +580,7 @@ function resolveHf(opts, hw) {
   const model = MODELS.find((m) => m.id === opts.modelId);
   if (!model) return null;
   // Pass the quantization label through directly (may be a tiered model's UD label, not in the generic QUANTS -- do not filter with QUANTS); auto-select by memory when unspecified.
-  const quantId = opts.quantId || autoQuantId(model, hw, Number(opts.ctx || 16384));
+  const quantId = opts.quantId || autoQuantId(model, hw, Number(opts.ctx || MIN_CTX));
   return { hf: `${model.hf}:${quantId}`, repo: model.hf, quant: quantId, label: model.name, vision: !!model.vision, mtp: model.mtp, id: model.id, name: model.name, model, bpw: quantBpw(model, quantId), chatTemplate: opts.chatTemplate || null };
 }
 
@@ -604,6 +630,16 @@ export function start(opts = {}) {
   const hw = detectHardware();
   const r = resolveHf(opts, hw);
   if (!r) { state.phase = "error"; state.error = "unknown modelId"; emit(); return status(); }
+  // Authoritative 32K floor: this is the one chokepoint every start flows through (Recommended / Installed / Browse /
+  // restore-on-restart), so a model whose native window is too small can never be *used*, not merely not downloaded.
+  // maxCtx is the model's own window (catalog entry, or descriptorFromGguf for community repos, which defaults to
+  // MIN_CTX when HF has no header) — so an unknown window passes, matching the fail-open rule used in search.
+  if (r.model && r.model.maxCtx && r.model.maxCtx < MIN_CTX) {
+    state.phase = "error";
+    state.error = `Model context window (${r.model.maxCtx}) is below the ${MIN_CTX} minimum`;
+    emit();
+    return status();
+  }
 
   const visionOn = r.vision && opts.vision !== false; // true only when the model supports vision and the toggle is not off
   const mtpOn = !!r.mtp && opts.mtp !== false;  // MTP speculative decoding (model supports it and the toggle is not off, on by default)
@@ -653,7 +689,7 @@ async function launch(variant, cfg) {
   const hfEnd = await resolveHfEndpoint(); // test huggingface.co reachability before startup, use the mirror if unreachable
   const modelsDir = path.join(localFilesBase(), "models"); // GGUF weights directory (self-download lands here; also used as LLAMA_CACHE when falling back to -hf)
   try { fs.mkdirSync(modelsDir, { recursive: true }); } catch { /* ignore */ }
-  let modelPath = null, mmprojPath = null, mtpPath = null;
+  let modelPath = null, mmprojPath = null, mtpPath = null, templatePath = null;
   if (r.repo && r.quant) {
     const destDir = path.join(modelsDir, r.repo.replace(/\//g, "_"), r.quant);
     const local = localModelFiles(destDir);
@@ -687,6 +723,10 @@ async function launch(variant, cfg) {
         if (state.dlAbort === ac) state.dlAbort = null;
       }
     }
+    // Resolved after both branches by re-scanning the directory, so it picks up a template that was just downloaded and
+    // one the user dropped in by hand since the last launch alike (see findTemplateFile for the priority order).
+    const tpl = localModelFiles(destDir).template;
+    templatePath = tpl ? path.join(destDir, tpl) : null;
   }
 
   if (stale()) { pushLog("[llama] startup superseded by a new start/stop, abandoning this one\n"); return; } // the user pressed start or stop again during download/install
@@ -705,8 +745,9 @@ async function launch(variant, cfg) {
   const useMtp = !!mtpOn && haveMtp;
   const mtpDraft = useMtp && mtpSeparate ? mtpPath : null;
   if (mtpOn && !haveMtp) pushLog("[llama] MTP is enabled but no drafter found, speculative decoding not enabled this time\n");
-  const args = buildServerArgs({ modelPath, mmproj: visionOn ? mmprojPath : null, mtpDraft, specMtp: useMtp, hw, ctx, port: state.port, kvBits, kvCacheDir: KV_DIR, ngl, chatTemplate: r.chatTemplate });
-  if (r.chatTemplate) pushLog(`[llama] chat template override: ${r.chatTemplate}\n`);
+  const args = buildServerArgs({ modelPath, mmproj: visionOn ? mmprojPath : null, mtpDraft, specMtp: useMtp, hw, ctx, port: state.port, kvBits, kvCacheDir: KV_DIR, ngl, chatTemplate: r.chatTemplate, chatTemplateFile: templatePath });
+  if (templatePath) pushLog(`[llama] chat template file: ${path.basename(templatePath)}${r.chatTemplate ? ` (overrides the "${r.chatTemplate}" built-in)` : ""}\n`);
+  else if (r.chatTemplate) pushLog(`[llama] chat template override: ${r.chatTemplate}\n`);
   pushLog(`[llama] argv: ${bin} ${args.join(" ")}\n`); // full startup command (for troubleshooting)
   let proc;
   try {

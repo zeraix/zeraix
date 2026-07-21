@@ -3,7 +3,7 @@ import ModelLibrary from "@/components/ai/ModelLibrary";
 
 export default function AgentModelsPage() {
   return (
-    <div className="mx-auto max-w-3xl px-8 py-10">
+    <div className="mx-auto max-w-4xl px-8 py-10">
       <div className="flex items-center gap-3">
         <span className="flex size-9 items-center justify-center rounded-lg bg-accent text-foreground">
           <Package className="size-5" />

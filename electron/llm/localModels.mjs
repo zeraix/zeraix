@@ -211,20 +211,32 @@ export function bestQuant(model, budgetGB, ctx, kvBits) {
   return null;
 }
 
+/**
+ * Minimum usable context window for a local model. The agent system prompt alone already approaches 8K, so anything
+ * below this leaves no room for tools, history, or a real answer — a model that cannot reach 32K is not worth listing.
+ * Enforced in three places: Hub search results (hfDownload.searchModels), the selectable context rungs (CTX_LADDER +
+ * the UI presets/input), and the recommender's per-model cap. Models whose window is *unknown* are kept (fail open),
+ * since HF metadata is frequently incomplete and a wrong exclusion is worse than a wrong inclusion.
+ */
+export const MIN_CTX = 32768;
+
 // Automatic context tiering (largest to smallest): pick "the largest -c that fits" by device memory, capped at the model's native window (maxCtx).
-// 16K is too small for real use (the system prompt alone is ~6K), so probe upward as much as possible; within a tier prefer KV q8 (near-lossless), and only drop to q4 (half the size) when it doesn't fit, to unlock a larger context.
-export const CTX_LADDER = [262144, 131072, 65536, 32768, 16384];
+// The ladder bottoms out at MIN_CTX (32K): below that the system prompt alone eats the window, so those rungs are never
+// offered. Within a tier prefer KV q8 (near-lossless), and only drop to q4 (half the size) when it doesn't fit, to unlock a larger context.
+export const CTX_LADDER = [262144, 131072, 65536, 32768];
 
 /**
  * Pick context length and KV quantization for a "model + quant": { ctx, kvBits }.
  * cap is the larger of the usable budget and deviceMem*0.78 (a compromise with the device-memory "fits" criterion used for tiered models).
  * 0.78 rather than 0.75: the KV estimate is already conservative (q4 is actually 4.5bpw, i.e. +12%; the SWA window uses the upper bound), so loosening it lets 26B-A4B reach
  * 128K on 24G (18.4GB ≈ 77%, close to the macOS Metal wired ceiling of ~75–80%; if an extreme combo fails on first launch, turn off vision / drop a tier).
- * When nothing fits, fall back to { 16K, q4 } (the leanest combo, behavior close to the old default).
+ * When not even the 32K rung fits, fall back to { 16K, q4 } (the leanest combo). This is deliberately *below* MIN_CTX:
+ * it is a last resort for low-memory devices that would otherwise be unable to launch anything at all, and it is never
+ * user-selectable — the 32K floor governs what can be browsed and chosen, not this internal rescue path.
  */
 export function pickCtxKv(model, bpw, hw, budgetGB, vision = false) {
   const cap = Math.max(budgetGB || 0, deviceMemGB(hw) * 0.78);
-  const maxCtx = model.maxCtx || 32768;
+  const maxCtx = model.maxCtx || MIN_CTX;
   for (const ctx of CTX_LADDER) {
     if (ctx > maxCtx) continue;
     for (const kvBits of [8, 4]) {
@@ -276,7 +288,7 @@ function modelQuants(model, hw, budgetGB, vision = false) {
 }
 
 /** Auto-select a quant tag for a model (tiered models use the UD tag from quantTiers, the rest use the generic QUANTS); a fallback for when quant isn't explicitly specified at launch. */
-export function autoQuantId(model, hw, ctx = 16384, kvBits = 8) {
+export function autoQuantId(model, hw, ctx = MIN_CTX, kvBits = 8) {
   const q = selectQuant(model, hw, usableModelMemoryGB(hw), ctx, kvBits);
   return q ? q.id : "Q4_K_M";
 }
@@ -317,7 +329,7 @@ function speedHint(model, hw) {
 
 /** List all models that fit within the hardware budget (each with its best quant) and highlight the primary. Each entry includes ngl (GPU-offloaded layers) and layers (total layers) for the UI to display.
  *  vision (the vision toggle, normally passed in by the UI): when on and the model supports vision, the size estimate includes the vision-projector overhead. */
-export function recommend(hw, budgetGB, { ctx = 16384, kvBits = 8, vision = false } = {}) {
+export function recommend(hw, budgetGB, { ctx = MIN_CTX, kvBits = 8, vision = false } = {}) {
   const vram = hw.unified ? 0 : (hw.gpu && hw.gpu.vramGB) || 0;
   const options = [];
   for (const model of MODELS) {
@@ -362,10 +374,14 @@ export function recommend(hw, budgetGB, { ctx = 16384, kvBits = 8, vision = fals
  *   --chat-template NAME  override the model's embedded chat template with a llama.cpp built-in (chatml / qwen / gemma / llama3 …).
  *                   Rescues community GGUFs whose embedded Jinja template breaks --jinja's tool-parser generation ("Unable to generate parser for this template");
  *                   omitted (null) → use the template baked into the GGUF (the default, correct for catalog models).
+ *   --chat-template-file F  load the chat template from a Jinja file shipped alongside the weights. Takes priority over both
+ *                   the embedded GGUF template and --chat-template NAME: a repo that ships an explicit template file is
+ *                   stating the authoritative template, and it is also the escape hatch for fixing a broken embedded one
+ *                   by dropping a file into the model directory. Only one of the two flags is ever passed (file wins).
  * Local first: given modelPath → `-m FILE` (+ explicit `--mmproj FILE` when vision), the weights already downloaded by us (with progress/resume);
  * if not auto-downloaded (fallback path) → `-hf repo:quant` is fetched by llama itself, and only then, when noMmproj=true, is --no-mmproj used to turn off the automatic vision projector.
  */
-export function buildServerArgs({ hf, modelPath = null, hw, ctx = 16384, port = 8080, kvBits = 8, mtpDraft = null, specMtp = false, mmproj = null, noMmproj = false, kvCacheDir = null, ngl = null, chatTemplate = null, extraArgs = [] }) {
+export function buildServerArgs({ hf, modelPath = null, hw, ctx = MIN_CTX, port = 8080, kvBits = 8, mtpDraft = null, specMtp = false, mmproj = null, noMmproj = false, kvCacheDir = null, ngl = null, chatTemplate = null, chatTemplateFile = null, extraArgs = [] }) {
   const args = modelPath ? ["-m", modelPath] : ["-hf", hf];
   args.push(
     "--host", "127.0.0.1",
@@ -376,7 +392,9 @@ export function buildServerArgs({ hf, modelPath = null, hw, ctx = 16384, port = 
     "--jinja",
     "--cache-reuse", "256",
   );
-  if (chatTemplate) args.push("--chat-template", String(chatTemplate)); // override a broken embedded template with a built-in
+  // An explicit template file outranks a built-in name, which in turn outranks the GGUF's embedded template.
+  if (chatTemplateFile) args.push("--chat-template-file", String(chatTemplateFile));
+  else if (chatTemplate) args.push("--chat-template", String(chatTemplate)); // override a broken embedded template with a built-in
   const kvType = kvBits === 8 ? "q8_0" : kvBits === 4 ? "q4_0" : "f16";
   if (kvType !== "f16") args.push("-ctk", kvType, "-ctv", kvType);
   if (kvCacheDir) args.push("--slot-save-path", kvCacheDir);

@@ -26,13 +26,19 @@ import {
 } from "@/lib/ai/localModel";
 
 type Opt = LocalLlmRecommendation["options"][number];
-const CTX_LADDER = [16384, 32768, 65536, 131072, 262144, 524288, 1048576];
+/** Minimum selectable context window — mirrors MIN_CTX in electron/llm/localModels.mjs. The agent system prompt alone
+ *  already approaches 8K, so a smaller window leaves no room for tools or history and is never offered. */
+const MIN_CTX = 32768;
+const CTX_LADDER = [32768, 65536, 131072, 262144, 524288, 1048576];
 /** Context presets for a given native window: the standard rungs at or below it, always ending at the window itself
- *  (so a non-power-of-2 max like 40960 gets its exact value as the top button). */
+ *  (so a non-power-of-2 max like 40960 gets its exact value as the top button). Empty when the model can't reach MIN_CTX. */
 const ctxPresets = (maxCtx: number): number[] => {
+  if (maxCtx < MIN_CTX) return [];
   const rungs = CTX_LADDER.filter((c) => c < maxCtx);
   return rungs[rungs.length - 1] === maxCtx ? rungs : [...rungs, maxCtx];
 };
+/** Clamp a user-typed context into [MIN_CTX, maxCtx]. */
+const clampCtx = (n: number, maxCtx: number) => Math.min(Math.max(n, MIN_CTX), Math.max(maxCtx, MIN_CTX));
 const OPTS_KEY = "zeraix.modelLibrary.opts";
 const HW_KEY = "zeraix.modelLibrary.hw";
 const TMPL_KEY = "zeraix.modelLibrary.tmpl"; // per-repo chat-template override { [repo]: builtinName }
@@ -165,8 +171,9 @@ export default function ModelLibrary() {
         const target = d.gguf?.total ? (d.gguf.total * 4.85) / 8 : 0;
         const pick = target ? [...d.quants].sort((a, b) => Math.abs(a.bytes - target) - Math.abs(b.bytes - target))[0] : d.quants[Math.floor(d.quants.length / 2)];
         setRepoQuant(pick.id);
-        // Default context: 32K (usable headroom over the ~6K system prompt) but never above the model's native window.
-        setRepoCtx(Math.min(32768, d.gguf?.context_length || 32768));
+        // Default context: the 32K floor (usable headroom over the ~6K system prompt). Repos whose native window is
+        // smaller are rejected outright via belowMinCtx, so there is nothing below this to clamp down to.
+        setRepoCtx(MIN_CTX);
         setRepoKv(8);
       }
     });
@@ -403,6 +410,7 @@ export default function ModelLibrary() {
                 <div className="mt-2 flex items-center gap-2">
                   <span className="text-[11px] text-ink-muted">{fmtGB(d.sizeBytes)}</span>
                   {isRunning && <span className="rounded-full bg-emerald-500/15 px-2 py-0.5 text-[10px] font-medium text-emerald-600">{t("ml.running")}</span>}
+                  {d.belowMinCtx && <span className="rounded-full bg-amber-500/15 px-2 py-0.5 text-[10px] font-medium text-amber-600 dark:text-amber-400">{t("ml.ctxTooSmall", { min: fmtK(MIN_CTX) })}</span>}
                   <span className="ml-auto flex items-center gap-1.5">
                     {isRunning ? (
                       <button onClick={stop} className="inline-flex items-center gap-1 rounded-lg border border-line-strong px-2.5 py-1 text-xs text-ink transition hover:bg-surface-muted"><Square className="size-3" /> {t("ml.stop")}</button>
@@ -411,7 +419,9 @@ export default function ModelLibrary() {
                         <Loader2 className="size-3 animate-spin" /> {isFetching ? t("ml.downloadPct", { pct: status?.pct ?? 0 }) : t("ml.loading")} <X className="size-3" />
                       </button>
                     ) : (
-                      <button onClick={() => startCustom(d)} className="inline-flex items-center gap-1 rounded-lg bg-primary px-2.5 py-1 text-xs font-medium text-white shadow-sm transition hover:brightness-105"><Play className="size-3" /> {t("ml.start")}</button>
+                      // Installed before the 32K floor existed: keep it listed (so it can be inspected and deleted) but refuse to start it.
+                      <button onClick={() => startCustom(d)} disabled={!!d.belowMinCtx} title={d.belowMinCtx ? t("ml.ctxTooSmall", { min: fmtK(MIN_CTX) }) : undefined}
+                        className="inline-flex items-center gap-1 rounded-lg bg-primary px-2.5 py-1 text-xs font-medium text-white shadow-sm transition hover:brightness-105 disabled:opacity-40 disabled:hover:brightness-100"><Play className="size-3" /> {t("ml.start")}</button>
                     )}
                     <button onClick={() => openFolder(d.dir)} className="rounded-lg border border-line p-1 text-ink-subtle transition hover:bg-surface-muted" title={t("ml.openWeightsDir")}><FolderOpen className="size-3.5" /></button>
                     <button onClick={async () => { if (d.running || isRunning) return; setBusy(true); await bridge.deleteModel({ dir: d.dir }); await bridge.listModels().then(setDownloaded); setBusy(false); }} disabled={d.running || isRunning || busy}
@@ -463,8 +473,8 @@ export default function ModelLibrary() {
                     </label>
                     <label className="flex flex-col gap-1.5 text-xs text-ink-subtle">{t("ml.contextLen", { max: fmtK(maxCtx) })}
                       <span className="inline-flex w-fit items-center rounded-md border border-line-strong bg-surface">
-                        <input type="number" min={1} max={Math.round(maxCtx / 1024)} step={1} value={Math.round(mo.ctx / 1024)} disabled={locked}
-                          onChange={(e) => { const k = Math.max(1, Math.min(Math.round(maxCtx / 1024), Math.floor(Number(e.target.value) || 1))); setOpt(o.model.id, { ctx: k * 1024 }); }}
+                        <input type="number" min={Math.round(MIN_CTX / 1024)} max={Math.round(maxCtx / 1024)} step={1} value={Math.round(mo.ctx / 1024)} disabled={locked}
+                          onChange={(e) => setOpt(o.model.id, { ctx: clampCtx(Math.floor(Number(e.target.value) || 0) * 1024, maxCtx) })}
                           className="w-14 bg-transparent px-2 py-1 text-right text-ink disabled:opacity-50" /><span className="pr-2 text-ink-muted">K</span>
                       </span>
                       <div className="flex flex-wrap gap-1">
@@ -548,6 +558,11 @@ export default function ModelLibrary() {
                       {info.mmproj && <span>{t("ml.vision")}</span>}
                       {info.gated ? <span className="text-amber-600 dark:text-amber-400">{t("ml.gated")}</span> : null}
                     </div>
+                    {info.belowMinCtx && (
+                      <p className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-700 dark:text-amber-400">
+                        {t("ml.ctxTooSmall", { min: fmtK(info.minCtx ?? MIN_CTX) })}
+                      </p>
+                    )}
                     {(info.quants ?? []).length === 0 ? (
                       <p className="py-4 text-center text-sm text-ink-subtle">{t("ml.noQuants")}</p>
                     ) : (() => {
@@ -570,21 +585,23 @@ export default function ModelLibrary() {
                           </label>
                           <label className="flex flex-col gap-1.5 text-xs text-ink-subtle sm:col-span-2">{t("ml.contextLen", { max: fmtK(repoMaxCtx) })}
                             <span className="inline-flex w-fit items-center rounded-md border border-line-strong bg-surface">
-                              <input type="number" min={1} max={Math.round(repoMaxCtx / 1024)} step={1} value={Math.round(repoCtx / 1024)} disabled={isLoading || isRunning}
-                                onChange={(e) => { const k = Math.max(1, Math.min(Math.round(repoMaxCtx / 1024), Math.floor(Number(e.target.value) || 1))); setRepoCtx(k * 1024); }}
+                              <input type="number" min={Math.round(MIN_CTX / 1024)} max={Math.round(repoMaxCtx / 1024)} step={1} value={Math.round(repoCtx / 1024)} disabled={isLoading || isRunning}
+                                onChange={(e) => setRepoCtx(clampCtx(Math.floor(Number(e.target.value) || 0) * 1024, repoMaxCtx))}
                                 className="w-14 bg-transparent px-2 py-1 text-right text-ink disabled:opacity-50" /><span className="pr-2 text-ink-muted">K</span>
                             </span>
                             <div className="flex flex-wrap gap-1">
                               {ctxPresets(repoMaxCtx).map((c) => <button key={c} type="button" disabled={isLoading || isRunning} onClick={() => setRepoCtx(c)} className={`rounded-md px-1.5 py-0.5 text-[11px] transition ${repoCtx === c ? "bg-primary/15 font-medium text-primary" : "bg-surface-muted text-ink-subtle hover:bg-surface-muted/70"}`}>{fmtK(c)}</button>)}
                             </div>
                           </label>
+                          {/* A template file shipped by the repo is loaded with --chat-template-file and outranks any
+                              built-in pick, so the selector below would have no effect — disable it and say why. */}
                           <label className="flex flex-col gap-1 text-xs text-ink-subtle sm:col-span-2">{t("ml.chatTemplate")}
-                            <select className="rounded-md border border-line-strong bg-surface px-2 py-1 text-ink disabled:opacity-50" value={repoTmpl} disabled={isLoading || isRunning}
+                            <select className="rounded-md border border-line-strong bg-surface px-2 py-1 text-ink disabled:opacity-50" value={repoTmpl} disabled={isLoading || isRunning || !!info.templateFile}
                               onChange={(e) => setRepoTmplPersist(repoDlg, e.target.value)}>
                               <option value="">{t("ml.chatTemplateAuto")}</option>
                               {CHAT_TEMPLATES.map((tm) => <option key={tm} value={tm}>{tm}</option>)}
                             </select>
-                            <span className="text-[11px] text-ink-muted">{t("ml.chatTemplateHint")}</span>
+                            <span className="text-[11px] text-ink-muted">{info.templateFile ? t("ml.chatTemplateFile", { file: info.templateFile }) : t("ml.chatTemplateHint")}</span>
                           </label>
                         </div>
                       );
@@ -607,7 +624,7 @@ export default function ModelLibrary() {
                           <Loader2 className="size-3 animate-spin" /> {isFetching ? t("ml.downloadPct", { pct: status?.pct ?? 0 }) : t("ml.loading")} <X className="size-3" />
                         </button>
                       ) : (
-                        <button onClick={() => startRepo(repoDlg, info, repoQuant)} disabled={!repoQuant || busy}
+                        <button onClick={() => startRepo(repoDlg, info, repoQuant)} disabled={!repoQuant || busy || !!info.belowMinCtx}
                           className="inline-flex items-center gap-1 rounded-lg bg-primary px-3 py-1.5 text-sm font-medium text-white shadow-sm transition hover:brightness-105 disabled:opacity-50">
                           <Play className="size-3" /> {downloaded.some((d) => d.repo === repoDlg && d.quant === repoQuant) ? t("ml.start") : t("ml.downloadStart")}
                         </button>

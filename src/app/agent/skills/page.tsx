@@ -23,6 +23,7 @@ import {
 } from "@/components/ui/dialog";
 import type {
   InstalledSkill,
+  Skill,
   SkillAudience,
   SkillManifest,
   SkillScope,
@@ -78,13 +79,20 @@ function ToggleSwitch({
 }
 
 /** Card shell: code icon on the left + title (name / version) + badge row + two-line description; the action area on the right is a separate flex child
- *  that reserves its own width and never overlaps the content (prevents long names / badges from crowding the toggle, edit, uninstall, etc. buttons). */
+ *  that reserves its own width and never overlaps the content (prevents long names / badges from crowding the toggle, edit, uninstall, etc. buttons).
+ *
+ *  onOpen makes the whole card activatable (opens the detail dialog). The card stays a <div role="button"> rather than a
+ *  real <button>, because it already contains buttons (download / toggle / edit / uninstall) and nesting interactive
+ *  elements is invalid HTML and breaks keyboard navigation. The action area stops click propagation so those buttons
+ *  keep working without also opening the detail. */
 function SkillCard({
   name,
   version,
   description,
   audienceLabel,
   customLabel,
+  onOpen,
+  openLabel,
   children,
 }: {
   name: string;
@@ -92,10 +100,30 @@ function SkillCard({
   description: string;
   audienceLabel?: string;
   customLabel?: string;
+  onOpen?: () => void;
+  openLabel?: string;
   children?: React.ReactNode;
 }) {
   return (
-    <div className="group flex items-start gap-4 rounded-xl border border-line bg-surface p-5 transition hover:border-line-strong hover:shadow-sm">
+    <div
+      {...(onOpen && {
+        role: "button",
+        tabIndex: 0,
+        "aria-label": openLabel,
+        onClick: onOpen,
+        // Enter / Space activate, matching native button behavior for a role="button" element.
+        onKeyDown: (e: React.KeyboardEvent<HTMLDivElement>) => {
+          if (e.key === "Enter" || e.key === " ") {
+            e.preventDefault();
+            onOpen();
+          }
+        },
+      })}
+      className={`group flex items-start gap-4 rounded-xl border border-line bg-surface p-5 transition hover:border-line-strong hover:shadow-sm ${
+        onOpen ? "cursor-pointer focus-visible:outline-2 focus-visible:outline-offset-2" : ""
+      }`}
+      style={onOpen ? { outlineColor: ACCENT } : undefined}
+    >
       <FileCode2 className="mt-0.5 size-9 shrink-0 text-muted-foreground" strokeWidth={1.5} />
       <div className="min-w-0 flex-1">
         <div className="flex items-center gap-1.5">
@@ -127,7 +155,14 @@ function SkillCard({
           {description}
         </p>
       </div>
-      {children}
+      {/* Buttons live inside an activatable card: swallow clicks/keys so acting on a skill never also opens its detail. */}
+      <div
+        className="shrink-0"
+        onClick={(e) => e.stopPropagation()}
+        onKeyDown={(e) => e.stopPropagation()}
+      >
+        {children}
+      </div>
     </div>
   );
 }
@@ -145,6 +180,13 @@ export default function AgentSkillsPage() {
   const [editing, setEditing] = useState<InstalledSkill | null>(null); // the user skill currently being edited
   const [editText, setEditText] = useState(""); // the raw Markdown in the editor
   const [editErr, setEditErr] = useState<string | null>(null);
+  // Detail dialog: the skill whose details are open. A marketplace entry is only a manifest (no instructions), so the
+  // body is fetched lazily on open; an installed skill already carries them and renders immediately.
+  const [detail, setDetail] = useState<SkillManifest | InstalledSkill | null>(null);
+  const [detailBody, setDetailBody] = useState<Skill | null>(null);
+  const [detailLoading, setDetailLoading] = useState(false);
+  const [detailErr, setDetailErr] = useState<string | null>(null);
+  const detailReq = useRef(0); // increments per open; stale fetches are discarded
 
   // On mount: restore installed skills + fetch the marketplace catalog.
   useEffect(() => {
@@ -237,6 +279,35 @@ export default function AgentSkillsPage() {
     } catch (e) {
       setEditErr(e instanceof Error ? e.message : String(e));
     }
+  };
+
+  /**
+   * Open the detail dialog for a skill. An installed skill already carries its instructions and renders instantly;
+   * a marketplace entry is only a manifest, so the full body is fetched. That fetch reads the catalog and does NOT
+   * install anything — viewing details is non-destructive, and downloading stays an explicit action.
+   * detailReq guards against a slow fetch for a previously-opened skill landing after the user opened another one.
+   */
+  const openDetail = (s: SkillManifest | InstalledSkill) => {
+    const req = ++detailReq.current;
+    setDetailErr(null);
+    setDetail(s);
+    if ("instructions" in s && s.instructions) {
+      setDetailBody(s as Skill);
+      setDetailLoading(false);
+      return;
+    }
+    setDetailBody(null);
+    setDetailLoading(true);
+    void downloadSkill(s.id)
+      .then((full) => {
+        if (detailReq.current === req) setDetailBody(full);
+      })
+      .catch((e) => {
+        if (detailReq.current === req) setDetailErr(e instanceof Error ? e.message : String(e));
+      })
+      .finally(() => {
+        if (detailReq.current === req) setDetailLoading(false);
+      });
   };
 
   const AUDIENCE_FILTERS: { key: AudienceFilter; label: string }[] = [
@@ -410,6 +481,8 @@ export default function AgentSkillsPage() {
                               audienceLabel={
                                 audience === "all" ? audienceLabel(s.audience) : undefined
                               }
+                              onOpen={() => openDetail(s)}
+                              openLabel={t("skills.detail.open", { name: s.name })}
                             >
                               {marketAction(s)}
                             </SkillCard>
@@ -439,6 +512,8 @@ export default function AgentSkillsPage() {
                     description={s.description}
                     audienceLabel={audienceLabel(s.audience)}
                     customLabel={s.source === "user" ? t("skills.badge.custom") : undefined}
+                    onOpen={() => openDetail(s)}
+                    openLabel={t("skills.detail.open", { name: s.name })}
                   >
                     <div className="flex shrink-0 items-center gap-2">
                       <ToggleSwitch
@@ -473,6 +548,113 @@ export default function AgentSkillsPage() {
             ))}
         </div>
       </div>
+
+      {/* Skill details (read-only), opened by clicking a card in either tab. Marketplace entries load their body on open. */}
+      <Dialog open={!!detail} onOpenChange={(open) => !open && setDetail(null)}>
+        <DialogContent className="sm:max-w-2xl">
+          {detail && (
+            <>
+              <DialogHeader>
+                <DialogTitle className="flex items-center gap-1.5">
+                  <span className="truncate">{detail.name}</span>
+                  {detail.version && (
+                    <span className="shrink-0 font-mono text-[11px] font-normal text-muted-foreground">
+                      v{detail.version}
+                    </span>
+                  )}
+                </DialogTitle>
+                <DialogDescription>{detail.description}</DialogDescription>
+              </DialogHeader>
+
+              {/* Metadata row: badges + author. Only rendered when there is something to show. */}
+              <div className="flex flex-wrap items-center gap-1.5">
+                {"source" in detail && detail.source === "user" && (
+                  <span
+                    className="rounded-full px-1.5 py-0.5 text-[10px] font-medium"
+                    style={{ backgroundColor: `${ACCENT}1a`, color: ACCENT }}
+                  >
+                    {t("skills.badge.custom")}
+                  </span>
+                )}
+                {audienceLabel(detail.audience) && (
+                  <span className="rounded-full bg-surface-muted px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground">
+                    {audienceLabel(detail.audience)}
+                  </span>
+                )}
+                <span className="rounded-full bg-surface-muted px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground">
+                  {(detail.scope ?? "general") === "general"
+                    ? t("skills.scope.general")
+                    : t("skills.scope.targeted")}
+                </span>
+                {(detail.tags ?? []).map((tag) => (
+                  <span
+                    key={tag}
+                    className="rounded-full bg-surface-muted px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground"
+                  >
+                    {tag}
+                  </span>
+                ))}
+                {detail.author && (
+                  <span className="text-[11px] text-muted-foreground">
+                    {t("skills.detail.author")}: {detail.author}
+                  </span>
+                )}
+              </div>
+
+              {(detailBody?.allowedTools ?? []).length > 0 && (
+                <div className="text-[11px] text-muted-foreground">
+                  {t("skills.detail.tools")}:{" "}
+                  <span className="font-mono">{detailBody?.allowedTools?.join(", ")}</span>
+                </div>
+              )}
+
+              <div>
+                <p className="mb-1.5 text-xs font-semibold text-foreground">
+                  {t("skills.detail.instructions")}
+                </p>
+                {detailErr ? (
+                  <div className="rounded-lg border border-destructive/20 bg-destructive/10 px-3 py-2 text-xs text-destructive">
+                    {detailErr}
+                  </div>
+                ) : detailLoading ? (
+                  <p className="flex items-center gap-1.5 rounded-lg bg-surface-muted px-3 py-3 text-xs text-muted-foreground">
+                    <Loader2 className="size-3.5 animate-spin" />
+                    {t("skills.detail.loading")}
+                  </p>
+                ) : (
+                  <pre className="max-h-[45vh] overflow-auto whitespace-pre-wrap break-words rounded-lg border border-line bg-surface-muted px-3 py-2 font-mono text-xs leading-relaxed text-foreground">
+                    {detailBody?.instructions}
+                  </pre>
+                )}
+              </div>
+
+              <DialogFooter>
+                {/* Downloading straight from the detail view: the natural next step after reading what a skill does. */}
+                {!installedIds.has(detail.id) && (
+                  <button
+                    type="button"
+                    onClick={() => void onDownload(detail.id)}
+                    disabled={busyId === detail.id}
+                    className="rounded-lg px-3 py-1.5 text-sm font-semibold text-white shadow-sm transition hover:brightness-105 disabled:opacity-60"
+                    style={{ backgroundColor: ACCENT }}
+                  >
+                    {busyId === detail.id
+                      ? t("skills.action.downloading")
+                      : t("skills.action.download")}
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={() => setDetail(null)}
+                  className="rounded-lg border border-line-strong bg-surface px-3 py-1.5 text-sm text-foreground transition hover:bg-surface-muted"
+                >
+                  {t("skills.close")}
+                </button>
+              </DialogFooter>
+            </>
+          )}
+        </DialogContent>
+      </Dialog>
 
       {/* Edit a user skill: edit its Markdown directly (frontmatter + body), re-parsed on save. */}
       <Dialog open={!!editing} onOpenChange={(open) => !open && setEditing(null)}>
