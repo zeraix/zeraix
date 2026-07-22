@@ -313,6 +313,87 @@ contextBridge.exposeInMainWorld("appConfig", {
   getPath: () => ipcRenderer.invoke("appconfig:get-path"),
 });
 
+// Automation workflows (electron/automation/*). Named `workflows`, NOT `automation` — that global is
+// already the <webview> CDP browser panel above, and its `automation:event` channel is broadcast to
+// every window, so sharing the namespace would cross-wire the two features.
+contextBridge.exposeInMainWorld("workflows", {
+  /** Workflow summaries for the list view. */
+  list: () => ipcRenderer.invoke("wf:list"),
+  /** One definition; omit version for the current one, pass it to read exactly what a run executed. */
+  get: (id, version) => ipcRenderer.invoke("wf:get", { id, version }),
+  /** Every stored version number for a workflow. */
+  versions: (id) => ipcRenderer.invoke("wf:versions", id),
+  /** Ids of the available starter templates. */
+  templates: () => ipcRenderer.invoke("wf:templates"),
+  /** { path } — the folder a step's file tools write into. Open it with window.shellApi.openPath. */
+  workdir: () => ipcRenderer.invoke("wf:workdir"),
+  /** Create a workflow from a starter template; returns { ok, version } or { ok:false, errors }. */
+  createFromTemplate: (templateId, name) =>
+    ipcRenderer.invoke("wf:create-from-template", { templateId, name }),
+  /** Save as a NEW version; returns { ok, version } or { ok:false, errors }. */
+  save: (definition) => ipcRenderer.invoke("wf:save", definition),
+  /** Delete a workflow and all of its versions. */
+  remove: (id) => ipcRenderer.invoke("wf:delete", id),
+
+  /** Start a run; resolves as soon as it is queued, with { ok, runId }. Follow it via onEvent. */
+  run: (workflowId, variables) => ipcRenderer.invoke("wf:run", { workflowId, variables }),
+  /** Cancel an in-flight run. */
+  cancel: (runId) => ipcRenderer.invoke("wf:cancel", runId),
+  /** Recent runs, newest first: { workflowId?, state?, limit? }. */
+  runs: (query) => ipcRenderer.invoke("wf:runs", query ?? {}),
+  /** Full detail for one run (run, attempts, events, outputs); sinceSeq fetches only the delta. */
+  runDetail: (runId, sinceSeq) => ipcRenderer.invoke("wf:run-detail", { runId, sinceSeq }),
+
+  /** Runs suspended waiting on an external event. */
+  waits: () => ipcRenderer.invoke("wf:waits"),
+  /** Deliver an inbound event by match key; resumes whichever run is waiting on it. */
+  deliverEvent: (key, payload) => ipcRenderer.invoke("wf:deliver", { key, payload }),
+  /** Native file picker for a `file` workflow input; resolves to an absolute path or null. */
+  pickFile: () => ipcRenderer.invoke("wf:pick-file"),
+  /** Runs waiting on a human decision, oldest first. */
+  approvals: () => ipcRenderer.invoke("wf:approvals"),
+  /** Approve or reject a pending gate; approving resumes the run in the background. */
+  decide: (approvalId, approved, note) =>
+    ipcRenderer.invoke("wf:decide", { approvalId, approved, note }),
+  /**
+   * Push translated strings for the approval OS-notification. The main process has no i18n runtime,
+   * and the notification may need to fire when no window is open, so the strings are cached there.
+   */
+  setApprovalStrings: (strings) => ipcRenderer.send("wf:approval-strings", strings),
+
+  /** Subscribe to live run events; returns an unsubscribe function. */
+  onEvent: (cb) => {
+    const handler = (_e, payload) => cb(payload);
+    ipcRenderer.on("wf:event", handler);
+    return () => ipcRenderer.removeListener("wf:event", handler);
+  },
+  /** Subscribe to run state transitions; returns an unsubscribe function. */
+  onState: (cb) => {
+    const handler = (_e, payload) => cb(payload);
+    ipcRenderer.on("wf:state", handler);
+    return () => ipcRenderer.removeListener("wf:state", handler);
+  },
+});
+
+// Background / tray mode: keeps the app resident after the last window closes so the automation
+// scheduler keeps running (see electron/services/background.mjs).
+contextBridge.exposeInMainWorld("background", {
+  /** Current state { enabled, openAtLogin, paused, traySupported }. */
+  get: () => ipcRenderer.invoke("background:get"),
+  /** Stay resident after the last window closes (creates/removes the tray to match). */
+  setEnabled: (on) => ipcRenderer.invoke("background:set-enabled", on),
+  /** Register/unregister the login item (launches hidden, tray only). */
+  setOpenAtLogin: (on) => ipcRenderer.invoke("background:set-open-at-login", on),
+  /** Pause all automations (runtime only — a restart always resumes). */
+  setPaused: (on) => ipcRenderer.invoke("background:set-paused", on),
+  /**
+   * Push translated tray-menu labels { open, pause, quit, running } to the main process, which has no
+   * i18n runtime of its own. Persisted so an autostart launch — which renders the tray before any
+   * renderer exists — still uses the user's language from the previous session.
+   */
+  setTrayLabels: (labels) => ipcRenderer.send("background:set-tray-labels", labels),
+});
+
 // System-level notifications: renderer → main-process notification service (queue / merge / rate-limit / OS popup), with click routing sent back.
 contextBridge.exposeInMainWorld("notification", {
   /** Send a system notification; returns { ok, id?, merged?, supported }. See NotificationItem for payload. */

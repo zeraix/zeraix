@@ -20,11 +20,14 @@ export class NotificationService {
    * @param {object} deps
    * @param {import("../adapters/notificationAdapter.mjs").ElectronNotificationAdapter} deps.adapter Platform adapter
    * @param {() => (Electron.BrowserWindow | null)} deps.getWindow Get the main window (bring forward + route on click)
+   * @param {() => Promise<Electron.BrowserWindow | null>} [deps.ensureWindow] Create the window if there is none, resolving once its content is loaded.
+   *   Required for background/tray mode: with no window open, a notification click would otherwise silently do nothing.
    * @param {(channel: string, payload?: any) => void} [deps.broadcast] Broadcast to the renderer (e.g. notify:changed)
    */
-  constructor({ adapter, getWindow, broadcast }) {
+  constructor({ adapter, getWindow, ensureWindow, broadcast }) {
     this.adapter = adapter;
     this.getWindow = getWindow;
+    this.ensureWindow = ensureWindow;
     this.broadcast = broadcast || (() => {});
     this.queue = [];
     this.active = false;
@@ -126,10 +129,12 @@ export class NotificationService {
     });
   }
 
-  /** Click a notification: bring the main window forward and dispatch route:navigate (Deep Link, §7). */
-  handleClick(item) {
+  /** Click a notification: bring the main window forward and dispatch route:navigate (Deep Link, §7).
+   *  In background/tray mode there may be no window at all, so create one first and wait for it to load
+   *  -- sending route:navigate at that point would otherwise be dropped before the renderer is listening. */
+  async handleClick(item) {
     const route = normalizeRoute(item.route ?? item.url);
-    const win = this.getWindow?.();
+    const win = (await this.ensureWindow?.()) ?? this.getWindow?.();
     if (win) {
       if (win.isMinimized()) win.restore();
       win.show();
@@ -139,8 +144,8 @@ export class NotificationService {
   }
 
   /** Action button click: dispatch along with the button index; the renderer decides the behavior. */
-  handleAction(item, index) {
-    const win = this.getWindow?.();
+  async handleAction(item, index) {
+    const win = (await this.ensureWindow?.()) ?? this.getWindow?.();
     const action = Array.isArray(item.actions) ? item.actions[index] : undefined;
     win?.webContents.send("notify:action", { id: item.id, index, actionId: action?.actionId });
     // An action also brings the window forward by default, to ease subsequent routing.

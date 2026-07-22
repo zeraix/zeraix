@@ -64,7 +64,14 @@ export const AGENT_MAX_SUBAGENT_ROUNDS_KEY = "agent.limits.maxSubagentRounds";
  * After AgentShell detects a page registered here, it does not render AgentSidebar, and the page provides its own back entry.
  * To add such a page, just add its path to this array.
  */
-export const AGENT_FULLSCREEN_PATHS: string[] = ["/agent/settings"];
+export const AGENT_FULLSCREEN_PATHS: string[] = [
+  "/agent/settings",
+  // The workflow builder is a focused, full-page editor (Simple/Professional) with its own back
+  // entry — not a dialog. Both the editor and the "new workflow" template picker run fullscreen.
+  // NB: prefix match, so this covers /agent/automation/edit/<id> but not the list at /agent/automation.
+  "/agent/automation/edit",
+  "/agent/automation/new",
+];
 
 /** Determine whether a given path should hide the left main sidebar (fullscreen display). */
 export function shouldHideAgentSidebar(pathname: string): boolean {

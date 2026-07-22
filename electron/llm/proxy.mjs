@@ -20,7 +20,7 @@ function deriveBaseURL(endpoint) {
 }
 
 /** Raw forwarding: for endpoints with non-standard paths that the SDK cannot map. */
-async function rawFetch({ endpoint, apiKey, body, headers }) {
+async function rawFetch({ endpoint, apiKey, body, headers, signal }) {
   try {
     const res = await fetch(endpoint, {
       method: "POST",
@@ -30,6 +30,7 @@ async function rawFetch({ endpoint, apiKey, body, headers }) {
         ...(headers ?? {}),
       },
       body: JSON.stringify(body ?? {}),
+      signal,
     });
     const text = await res.text();
     let data;
@@ -137,8 +138,12 @@ async function rawFetchStream({ endpoint, apiKey, body, headers }, onChunk, sign
 }
 
 export async function llmChat(req) {
-  const { endpoint, apiKey, body, headers } = req ?? {};
+  // `signal` is only reachable on the in-process (automation) path — an AbortSignal is not
+  // structured-cloneable, so the renderer's IPC call never carries one. That is exactly what lets a
+  // workflow "Stop" abort an in-flight request instead of waiting for the whole response.
+  const { endpoint, apiKey, body, headers, signal } = req ?? {};
   if (!endpoint) return { ok: false, status: 0, error: "missing endpoint" };
+  if (signal?.aborted) return { ok: false, status: 0, error: "aborted", aborted: true };
 
   const baseURL = deriveBaseURL(endpoint);
   if (!baseURL) return rawFetch(req); // fall back for non-standard endpoints
@@ -150,9 +155,10 @@ export async function llmChat(req) {
       defaultHeaders: headers,
       maxRetries: 1,
     });
-    const completion = await client.chat.completions.create(body ?? {});
+    const completion = await client.chat.completions.create(body ?? {}, signal ? { signal } : undefined);
     return { ok: true, status: 200, data: plain(completion) };
   } catch (e) {
+    if (signal?.aborted) return { ok: false, status: 0, error: "aborted", aborted: true };
     // OpenAI.APIError carries status / error; other errors such as network failures have status=0.
     const status = typeof e?.status === "number" ? e.status : 0;
     return { ok: false, status, error: e?.message ?? String(e), data: plain(e?.error) };

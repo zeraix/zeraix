@@ -59,6 +59,11 @@ function wireEvents() {
   // Install on quit rather than forcing a restart out from under the user. This is what makes the
   // renderer's "Install later" work: the staged update is applied when the app quits, so the next
   // launch is already the new version — no further prompting needed.
+  //
+  // Caveat with background/tray mode (services/background.mjs): a tray-resident app quits rarely, so
+  // "Install later" can stay pending for a long time — closing the window only hides it. The staged
+  // update still applies on the next real quit (tray "Quit", Cmd-Q, reboot), and the immediate
+  // "Install now" path (quitAndInstall -> app.quit -> before-quit sets isQuitting) is unaffected.
   autoUpdater.autoInstallOnAppQuit = true;
   // Always fetch the full installer instead of patching the installed one from its blockmap.
   // The differential path is the reason a download could run to completion while emitting no

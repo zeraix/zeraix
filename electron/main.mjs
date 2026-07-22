@@ -50,6 +50,21 @@ import { registerGoogleAuth } from "./ipc/googleAuthIpc.mjs";
 import { registerUpdater } from "./ipc/updaterIpc.mjs";
 import { loadEnvFiles } from "./loadEnv.mjs";
 import { registerProtocolClient, findDeepLink } from "./services/deepLink.mjs";
+import { initAutomation, shutdownAutomation, setAutomationNotifier } from "./automation/paths.mjs";
+import { closeDb } from "./automation/db.mjs";
+import {
+  initBackground,
+  isBackgroundEnabled,
+  isBackgroundLaunch,
+  setBackgroundEnabled,
+  isOpenAtLogin,
+  setOpenAtLogin,
+  setTrayLabels,
+  isPaused,
+  setPaused,
+  destroyTray,
+  isTraySupported,
+} from "./services/background.mjs";
 
 // CDP remote-debugging port: puppeteer-core connects through this; automation drives the <webview> in a separate utilityProcess.
 // These switches must be appended before app ready. Only listens on 127.0.0.1.
@@ -86,13 +101,75 @@ let pendingDeepLink = findDeepLink(process.argv);
 
 /** Bring the main window to the foreground (restore if minimized, show and focus if hidden); create a new one if none exists. */
 function focusMainWindow() {
-  if (!mainWindow) {
+  onWindowShown(); // cancel a pending local-model release: the user is back
+  // macOS: the dock icon is hidden while running in the background, restore it before showing.
+  if (process.platform === "darwin") app.dock?.show();
+  if (!mainWindow || mainWindow.isDestroyed()) {
     createWindow();
     return;
   }
   if (mainWindow.isMinimized()) mainWindow.restore();
   mainWindow.show();
   mainWindow.focus();
+}
+
+/**
+ * Ensure a loaded main window exists, then return it. Unlike focusMainWindow this awaits the initial
+ * page load, so callers that immediately send to webContents (notification click -> route:navigate)
+ * do not fire before the renderer is listening. Needed because background mode can have no window.
+ */
+async function ensureMainWindow() {
+  onWindowShown();
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    if (process.platform === "darwin") app.dock?.show();
+    await createWindow();
+    return mainWindow;
+  }
+  focusMainWindow();
+  return mainWindow;
+}
+
+/** Perform a real quit (tray "Quit"): flip the latch first so the window `close` handler stops hiding. */
+function quitApp() {
+  isQuitting = true;
+  destroyTray();
+  app.quit();
+}
+
+/**
+ * Idle grace period before a hidden window releases the local model. Long enough that hiding and
+ * reopening does not pay the multi-GB reload cost, short enough that a tray-resident app is not
+ * quietly holding that memory for the rest of the session.
+ */
+const LOCAL_MODEL_IDLE_MS = 5 * 60 * 1000;
+let localModelIdleTimer = null;
+
+/**
+ * The window just went to the background. Schedule release of the expensive resident cost: a
+ * llama.cpp server parked in the tray means multiple GB held permanently on the user's machine,
+ * which is exactly what makes people kill the process. It restarts on demand on next use.
+ */
+function onWindowHidden() {
+  clearTimeout(localModelIdleTimer);
+  localModelIdleTimer = setTimeout(() => {
+    // Never yank the model out from under a running generation -- an in-flight stream means the
+    // user (or a scheduled automation) is still working, hidden window or not.
+    if (llmStreamControllers.size > 0) {
+      onWindowHidden(); // still busy: re-arm rather than dropping the check entirely
+      return;
+    }
+    try {
+      localLlm.stop();
+    } catch {
+      /* ignore -- nothing running */
+    }
+  }, LOCAL_MODEL_IDLE_MS);
+}
+
+/** The window came back: cancel any pending local-model release. */
+function onWindowShown() {
+  clearTimeout(localModelIdleTimer);
+  localModelIdleTimer = null;
 }
 
 /**
@@ -221,6 +298,8 @@ async function handleAppRequest(request) {
 
 let mainWindow = null;
 let splashWindow = null;
+/** True once a real quit is under way, so the window `close` handler stops hiding and lets it through. */
+let isQuitting = false;
 
 /** Main window ready: show the main window (the splash screen has been removed, splashWindow is always null, so it takes the direct-show branch). Safe to call repeatedly (idempotent). */
 let splashDismissed = false;
@@ -247,6 +326,10 @@ function dismissSplash() {
 }
 
 async function createWindow() {
+  // Reset the one-shot show latch: the window can legitimately be created more than once now
+  // (tray "Open" after a --background cold start, or macOS dock activate), and a stale `true` here
+  // would leave every subsequent window hidden forever.
+  splashDismissed = false;
   mainWindow = new BrowserWindow({
     width: 1280,
     height: 800,
@@ -310,6 +393,22 @@ async function createWindow() {
   // Dismiss the splash screen and show the main window as soon as the first content frame is ready (ready-to-show fires before loadURL resolves,
   // minimizing the blank period). Safety net: in case ready-to-show never fires, force-dismiss after load completes too.
   mainWindow.once("ready-to-show", dismissSplash);
+
+  // Background mode: closing the window hides it instead of tearing it down, so the scheduler (and
+  // any in-flight run) survives. A real quit goes through before-quit, which sets isQuitting first.
+  mainWindow.on("close", (e) => {
+    if (isQuitting || !isBackgroundEnabled()) return;
+    e.preventDefault();
+    mainWindow?.hide();
+    if (process.platform === "darwin") app.dock?.hide();
+    onWindowHidden();
+  });
+
+  // Drop the reference once the window is actually gone; otherwise focusMainWindow would call
+  // methods on a destroyed BrowserWindow instead of creating a fresh one.
+  mainWindow.on("closed", () => {
+    mainWindow = null;
+  });
 
   if (isDev) {
     await mainWindow.loadURL(DEV_SERVER_URL);
@@ -558,6 +657,26 @@ function registerWindowControls() {
   });
 }
 
+/**
+ * Background / tray mode IPC: renderer window.background.* -> main process.
+ * The renderer also pushes its translated tray labels here on load, because the main process has no
+ * i18n runtime and the tray must render on a headless start with no renderer at all (see background.mjs).
+ */
+function registerBackground() {
+  // ipcMain.handle("background:get", () => ({
+  //   enabled: isBackgroundEnabled(),
+  //   openAtLogin: isOpenAtLogin(),
+  //   paused: isPaused(),
+  //   // The tray is the only way back into a windowless app; without it, background mode is unsafe
+  //   // to offer at all (common on minimal Linux desktops with no StatusNotifier host).
+  //   traySupported: isTraySupported(),
+  // }));
+  // ipcMain.handle("background:set-enabled", (_e, on) => setBackgroundEnabled(on));
+  // ipcMain.handle("background:set-open-at-login", (_e, on) => setOpenAtLogin(on));
+  // ipcMain.handle("background:set-paused", (_e, on) => setPaused(on));
+  // ipcMain.on("background:set-tray-labels", (_e, labels) => setTrayLabels(labels));
+}
+
 function registerAgentStore() {
   ipcMain.handle("agent-store:load-index", () => loadIndex());
   ipcMain.handle("agent-store:load-project", (_e, id) => loadProject(id));
@@ -774,14 +893,44 @@ app.whenReady().then(() => {
   registerIntegrity();
   registerMemoryFiles();
   // System-level notifications (renderer window.notification.* -> queue/coalesce/throttle -> OS notification; click relays route:navigate)
-  registerNotifications({ getWindow: () => mainWindow, iconPath: notificationIconPath() });
+  const notificationService = registerNotifications({
+    getWindow: () => mainWindow,
+    // Background mode: a click on an automation notification must open the app, not fall on the floor.
+    ensureWindow: ensureMainWindow,
+    iconPath: notificationIconPath(),
+  });
+  // Automation uses this to nudge the user when a run is waiting on their approval.
+  setAutomationNotifier(notificationService);
   // Google login (RFC 8252 native flow: loopback service + PKCE + system browser -> id_token handed back to the renderer)
   registerGoogleAuth();
   // Auto-update (GitHub Releases feed; renderer drives check/download/install via window.updater)
   registerUpdater();
   registerAutomation();
   registerWebviewWindowOpen();
-  createWindow();
+  registerBackground();
+  // Automation subsystem: fix the storage root and open/migrate the run-state database.
+  // A failure here must not block startup -- the rest of the app is fully usable without it.
+  try {
+    initAutomation();
+  } catch (e) {
+    console.error("[automation] initialization failed; automation disabled this session:", e);
+  }
+  // Tray-resident mode: creates the tray when background mode is on (or when this is an autostart
+  // launch) and re-applies the login-item registration.
+  const background = initBackground({ onOpen: focusMainWindow, onQuit: quitApp });
+
+  // Autostart launches come up headless -- tray only, no window. Any deep link arriving later, a
+  // tray click, or macOS dock activate creates the window on demand via focusMainWindow.
+  // `background.active` is false when no tray could be created: staying headless there would leave
+  // an invisible, unreachable process, so fall back to showing the window normally.
+  const headless = isBackgroundLaunch() && background.active && !pendingDeepLink;
+  if (headless) {
+    console.log("[background] started headless (tray only)");
+    // macOS: keep the dock icon out of the way until the user actually opens a window.
+    if (process.platform === "darwin") app.dock?.hide();
+  } else {
+    createWindow();
+  }
 
   // A deep link present at cold start (Windows/Linux argv / an early open-url on macOS) is processed once the window is ready.
   if (pendingDeepLink) {
@@ -797,6 +946,9 @@ app.whenReady().then(() => {
 });
 
 app.on("before-quit", () => {
+  // Let the window `close` handler through: from here on a close is a real teardown, not a hide.
+  // Covers every quit path (tray Quit, macOS Cmd-Q, updater restart, OS shutdown).
+  isQuitting = true;
   // Kill the automation child process before quitting to avoid it hanging.
   try {
     automationChild?.kill();
@@ -822,9 +974,26 @@ app.on("before-quit", () => {
   } catch {
     /* ignore */
   }
+  // Abort in-flight automation runs (killing their child process trees) before closing the database,
+  // so a quit does not leave orphaned processes behind.
+  try {
+    shutdownAutomation();
+  } catch {
+    /* ignore */
+  }
+  // Close the automation database so WAL is checkpointed rather than left for recovery on next open.
+  try {
+    closeDb();
+  } catch {
+    /* ignore */
+  }
 });
 
 app.on("window-all-closed", () => {
+  // Background mode: stay resident so the automation scheduler keeps running with no window open.
+  // The tray is the only way back in, so this must never be reached without a tray present
+  // (initBackground guarantees one whenever background mode or a --background launch is active).
+  if (isBackgroundEnabled()) return;
   // macOS convention: the app stays active after all windows are closed
   if (process.platform !== "darwin") app.quit();
 });

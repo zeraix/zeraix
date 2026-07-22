@@ -24,9 +24,7 @@ export async function loginWithGoogle(
   );
 }
 
-/**
- * 获取当前用户信息（刷新 token 并返回最新用户数据）
- */
+
 export async function refreshCurrentUser(): Promise<{
   success: boolean;
   message: string;

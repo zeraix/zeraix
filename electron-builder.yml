@@ -142,15 +142,24 @@ win:
     # RFC 3161 Timestamping: Ensures signatures remain valid long after the certificate expires (without a timestamp, the signature becomes invalid as soon as the certificate expires).
     rfc3161TimeStampServer: http://timestamp.digicert.com
 nsis:
-  # One-click, per-user — chosen so auto-updates never prompt.
-  # electron/services/updater.mjs installs with isSilent=true (/S), which suppresses the installer UI but
-  # cannot suppress UAC: writing to Program Files needs elevation, and Windows asks every time. Per-user
-  # installs land in %LOCALAPPDATA%\Programs, need no elevation, and therefore update in complete silence.
-  # The assisted wizard let users pick "all users", which put them in Program Files and re-introduced the
-  # prompt on every update — hence oneClick. allowToChangeInstallationDirectory is gone with it: NSIS only
-  # offers a directory page in assisted mode (oneClick: false), and the two options are mutually exclusive.
-  oneClick: true
+  # Assisted, per-user — the wizard shows a directory page so users can pick the install
+  # location (e.g. a different hard drive / D:\), while updates stay silent.
+  #
+  # Why this still updates silently: electron/services/updater.mjs installs with isSilent=true (/S),
+  # which suppresses the installer UI but cannot suppress UAC. UAC only fires when the target needs
+  # elevation (i.e. Program Files, a per-machine install). We keep perMachine: false, so the install
+  # lands in a user-writable location (%LOCALAPPDATA%\Programs by default, or the user-chosen folder)
+  # and needs no elevation — so /S updates run in complete silence.
+  #
+  # Directory selection requires the assisted installer (oneClick: false) — NSIS only renders the
+  # directory page in assisted mode. allowToChangeInstallationDirectory enables that page.
+  #
+  # Keep perMachine: false. Do NOT expose an "all users" option: a per-machine install goes to
+  # Program Files and re-introduces the UAC prompt on every silent update. If a per-machine option
+  # is ever wanted, gate it behind its own build so auto-update stays silent for per-user installs.
+  oneClick: false
   perMachine: false
+  allowToChangeInstallationDirectory: true
   createDesktopShortcut: true
   createStartMenuShortcut: true
 

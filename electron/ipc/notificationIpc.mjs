@@ -91,14 +91,14 @@ function sanitize(raw) {
 
 /**
  * Register the system notification IPC and return the NotificationService (for the main process to push directly, e.g. AI task-completion notifications).
- * @param {{ getWindow: () => (Electron.BrowserWindow|null), iconPath?: string }} opts
+ * @param {{ getWindow: () => (Electron.BrowserWindow|null), ensureWindow?: () => Promise<Electron.BrowserWindow|null>, iconPath?: string }} opts
  */
-export function registerNotifications({ getWindow, iconPath }) {
+export function registerNotifications({ getWindow, ensureWindow, iconPath }) {
   const adapter = new ElectronNotificationAdapter({ iconPath });
   const broadcast = (channel, payload) => {
     for (const win of BrowserWindow.getAllWindows()) win.webContents.send(channel, payload);
   };
-  const service = new NotificationService({ adapter, getWindow, broadcast });
+  const service = new NotificationService({ adapter, getWindow, ensureWindow, broadcast });
 
   // Send: returns { ok, id?, supported }. An invalid payload -> ok:false.
   ipcMain.handle("notify:send", (_e, payload) => {

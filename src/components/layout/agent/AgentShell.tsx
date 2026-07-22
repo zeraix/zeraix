@@ -11,6 +11,7 @@ import FilesPanel from "@/app/agent/chat/FilesPanel";
 import { ChatAgentView } from "@/app/agent/chat/page";
 import WindowControls from "./WindowControls";
 import LocalModelSync from "@/components/ai/LocalModelSync";
+import TrayLabelSync from "@/components/ai/TrayLabelSync";
 import { requestCloseFile } from "@/lib/fileViewer";
 
 /** Sidebar outer frame width: card 260 + m-2 on each side (8 each). */
@@ -48,6 +49,7 @@ export default function AgentShell({ children }: { children: React.ReactNode }) 
     <div className="relative flex h-full w-full overflow-hidden bg-surface">
       {/* Global: local model ready/stopped -> sync the chat model list (persists across pages, so leaving the model-library page doesn't lose the ready event). */}
       <LocalModelSync />
+      <TrayLabelSync />
       {/* Outer layer only animates width and clips; the inner aside stays 260 wide so text isn't squeezed while collapsing */}
       {!hideSidebar && (
         <motion.div

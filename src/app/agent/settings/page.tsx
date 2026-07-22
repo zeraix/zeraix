@@ -38,6 +38,7 @@ import {
   ExternalLink,
   Loader2,
   CheckCircle2,
+  Activity,
 } from "lucide-react";
 import { useAuthStore } from "@/store/authStore";
 import { useLoginModalStore } from "@/store/loginModalStore";
@@ -75,6 +76,12 @@ import {
   setStorePath,
 } from "@/lib/ai/conversation";
 import { isAppConfigAvailable, openAppConfigFile, saveOfficialApiKeyToConfig } from "@/lib/ai/appConfig";
+import {
+  getBackgroundState,
+  setBackgroundEnabled,
+  setBackgroundOpenAtLogin,
+  type BackgroundState,
+} from "@/lib/background";
 import {
   defaultSoundFor,
   getNotifySoundConfig,
@@ -184,6 +191,10 @@ const SECTION_KEYS: Record<SectionId, string[]> = {
     "general.appConfig",
     "general.appConfigDesc",
     "general.appConfigOpen",
+    "general.background",
+    "general.backgroundDesc",
+    "general.backgroundEnable",
+    "general.backgroundAutostart",
   ],
   notify: [
     "settings.notify",
@@ -1295,10 +1306,13 @@ function GeneralSection({ t }: { t: TFunc }) {
   const [configurable, setConfigurable] = useState(false);
   const [appConfigOk, setAppConfigOk] = useState(false);
   const [appConfigMsg, setAppConfigMsg] = useState<string | null>(null);
+  // Background / tray mode. `null` = desktop bridge absent (web build) -> the whole block is hidden.
+  const [bg, setBg] = useState<BackgroundState | null>(null);
 
   useEffect(() => {
     setConfigurable(isFileStoreAvailable());
     setAppConfigOk(isAppConfigAvailable());
+    void getBackgroundState().then(setBg);
     void getStorePath().then((p) => {
       if (p) {
         setPath(p);
@@ -1411,6 +1425,67 @@ function GeneralSection({ t }: { t: TFunc }) {
             )}
           </div>
         </div>
+      )}
+
+      {/* Background / tray mode: desktop only. Scheduled automations cannot fire while the app is
+          not running, so this is the setting that makes the automation scheduler useful at all. */}
+      {bg && (
+        <>
+          <p className="mb-2 mt-6 flex items-center gap-1.5 text-sm font-semibold text-ink">
+            <Activity className="size-4 text-ink-muted" />
+            {t("general.background")}
+          </p>
+          <div className="rounded-xl border border-line bg-surface-muted/50 px-4 py-3.5">
+            <p className="mb-3 text-xs text-ink-subtle">{t("general.backgroundDesc")}</p>
+            {bg.traySupported ? (
+              <>
+                <div className="flex items-center justify-between gap-4">
+                  <div>
+                    <p className="text-sm font-medium text-ink">{t("general.backgroundEnable")}</p>
+                    <p className="text-xs text-ink-subtle">{t("general.backgroundEnableDesc")}</p>
+                  </div>
+                  <ToggleSwitch
+                    on={bg.enabled}
+                    label={t("general.backgroundEnable")}
+                    onChange={(v) => {
+                      // Optimistic: the main process is the source of truth, but disabling background
+                      // mode also clears autostart there, so mirror that here to stay consistent.
+                      setBg({ ...bg, enabled: v, openAtLogin: v ? bg.openAtLogin : false });
+                      // Enabling can still be refused (no system tray) -- reconcile with the result
+                      // rather than leaving the toggle showing a state the main process rejected.
+                      void setBackgroundEnabled(v).then((actual) => {
+                        if (actual !== v) void getBackgroundState().then(setBg);
+                      });
+                    }}
+                  />
+                </div>
+                <div
+                  className={cn(
+                    "mt-3 flex items-center justify-between gap-4 border-t border-line pt-3 transition",
+                    !bg.enabled && "pointer-events-none opacity-40",
+                  )}
+                >
+                  <div>
+                    <p className="text-sm font-medium text-ink">{t("general.backgroundAutostart")}</p>
+                    <p className="text-xs text-ink-subtle">{t("general.backgroundAutostartDesc")}</p>
+                  </div>
+                  <ToggleSwitch
+                    on={bg.openAtLogin}
+                    label={t("general.backgroundAutostart")}
+                    onChange={(v) => {
+                      setBg({ ...bg, openAtLogin: v });
+                      void setBackgroundOpenAtLogin(v);
+                    }}
+                  />
+                </div>
+              </>
+            ) : (
+              <p className="text-xs text-amber-600 dark:text-amber-400">
+                {t("general.backgroundUnsupported")}
+              </p>
+            )}
+          </div>
+        </>
       )}
     </div>
   );
