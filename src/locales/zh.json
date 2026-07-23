@@ -766,6 +766,7 @@
   "chat.tokenUsageLine": "本对话消耗 token：{approx}{total}（输入 {prompt}/输出 {completion}）",
   "chat.subagentProcessing": "子代理「{agent}」处理中…",
   "chat.subagentThinking": "子代理「{agent}」思考中…",
+  "chat.subagentTask": "委派的任务",
   "chat.loadingSkill": "加载技能「{id}」",
   "chat.skillDisabled": "技能未启用",
   "chat.browserAction": "浏览器操作：{action}",
@@ -913,5 +914,19 @@
   "image.error.network": "图片生成失败：无法连接到服务商。",
   "image.error.timeout": "图片生成超时。",
   "image.error.unsupported": "当前没有可用于生成图片的服务商，请先添加Gemini 或 OpenAI 的 API Key。",
-  "image.error.unknown": "图片生成失败。"
+  "image.error.unknown": "图片生成失败。",
+  "projmem.title": "项目记忆（ZERAIX.md）",
+  "projmem.desc": "当前工作区的地图，助手在探索代码前会先读它：各模块职责、技术栈、常用命令，以及你记录的规则。自动生成的部分会自行更新，你写下的内容会被保留。",
+  "projmem.workdir": "工作区：{dir}",
+  "projmem.none": "当前工作区还没有项目记忆。生成时会扫描仓库——除一次简短的摘要请求外，不会上传任何源码文件。",
+  "projmem.generate": "生成",
+  "projmem.statModules": "{count} 个模块",
+  "projmem.statNotes": "{count} 条笔记",
+  "projmem.statPinned": "{count} 条已固定",
+  "projmem.statPending": "{count} 个待描述",
+  "projmem.save": "保存",
+  "projmem.saved": "已保存",
+  "projmem.reload": "重新载入",
+  "projmem.rebuild": "重新生成",
+  "projmem.hint": "你的修改不会被覆盖：标记了 lock 的区块、写入 pins 的模块行，以及 zeraix 标记之外的所有内容，都不会被重新生成。"
 }

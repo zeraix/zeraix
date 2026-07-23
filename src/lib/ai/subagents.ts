@@ -36,7 +36,24 @@ export const CODER_TOOLS = [
   "move_file",
   "run_command",
   "check_project",
+  "remember_project",
 ];
+
+/**
+ * Tool discipline shared by every sub-agent, appended to each one's system prompt at run time.
+ *
+ * The main agent gets this from base.system.md; sub-agents run on `def.systemPrompt` alone and never
+ * saw it, so they issued one tool call per round even though runSubAgent batches consecutive read-only
+ * calls exactly like the main loop (PARALLEL_SAFE_TOOLS). The capability was there and unused — a
+ * sub-agent reading six files took six sequential round trips instead of one.
+ */
+export const SUBAGENT_TOOL_DISCIPLINE =
+  "Tool use: issue independent tool calls TOGETHER in a single response — read-only calls " +
+  "(read_file / search_files / search_in_files / list_directory / file_info) in the same batch execute " +
+  "concurrently, so batching them is much faster than one per round. If you know you need three files, " +
+  "request all three at once rather than waiting for each result. Serialize only when one call genuinely " +
+  "depends on another's result. Prefer the narrowest tool, and read the specific line range you need " +
+  "(offset/limit) rather than whole files.";
 
 export interface SubAgentDef {
   /** The value for the tool's agent argument. */
@@ -80,7 +97,10 @@ export const SUBAGENTS: SubAgentDef[] = [
   {
     id: "coder",
     label: "Coder",
-    description: "General Execution: Can read and write files, run commands, and complete specific multi-step modification tasks (sensitive operations like writing files require user confirmation; irreversible deletions are not allowed).",
+    description:
+      "Execute ONE specific change you have already decided on: reads/writes files and runs commands (writes require user confirmation; it cannot delete files). " +
+      "Use it only for work you could fully brief a stranger on in a paragraph — not for a change you are still working out, and not because the task is large or hard. " +
+      "If you understand the change well enough to describe it here, make it yourself instead: you will see the actual code, which this returns only a summary of.",
     tools: CODER_TOOLS,
     systemPrompt:
       "You are a general execution sub-agent: you can read/write files and run commands to complete a task (you cannot delete files). Before changing anything, confirm the current state with read-only tools; " +
@@ -107,11 +127,13 @@ export function subAgentTool() {
     function: {
       name: "run_subagent",
       description:
-        "Delegate a self-contained subtask to a dedicated sub-agent for execution, retrieving only its final conclusion." +
-        "Prioritize using this over sending multiple search_in_files / read_file requests: when a question requires investigation across multiple files," +
-        "delegate it to explore — it will run a round of tool iterations and return a concise answer, keeping the main conversation streamlined and more efficient. Available sub-agents: \n" +
+        "Delegate ONE self-contained subtask to a dedicated sub-agent and receive only its final conclusion. " +
+        "You are the one doing the work: use this only when a subtask is separable enough that a whole extra model loop beats doing it yourself. " +
+        "Separability is the criterion — difficulty is not. Delegating a task because it is hard is backwards: the sub-agent returns a summary rather than the code it read or wrote, " +
+        "so the harder the problem, the more of it you lose. Available sub-agents: \n" +
         menu +
-        "\nNote: Sub-agents do not see the main conversation history; tasks must be self-contained (including necessary context and expected output).",
+        "\nCost of delegating: the sub-agent cannot see this conversation, cannot ask the user anything, and cannot be steered once started — " +
+        "so the task must be complete and self-contained (all necessary context, plus what the output should be), and a vague task returns a vague summary.",
       parameters: {
         type: "object",
         properties: {

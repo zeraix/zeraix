@@ -763,6 +763,7 @@
   "chat.tokenUsageLine": "Cette conversation a utilisé {approx}{total} tokens (entrée {prompt} / sortie {completion})",
   "chat.subagentProcessing": "Le sous-agent « {agent} » travaille…",
   "chat.subagentThinking": "Le sous-agent « {agent} » réfléchit…",
+  "chat.subagentTask": "Tâche déléguée",
   "chat.loadingSkill": "Chargement de la compétence « {id} »",
   "chat.skillDisabled": "Compétence non activée",
   "chat.browserAction": "Action du navigateur : {action}",
@@ -910,5 +911,19 @@
   "image.error.network": "Échec de la génération : impossible de contacter le fournisseur.",
   "image.error.timeout": "Délai dépassé lors de la génération de l'image.",
   "image.error.unsupported": "Aucun fournisseur configuré ne peut générer d'images. Ajoutez une clé API  Gemini ou OpenAI.",
-  "image.error.unknown": "Échec de la génération de l'image."
+  "image.error.unknown": "Échec de la génération de l'image.",
+  "projmem.title": "Mémoire du projet (ZERAIX.md)",
+  "projmem.desc": "Une carte de l'espace de travail actuel que l'assistant lit avant d'explorer le code : rôle de chaque module, technologies, commandes courantes et les règles que vous consignez. Les parties générées se mettent à jour seules ; ce que vous écrivez ici est conservé.",
+  "projmem.workdir": "Espace de travail : {dir}",
+  "projmem.none": "Cet espace de travail n'a pas encore de mémoire de projet. La génération analyse le dépôt ; aucun fichier source n'est transmis, hormis une courte demande de résumé.",
+  "projmem.generate": "Générer",
+  "projmem.statModules": "{count} modules",
+  "projmem.statNotes": "{count} notes",
+  "projmem.statPinned": "{count} épinglés",
+  "projmem.statPending": "{count} sans description",
+  "projmem.save": "Enregistrer",
+  "projmem.saved": "Enregistré",
+  "projmem.reload": "Recharger",
+  "projmem.rebuild": "Régénérer",
+  "projmem.hint": "Vos modifications survivent aux régénérations : les sections marquées lock, les lignes de module listées dans pins et tout ce qui se trouve hors des marqueurs zeraix ne sont jamais régénérés."
 }

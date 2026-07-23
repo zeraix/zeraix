@@ -127,6 +127,73 @@ const STATIC_MODELS: Record<string, { ctx: number; out?: number }> = {
 };
 
 /**
+ * Vision (image input) capability per model id.
+ *
+ * Why this table exists: the model list stores `multimodal` per entry, but nothing ever filled it in
+ * for catalog / official-platform models (only the custom-model form has a toggle). Every such entry
+ * therefore resolved to multimodal:false, and the chat page strips EVERY image_url part from the wire
+ * for a non-multimodal model — so a user attaching a screenshot to GPT-5.5 or Claude got "sorry, I
+ * can't view images". This table restores the capability at resolve time.
+ *
+ * Only listed as `true` where the vendor documents image input. Being wrong in the optimistic
+ * direction is the expensive mistake: a text-only endpoint rejects the entire request with
+ * HTTP 400 "unknown variant `image_url`", so a model whose status is unclear is left out and the user
+ * can still flip the per-model toggle in Settings → Models.
+ */
+const VISION_MODELS: Record<string, boolean> = {
+  // OpenAI — GPT-4o and everything after it takes images; the o-series reasoning models do too.
+  "gpt-4o": true,
+  "gpt-4o-mini": true,
+  "gpt-4.1": true,
+  "gpt-4.1-mini": true,
+  "gpt-5.5": true,
+  "gpt-5.4-mini": true,
+  "gpt-5.4-nano": true,
+  "o3": true,
+  "o4-mini": true,
+  // Anthropic — the whole Claude family accepts images.
+  "claude-opus-4-8": true,
+  "claude-sonnet-5": true,
+  "claude-haiku-4-5": true,
+  "claude-fable-5": true,
+  // Google — Gemini is natively multimodal across the line.
+  "gemini-3.1-pro-preview": true,
+  "gemini-3.5-flash": true,
+  "gemini-3.1-flash-lite": true,
+  // Vision variants of otherwise text-only Chinese families.
+  "glm-4v-plus": true,
+  "step-1v-8k": true,
+  // Deliberately absent (text-only at the time of writing): deepseek-*, qwen3.x-plus/flash
+  // (the vision line is qwen-vl-*), moonshot-v1-* (vision is moonshot-v1-*-vision-preview),
+  // MiniMax-Text-01 / abab*, ernie-*, hunyuan-*, yi-*, Baichuan*, SenseChat-*.
+};
+
+/**
+ * Name-shape fallback for models not in the table (manually added ids, official-platform catalog
+ * entries, third-party gateways). Matches only naming conventions vendors use consistently for
+ * image-capable models, so an unknown text model stays false and never triggers a 400.
+ */
+export function guessVision(modelId: string): boolean {
+  const id = modelId.toLowerCase();
+  if (/(^|[-_/])(vl|vision|multimodal|omni)([-_/.]|$)/.test(id)) return true; // qwen-vl-max, *-vision-preview, gpt-4o-omni
+  if (/(^|[-_/])glm-\d+(\.\d+)?v/.test(id)) return true; // glm-4v-plus, glm-4.5v
+  if (/(^|[-_/])step-\d+v/.test(id)) return true; // step-1v-8k
+  if (/(^|[-_/])(gpt-4o|gpt-4\.1|gpt-5|o3|o4)/.test(id)) return true; // OpenAI vision-era families
+  if (/(^|[-_/])claude-/.test(id)) return true;
+  if (/(^|[-_/])gemini-/.test(id)) return true;
+  return false;
+}
+
+/**
+ * Whether a model accepts image input: exact table entry → name-shape heuristic → false.
+ * Used by resolveModel to fill in `multimodal` for catalog entries that never stored one.
+ */
+export function resolveVision(modelId: string): boolean {
+  if (!modelId) return false;
+  return VISION_MODELS[modelId] ?? guessVision(modelId);
+}
+
+/**
  * Default window for unknown / custom models. Deliberately large, to avoid prematurely triggering context compression when the window can't be identified and
  * summarizing away the analysis / conclusions / evidence from earlier questions (which shows up as "the next question seems to have forgotten the previous one").
  * Cost: if the connected model actually has a small window (e.g. a local 8K/32K model), a long conversation may overflow and error before compression kicks in —

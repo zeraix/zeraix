@@ -24,7 +24,7 @@ import { useCallback, useEffect, useState } from "react";
 import { Download, Loader2, RefreshCw, X, CircleAlert } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useT } from "@/lib/i18n";
-import { updaterBridge, errorKey, type UpdaterState } from "@/lib/updater";
+import { updaterBridge, errorKey, mergeUpdaterState, type UpdaterState } from "@/lib/updater";
 
 /** Delay the first check so it never competes with app startup work. */
 const INITIAL_CHECK_DELAY_MS = 8000;
@@ -46,25 +46,33 @@ export default function UpdateNotifier() {
     if (!bridge) return; // browser / next dev: nothing to do
 
     const off = bridge.onState((s) => {
-      // Merge rather than replace: `supported` / `currentVersion` describe the environment, not the
-      // transition, so a push that omitted one must never turn this card off mid-download.
-      setState((prev) => ({ ...prev, ...s }));
+      // mergeUpdaterState keeps `supported` / `currentVersion` (environment facts a transition may
+      // omit) AND refuses to let a later "checking" / "not-available" erase an update already found —
+      // that is what made this card flash and vanish once a second check started.
+      setState((prev) => mergeUpdaterState(prev, s));
       // A newly found update re-opens a card the user dismissed earlier in this session.
       if (s.status === "available" || s.status === "downloaded") setDismissed(false);
-      // Main is now driving the display; drop the optimistic flag.
-      if (s.status !== "available") setStarting(false);
+      // Main is now driving the display; drop the optimistic flag. Transient statuses are excluded:
+      // they no longer change what is shown, so acting on them would strand the progress view.
+      if (s.status !== "available" && s.status !== "checking" && s.status !== "idle") setStarting(false);
     });
 
     let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
     bridge.getState().then((s) => {
       if (cancelled) return;
-      setState(s);
-      // Only check when packaged; unpackaged reports supported:false and would error.
-      if (s.supported) setTimeout(() => bridge.check(), INITIAL_CHECK_DELAY_MS);
+      setState((prev) => mergeUpdaterState(prev, s));
+      // The main process now owns the update schedule (a check shortly after launch, then periodically),
+      // because it outlives every window. This only covers the gap before its first check has run — hence
+      // the `idle` guard: without it, every remount kicked off another check, and each one dragged the
+      // state through "checking", which is what made the prompt flicker.
+      // Held in `timer` so an unmount inside the delay cancels it.
+      if (s.supported && s.status === "idle") timer = setTimeout(() => bridge.check(), INITIAL_CHECK_DELAY_MS);
     });
 
     return () => {
       cancelled = true;
+      if (timer) clearTimeout(timer);
       off();
     };
   }, []);

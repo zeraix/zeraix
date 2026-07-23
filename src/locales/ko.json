@@ -763,6 +763,7 @@
   "chat.tokenUsageLine": "이 대화의 토큰 사용량: {approx}{total}(입력 {prompt}/출력 {completion})",
   "chat.subagentProcessing": "서브 에이전트 “{agent}”이(가) 작업 중입니다…",
   "chat.subagentThinking": "서브 에이전트 “{agent}”이(가) 생각 중입니다…",
+  "chat.subagentTask": "위임된 작업",
   "chat.loadingSkill": "스킬 “{id}” 로드 중",
   "chat.skillDisabled": "스킬이 활성화되지 않았습니다",
   "chat.browserAction": "브라우저 작업: {action}",
@@ -910,5 +911,19 @@
   "image.error.network": "이미지 생성 실패: 공급자에 연결할 수 없습니다.",
   "image.error.timeout": "이미지 생성 시간이 초과되었습니다.",
   "image.error.unsupported": "이미지를 생성할 수 있는 공급자가 없습니다. Gemini 또는 OpenAI API 키를 추가하세요.",
-  "image.error.unknown": "이미지 생성에 실패했습니다."
+  "image.error.unknown": "이미지 생성에 실패했습니다.",
+  "projmem.title": "프로젝트 메모리(ZERAIX.md)",
+  "projmem.desc": "어시스턴트가 코드를 탐색하기 전에 먼저 읽는 현재 작업 공간의 지도입니다. 모듈별 역할, 기술 스택, 주요 명령어, 기록한 규칙이 담깁니다. 자동 생성 부분은 스스로 갱신되고, 직접 작성한 내용은 유지됩니다.",
+  "projmem.workdir": "작업 공간: {dir}",
+  "projmem.none": "이 작업 공간에는 아직 프로젝트 메모리가 없습니다. 생성하면 저장소를 스캔합니다(짧은 요약 요청 외에 소스 파일은 전송되지 않습니다).",
+  "projmem.generate": "생성",
+  "projmem.statModules": "모듈 {count}개",
+  "projmem.statNotes": "노트 {count}개",
+  "projmem.statPinned": "고정 {count}개",
+  "projmem.statPending": "설명 대기 {count}개",
+  "projmem.save": "저장",
+  "projmem.saved": "저장됨",
+  "projmem.reload": "다시 불러오기",
+  "projmem.rebuild": "다시 생성",
+  "projmem.hint": "수정한 내용은 다시 생성해도 유지됩니다. lock이 표시된 섹션, pins에 등록된 모듈 줄, zeraix 마커 바깥의 모든 내용은 재생성되지 않습니다."
 }

@@ -26,6 +26,10 @@ import {
   listProcesses as engineListProcesses,
   stopProcess as engineStopProcess,
 } from "./sandbox/engine.mjs";
+import { ensureProjectMemory, summarise as summariseMemory } from "./projectMemory/index.mjs";
+import { rememberProject } from "./projectMemory/remember.mjs";
+import { noteFileRead, resetObservations } from "./projectMemory/observations.mjs";
+import { noteUserMessage, resetConversationCapture } from "./projectMemory/conversation.mjs";
 
 // Command execution is abstracted into a pluggable engine (native = run directly on the host
 // (legacy behavior); qemu = hardware-isolated VM, see the probing/selection in
@@ -129,6 +133,8 @@ let WORKDIR = path.join(os.homedir(), "zeraix-workspace");
 export function setWorkingDir(dir) {
   WORKDIR = path.resolve(dir);
   invalidateWalkCache(); // directory changed: the old file-list cache is now stale
+  resetObservations(); // reads observed for the previous workspace say nothing about this one
+  resetConversationCapture();
   getEngine().prewarm?.(WORKDIR);
   return WORKDIR;
 }
@@ -418,6 +424,61 @@ function diffLines(a, b) {
 }
 
 /**
+ * Diagnose a failed edit_file match by locating the line where the supplied text stops agreeing with
+ * the file.
+ *
+ * The dominant failure mode is a long block retyped from memory with a line or two wrong somewhere in
+ * the middle: the exact match fails, and the whitespace-collapse check fails too because the
+ * divergence is real text rather than spacing. Both leave the model with nothing to act on, so it
+ * re-guesses at a variation and fails identically — the loop the user keeps hitting.
+ *
+ * So anchor on the first non-blank supplied line, walk forward while lines keep agreeing (comparing
+ * trimmed, since indentation is the *other* common miss and is already reported separately), and name
+ * the first line that differs, both sides quoted with line numbers. That turns "not found" into a
+ * single targeted re-read.
+ *
+ * Returns "" when there is no anchor at all — the block genuinely isn't in this file, and the caller's
+ * generic message is already the right advice.
+ */
+function describeEditDivergence(text, oldStr) {
+  const fileLines = text.split("\n");
+  const oldLines = oldStr.split("\n");
+  const firstIdx = oldLines.findIndex((l) => l.trim());
+  if (firstIdx === -1) return "";
+  const anchor = oldLines[firstIdx].trim();
+
+  // Best anchor = the occurrence that keeps agreeing for the most lines. Ambiguous anchors (a common
+  // line like "}" or "try {") are why this picks the longest run instead of the first hit.
+  let best = null;
+  for (let i = 0; i < fileLines.length; i++) {
+    if (fileLines[i].trim() !== anchor) continue;
+    let n = 0;
+    while (
+      firstIdx + n < oldLines.length &&
+      i + n < fileLines.length &&
+      fileLines[i + n].trim() === oldLines[firstIdx + n].trim()
+    ) {
+      n++;
+    }
+    if (!best || n > best.matched) best = { start: i, matched: n };
+  }
+  if (!best) return "";
+
+  const oi = firstIdx + best.matched; // first supplied line that disagrees
+  const fi = best.start + best.matched; // the file line it was compared against
+  if (oi >= oldLines.length) return ""; // every supplied line agreed → a pure whitespace miss, reported by the caller's other branch
+
+  const clip = (s) => (s.length > 160 ? `${s.slice(0, 160)}…` : s);
+  const fileSide =
+    fi < fileLines.length ? JSON.stringify(clip(fileLines[fi].trim())) : "past the end of the file";
+  return (
+    ` Your first ${best.matched} line(s) DO match, starting at line ${best.start + 1} — the text diverges at` +
+    ` your line ${oi + 1}: you supplied ${JSON.stringify(clip(oldLines[oi].trim()))}, but line ${fi + 1}` +
+    ` of the file is ${fileSide}. Re-read that range and copy it verbatim rather than adjusting what you wrote.`
+  );
+}
+
+/**
  * Produce a unified diff (with @@ line-number headers and context), wrapped in a ```diff code block.
  * Returns an empty string if the content is identical; returns a short note for oversized files.
  */
@@ -684,159 +745,6 @@ function unwrapBingUrl(href) {
   }
 }
 
-// ── Project memory (init_command) ─────────────────────────────────────────────
-// init_command scans the working directory, identifies the repo type / tech stack / key config /
-// common scripts / README, produces a structured "project memory", and writes it to ZERAIX.md at the
-// working-directory root so later turns can read it directly, avoiding rescanning the repo.
-// Constraints: only reads config and text files, never binaries; skips heavy dirs; limits how much is scanned.
-const INIT_MEMORY_FILE = "ZERAIX.md"; // Filename the project memory is written to (at the WORKDIR root)
-// Additional build / cache / dependency directories skipped during scanning (on top of SKIP_DIRS; used
-// only for the init scan, and does not affect the traversal range of tools like search_*).
-const INIT_SKIP_DIRS = new Set([
-  ...SKIP_DIRS,
-  "build", "out", "coverage", ".turbo", ".cache", ".parcel-cache",
-  "target", "vendor", ".venv", "venv", "__pycache__", ".idea", ".vscode",
-]);
-const INIT_MAX_ENTRIES = 40; // Max entries listed per directory level (limits scan / feedback size)
-const INIT_README_CHARS = 1200; // Character cap kept for the README summary
-
-// In-memory cache for the init scan: key = WORKDIR, value = the generated markdown. Avoids rescanning within the same session.
-const initMemoryCache = new Map();
-
-/** Read and parse a JSON config file under WORKDIR; returns null if it's missing or fails to parse. */
-async function readJsonInWorkdir(relPath) {
-  try {
-    return JSON.parse(await fs.readFile(path.join(WORKDIR, relPath), "utf8"));
-  } catch {
-    return null;
-  }
-}
-
-/** Safely read a text file: returns null if it's over the cap or contains a NUL byte (likely binary) — never reads binaries. */
-async function readTextCapped(abs, cap = MAX_READ_BYTES) {
-  try {
-    const st = await fs.stat(abs);
-    if (!st.isFile() || st.size > cap) return null;
-    const buf = await fs.readFile(abs);
-    if (buf.includes(0)) return null; // Contains a NUL byte → treated as binary, skipped
-    return buf.toString("utf8");
-  } catch {
-    return null;
-  }
-}
-
-/** Find the README under WORKDIR (case- / extension-insensitive), returning { name, text } or null. */
-async function findReadme() {
-  let entries;
-  try {
-    entries = await fs.readdir(WORKDIR, { withFileTypes: true });
-  } catch {
-    return null;
-  }
-  const hit = entries.find(
-    (e) => e.isFile() && /^readme(\.(md|markdown|txt|rst))?$/i.test(e.name),
-  );
-  if (!hit) return null;
-  const text = await readTextCapped(path.join(WORKDIR, hit.name));
-  return text == null ? null : { name: hit.name, text };
-}
-
-/** Identify the repo type: whether it's a Git repository, and whether it's a monorepo (and how it's managed). */
-async function detectRepoType() {
-  const isGit = await existsInWorkdir(".git");
-  let monorepo = null;
-  if (await existsInWorkdir("pnpm-workspace.yaml")) monorepo = "pnpm workspaces";
-  else if (await existsInWorkdir("lerna.json")) monorepo = "Lerna";
-  else if (await existsInWorkdir("turbo.json")) monorepo = "Turborepo";
-  else {
-    const pkg = await readJsonInWorkdir("package.json");
-    if (pkg && pkg.workspaces) monorepo = "npm/yarn workspaces";
-  }
-  return { isGit, monorepo };
-}
-
-/** Infer the package manager by lock file; returns null if none is detected. */
-async function detectPackageManager() {
-  if (await existsInWorkdir("pnpm-lock.yaml")) return "pnpm";
-  if (await existsInWorkdir("yarn.lock")) return "yarn";
-  if (await existsInWorkdir("bun.lockb")) return "bun";
-  if (await existsInWorkdir("package-lock.json")) return "npm";
-  return null;
-}
-
-/** Infer the tech stack from config files and the dependency manifest, returning a deduped array of labels (prefers config, does not read source). */
-async function detectTechStack(pkg) {
-  const stack = new Set();
-  const deps = { ...(pkg?.dependencies || {}), ...(pkg?.devDependencies || {}) };
-  const has = (name) => Object.prototype.hasOwnProperty.call(deps, name);
-
-  if (pkg) stack.add("Node.js");
-  if (has("typescript") || (await existsInWorkdir("tsconfig.json"))) stack.add("TypeScript");
-  if (has("next")) stack.add("Next.js");
-  else if (has("react")) stack.add("React");
-  if (has("vue")) stack.add("Vue");
-  if (has("electron")) stack.add("Electron");
-  if (has("vite")) stack.add("Vite");
-  if (has("webpack")) stack.add("Webpack");
-  if (has("tailwindcss")) stack.add("Tailwind CSS");
-  if (has("express")) stack.add("Express");
-  if (has("@nestjs/core")) stack.add("NestJS");
-  if (has("jest")) stack.add("Jest");
-  if (has("vitest")) stack.add("Vitest");
-
-  if (await existsInWorkdir("Cargo.toml")) stack.add("Rust");
-  if (await existsInWorkdir("go.mod")) stack.add("Go");
-  if (
-    (await existsInWorkdir("pyproject.toml")) ||
-    (await existsInWorkdir("requirements.txt")) ||
-    (await existsInWorkdir("setup.py"))
-  )
-    stack.add("Python");
-  if ((await existsInWorkdir("pom.xml")) || (await existsInWorkdir("build.gradle"))) stack.add("Java");
-  if (await existsInWorkdir("Gemfile")) stack.add("Ruby");
-  if (await existsInWorkdir("composer.json")) stack.add("PHP");
-  if ((await existsInWorkdir("Dockerfile")) || (await existsInWorkdir("docker-compose.yml"))) stack.add("Docker");
-
-  return [...stack];
-}
-
-/** Produce the top-level (plus one level of subdirectories) directory-structure text, skipping heavy dirs and limiting the entry count. */
-async function buildDirTree() {
-  let top;
-  try {
-    top = await fs.readdir(WORKDIR, { withFileTypes: true });
-  } catch {
-    return "(unable to read working directory)";
-  }
-  const keep = (list) =>
-    list
-      .filter((e) => !INIT_SKIP_DIRS.has(e.name))
-      .sort(
-        (a, b) => Number(b.isDirectory()) - Number(a.isDirectory()) || a.name.localeCompare(b.name),
-      );
-
-  const lines = [];
-  for (const e of keep(top).slice(0, INIT_MAX_ENTRIES)) {
-    if (!e.isDirectory()) {
-      lines.push(`      ${e.name}`);
-      continue;
-    }
-    lines.push(`[dir] ${e.name}/`);
-    let children = [];
-    try {
-      children = await fs.readdir(path.join(WORKDIR, e.name), { withFileTypes: true });
-    } catch {
-      children = [];
-    }
-    const kids = keep(children);
-    for (const c of kids.slice(0, INIT_MAX_ENTRIES)) {
-      lines.push(`        ${c.isDirectory() ? `${c.name}/` : c.name}`);
-    }
-    if (kids.length > INIT_MAX_ENTRIES) lines.push(`        … (+${kids.length - INIT_MAX_ENTRIES})`);
-  }
-  return lines.join("\n") || "(empty directory)";
-}
-
 // ── Tool implementations ──────────────────────────────────────────────────────
 // Each implementation returns a "string" as the tool result text for the model; exceptions are caught uniformly by runTool.
 const handlers = {
@@ -871,143 +779,61 @@ const handlers = {
   },
 
   /**
-   * Initialize project memory: scan the working directory, identify the repo type / tech stack / key
-   * config / directory structure / common scripts / README, produce a structured "project memory",
-   * and write it to ZERAIX.md at the working-directory root so later turns can read it directly,
-   * avoiding rescanning the repo.
-   * By default, reuses a cache hit or an existing ZERAIX.md; pass refresh:true to force a rescan.
+   * Project memory: bring ZERAIX.md at the working-directory root up to date, and return it.
+   *
+   * Freshness is pulled, not pushed: every section of the document declares which files it is a
+   * function of, and only sections whose declared inputs actually moved get rebuilt (see
+   * ./projectMemory/). An unchanged project costs a handful of stat/read calls and no write at
+   * all. Hand-authored sections are seeded once and never machine-written after that.
    */
   async init_command({ refresh } = {}) {
-    // 1) In-memory cache hit: repeated calls within the same session reuse it directly (unless forced to refresh).
-    if (!refresh && initMemoryCache.has(WORKDIR)) {
-      return `Project memory ready (cache hit · ${INIT_MEMORY_FILE}).\n\n${initMemoryCache.get(WORKDIR)}`;
-    }
-    // ZERAIX.md already exists and no refresh requested: read it back and reuse, avoiding a rescan.
-    if (!refresh) {
-      const existing = await readTextCapped(path.join(WORKDIR, INIT_MEMORY_FILE));
-      if (existing) {
-        initMemoryCache.set(WORKDIR, existing);
-        return (
-          `Project memory already exists (${INIT_MEMORY_FILE}); reusing it. ` +
-          `Call init_command({ refresh: true }) to rescan.\n\n${existing}`
-        );
-      }
-    }
+    const result = await ensureProjectMemory({
+      workdir: WORKDIR,
+      mode: refresh ? "full" : "auto",
+      llm: { available: Boolean(LLM_CONFIG.endpoint && LLM_CONFIG.model), chat: chatComplete },
+      detectCheckSteps,
+    });
+    return `${summariseMemory(result)}\n\n${result.markdown}`;
+  },
 
-    // 2) Parse config files (prefer config, avoid reading source where possible).
-    const pkg = await readJsonInWorkdir("package.json");
-    const { isGit, monorepo } = await detectRepoType();
-    const pm = await detectPackageManager();
-    const stack = await detectTechStack(pkg);
-    const tree = await buildDirTree();
-    const checkSteps = await detectCheckSteps();
-    const readme = await findReadme();
+  /**
+   * Offer a user message to conversational capture.
+   *
+   * Deliberately absent from TOOLS: the chat page calls this over IPC after the user sends, not the
+   * model. Returns at once — the gate and any extraction run in the background, so a slow or failing
+   * capture can never delay a message.
+   */
+  async note_conversation({ text } = {}) {
+    noteUserMessage({
+      workdir: WORKDIR,
+      text,
+      llm: { available: Boolean(LLM_CONFIG.endpoint && LLM_CONFIG.model), chat: chatComplete },
+    });
+    return "ok";
+  },
 
-    const projectName = pkg?.name || path.basename(WORKDIR);
-    const description = pkg?.description || "";
-
-    // 3) Common scripts (from package.json scripts).
-    const scripts = pkg?.scripts || {};
-    const runPrefix = pm === "npm" || !pm ? "npm run" : `${pm} run`;
-    const scriptLines = Object.entries(scripts)
-      .slice(0, 30)
-      .map(([k, v]) => `- \`${runPrefix} ${k}\` — ${String(v).slice(0, 120)}`);
-
-    // 4) List of key config files (listed only if present).
-    const configCandidates = [
-      "package.json", "tsconfig.json", "next.config.js", "next.config.mjs", "next.config.ts",
-      "vite.config.ts", "vite.config.js", "electron-builder.yml", "pnpm-workspace.yaml",
-      "turbo.json", "eslint.config.mjs", ".eslintrc.json", "tailwind.config.ts", "tailwind.config.js",
-      "postcss.config.mjs", "Cargo.toml", "go.mod", "pyproject.toml", "requirements.txt",
-      "Dockerfile", "docker-compose.yml", ".env.example",
-    ];
-    const presentConfigs = [];
-    for (const c of configCandidates) {
-      if (await existsInWorkdir(c)) presentConfigs.push(c);
-    }
-
-    // 5) Optional enrichment: when an LLM is configured, use it to write a more natural project overview (best-effort, falls back on failure).
-    let overview = description || (readme ? readme.text.slice(0, 400).trim() : "");
-    if (LLM_CONFIG.endpoint && LLM_CONFIG.model) {
-      try {
-        const facts = [
-          `Project name: ${projectName}`,
-          description && `package.json description: ${description}`,
-          stack.length && `Tech stack: ${stack.join(", ")}`,
-          readme && `README (excerpt):\n${readme.text.slice(0, REFINE_MAX_CHARS)}`,
-        ]
-          .filter(Boolean)
-          .join("\n\n");
-        overview = await chatComplete(
-          [
-            {
-              role: "system",
-              content:
-                "You are a codebase-analysis assistant. Based on the given project information, summarize in 2-4 " +
-                "sentences what this project does and its core technologies and purpose. Output only the summary " +
-                "itself, in English, with no heading, prefix, or quotes.",
-            },
-            { role: "user", content: facts },
-          ],
-          { temperature: 0.2, maxTokens: 300 },
-        );
-      } catch {
-        // LLM unavailable / request failed: silently fall back to description or README excerpt.
-      }
-    }
-
-    // 6) Assemble the structured markdown (null lines are filtered out, "" lines are kept for spacing).
-    const now = new Date().toISOString();
-    const md = [
-      `# Project Memory · ${projectName}`,
-      "",
-      `> Auto-generated by \`init_command\` at ${now}.`,
-      "> Purpose: later turns can read this file to quickly understand the project instead of rescanning the repo.",
-      "> Refresh: call `init_command({ refresh: true })` to rescan.",
-      "",
-      "## Overview",
-      overview || "(no description)",
-      "",
-      "## Basics",
-      `- Working directory: \`${WORKDIR}\``,
-      `- Repository type: ${isGit ? "Git repository" : "non-Git directory"}${monorepo ? ` · Monorepo (${monorepo})` : ""}`,
-      pm ? `- Package manager: ${pm}` : null,
-      pkg?.version ? `- Version: ${pkg.version}` : null,
-      "",
-      "## Tech Stack",
-      stack.length ? stack.map((s) => `- ${s}`).join("\n") : "- (not detected)",
-      "",
-      "## Directory Structure (top level)",
-      "```",
-      tree,
-      "```",
-      "",
-      "## Key Config Files",
-      presentConfigs.length ? presentConfigs.map((c) => `- ${c}`).join("\n") : "- (none)",
-      "",
-      "## Common Scripts / Commands",
-      scriptLines.length ? scriptLines.join("\n") : "- (no scripts defined in package.json)",
-      checkSteps.length
-        ? `\n**Checks (build / test):**\n${checkSteps.map((s) => `- ${s.label}: \`${s.cmd}\``).join("\n")}`
-        : "",
-      "",
-      readme
-        ? `## README Summary (${readme.name})\n\n${readme.text.slice(0, INIT_README_CHARS).trim()}${
-            readme.text.length > INIT_README_CHARS ? `\n\n… (truncated; see ${readme.name} for the full content)` : ""
-          }`
-        : "",
-    ]
-      .filter((l) => l !== null)
-      .join("\n");
-
-    // 7) Persist to ZERAIX.md at the working-directory root, and write the in-memory cache.
-    await fs.writeFile(path.join(WORKDIR, INIT_MEMORY_FILE), md, "utf8");
-    initMemoryCache.set(WORKDIR, md);
-
-    return (
-      `Generated project memory and wrote it to ${INIT_MEMORY_FILE} (working-directory root). ` +
-      `Later turns can read this file directly instead of rescanning.\n\n${md}`
-    );
+  /**
+   * Write back into project memory what this session learned.
+   *
+   * The generated sections can only ever describe what is derivable from the repository's shape.
+   * Anything the model works out by actually reading code — or anything the user explains — dies
+   * with the turn unless it is recorded here.
+   */
+  async remember_project({ note, module: mod } = {}) {
+    const result = await rememberProject({
+      workdir: WORKDIR,
+      note,
+      module: mod,
+      ensure: () =>
+        ensureProjectMemory({
+          workdir: WORKDIR,
+          mode: "auto",
+          llm: { available: Boolean(LLM_CONFIG.endpoint && LLM_CONFIG.model), chat: chatComplete },
+          detectCheckSteps,
+        }),
+    });
+    if (!result.ok) throw new Error(result.message);
+    return result.message;
   },
 
   // Returns a line range rather than always the whole file: a targeted read keeps the model's context
@@ -1121,8 +947,9 @@ const handlers = {
         );
       }
       throw new Error(
-        `old_string not found in ${p} — that text is not in the file (the file has ${text.split("\n").length} lines). ` +
-          `Do not guess at another variation: read_file the relevant part first, then copy the exact text to replace.`,
+        `old_string not found in ${p} — that text is not in the file (the file has ${text.split("\n").length} lines).` +
+          describeEditDivergence(text, oldStr) +
+          ` Do not guess at another variation: read_file the relevant part first, then copy the exact text to replace.`,
       );
     }
     if (!replace_all && count > 1) {
@@ -1517,6 +1344,7 @@ const FILE_LIST_MUTATORS = new Set([
   "create_directory",
   "run_command",
   "init_command",
+  "remember_project",
 ]);
 
 export async function runTool(name, args = {}) {
@@ -1526,6 +1354,17 @@ export async function runTool(name, args = {}) {
     await ensureWorkdir();
     const content = await handler(args ?? {});
     if (FILE_LIST_MUTATORS.has(name)) invalidateWalkCache(); // the file list may have changed: the next search_* re-walks
+    // Observe reads so project memory can learn from what was actually opened. This is the right
+    // layer for it: sub-agent tool calls come through here too, and sub-agents do most of the
+    // exploring. Fire-and-forget — it can neither delay nor fail this call.
+    if (name === "read_file") {
+      noteFileRead({
+        workdir: WORKDIR,
+        relPath: args?.path,
+        text: content,
+        llm: { available: Boolean(LLM_CONFIG.endpoint && LLM_CONFIG.model), chat: chatComplete },
+      });
+    }
     return { ok: true, content: String(content) };
   } catch (e) {
     return { ok: false, content: `Error in ${name}: ${e?.message ?? String(e)}` };
@@ -1603,9 +1442,14 @@ const TOOLS = [
        context: str("Optional surrounding conversation/context to clarify intent; not answered, only used to understand the question.") },
      ["question"]),
   fn("init_command",
-     "Initialize project memory: scan the working directory to identify repo type (Git/monorepo), tech stack, key config files, directory structure, scripts and README, then generate a structured project memory and persist it to ZERAIX.md at the working-directory root — so later turns can read that file instead of rescanning the repo. Use this when the user asks to initialize / analyze / understand the project, explain the codebase, or 'what's in this folder'. Reuses an existing ZERAIX.md (or in-memory cache) on later calls; pass refresh:true to force a fresh rescan. Only reads config/text files (never binaries) and skips node_modules/.git/dist/build/coverage/.next etc.",
-     { refresh: bool("Force a fresh rescan even if ZERAIX.md / cache already exists; defaults to false.") },
+     "Initialize or refresh project memory: bring ZERAIX.md at the working-directory root up to date and return it — a structured map of the project (repo type, tech stack, key config files, directory structure, scripts, README) that later turns read instead of rescanning the repo. Use this when the user asks to initialize / analyze / understand the project, explain the codebase, or 'what's in this folder'. Cheap to call repeatedly: it only rebuilds the sections whose underlying files actually changed, and writes nothing when the project is unchanged, so call it at the start of a task rather than assuming an existing ZERAIX.md is current. Sections a human has written or frozen are never overwritten. Pass refresh:true to force every generated section to be rebuilt. Only reads config/text files (never binaries) and skips node_modules/.git/dist/build/coverage/.next etc.",
+     { refresh: bool("Rebuild every generated section even if its inputs are unchanged; defaults to false, which rebuilds only what went stale.") },
      []),
+  fn("remember_project",
+     "Record something you learned about THIS project into its long-term memory (ZERAIX.md), so future sessions start knowing it instead of rediscovering it. Call this whenever you worked something out that the project map does not already state — especially right after reading code or running a sub-agent to answer a question about how part of the codebase works, and whenever the user explains a convention, constraint or gotcha ('we use npm here, not pnpm', 'never touch fs from the renderer'). Two uses: pass `module` plus a one-sentence `note` to replace that module's line in the Module Map with a description based on what you actually read (this pins the line so it is never regenerated); or pass `note` alone to append a durable fact to the project's Invariants & Gotchas section. Keep each note to one specific, self-contained sentence, and record only things that will still be true next week — not what you are doing right now.",
+     { note: str("One clear sentence. As a module description: what that directory is responsible for and its entry point. As a standalone note: an invariant, convention, constraint or gotcha worth knowing before touching this project."),
+       module: str("Optional module path exactly as it appears in the Module Map, e.g. 'electron' or 'src/lib'. Omit to append a general note instead.") },
+     ["note"]),
   fn("web_search",
      "Search the web and get ranked results (title, URL, snippet) back as text, directly — WITHOUT opening the visible browser panel. This is your built-in, fastest way to look things up online: current events, facts that may have changed since training, documentation, library/API usage, exact error messages, product/price info, etc. Prefer web_search over openBrowser for information lookups. Typical flow: web_search to find sources → fetch_url on the most relevant result to read it → answer and cite the URL. Do NOT answer from memory when the user asks about anything current, niche, or verifiable; search first. Only use openBrowser instead when the user needs to visually SEE a page, or the page requires interaction / login / JavaScript.",
      { query: str("The search query. Prefer concise, keyword-style queries; for precise lookups include distinctive terms (exact error text, proper names, version numbers). Use the user's language unless an English query would find better sources."),

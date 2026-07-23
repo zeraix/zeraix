@@ -18,7 +18,7 @@ import { DiffView, extractDiff } from "./DiffView";
 import { Markdown } from "./Markdown";
 import { formatBytes, abbreviateNumber, formatDuration } from "./format";
 import { useT } from "@/lib/i18n";
-import type { ChoiceMsg, DisplayMsg, Todo } from "./types";
+import type { ChoiceMsg, DisplayMsg, SubAgentStep, Todo } from "./types";
 
 /** A single tool-call message (the tool branch extracted from the DisplayMsg union). */
 export type ToolMsg = Extract<DisplayMsg, { kind: "tool" }>;
@@ -357,11 +357,109 @@ function ChoiceCard({
 /** Display dispatch for a single tool call: file-type tools use the "path + changes" card, others use a collapsible bubble.
  *  Extracted so the same rendering can be reused in the ToolGroup timeline. */
 function ToolEntry({ m }: { m: ToolMsg }) {
+  // A sub-agent delegation renders as its own card so its inner operations are visible; a plain bubble
+  // would show only the conclusion and hide everything the sub-agent actually did.
+  if (m.steps?.length) return <SubAgentCard m={m} />;
   const isFileChange = extractDiff(m.result).diff !== null;
   return isFileChange ? (
     <FileChangeCard name={m.name} args={m.args} ok={m.ok} result={m.result} />
   ) : (
     <ToolCallBubble name={m.name} args={m.args} ok={m.ok} result={m.result} />
+  );
+}
+
+/** One step inside a sub-agent's loop, rendered with the same two shapes as a top-level tool call
+ *  (file-change card when the result carries a diff, collapsible bubble otherwise). */
+function SubAgentStepEntry({ s }: { s: SubAgentStep }) {
+  return extractDiff(s.result).diff !== null ? (
+    <FileChangeCard name={s.name} args={s.args} ok={s.ok} result={s.result} />
+  ) : (
+    <ToolCallBubble name={s.name} args={s.args} ok={s.ok} result={s.result} />
+  );
+}
+
+/**
+ * Sub-agent delegation card: the task handed off, the conclusion returned, and — the point of this card —
+ * every tool call the sub-agent made along the way, as a nested timeline.
+ *
+ * Nested rather than flat: the whole delegation is persisted as a single tool message (see
+ * StoredMessage.steps), so sibling bubbles would exist while running and vanish on reload. Collapsed by
+ * default, because a delegation's steps are detail the user opens when they want it — but they are there,
+ * rather than the delegation being an opaque wait behind a status line.
+ */
+function SubAgentCard({ m }: { m: ToolMsg }) {
+  const t = useT();
+  const [open, setOpen] = useState(false);
+  const steps = m.steps ?? [];
+  const failed = steps.filter((s) => !s.ok).length;
+  const task =
+    m.args && typeof m.args === "object"
+      ? String((m.args as Record<string, unknown>).task ?? "")
+      : "";
+  const subtitle =
+    failed > 0
+      ? t("chat.stepsFailed", { n: steps.length, failed })
+      : t("chat.stepsAllDone", { n: steps.length });
+
+  return (
+    <div className="overflow-hidden rounded-lg border border-line bg-surface text-[11px]">
+      <button
+        type="button"
+        onClick={() => setOpen((o) => !o)}
+        className="flex w-full items-center gap-2 px-2.5 py-1.5 text-left transition hover:bg-surface-hover/50"
+        aria-expanded={open}
+      >
+        <Sparkles className="h-3.5 w-3.5 shrink-0 text-ink-subtle" />
+        <span className="shrink-0 font-mono font-semibold text-ink">{m.name}</span>
+        <span className="min-w-0 flex-1 truncate text-ink-subtle">· {subtitle}</span>
+        {failed > 0 && (
+          <span className="shrink-0 rounded-full bg-destructive/10 px-1.5 py-px text-[10px] font-medium tabular-nums text-destructive">
+            {t("chat.failedBadge", { failed })}
+          </span>
+        )}
+        <ChevronDown
+          className={`h-3.5 w-3.5 shrink-0 text-ink-subtle transition-transform duration-200 ${
+            open ? "rotate-180" : ""
+          }`}
+        />
+      </button>
+
+      {open && (
+        <div className="space-y-2 border-t border-line bg-surface-muted/40 px-3 py-2">
+          {task && (
+            <div>
+              <div className="mb-0.5 font-semibold text-ink-subtle">{t("chat.subagentTask")}</div>
+              <p className="whitespace-pre-wrap break-words text-ink-muted">{task}</p>
+            </div>
+          )}
+          <div>
+            <div className="mb-1 font-semibold text-ink-subtle">{t("chat.executing")}</div>
+            {/* Same vertical timeline as ToolSubGroup, so a sub-agent's steps read like the main agent's. */}
+            <div className="space-y-2.5">
+              {steps.map((s, i) => (
+                <div key={i} className="relative pl-6">
+                  {i !== steps.length - 1 && (
+                    <span className="absolute bottom-0 left-[6px] top-4 w-px bg-line" />
+                  )}
+                  <span
+                    className={`absolute left-0 top-[7px] h-3 w-3 rounded-full border-2 border-surface ring-1 ${
+                      s.ok ? "bg-emerald-500 ring-emerald-500/30" : "bg-destructive ring-destructive/30"
+                    }`}
+                  />
+                  <SubAgentStepEntry s={s} />
+                </div>
+              ))}
+            </div>
+          </div>
+          {m.result && (
+            <div>
+              <div className="mb-0.5 font-semibold text-ink-subtle">{t("chat.result")}</div>
+              <p className="whitespace-pre-wrap break-words text-ink-muted">{m.result}</p>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -793,7 +891,9 @@ export const MessageItem = memo(function MessageItem({
     return (
       <div className="flex justify-center">
         <div className="w-full max-w-[92%]">
-          {isFileChange ? (
+          {m.steps?.length ? (
+            <SubAgentCard m={m} />
+          ) : isFileChange ? (
             <FileChangeCard name={m.name} args={m.args} ok={m.ok} result={m.result} />
           ) : (
             <ToolCallBubble name={m.name} args={m.args} ok={m.ok} result={m.result} />

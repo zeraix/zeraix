@@ -44,7 +44,7 @@ import { isLocalEndpoint, localLlm, LOCAL_PROVIDER_ID } from "@/lib/ai/localMode
 import { setSandboxMode, onSandboxStatus, getSandboxStatus, getSandboxVmInfo, sandboxEnvHint, isSandboxEngine, type SandboxStatus } from "@/lib/ai/sandbox";
 import { useT } from "@/lib/i18n";
 import { toast } from "sonner";
-import { SUBAGENTS, subAgentTool } from "@/lib/ai/subagents";
+import { SUBAGENTS, SUBAGENT_TOOL_DISCIPLINE, subAgentTool } from "@/lib/ai/subagents";
 import { SkillSelectPanel } from "./SkillSelectPanel";
 import BrowserPanel from "./BrowserPanel";
 import { getStorage } from "@zzcpt/zztool";
@@ -90,6 +90,7 @@ import {
   getSelectedModel,
   setSelectedModelId,
   resolveContextWindow,
+  markVisionUnsupported,
   PROVIDERS,
   OFFICIAL_PROVIDER_ID,
   MODEL_LIST_CHANGE_EVENT,
@@ -102,6 +103,7 @@ import {
   FEEDBACK_DOWN_NUDGE,
   FEEDBACK_UP_NUDGE,
   FINALIZE_NUDGE,
+  RECORD_MEMORY_NUDGE,
   FORCE_REVIEW_NUDGE,
   MUTATING_FILE_TOOLS,
   PARALLEL_SAFE_TOOLS,
@@ -123,6 +125,7 @@ import type {
   ChatResponse,
   ContentPart,
   DisplayMsg,
+  SubAgentStep,
   Todo,
   TodoStatus,
 } from "./types";
@@ -382,6 +385,11 @@ function ChatAgent() {
   // the persist step needs the image URL to store it for display rebuild. generateImageAction sets this right before
   // returning; the persist step consumes it. Safe because image_generation runs serially (its own tool group).
   const lastImageArtifactRef = useRef<{ image: string; servedBy?: string } | null>(null);
+  // Same side-channel shape for run_subagent: the tool returns only the sub-agent's conclusion text, but the
+  // persist step needs its inner steps so the reopened conversation shows what it actually did. Points at the
+  // live array (mutated in place as steps land), so it is current by the time the persist step reads it.
+  // Safe for the same reason as above: run_subagent is not parallel-safe, so it runs in its own serial group.
+  const lastSubagentStepsRef = useRef<SubAgentStep[] | null>(null);
   const [status, setStatus] = useState(""); // While generating, show the user "what it is doing"
   const [error, setError] = useState<string | null>(null);
   const [toolsReady, setToolsReady] = useState(false);
@@ -1119,7 +1127,27 @@ function ChatAgent() {
           // The rating (thumbs up / down) is restored from the archive into the in-memory wire buffer; before sending, injectRatingFeedback strips the field and injects the feedback.
           ...(m.rating ? { rating: m.rating } : {}),
         };
-      return { role: "user", content: m.content };
+      // Rebuild the multimodal user turn. The archive splits a user message into `content` (the text the
+      // bubble renders) and `images` (the URLs), so replaying `content` alone silently dropped every image
+      // the user had sent: the transcript still showed the thumbnail — rebuilt from `images` just below —
+      // while the model saw a text-only history and could no longer answer questions about the picture.
+      // Reassemble the OpenAI-compatible shape it was sent as: one text part (when there is text) followed
+      // by one image_url part per image.
+      //   { role:"user", content:[ {type:"text",text}, {type:"image_url",image_url:{url}}, … ] }
+      // `wireText` is preferred over `content` when present: it is the version that carried inlined
+      // text-file contents and saved attachment paths (see the persist site), which `content` omits so the
+      // user's own bubble stays clean.
+      const userText = m.wireText ?? m.content;
+      if (m.images?.length) {
+        return {
+          role: "user",
+          content: [
+            ...(userText ? [{ type: "text" as const, text: userText }] : []),
+            ...m.images.map((url) => ({ type: "image_url" as const, image_url: { url } })),
+          ],
+        };
+      }
+      return { role: "user", content: userText };
     });
     // Rebuild the display: tool result messages are restored as tool bubbles (arguments taken from the corresponding assistant tool_call); an assistant message that only issues
     // tool calls and has no body is skipped in the display layer (its trace is reflected by the tool bubbles).
@@ -1151,6 +1179,8 @@ function ChatAgent() {
           result: m.content,
           // Restore a generated image so it survives a conversation switch (persisted display-only, see StoredMessage.image).
           ...(m.image ? { image: m.image, servedBy: m.servedBy } : {}),
+          // Same for a sub-agent's inner steps, so the reopened view matches what was shown live.
+          ...(m.steps?.length ? { steps: m.steps } : {}),
         });
       } else if (m.role === "assistant") {
         // The deep-thinking block is restored before this round's content / tool trace (consistent with the real-time order).
@@ -1223,6 +1253,19 @@ function ChatAgent() {
       return next;
     });
   };
+  /** Replace one already-pushed display entry, matched by object identity, keeping its position.
+   *  Used to grow a bubble in place while it is still running (a sub-agent appending its steps), which
+   *  push/pop cannot express. Mirrors pushDisplay's synchronous-mirror-then-setState discipline for the
+   *  same reason: the send loop reads displayRef synchronously to rebuild from a baseline. */
+  const replaceDisplay = (target: DisplayMsg, next: DisplayMsg) => {
+    const swap = (d: DisplayMsg[]) => d.map((x) => (x === target ? next : x));
+    displayRef.current = swap(displayRef.current);
+    setDisplay((d) => {
+      const n = swap(d);
+      displayRef.current = n;
+      return n;
+    });
+  };
   // Fallback: after any other setDisplay path (choice-card updates, etc.) renders, sync the mirror, to avoid the mirror lagging behind the state.
   useEffect(() => {
     displayRef.current = display;
@@ -1279,8 +1322,11 @@ function ChatAgent() {
   /**
    * A single request (non-streaming, OpenAI-compatible).
    * Under Electron it is forwarded via the main-process proxy (bypassing CORS); in the browser it falls back to a direct fetch (which may be blocked by CORS).
+   *
+   * Wrapped by requestChat below, which owns the retry-without-images fallback — this function just sends
+   * what it is given.
    */
-  const requestChat = async (
+  const sendChatOnce = async (
     messages: ApiMsg[],
     tools?: unknown[],
     signal?: AbortSignal,
@@ -1470,6 +1516,43 @@ function ChatAgent() {
     return data;
   };
 
+  /**
+   * One request, with a fail-safe for models that cannot accept images.
+   *
+   * Image capability is no longer predicted before sending (see modelAcceptsImages): a wrong prediction
+   * used to delete the user's image and tell the model "1 image(s) omitted", which reads to the user as
+   * "the AI can't see my picture" with nothing indicating the app removed it. Images now always go out,
+   * and this is what makes that safe — if a request carrying images fails, it is retried once with the
+   * images stripped. Succeeding on the retry is the proof the images were the problem, so the model is
+   * marked visionUnsupported and later turns strip up front, costing one extra request once per model.
+   *
+   * Retrying on ANY failure rather than pattern-matching the error text is deliberate: providers word
+   * this rejection every possible way ("unknown variant `image_url`", "invalid_image_url", "does not
+   * support image input", a bare 400), and a signature that misses one puts us back to a hard failure on
+   * a picture the user can see on screen. The cost of guessing wrong here is one request that was
+   * already failing.
+   */
+  const requestChat = async (
+    messages: ApiMsg[],
+    tools?: unknown[],
+    signal?: AbortSignal,
+    onDelta?: (d: { content: string; reasoning: string }) => void,
+  ): Promise<ChatResponse> => {
+    const hasImages = messages.some(
+      (m) => Array.isArray(m.content) && m.content.some((p) => p.type === "image_url"),
+    );
+    try {
+      return await sendChatOnce(messages, tools, signal, onDelta);
+    } catch (e) {
+      // No images to blame, or the user cancelled: this failure is genuine, surface it unchanged.
+      if (!hasImages || signal?.aborted) throw e;
+      const stripped = stripAllImagesForText(messages);
+      const data = await sendChatOnce(stripped, tools, signal, onDelta); // throws the retry's own error if it also fails
+      if (activeModel?.id) markVisionUnsupported(activeModel.id);
+      return data;
+    }
+  };
+
   // ── Context compaction ────────────────────────────────────────────────────────────────
   /** Render a span of history messages into a plain-text transcript for the "summarizer model" (tool results truncated, to control the summary input size). */
   const renderTranscript = (msgs: ApiMsg[]): string => {
@@ -1651,19 +1734,36 @@ function ChatAgent() {
     ctx.status(t("chat.subagentProcessing", { agent: agentId }));
 
     // Show a "delegate" bubble, so the user can see what task the main model handed to which subagent.
-    ctx.push({
+    // Its `steps` grow in place as the subagent works, so the delegation is not an opaque wait.
+    const steps: SubAgentStep[] = [];
+    // Typed as the tool variant, not the DisplayMsg union: `...bubble` below must keep the tool shape.
+    let bubble: Extract<DisplayMsg, { kind: "tool" }> = {
       kind: "tool",
       name: `run_subagent → ${agentId}`,
       args: { agent: agentId, task },
       ok: true,
       result: task,
-    });
+      steps,
+    };
+    ctx.push(bubble);
+    lastSubagentStepsRef.current = steps; // consumed by the persist step once this delegation returns
 
-    // The subagent's internal steps show only the single "delegate" bubble above: its internal tool calls no longer each surface a bubble.
-    // Reason: the whole delegation is persisted as just one run_subagent tool message (the subagent conversation is not persisted), so if the N internal
-    // calls were spread into N bubbles in real time, they would collapse into 1 step after reopening / switching back to the conversation, making the real-time view inconsistent with the reloaded view.
-    // So the internal loop uses a ctx whose push is a no-op — only showing "ran the subagent", while the main AI's own steps display as usual.
-    const silentCtx: RunCtx = { ...ctx, push: () => {} };
+    // The subagent's internal tool calls are nested INTO the delegate bubble above rather than pushed as
+    // sibling bubbles. Siblings were the obvious approach and are wrong: the whole delegation persists as
+    // a single run_subagent tool message, so N sibling bubbles seen live would collapse to one on reload.
+    // Nesting keeps live and reloaded identical, because `steps` is persisted with that one message
+    // (StoredMessage.steps) — and the user still sees every operation.
+    const collectCtx: RunCtx = {
+      ...ctx,
+      push: (m) => {
+        if (m.kind !== "tool") return; // the subagent has no path to choice cards / usage rows
+        steps.push({ name: m.name, args: m.args, ok: m.ok, result: m.result });
+        // New object identity so memoized message components re-render; the array is copied for the same reason.
+        const next = { ...bubble, steps: [...steps] };
+        replaceDisplay(bubble, next);
+        bubble = next;
+      },
+    };
 
     // Subagent tool set: reuse the same tool set, filtered by def.tools (the subagent does not include run_subagent, so there is no nesting).
     let subTools: unknown[] | undefined;
@@ -1673,20 +1773,36 @@ function ChatAgent() {
     }
 
     // The subagent and the main agent share the same execution engine, and system likewise injects the command-execution environment description.
-    const sys = [workdir ? `${def.systemPrompt}\n${workdirPrompt(workdir)}` : def.systemPrompt, sandboxEnvHint(sandboxStatusRef.current)].join("\n");
+    // SUBAGENT_TOOL_DISCIPLINE is what the main agent gets from base.system.md; a sub-agent runs on its own
+    // prompt alone, so without this it never learns that batched read-only calls run concurrently here.
+    const sys = [
+      workdir ? `${def.systemPrompt}\n${workdirPrompt(workdir)}` : def.systemPrompt,
+      SUBAGENT_TOOL_DISCIPLINE,
+      sandboxEnvHint(sandboxStatusRef.current),
+    ].join("\n");
     let convo: ApiMsg[] = [
       { role: "system", content: sys },
       { role: "user", content: task },
     ];
 
+    // Settle the bubble on the conclusion the sub-agent reported. Live and reloaded views must agree, and the
+    // reload path rebuilds `result` from the persisted tool content — which is the conclusion, not the task.
+    // Without this the bubble showed the task while running and the conclusion after reopening.
+    const finish = (conclusion: string): string => {
+      const next = { ...bubble, result: conclusion, steps: [...steps] };
+      replaceDisplay(bubble, next);
+      bubble = next;
+      return conclusion;
+    };
+
     // No upper limit on subagent rounds: loop until the subagent produces final text, or the user interrupts (using this run's own signal).
     while (true) {
-      if (ctx.signal.aborted) return "(canceled)";
+      if (ctx.signal.aborted) return finish("(canceled)");
       ctx.status(t("chat.subagentThinking", { agent: agentId }));
       const data = await requestChat(convo, subTools, ctx.signal);
-      if (ctx.signal.aborted) return "(canceled)";
+      if (ctx.signal.aborted) return finish("(canceled)");
       const msg = data.choices?.[0]?.message;
-      if (!msg) return "(no response from subagent)";
+      if (!msg) return finish("(no response from subagent)");
       convo = [...convo, msg];
 
       if (msg.tool_calls && msg.tool_calls.length > 0) {
@@ -1697,7 +1813,7 @@ function ChatAgent() {
           } catch {
             /* Invalid JSON arguments, call with an empty object */
           }
-          const content = await execToolCall(silentCtx, tc.function.name, a, `${agentId}→${tc.function.name}`);
+          const content = await execToolCall(collectCtx, tc.function.name, a, `${agentId}→${tc.function.name}`);
           return { tc, content };
         };
 
@@ -1717,7 +1833,7 @@ function ChatAgent() {
         }
 
         for (const group of groups) {
-          if (ctx.signal.aborted) return "(canceled)";
+          if (ctx.signal.aborted) return finish("(canceled)");
           const settled =
             group.length > 1 ? await Promise.all(group.map(runOne)) : [await runOne(group[0])];
           for (const { tc, content } of settled) {
@@ -1730,7 +1846,7 @@ function ChatAgent() {
         }
         continue;
       }
-      return msg.content || "(no output from subagent)";
+      return finish(msg.content || "(no output from subagent)");
     }
   };
 
@@ -1784,6 +1900,33 @@ function ChatAgent() {
     return `${result}.`;
   };
 
+  /**
+   * Write a generated artifact into the working directory and return its absolute path (null when
+   * tools are unavailable or the write fails — the caller treats the path as a bonus, never a
+   * precondition). fetch() handles both artifact shapes uniformly: a data: URL decodes locally, a
+   * vendor URL downloads once, which also rescues the pixels before the vendor link expires.
+   */
+  const saveGeneratedArtifact = async (src: string, mime: string, prompt: string): Promise<string | null> => {
+    if (!toolsReady) return null;
+    try {
+      const bytes = await (await fetch(src)).arrayBuffer();
+      // Name from the prompt so a directory of generated images stays readable; saveAttachment
+      // sanitizes the name and de-duplicates collisions (-1/-2…), so no timestamp is needed.
+      const slug =
+        prompt
+          .toLowerCase()
+          .replace(/[^a-z0-9]+/g, "-")
+          .replace(/^-+|-+$/g, "")
+          .split("-")
+          .slice(0, 6)
+          .join("-") || "image";
+      const ext = /png|jpeg|jpg|webp|gif/.exec(mime)?.[0].replace("jpeg", "jpg") ?? "png";
+      return await saveAttachment({ name: `generated-${slug}.${ext}`, bytes });
+    } catch {
+      return null; // The user already has the image on screen; a missing file is a degraded path, not a failure.
+    }
+  };
+
   // image_generation: text-to-image through the user's own provider key. The engine is derived from
   // the configured keys (their chat vendor first, then any keyed vendor) — never picked by the model
   // and never shown in the model picker. See docs/generation-capabilities-design.md.
@@ -1814,7 +1957,20 @@ function ChatAgent() {
     });
     // Stash the artifact so the persist step can store it (display-only) and the image survives a conversation switch.
     lastImageArtifactRef.current = { image: res.artifact.src, servedBy: res.artifact.servedBy };
-    return `Generated the image with ${res.artifact.servedBy}. It is already displayed to the user — do not repeat the URL or embed it in markdown.`;
+
+    // Also drop the pixels into the working directory. The artifact reaches the renderer as a data: or
+    // vendor URL, neither of which exists for the sandbox — so a model asked to "generate frames, then
+    // stitch them with ffmpeg" would find nothing on disk and fall back to drawing the frames in code.
+    // A real path is what makes a generated image composable with every other tool. Best-effort: the
+    // image is already shown to the user, so a failed write must not turn into a failed generation.
+    const savedPath = await saveGeneratedArtifact(res.artifact.src, res.artifact.mime, prompt);
+
+    return (
+      `Generated the image with ${res.artifact.servedBy}. It is already displayed to the user — do not repeat the URL or embed it in markdown.` +
+      (savedPath
+        ? ` The file is saved in the working directory at ${savedPath} — use that path if you need to process it further (edit, convert, compose into a video); do not redraw it in code.`
+        : "")
+    );
   };
 
   // save_memory: write a memory as a standalone Markdown file (retained across conversations), show a bubble, and feed the result back to the model.
@@ -1982,8 +2138,11 @@ function ChatAgent() {
         // Do not upload when attaching: decide only before sending based on the model selected at that time (avoids an upload/privacy mismatch caused by switching models after attaching).
         // Keep the file reference: local models read the original bytes and convert to base64 when sending (cannot rely on the previewUrl, which will be revoked, and cannot fetch
         // the OSS link — the CDN transcodes it to WebP, which llama cannot decode); cloud models use file to upload to OSS and get the publicUrl when sending. See send().
+        // hostPath is captured for images as well: on send they are copied into the working directory
+        // like binary attachments, so file tools / sandbox commands can open the actual file. A model
+        // that can *see* an image still cannot *edit* it without a path on disk.
         const previewUrl = URL.createObjectURL(file);
-        pushAttachment({ ...meta, kind: "image", file, previewUrl });
+        pushAttachment({ ...meta, kind: "image", file, previewUrl, hostPath });
       } else if (file.size > MAX_TEXT_BYTES) {
         // Too large to inline: capture the host path, and copy it to the working directory (Electron) at send time for the tools to process.
         pushAttachment({ ...meta, kind: "binary", hostPath, file });
@@ -2148,10 +2307,14 @@ function ChatAgent() {
     // convoRef[0] is therefore always the purely static systemStaticRef, keeping the prefix byte-stable.
     // Binary/oversized attachments: under Electron, persist them to the working directory first (workdir is already mounted into the sandbox),
     // so the model can process them directly with file tools / sandbox commands; the browser environment keeps to file names only.
+    // Images are persisted too, not just binaries: image_url only lets the model LOOK at the picture.
+    // Anything it is asked to DO with it — edit the pixels, run OCR, feed it to ffmpeg — happens through
+    // sandbox commands, which can only reach files under the working directory. Without this the model
+    // has to ask the user to copy the file in by hand.
     const savedPaths = new Map<number, string>();
     if (toolsReady) {
       for (const a of atts) {
-        if (a.kind !== "binary") continue;
+        if (a.kind !== "binary" && a.kind !== "image") continue;
         try {
           if (a.hostPath) {
             // A real disk file: the main process does a kernel-level copy by host path, with bytes not going through IPC (efficient even for large files).
@@ -2212,6 +2375,15 @@ function ChatAgent() {
         composed += saved
           ? `${composed ? "\n\n" : ""}[Attachment: ${a.name} (${formatBytes(a.size)}) has been saved to the working directory: ${saved} — please process this file directly with file tools or commands]`
           : `${composed ? "\n\n" : ""}[Attachment: ${a.name} (${formatBytes(a.size)}) — binary/oversized file, content not inlined]`;
+      } else if (a.kind === "image") {
+        // The path note is worth its tokens even for a vision model: the picture in the wire is
+        // something it can only read, while this is the same picture as an editable file. It also keeps
+        // a text-only model useful — the image_url part gets stripped, but the file is still there to
+        // run through a command-line tool.
+        const saved = savedPaths.get(a.id);
+        if (saved) {
+          composed += `${composed ? "\n\n" : ""}[Image: ${a.name} (${formatBytes(a.size)}) has been saved to the working directory: ${saved} — to edit or process it (crop, annotate, OCR, convert, feed to a script), work on this file directly with file tools or commands; do not ask the user to place the file anywhere]`;
+        }
       }
     }
     const userContent: string | ContentPart[] =
@@ -2219,6 +2391,12 @@ function ChatAgent() {
         ? [...(composed ? [{ type: "text" as const, text: composed }] : []), ...imageParts]
         : composed;
     convoRef.current = [...convoRef.current, { role: "user", content: userContent }];
+    // Conversational memory: the user may have just stated a durable project rule ("we use npm
+    // here, not pnpm"). Nothing in the repository records that, and the model does not reliably
+    // volunteer remember_project, so the main process gates and extracts it. Fire-and-forget: a
+    // cheap keyword gate rejects almost everything before any token is spent, and nothing here can
+    // delay or fail the send.
+    if (composed.trim()) void callTool("note_conversation", { text: composed });
     const userFiles = atts
       .filter((a) => a.kind !== "image")
       .map((a) => ({ name: a.name, size: a.size, embedded: a.kind === "text" }));
@@ -2243,6 +2421,10 @@ function ChatAgent() {
     store.appendMessage(convIdRef.current, {
       role: "user",
       content: text,
+      // `text` is what the bubble shows; `composed` is what the model was actually sent (it also carries
+      // inlined text-file contents and saved attachment paths). Store the difference so replaying this
+      // conversation reproduces the message the model saw, not just the one the user typed.
+      ...(composed !== text ? { wireText: composed } : {}),
       images: userImages.length ? userImages : undefined,
       files: userFiles.length ? userFiles : undefined,
       ts: Date.now(),
@@ -2283,6 +2465,10 @@ function ChatAgent() {
       // Critical-change review guard (dev mode only): when a risky path (auth / data / security …) has been changed but no reviewer was run before wrapping up,
       // inject one forced reminder and continue the loop, nudging the model to delegate a reviewer first. Cleared after a reviewer is delegated; forced at most once per round, to avoid a deadlock.
       let riskyChangePending = false;
+      // Project-memory guard state: set when this turn modifies source files, cleared the moment it records
+      // something. If it is still set when the turn tries to wrap up, the model gets one reminder (memoryNudged).
+      let learnedWithoutRecording = false;
+      let memoryNudged = false;
       let reviewForced = false;
       // Wrap-up guard: whether a tool was executed this round (including subagents). If a tool was executed yet the model ends with empty content (no user-facing
       // final answer, common when the main model "assumes it's done" and stays silent after a subagent returns a result, or writes the conclusion into reasoning),
@@ -2320,9 +2506,13 @@ function ChatAgent() {
         // Generated with the current activeModel each round (switching the conversation-bound model takes effect immediately); it only enters the wire and is not written back to the buffer / not persisted.
         wire = appendToSystemPrompt(wire, userTimeContext(activeModel));
         // let wire = buildWireContext(convo, compaction);
-        // Image handling depends on the active model's capability, applied to the wire only (never the persisted buffer):
-        //  - Text-only model (not multimodal): strip EVERY image_url part. A model with no image support 400s on any
-        //    image anywhere in history ("unknown variant `image_url`"), even one sent earlier to a vision model.
+        // Image handling, applied to the wire only (never the persisted buffer). `multimodal` here resolves
+        // through modelAcceptsImages, which now answers "yes" unless the model is a local build with no
+        // mmproj, or a provider actually rejected images for it before — so this strips only when we KNOW
+        // it is needed, instead of guessing and silently dropping the user's picture. If the guess is
+        // still wrong in the permissive direction, requestChat retries without images and records it.
+        //  - Known text-only: strip EVERY image_url part (such a provider 400s on any image anywhere in
+        //    history, even one sent turns ago to a different model).
         //  - Multimodal local model: keep inline base64 images, but downgrade remote http images (llama can't fetch them).
         //  - Multimodal cloud model: leave images as-is.
         if (!activeModel?.multimodal) wire = stripAllImagesForText(wire);
@@ -2485,8 +2675,12 @@ function ChatAgent() {
               if (tc.function.name === "run_subagent" && String(args.agent ?? "") === "reviewer") {
                 riskyChangePending = false;
               }
+              // Recording anything at all satisfies the memory guard — the reminder exists to make the model
+              // consider the question once per turn, not to demand a note per file touched.
+              if (tc.function.name === "remember_project") learnedWithoutRecording = false;
               // Risky-change detection: a tool that modifies source files hitting the risky-path signature (taking path-like args such as path/file/dest) → mark as pending review.
               if (MUTATING_FILE_TOOLS.has(tc.function.name)) {
+                learnedWithoutRecording = true;
                 const pathVals = Object.entries(args)
                   .filter(([k, v]) => typeof v === "string" && /path|file|dir|dest|src|source|target|name/i.test(k))
                   .map(([, v]) => v as string);
@@ -2505,6 +2699,11 @@ function ChatAgent() {
               const imageArtifact =
                 tc.function.name === "image_generation" ? lastImageArtifactRef.current : null;
               lastImageArtifactRef.current = null;
+              // Likewise for a sub-agent's inner steps: display-only, stored beside the conclusion so reopening
+              // the conversation shows the same operations the user watched happen.
+              const subSteps =
+                tc.function.name === "run_subagent" ? lastSubagentStepsRef.current : null;
+              lastSubagentStepsRef.current = null;
               // Persist the tool result to this conversation (store the compressed version, to avoid bloating storage / the integrity hash).
               store.appendMessage(genConvId, {
                 role: "tool",
@@ -2515,6 +2714,7 @@ function ChatAgent() {
                 ...(imageArtifact
                   ? { image: imageArtifact.image, servedBy: imageArtifact.servedBy }
                   : {}),
+                ...(subSteps?.length ? { steps: subSteps } : {}),
               });
 
               // Detect local service addresses in the tool output (e.g. an http://localhost:5173 printed by a dev server),
@@ -2551,6 +2751,19 @@ function ChatAgent() {
           reviewForced = true;
           if (!convo.some((mm) => mm.role === "system" && mm.content === FORCE_REVIEW_NUDGE)) {
             convo = [...convo, { role: "system", content: FORCE_REVIEW_NUDGE }];
+            syncView();
+          }
+          continue;
+        }
+
+        // Project-memory guard: files changed this turn and nothing was recorded. Inject one reminder and let the
+        // model take another round, the same shape as the review guard above — a prompt line alone does not survive a
+        // long turn, which is why the Module Map stays unsummarised even after the work that would fill it in.
+        // Forced only once (memoryNudged), and the nudge itself allows skipping, so this cannot deadlock.
+        if (mode === "dev" && learnedWithoutRecording && !memoryNudged) {
+          memoryNudged = true;
+          if (!convo.some((mm) => mm.role === "system" && mm.content === RECORD_MEMORY_NUDGE)) {
+            convo = [...convo, { role: "system", content: RECORD_MEMORY_NUDGE }];
             syncView();
           }
           continue;

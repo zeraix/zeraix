@@ -35,8 +35,50 @@ let state = /** @type {{status: UpdaterStatus, version: string|null, percent: nu
 let broadcastFn = null;
 let wired = false;
 
+/** Statuses meaning "an update is waiting for the user". */
+const ACTIONABLE = new Set(["available", "downloading", "downloaded"]);
+
+/**
+ * Whether `patch` would throw away a pending update.
+ *
+ * `state` doubles as two different things: the outcome of the last check, and the answer to "is there
+ * an update?". They agree until a SECOND check runs — and one runs often, because the renderer starts a
+ * check every time UpdateNotifier mounts. That check walks the state through "checking" and, if it comes
+ * back "not-available" or errors (an offline moment, a rate-limited feed), the pending update was
+ * overwritten and `version` nulled. The renderer then reads that on its next mount and shows nothing:
+ * the prompt the user saw a second ago is gone, with no way left to install the update.
+ *
+ * Guarding at the source rather than only in the renderer matters, because the renderer's own copy is
+ * lost on remount and rebuilt from getUpdaterState() — if the truth is gone HERE, it is gone for good.
+ *
+ * A found update stays until it is installed or the app restarts, which is the honest model: a release
+ * that exists does not stop existing because a later request failed. Progress within the actionable
+ * states ("available" -> "downloading" -> "downloaded") is unaffected — only backwards steps are.
+ */
+function erasesPendingUpdate(patch) {
+  if (!patch.status || !ACTIONABLE.has(state.status)) return false;
+  if (patch.status === "checking" || patch.status === "not-available") return true;
+  // A re-check re-announces the same release as "available". Applying that on top of a download in
+  // flight (or one already staged) walks the UI back to a Download button and abandons the staged
+  // file. A DIFFERENT version is a genuinely newer release and is allowed through.
+  if (
+    patch.status === "available" &&
+    (state.status === "downloading" || state.status === "downloaded") &&
+    (!patch.version || patch.version === state.version)
+  ) {
+    return true;
+  }
+  // A failed check does not invalidate a found update; a failed DOWNLOAD does need to surface.
+  return patch.status === "error" && state.status !== "downloading";
+}
+
 function setState(patch) {
-  state = { ...state, ...patch };
+  // Keep the error text (and anything else in the patch) while refusing the status/version regression,
+  // so a caller can still see what went wrong without losing the update.
+  const next = erasesPendingUpdate(patch)
+    ? { ...patch, status: state.status, version: state.version, percent: state.percent }
+    : patch;
+  state = { ...state, ...next };
   // Broadcast the SAME shape the updater:state invoke returns — i.e. including `supported` and
   // `currentVersion`, which live outside `state`. Pushing the bare object instead meant every
   // transition after the initial fetch arrived with supported:undefined, and the renderer (which
@@ -83,11 +125,40 @@ function wireEvents() {
   });
 }
 
+/** Delay before the first automatic check, so it never competes with startup work. */
+const FIRST_CHECK_DELAY_MS = 30_000;
+/** How often a running app re-checks the feed. */
+const RECHECK_INTERVAL_MS = 4 * 60 * 60 * 1000;
+let scheduleTimers = null;
+
+/**
+ * Schedule the automatic checks.
+ *
+ * Until now the ONLY check in the app was one the renderer fired 8s after UpdateNotifier mounted, and
+ * the About panel's manual button. That has it backwards on both ends: an app left open never checks
+ * again (background/tray mode is built for exactly that — "a tray-resident app quits rarely"), so a
+ * release could sit unnoticed for as long as the app stays up; while every remount of a React component
+ * started a fresh check, which is churn that says nothing about whether a release exists.
+ *
+ * Ownership belongs here: the main process outlives every window, so one timer covers the whole session
+ * regardless of what the renderer mounts or unmounts.
+ */
+function scheduleChecks() {
+  if (scheduleTimers) return;
+  const first = setTimeout(() => void checkForUpdates(), FIRST_CHECK_DELAY_MS);
+  const repeat = setInterval(() => void checkForUpdates(), RECHECK_INTERVAL_MS);
+  // unref so a pending timer never holds the process open at quit.
+  first.unref?.();
+  repeat.unref?.();
+  scheduleTimers = { first, repeat };
+}
+
 /** @param {(channel: string, payload: any) => void} broadcast */
 export function initUpdater(broadcast) {
   broadcastFn = broadcast;
   if (!updatesSupported()) return;
   wireEvents();
+  scheduleChecks();
 }
 
 export function getUpdaterState() {
@@ -118,7 +189,18 @@ export async function downloadUpdate() {
   if (state.status === "downloading") return { ok: true, alreadyRunning: true };
   try {
     setState({ status: "downloading", percent: 0, error: null });
-    await autoUpdater.downloadUpdate();
+    try {
+      await autoUpdater.downloadUpdate();
+    } catch (first) {
+      // downloadUpdate() can only act on the update info cached by the LAST checkForUpdates(). Since a
+      // found update now survives later checks (see erasesPendingUpdate), the UI can legitimately offer
+      // Download after an intervening check replaced that cache — electron-updater then refuses with
+      // "please check for updates first". Re-check once and retry, so the button does what it says
+      // instead of reporting a failure the user can do nothing about.
+      await autoUpdater.checkForUpdates();
+      await autoUpdater.downloadUpdate(); // still failing here is a real error; fall through to the catch below
+      void first;
+    }
     // Belt and braces: if the run emitted no "update-downloaded" (seen on some Windows paths), the
     // download is still finished here — report it rather than leaving the UI spinning forever.
     if (state.status === "downloading") setState({ status: "downloaded", percent: 100 });

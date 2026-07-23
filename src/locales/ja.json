@@ -763,6 +763,7 @@
   "chat.tokenUsageLine": "この会話のトークン消費：{approx}{total}（入力 {prompt}/出力 {completion}）",
   "chat.subagentProcessing": "サブエージェント「{agent}」が作業中…",
   "chat.subagentThinking": "サブエージェント「{agent}」が思考中…",
+  "chat.subagentTask": "委任したタスク",
   "chat.loadingSkill": "スキル「{id}」を読み込み中",
   "chat.skillDisabled": "スキルが有効になっていません",
   "chat.browserAction": "ブラウザ操作：{action}",
@@ -910,5 +911,19 @@
   "image.error.network": "画像生成に失敗しました: プロバイダーに接続できません。",
   "image.error.timeout": "画像生成がタイムアウトしました。",
   "image.error.unsupported": "画像を生成できるプロバイダーが設定されていません。Gemini、OpenAI のいずれかの API キーを追加してください。",
-  "image.error.unknown": "画像生成に失敗しました。"
+  "image.error.unknown": "画像生成に失敗しました。",
+  "projmem.title": "プロジェクトメモリ（ZERAIX.md）",
+  "projmem.desc": "アシスタントがコードを調べる前に読む、現在のワークスペースの地図です。各モジュールの役割、技術スタック、主要コマンド、記録したルールが含まれます。自動生成部分は自動で更新され、あなたが書いた内容は保持されます。",
+  "projmem.workdir": "ワークスペース：{dir}",
+  "projmem.none": "このワークスペースにはまだプロジェクトメモリがありません。生成時にリポジトリを走査します（短い要約リクエスト以外、ソースコードは送信されません）。",
+  "projmem.generate": "生成",
+  "projmem.statModules": "{count} モジュール",
+  "projmem.statNotes": "{count} 件のメモ",
+  "projmem.statPinned": "{count} 件を固定",
+  "projmem.statPending": "{count} 件が説明待ち",
+  "projmem.save": "保存",
+  "projmem.saved": "保存しました",
+  "projmem.reload": "再読み込み",
+  "projmem.rebuild": "再生成",
+  "projmem.hint": "編集内容は再生成後も残ります。lock を付けたセクション、pins に記載されたモジュール行、zeraix マーカーの外側は再生成されません。"
 }

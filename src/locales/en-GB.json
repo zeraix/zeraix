@@ -763,6 +763,7 @@
   "chat.tokenUsageLine": "This chat used {approx}{total} tokens (in {prompt} / out {completion})",
   "chat.subagentProcessing": "Sub-agent “{agent}” is working…",
   "chat.subagentThinking": "Sub-agent “{agent}” is thinking…",
+  "chat.subagentTask": "Delegated task",
   "chat.loadingSkill": "Loading skill “{id}”",
   "chat.skillDisabled": "Skill not enabled",
   "chat.browserAction": "Browser action: {action}",
@@ -910,5 +911,19 @@
   "image.error.network": "Image generation failed: no connection to the provider.",
   "image.error.timeout": "Image generation timed out.",
   "image.error.unsupported": "No configured provider can generate images. Add an API key for Gemini, or OpenAI.",
-  "image.error.unknown": "Image generation failed."
+  "image.error.unknown": "Image generation failed.",
+  "projmem.title": "Project memory (ZERAIX.md)",
+  "projmem.desc": "A map of the current workspace that the assistant reads before exploring: module responsibilities, tech stack, key commands, and any rules you record. Generated parts refresh themselves; anything you write here is kept.",
+  "projmem.workdir": "Workspace: {dir}",
+  "projmem.none": "This workspace has no project memory yet. Generating one scans the repository — no source files are sent anywhere except a short summary request.",
+  "projmem.generate": "Generate",
+  "projmem.statModules": "{count} modules",
+  "projmem.statNotes": "{count} notes",
+  "projmem.statPinned": "{count} pinned",
+  "projmem.statPending": "{count} awaiting description",
+  "projmem.save": "Save",
+  "projmem.saved": "Saved",
+  "projmem.reload": "Reload",
+  "projmem.rebuild": "Rebuild",
+  "projmem.hint": "Your edits survive rebuilds: sections marked lock, module lines listed in pins, and anything outside the zeraix markers are never regenerated."
 }

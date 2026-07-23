@@ -763,6 +763,7 @@
   "chat.tokenUsageLine": "Esta conversa consumiu {approx}{total} tokens (entrada {prompt} / saída {completion})",
   "chat.subagentProcessing": "O subagente “{agent}” está a trabalhar…",
   "chat.subagentThinking": "O subagente “{agent}” está a pensar…",
+  "chat.subagentTask": "Tarefa delegada",
   "chat.loadingSkill": "A carregar a competência “{id}”",
   "chat.skillDisabled": "Competência não ativada",
   "chat.browserAction": "Ação do navegador: {action}",
@@ -910,5 +911,19 @@
   "image.error.network": "Falha ao gerar a imagem: sem conexão com o provedor.",
   "image.error.timeout": "Tempo esgotado ao gerar a imagem.",
   "image.error.unsupported": "Nenhum provedor configurado pode gerar imagens. Adicione uma chave de API da Gemini ou OpenAI.",
-  "image.error.unknown": "Falha ao gerar a imagem."
+  "image.error.unknown": "Falha ao gerar a imagem.",
+  "projmem.title": "Memória do projeto (ZERAIX.md)",
+  "projmem.desc": "Um mapa do espaço de trabalho atual que o assistente lê antes de explorar o código: responsabilidades dos módulos, tecnologias, comandos principais e as regras que você registrar. As partes geradas se atualizam sozinhas; o que você escrever aqui é preservado.",
+  "projmem.workdir": "Espaço de trabalho: {dir}",
+  "projmem.none": "Este espaço de trabalho ainda não tem memória de projeto. A geração analisa o repositório; nenhum arquivo-fonte é enviado, exceto um breve pedido de resumo.",
+  "projmem.generate": "Gerar",
+  "projmem.statModules": "{count} módulos",
+  "projmem.statNotes": "{count} notas",
+  "projmem.statPinned": "{count} fixados",
+  "projmem.statPending": "{count} sem descrição",
+  "projmem.save": "Salvar",
+  "projmem.saved": "Salvo",
+  "projmem.reload": "Recarregar",
+  "projmem.rebuild": "Regenerar",
+  "projmem.hint": "Suas edições sobrevivem às regenerações: seções marcadas com lock, linhas de módulo listadas em pins e tudo fora dos marcadores zeraix nunca são regenerados."
 }

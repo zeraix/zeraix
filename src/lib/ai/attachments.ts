@@ -18,7 +18,7 @@ export type Attachment = {
   uploading?: boolean; // image: OSS upload in progress
   progress?: number; // image: upload progress 0-100
   uploadError?: boolean; // image: upload failed
-  hostPath?: string; // binary: the real host path (Electron, captured on drag-in/selection); on send the file is copied to the working directory using this path
+  hostPath?: string; // image / binary: the real host path (Electron, captured on drag-in/selection); on send the file is copied to the working directory using this path
   file?: File; // The original File reference. binary: for synthetic files without a host path, bytes are read and written to disk via IPC on send; image: for local models, bytes are read and converted to base64 on send (previewUrl is revoked before sending, so it can't be relied on).
 };
 
@@ -68,8 +68,11 @@ export function addFilesTo(
       }
       // Don't upload to OSS at attach time: defer until send and decide based on "whether the selected model is local" — local models inline base64 (privacy + offline,
       // never uploaded), while cloud models upload to OSS to get a publicUrl right before sending. Here we only set up a local preview placeholder and keep the file reference to read bytes at send time.
+      // hostPath is kept for images too: on send they are copied into the working directory alongside
+      // binary attachments, so file tools / sandbox commands can actually open the picture the user
+      // dropped in. Seeing it (image_url) and being able to edit it (a real path) are separate needs.
       const previewUrl = URL.createObjectURL(file);
-      ctx.push({ ...meta, kind: "image", file, previewUrl });
+      ctx.push({ ...meta, kind: "image", file, previewUrl, hostPath });
     } else if (file.size > MAX_TEXT_BYTES) {
       ctx.push({ ...meta, kind: "binary", hostPath, file });
       ctx.onError(`「${file.name}」Exceeds 2 MB; content not inlined (filenames only).`);

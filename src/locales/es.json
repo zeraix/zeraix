@@ -763,6 +763,7 @@
   "chat.tokenUsageLine": "Esta conversación consumió {approx}{total} tokens (entrada {prompt} / salida {completion})",
   "chat.subagentProcessing": "El subagente «{agent}» está trabajando…",
   "chat.subagentThinking": "El subagente «{agent}» está pensando…",
+  "chat.subagentTask": "Tarea delegada",
   "chat.loadingSkill": "Cargando la habilidad «{id}»",
   "chat.skillDisabled": "Habilidad no activada",
   "chat.browserAction": "Acción del navegador: {action}",
@@ -910,5 +911,19 @@
   "image.error.network": "Error al generar la imagen: sin conexión con el proveedor.",
   "image.error.timeout": "Se agotó el tiempo de generación de la imagen.",
   "image.error.unsupported": "Ningún proveedor configurado puede generar imágenes. Añade una clave de API de Gemini u OpenAI.",
-  "image.error.unknown": "Error al generar la imagen."
+  "image.error.unknown": "Error al generar la imagen.",
+  "projmem.title": "Memoria del proyecto (ZERAIX.md)",
+  "projmem.desc": "Un mapa del espacio de trabajo actual que el asistente lee antes de explorar el código: responsabilidades de cada módulo, tecnologías, comandos habituales y las reglas que registres. Las partes generadas se actualizan solas; lo que escribas aquí se conserva.",
+  "projmem.workdir": "Espacio de trabajo: {dir}",
+  "projmem.none": "Este espacio de trabajo aún no tiene memoria de proyecto. Al generarla se analiza el repositorio; no se envía ningún archivo fuente salvo una breve petición de resumen.",
+  "projmem.generate": "Generar",
+  "projmem.statModules": "{count} módulos",
+  "projmem.statNotes": "{count} notas",
+  "projmem.statPinned": "{count} fijados",
+  "projmem.statPending": "{count} sin descripción",
+  "projmem.save": "Guardar",
+  "projmem.saved": "Guardado",
+  "projmem.reload": "Recargar",
+  "projmem.rebuild": "Regenerar",
+  "projmem.hint": "Tus ediciones sobreviven a las regeneraciones: las secciones marcadas con lock, las líneas de módulo listadas en pins y todo lo que esté fuera de los marcadores zeraix nunca se regeneran."
 }

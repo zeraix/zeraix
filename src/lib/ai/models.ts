@@ -23,6 +23,7 @@ import {
 } from "@/constants/Agent";
 import { PROVIDERS, DEFAULT_PROVIDER, type Provider } from "@/app/agent/chat/providers";
 import { getApiKey, type ApiKeyInfo } from "@/lib/api/agent";
+import { resolveVision } from "./modelRegistry";
 
 export { PROVIDERS, DEFAULT_PROVIDER };
 export type { Provider };
@@ -46,8 +47,12 @@ export interface AgentModel {
   custom: boolean;
   /** API format (currently openai-chat only). */
   apiFormat?: string;
-  /** Whether it is multimodal (can send images). */
+  /** Whether it is multimodal (can send images). A hint that can only turn vision ON: images are sent by
+   *  default, so leaving this unset never suppresses them (see modelAcceptsImages). */
   multimodal?: boolean;
+  /** Set when the provider actually rejected a request carrying an image (see markVisionUnsupported).
+   *  Learned at runtime rather than guessed, and the only thing that stops images being sent. */
+  visionUnsupported?: boolean;
   /** The entry's real context window (tokens). For a local model = the -c passed when llama-server starts;
    *  when set, it takes precedence over resolveContextWindow's registry / naming heuristics / 1M default. */
   contextWindow?: number;
@@ -85,6 +90,39 @@ export function officialModelId(providerId: string, model: string): string {
 // keep the existing `@/lib/ai/models` imports unchanged.
 export { resolveContextWindow, DEFAULT_CONTEXT_WINDOW } from "./modelRegistry";
 
+/**
+ * Whether an entry accepts image input.
+ *
+ * Two classes of entry, two sources of truth:
+ *  - custom models (the settings form has an explicit toggle) and the local model (the flag mirrors
+ *    whether llama-server was started with an mmproj projector) carry an authoritative value — trust
+ *    it, including a deliberate `false`;
+ *  - catalog and official-platform entries never had the flag written at all (addOfficialModel) or had a
+ *    meaningless `false` written by an earlier build (addOfficialModelFromCatalog), which made every
+ *    vision-capable cloud model look text-only and got the user's attached images stripped from the
+ *    wire. For those, derive the capability from the model id.
+ *
+ * Literal "local" rather than LOCAL_PROVIDER_ID: localModel.ts imports from this module, so importing
+ * it back would be circular. The id also comes from the PROVIDERS table in ./providers.
+ */
+export function modelAcceptsImages(m: AgentModel): boolean {
+  // Learned from an actual provider rejection — the only source that is ever certain a model is
+  // text-only, so it wins over everything else.
+  if (m.visionUnsupported) return false;
+  // Local llama-server: whether an mmproj projector was loaded is a hard local fact, known before the
+  // request, and sending an image without one fails every time. Worth gating on.
+  if (m.providerId === "local") return !!m.multimodal;
+  // Everything else: send the image.
+  //
+  // This used to be a capability guess (a static table, a name heuristic, and the custom-model toggle
+  // that defaults to off). Guessing here is the wrong trade: a wrong "yes" costs one rejected request
+  // that the caller retries without images, while a wrong "no" silently deletes the user's image and
+  // substitutes "1 image(s) omitted", so the model answers "I cannot see images" and the user has no
+  // idea the app did it. Optimistic + fail-safe: requestChat retries stripped on rejection and records
+  // visionUnsupported, so a genuinely text-only model costs one extra request once, ever.
+  return true;
+}
+
 // ── List read / write ────────────────────────────────────────────────────────────
 export function loadModelList(): AgentModel[] {
   const raw = getStorage(MODEL_LIST_KEY);
@@ -118,7 +156,16 @@ export function addOfficialModel(providerId: string, model: string, label?: stri
   const list = loadModelList();
   const existing = list.find((m) => m.id === id);
   if (existing) return existing;
-  const entry: AgentModel = { id, providerId, model, label: label?.trim() || model, custom: false };
+  // Record vision capability at add time so the settings badge is right; only when the id is known to
+  // support it — leaving it unset lets resolveModel re-derive later (e.g. after the table gains the id).
+  const entry: AgentModel = {
+    id,
+    providerId,
+    model,
+    label: label?.trim() || model,
+    custom: false,
+    ...(resolveVision(model) ? { multimodal: true } : {}),
+  };
   saveModelList([...list, entry]);
   if (!getSelectedModelId()) setSelectedModelId(id);
   return entry;
@@ -183,6 +230,32 @@ export function addCustomModel(input: {
   if (input.apiKey?.trim()) setModelApiKey(entry, input.apiKey.trim());
   if (!getSelectedModelId()) setSelectedModelId(entry.id);
   return entry;
+}
+
+/**
+ * Display-only counterpart of modelAcceptsImages, for the settings badge.
+ *
+ * The two must not share an answer: the send path is deliberately optimistic (it would badge every model
+ * as multimodal, which tells the user nothing), while the badge should reflect what is actually known —
+ * an explicit flag, a recognised model id, or a local build with an mmproj projector.
+ */
+export function modelLikelyVision(m: AgentModel): boolean {
+  if (m.visionUnsupported) return false;
+  if (m.providerId === "local") return !!m.multimodal;
+  return m.multimodal === true || resolveVision(m.model);
+}
+
+/**
+ * Record that this model's provider rejected a request containing an image, so later sends strip images
+ * up front instead of paying a failed round trip every turn. Idempotent; a no-op for a model that is no
+ * longer in the list. Clearing it is a matter of removing and re-adding the model — deliberately not a
+ * toggle, because the flag means "the provider said no", not "the user thinks so".
+ */
+export function markVisionUnsupported(id: string): void {
+  const list = loadModelList();
+  const entry = list.find((m) => m.id === id);
+  if (!entry || entry.visionUnsupported) return;
+  saveModelList(list.map((m) => (m.id === id ? { ...m, visionUnsupported: true } : m)));
 }
 
 /** Remove a model; if the removed one was the current selection, select the first entry in the list instead. Returns the list after removal. */
@@ -267,7 +340,10 @@ export function addOfficialModelFromCatalog(
     label: opts?.label || modelId,
     endpoint: officialPlatformEndpoint(),
     custom: false,
-    multimodal: !!opts?.multimodal,
+    // Only written when something actually asserts it (the catalog, or the model id). An unconditional
+    // `!!opts?.multimodal` used to pin `false` on every platform model, which resolveModel then had to
+    // treat as gospel — that is what made vision-capable official models refuse attached images.
+    ...(opts?.multimodal ?? resolveVision(modelId) ? { multimodal: true } : {}),
   };
   saveModelList([...list, entry]);
   if (!getSelectedModelId()) setSelectedModelId(id);
@@ -381,7 +457,7 @@ export function resolveModel(m: AgentModel): ResolvedModel {
     apiKey: getModelApiKey(m),
     providerId: m.providerId,
     custom: m.custom,
-    multimodal: !!m.multimodal,
+    multimodal: modelAcceptsImages(m),
     ...(m.contextWindow && m.contextWindow > 0 ? { contextWindow: m.contextWindow } : {}),
   };
 }

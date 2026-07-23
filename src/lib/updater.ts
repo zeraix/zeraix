@@ -40,6 +40,48 @@ declare global {
   }
 }
 
+/** Statuses that mean "there is an update the user can act on right now". */
+const ACTIONABLE: ReadonlySet<UpdaterStatus> = new Set(["available", "downloading", "downloaded"]);
+/** Statuses that carry no verdict — a check in flight, or the absence of one. */
+const TRANSIENT: ReadonlySet<UpdaterStatus> = new Set(["checking", "not-available", "idle"]);
+
+/**
+ * Fold a pushed state into the previous one, keeping a known update alive.
+ *
+ * The main process reports the state of the LAST CHECK, but the UI has to represent something else:
+ * whether an update is waiting for the user. Those diverge the moment a second check runs — and one
+ * always does, because the About panel has a "Check for updates" button and the notifier schedules its
+ * own check on mount. The push order is then `available` → (user starts acting) → `checking`, and both
+ * components key their entire UI off `status`, so the card and the panel's Download button vanished the
+ * instant the new check began. If that check then returned `not-available` (or the feed hiccuped) the
+ * update was erased for the session: the user saw the prompt flash and disappear, with no way left to
+ * install it.
+ *
+ * So a status that carries no verdict never overwrites one that does.
+ *
+ * `error` gets the same protection, but only over `available` / `downloaded` — a background re-check
+ * that fails (offline for a moment, feed rate-limited) says nothing about the update already waiting,
+ * and letting it through removed the card and the Download button just the same. Over `downloading` an
+ * error passes through untouched: there it IS the download failing, which the user must see and retry.
+ *
+ * Fields are merged rather than replaced for the same reason as before: a push that omits `supported`
+ * must not read as "updates are unsupported here".
+ */
+export function mergeUpdaterState(
+  prev: UpdaterState | null,
+  next: Partial<UpdaterState>,
+): UpdaterState {
+  const merged = { ...prev, ...next } as UpdaterState;
+  if (!prev || !next.status) return merged;
+  const erasesAKnownUpdate =
+    (TRANSIENT.has(next.status) && ACTIONABLE.has(prev.status)) ||
+    (next.status === "error" && (prev.status === "available" || prev.status === "downloaded"));
+  // Keep what described the pending update; let everything else (error text, supported, …) through.
+  return erasesAKnownUpdate
+    ? { ...merged, status: prev.status, version: prev.version, percent: prev.percent }
+    : merged;
+}
+
 /** Retrieves the updater bridge (or `null` outside Electron). */
 export function updaterBridge(): UpdaterBridge | null {
   return typeof window !== "undefined" && window.updater ? window.updater : null;

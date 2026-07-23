@@ -20,6 +20,16 @@ export interface StoredMessage {
   role: "user" | "assistant" | "tool";
   content: string;
   images?: string[]; // accessible URLs of image attachments
+  /**
+   * The user turn as the MODEL saw it, when that differs from `content`.
+   *
+   * `content` is the text the user typed, because the chat bubble renders it — so it deliberately omits
+   * what send() appends for the model: inlined text-file contents, and the working-directory paths of
+   * saved binary/image attachments. Replaying `content` on reload therefore handed the model a message
+   * missing the attachment it was asked about. Written only when the two actually differ, so ordinary
+   * messages are unchanged. Model-facing (unlike images/steps, which are display-only).
+   */
+  wireText?: string;
   files?: { name: string; size: number; embedded: boolean }[]; // metadata of non-image attachments
   /** Tool calls initiated by the assistant (OpenAI-compatible structure); only present on "assistant messages that called tools". */
   tool_calls?: { id: string; type: "function"; function: { name: string; arguments: string } }[];
@@ -32,6 +42,11 @@ export interface StoredMessage {
    *  conversations. Display-only, not fed to the model, not part of the integrity hash (same as name / reasoning). */
   image?: string;
   servedBy?: string;
+  /** The tool calls a sub-agent made inside its own loop (only on a run_subagent tool result). The sub-agent
+   *  conversation itself is never persisted — only its conclusion goes into content — so without this the
+   *  steps the user watched in real time would disappear the moment the conversation is reopened.
+   *  Display-only, never fed to the model, not part of the integrity hash (same as name / image / reasoning). */
+  steps?: { name: string; args: unknown; ok: boolean; result: string }[];
   /** The reasoning model's "deep thinking" body (only when role==="assistant"): used only to rebuild the UI thinking block, never fed back to the model, not part of the integrity hash. */
   reasoning?: string;
   /**

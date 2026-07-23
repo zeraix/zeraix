@@ -93,6 +93,25 @@ export const FORCE_REVIEW_NUDGE =
   'review. Before concluding, call run_subagent with agent "reviewer" and a self-contained task describing ' +
   "the change, so it can verify correctness, regressions, and security. Only report done after the review.";
 
+/**
+ * Record-to-project-memory reminder (fed back to the model only; not displayed / not persisted).
+ *
+ * Injected when a turn modified source files but never called `remember_project`, which was the norm:
+ * the tool exists and its description is clear, but nothing in the turn ever brings it to mind, so a
+ * session would work out how a module fits together, ship the change, and drop everything it learned —
+ * leaving the Module Map full of "(not yet summarised)" while the work that would have filled it in had
+ * just been done. Injected at most once per turn, and it offers an explicit way out, so a turn that
+ * genuinely learned nothing durable is not pushed into inventing a note.
+ */
+export const RECORD_MEMORY_NUDGE =
+  "You changed files in this project but have not recorded anything into its long-term memory " +
+  "(ZERAIX.md). Before you finish: if you worked out something durable that the project map does not " +
+  "already state — what a module is responsible for, a convention or constraint the user stated, a " +
+  "gotcha that cost you time — call remember_project now (pass `module` plus a one-sentence `note` to " +
+  "describe a module, or `note` alone for an invariant). Record only what will still be true next week, " +
+  "not what you did in this turn. If you genuinely learned nothing the map does not already have, skip " +
+  "the call and just give your final answer.";
+
 /** Sensitive tools: they modify the file system or run commands, and require user confirmation before being called.
  *  Read-only tools (read_file / list_directory / file_info / search_*) are not included here and can run directly. */
 export const SENSITIVE_TOOLS = new Set([

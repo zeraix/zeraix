@@ -763,6 +763,7 @@
   "chat.tokenUsageLine": "Diese Unterhaltung verbrauchte {approx}{total} Token (Eingabe {prompt} / Ausgabe {completion})",
   "chat.subagentProcessing": "Sub-Agent „{agent}“ arbeitet…",
   "chat.subagentThinking": "Sub-Agent „{agent}“ denkt nach…",
+  "chat.subagentTask": "Delegierte Aufgabe",
   "chat.loadingSkill": "Skill „{id}“ wird geladen",
   "chat.skillDisabled": "Skill nicht aktiviert",
   "chat.browserAction": "Browser-Aktion: {action}",
@@ -910,5 +911,19 @@
   "image.error.network": "Bilderzeugung fehlgeschlagen: keine Verbindung zum Anbieter.",
   "image.error.timeout": "Zeitüberschreitung bei der Bilderzeugung.",
   "image.error.unsupported": "Kein eingerichteter Anbieter kann Bilder erzeugen. Füge einen API-Schlüssel für Zhipu, Gemini oder OpenAI hinzu.",
-  "image.error.unknown": "Bilderzeugung fehlgeschlagen."
+  "image.error.unknown": "Bilderzeugung fehlgeschlagen.",
+  "projmem.title": "Projektgedächtnis (ZERAIX.md)",
+  "projmem.desc": "Eine Karte des aktuellen Arbeitsbereichs, die der Assistent liest, bevor er den Code durchsucht: Zuständigkeiten der Module, Tech-Stack, wichtige Befehle und von dir festgehaltene Regeln. Generierte Teile aktualisieren sich selbst; was du hier schreibst, bleibt erhalten.",
+  "projmem.workdir": "Arbeitsbereich: {dir}",
+  "projmem.none": "Für diesen Arbeitsbereich gibt es noch kein Projektgedächtnis. Beim Erzeugen wird das Repository gescannt – außer einer kurzen Zusammenfassungsanfrage werden keine Quelldateien übertragen.",
+  "projmem.generate": "Erzeugen",
+  "projmem.statModules": "{count} Module",
+  "projmem.statNotes": "{count} Notizen",
+  "projmem.statPinned": "{count} angeheftet",
+  "projmem.statPending": "{count} ohne Beschreibung",
+  "projmem.save": "Speichern",
+  "projmem.saved": "Gespeichert",
+  "projmem.reload": "Neu laden",
+  "projmem.rebuild": "Neu erzeugen",
+  "projmem.hint": "Deine Änderungen überstehen jede Neuerzeugung: Abschnitte mit lock, in pins eingetragene Modulzeilen und alles außerhalb der zeraix-Marker werden nie neu erzeugt."
 }

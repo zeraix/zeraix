@@ -763,6 +763,7 @@
   "chat.tokenUsageLine": "Questa conversazione ha usato {approx}{total} token (input {prompt} / output {completion})",
   "chat.subagentProcessing": "Il sub-agente “{agent}” sta lavorando…",
   "chat.subagentThinking": "Il sub-agente “{agent}” sta ragionando…",
+  "chat.subagentTask": "Attività delegata",
   "chat.loadingSkill": "Caricamento della competenza “{id}”",
   "chat.skillDisabled": "Competenza non abilitata",
   "chat.browserAction": "Azione del browser: {action}",
@@ -910,5 +911,19 @@
   "image.error.network": "Generazione non riuscita: nessuna connessione al provider.",
   "image.error.timeout": "Timeout durante la generazione dell'immagine.",
   "image.error.unsupported": "Nessun provider configurato può generare immagini. Aggiungi una chiave API di Gemini o OpenAI.",
-  "image.error.unknown": "Generazione dell'immagine non riuscita."
+  "image.error.unknown": "Generazione dell'immagine non riuscita.",
+  "projmem.title": "Memoria del progetto (ZERAIX.md)",
+  "projmem.desc": "Una mappa dello spazio di lavoro corrente che l'assistente legge prima di esplorare il codice: responsabilità dei moduli, stack tecnologico, comandi principali e le regole che annoti. Le parti generate si aggiornano da sole; ciò che scrivi qui viene conservato.",
+  "projmem.workdir": "Spazio di lavoro: {dir}",
+  "projmem.none": "Questo spazio di lavoro non ha ancora una memoria di progetto. La generazione analizza il repository; nessun file sorgente viene inviato, a parte una breve richiesta di riepilogo.",
+  "projmem.generate": "Genera",
+  "projmem.statModules": "{count} moduli",
+  "projmem.statNotes": "{count} note",
+  "projmem.statPinned": "{count} fissati",
+  "projmem.statPending": "{count} senza descrizione",
+  "projmem.save": "Salva",
+  "projmem.saved": "Salvato",
+  "projmem.reload": "Ricarica",
+  "projmem.rebuild": "Rigenera",
+  "projmem.hint": "Le tue modifiche sopravvivono alle rigenerazioni: le sezioni con lock, le righe di modulo elencate in pins e tutto ciò che sta fuori dai marcatori zeraix non vengono mai rigenerati."
 }

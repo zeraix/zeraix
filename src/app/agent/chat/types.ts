@@ -40,6 +40,10 @@ export type ChatResponse = {
   usage?: Usage; // OpenAI-compatible usage statistics
 };
 
+/** One tool call a sub-agent made inside its own loop, recorded so the user can see what it actually did
+ *  rather than only the conclusion it reported back. Same four fields as a top-level tool bubble. */
+export type SubAgentStep = { name: string; args: unknown; ok: boolean; result: string };
+
 /** Display message (includes tool-call bubbles / choice cards). */
 export type ChoiceMsg = {
   kind: "choice";
@@ -66,7 +70,19 @@ export type DisplayMsg =
   // display layer, and deliberately never enters the model's context (a base64 payload would be
   // re-sent every turn). `servedBy` names the engine because the vendor may differ from the chat
   // vendor — see docs/generation-capabilities-design.md §3.
-  | { kind: "tool"; name: string; args: unknown; ok: boolean; result: string; image?: string; servedBy?: string }
+  // `steps` is set by run_subagent only: the tool calls the sub-agent made inside its own loop. They are
+  // nested in this one bubble rather than pushed as siblings, because the whole delegation is persisted
+  // as a single tool message — sibling bubbles would exist live and then vanish on reload.
+  | {
+      kind: "tool";
+      name: string;
+      args: unknown;
+      ok: boolean;
+      result: string;
+      image?: string;
+      servedBy?: string;
+      steps?: SubAgentStep[];
+    }
   | { kind: "todos"; todos: Todo[] } // the task list archived into the chat after the conversation ends
   // this round's token usage (cached = input tokens served from prefix cache) + the wall-clock time it took
   | {
