@@ -995,5 +995,6 @@
   "general.contextBudget": "Budget del contesto",
   "general.contextBudgetDesc": "Working set massimo (in K token) che l'agente mantiene prima di compattare automaticamente la cronologia più vecchia. Limita il contesto sui modelli con finestra grande così che un'attività non trascini centinaia di migliaia di token. Intervallo 40–500; 0 disattiva il limite (solo finestra del modello).",
   "general.contextBudgetUnit": "K token",
-  "general.contextBudgetOff": "disattivato (solo relativo alla finestra)"
+  "general.contextBudgetOff": "disattivato (solo relativo alla finestra)",
+  "chat.provenanceWarning": "⚠ Questa operazione si basa sullo stato del file preso dalla cronologia compressa e non verificato di recente; valuta di rileggere prima il file."
 }

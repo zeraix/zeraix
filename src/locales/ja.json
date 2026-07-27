@@ -995,5 +995,6 @@
   "general.contextBudget": "コンテキスト予算",
   "general.contextBudgetDesc": "エージェントが古い履歴を自動圧縮する前に保持する最大ワーキングセット（K トークン単位）。大きなコンテキストウィンドウのモデルでコンテキストを制限し、1 つのタスクが数十万トークンを抱え込まないようにします。範囲 40〜500、0 で無効（モデルのウィンドウのみ）。",
   "general.contextBudgetUnit": "K トークン",
-  "general.contextBudgetOff": "オフ（ウィンドウ比のみ）"
+  "general.contextBudgetOff": "オフ（ウィンドウ比のみ）",
+  "chat.provenanceWarning": "⚠ この操作は、圧縮された履歴に由来し最近再確認されていないファイル状態に基づいています。先にファイルを読み直すことをおすすめします。"
 }

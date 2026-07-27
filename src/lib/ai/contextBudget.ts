@@ -14,11 +14,16 @@ import { getStorage, setStorage } from "@zzcpt/zztool";
 import STORAGE_KEY from "@/constants/Storage";
 
 /**
- * Default budget in K tokens. Picked from the offline replay of a real 186K / 1M-window task: ~120K
- * cut the average per-turn context ~47% with only ~2 summariser calls, whereas tighter budgets made the
- * (re-summarise-from-scratch) summariser cost explode. A safe starting point, tunable by the user.
+ * Default budget in K tokens. **0 = off (opt-in).** A fixed cap is deliberately NOT imposed by default:
+ * it's inert on common windows (≤160K, where the window's own 75% is tighter) and its "good" value depends
+ * on the window, so a single hardcoded number would be arbitrary — and correctness never depends on it
+ * (Task Memory preserves the mission regardless). Users on large-window models opt in; the offline replay
+ * of a real 186K / 1M-window task suggested ~120K (≈47% lower avg context, ~2 summariser calls) as a
+ * sensible starting cap, with tighter values raising re-summary cost.
  */
-export const DEFAULT_CONTEXT_BUDGET_K = 120;
+export const DEFAULT_CONTEXT_BUDGET_K = 0;
+/** Suggested cap for a user opting in on a large-window model (see DEFAULT note). */
+export const SUGGESTED_CONTEXT_BUDGET_K = 120;
 /** Below this the summariser thrashes (re-summary cost dominates); above it the cap is moot on any real window. */
 export const MIN_CONTEXT_BUDGET_K = 40;
 export const MAX_CONTEXT_BUDGET_K = 500;

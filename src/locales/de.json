@@ -995,5 +995,6 @@
   "general.contextBudget": "Kontextbudget",
   "general.contextBudgetDesc": "Maximaler Arbeitssatz (in K Tokens), den der Agent behält, bevor ältere Historie automatisch verdichtet wird. Begrenzt den Kontext bei Modellen mit großem Fenster, damit eine Aufgabe nicht Hunderttausende Tokens mitschleppt. Bereich 40–500; 0 deaktiviert die Grenze (nur Modellfenster).",
   "general.contextBudgetUnit": "K Tokens",
-  "general.contextBudgetOff": "aus (nur fensterrelativ)"
+  "general.contextBudgetOff": "aus (nur fensterrelativ)",
+  "chat.provenanceWarning": "⚠ Dieser Vorgang stützt sich auf den Dateizustand aus dem komprimierten Verlauf, der kürzlich nicht erneut überprüft wurde – lies die Datei am besten zuerst erneut."
 }

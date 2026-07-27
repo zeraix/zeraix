@@ -37,7 +37,7 @@ interface AiToolsBridge {
   chooseWorkingDir(): Promise<string | null>;
   defaultWorkingDir(): Promise<string>;
   getPathForFile?(file: File): string;
-  saveAttachment?(payload: { name: string; srcPath: string }): Promise<string>;
+  saveAttachment?(payload: { name: string; srcPath?: string; url?: string; bytes?: ArrayBuffer }): Promise<string>;
   wsReadDir?(relPath?: string): Promise<WsEntry[]>;
   wsReadFile?(relPath: string): Promise<WsReadFileResult>;
   wsWriteFile?(relPath: string, content: string): Promise<WsWriteResult>;
@@ -162,6 +162,7 @@ export function saveAttachment(payload: {
   name: string;
   srcPath?: string;
   bytes?: ArrayBuffer;
+  url?: string;
 }): Promise<string> {
   if (payload.srcPath) {
     const b = bridge();
@@ -169,9 +170,34 @@ export function saveAttachment(payload: {
     return b.saveAttachment({ name: payload.name, srcPath: payload.srcPath });
   }
   if (payload.bytes) {
-    return transferToMain<string>("save-attachment", { name: payload.name }, payload.bytes);
+    // Byte-only attachments (pasted screenshots, web-uploaded images) hand their bytes to the main
+    // process. Prefer the zero-copy MessagePort transfer channel, but fall back to the plain invoke
+    // channel (a structured-clone copy) when that channel is missing or fails — otherwise the save is
+    // silently lost and the model later reports the image "isn't in the working directory" and fabricates
+    // a replacement. This is why paste / web uploads failed while Electron file drags (srcPath) worked.
+    const bytes = payload.bytes;
+    if (window.transfer) {
+      return transferToMain<string>("save-attachment", { name: payload.name }, bytes).catch((e) => {
+        const b = bridge();
+        // Retry via invoke only if the bytes are still intact (transfer neuters the buffer once it posts;
+        // an up-front failure leaves byteLength untouched).
+        if (b.saveAttachment && bytes.byteLength > 0) return b.saveAttachment({ name: payload.name, bytes });
+        throw e;
+      });
+    }
+    const b = bridge();
+    if (!b.saveAttachment) return Promise.reject(new Error("saveAttachment is unavailable (the preload version is too old)"));
+    return b.saveAttachment({ name: payload.name, bytes });
   }
-  return Promise.reject(new Error("saveAttachment requires srcPath or bytes"));
+  if (payload.url) {
+    // A URL-only image (edit/resend, home-page handoff, restored history) — no local bytes to hand over.
+    // The main process downloads the link itself (no renderer CORS, no large base64 over IPC) and writes
+    // it into the working directory, so it becomes an editable file, not just something the model can view.
+    const b = bridge();
+    if (!b.saveAttachment) return Promise.reject(new Error("saveAttachment is unavailable (the preload version is too old)"));
+    return b.saveAttachment({ name: payload.name, url: payload.url });
+  }
+  return Promise.reject(new Error("saveAttachment requires srcPath, bytes, or url"));
 }
 
 /** Run the tool calls returned by the model in batch, preserving order, returning each one's result. */

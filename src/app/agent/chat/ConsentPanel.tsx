@@ -10,6 +10,7 @@ export type PendingConsent = {
   name: string;
   args: unknown;
   diff: string | null; // File change preview (with line numbers); null means no diff (e.g. run_command)
+  warning?: string | null; // Provenance warning (§A1): the target's state is only known from compressed history
   convId: string | null; // The conversation that issued this request (used to indicate which conversation is asking)
   queued: number; // Number of requests still queued behind this one (excluding the current one)
 };
@@ -79,6 +80,12 @@ export function ConsentPanel({
                 </p>
               ) : null;
             })()}
+            {/* Provenance warning (§A1): this operation relies on file state known only from compressed history. */}
+            {pending.warning ? (
+              <p className="mt-2 rounded-lg border border-amber-500/40 bg-amber-500/10 px-2.5 py-1.5 text-[11px] font-medium text-amber-700 dark:text-amber-300">
+                {pending.warning}
+              </p>
+            ) : null}
             {/* Show the diff if there's a change preview (with line numbers); otherwise fall back to showing the raw arguments */}
             {pending.diff ? (
               <div className="mt-2 max-h-56 overflow-auto rounded-lg border border-amber-500/25">

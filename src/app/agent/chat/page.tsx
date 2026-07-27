@@ -6,7 +6,6 @@ import {
   useEffect,
   useRef,
   useState,
-  type KeyboardEvent as ReactKeyboardEvent,
 } from "react";
 import { useSearchParams, useRouter, usePathname } from "next/navigation";
 import { ChevronDown, Pencil, Eraser } from "lucide-react";
@@ -54,6 +53,7 @@ import {
   simulateBudgets,
   defaultBudgetCandidates,
   formatSimulation,
+  findUnverifiedFacts,
 } from "./contextDiag";
 import { isLocalEndpoint, localLlm, LOCAL_PROVIDER_ID } from "@/lib/ai/localModel";
 import { setSandboxMode, onSandboxStatus, getSandboxStatus, getSandboxVmInfo, sandboxEnvHint, isSandboxEngine, type SandboxStatus } from "@/lib/ai/sandbox";
@@ -74,13 +74,13 @@ import {
 } from "@/constants/Agent";
 import { migrateLegacyAgentStorage, putStorage } from "@/lib/ai/agentStorage";
 import { hydrateAppConfig } from "@/lib/ai/appConfig";
-import { notifyReplyComplete, notifyAgentError, notifyPermissionRequest, notifyQuestion } from "@/lib/ai/agentNotify";
+import { notifyReplyComplete, notifyAgentError, notifyQuestion } from "@/lib/ai/agentNotify";
 import { isWindowAlwaysOnTop } from "@/lib/electron/windowControls";
 import { useAgentChatStore } from "@/store/agentChatStore";
 import { enabledSkills, loadInstalled } from "@/lib/ai/skills/store";
 import { getSkillInstructions, loadSkillTool, skillSystemHint } from "@/lib/ai/skills/runtime";
 import { SANDBOX_TOOLBOX_SKILL } from "@/lib/ai/skills/builtin";
-import { loadEnabledProjectSkills, type LoadedProjectSkill } from "@/lib/ai/skills/project";
+import { loadEnabledProjectSkills } from "@/lib/ai/skills/project";
 import type { InstalledSkill } from "@/lib/ai/skills/types";
 import { makeUnifiedDiff } from "./diffUtil";
 import { capToolOutput } from "./compress";
@@ -92,14 +92,18 @@ import {
   serializeCompaction,
   deserializeCompaction,
   resolveHybridBudget,
+  pathProvenance,
   MANUAL_COMPACT_MIN_PCT,
+  MAX_SUMMARY_REUSE,
   type CompactionState,
 } from "./contextCompress";
 import { getContextBudgetK } from "@/lib/ai/contextBudget";
 import {
+  emptyTaskMemory,
   isTaskMemoryEmpty,
   normalizeTaskMemory,
   renderTaskMemory,
+  applyTaskState,
   mergeExtracted,
   parseSummaryWithTaskState,
   type TaskMemory,
@@ -125,7 +129,6 @@ import {
 } from "@/lib/ai/models";
 import { useAuthStore } from "@/store/authStore";
 import {
-  CONSENT_OPTIONS,
   FEEDBACK_DOWN_NUDGE,
   FEEDBACK_UP_NUDGE,
   FINALIZE_NUDGE,
@@ -134,8 +137,6 @@ import {
   MUTATING_FILE_TOOLS,
   PARALLEL_SAFE_TOOLS,
   RENDERER_HANDLED_TOOLS,
-  RATING_DOWN_FEEDBACK,
-  RATING_UP_FEEDBACK,
   RESUME_NUDGE,
   RISKY_PATH_PATTERN,
   toolNeedsConsent,
@@ -144,7 +145,6 @@ import {
   selCls,
   toolStatusText,
   workdirPrompt,
-  type ConsentDecision,
 } from "./constants";
 import type {
   ApiMsg,
@@ -183,64 +183,18 @@ import { TodoPanel } from "./TodoPanel";
 import { Composer } from "./Composer";
 import { ProjectSkillsPrompt } from "./ProjectSkillsPrompt";
 import { ConsentPanel } from "./ConsentPanel";
-
-/**
- * Dynamically builds the runtime info appended to the end of the system prompt: user time zone, current date (YYYY-MM-DD), and the current model and provider.
- * Called each time the system prompt is assembled for a send, so it automatically reflects the latest time zone / date / selected model.
- */
-function userTimeContext(model: ResolvedModel | null): string {
-  const now = new Date();
-  const y = now.getFullYear();
-  const m = String(now.getMonth() + 1).padStart(2, "0");
-  const d = String(now.getDate()).padStart(2, "0");
-  let tz = "";
-  try {
-    tz = Intl.DateTimeFormat().resolvedOptions().timeZone || "";
-  } catch {
-    /* Leave empty if reading the time zone fails */
-  }
-  const modelPart = model ? `\nCurrent Model: ${model.label} (${model.model})` : "";
-  return `User Time Zone: ${tz || "unknown"}\nCurrent Date: ${y}-${m}-${d}${modelPart}`;
-}
-
-/**
- * Collapse every system message into a SINGLE leading system message (contents joined in original order), rest after.
- * Local llama.cpp chat templates (Qwen / GLM / …) don't merely require the system message to be positioned first — many
- * reject *any second* `role:"system"` entry anywhere in the array (their Jinja checks `loop.first`), raising
- * "System message must be at the beginning." The runtime context + nudges are appended at the end for prefix-cache
- * stability, and several nudge/rating paths add their own separate system messages, so for local models we both hoist
- * and merge them into one message[0] just before sending. No-op when there is at most one system message and it is
- * already at the front. System messages are always string-content per ApiMsg.
- */
-function hoistSystemToFront(msgs: ApiMsg[]): ApiMsg[] {
-  const sysIdx = msgs.reduce<number[]>((acc, m, i) => (m.role === "system" ? [...acc, i] : acc), []);
-  // Nothing to do: no system message, or exactly one already at index 0.
-  if (sysIdx.length === 0 || (sysIdx.length === 1 && sysIdx[0] === 0)) return msgs;
-  const merged: ApiMsg = {
-    role: "system",
-    content: sysIdx
-      .map((i) => (msgs[i] as { role: "system"; content: string }).content)
-      .filter(Boolean)
-      .join("\n\n"),
-  };
-  const rest = msgs.filter((m) => m.role !== "system");
-  return [merged, ...rest];
-}
-
-/**
- * Append text to the end of the first system message's content, merging it into the system prompt itself rather than
- * adding a second system message — so chat templates that require a single leading system message (Qwen / GLM / …) accept it.
- * System messages are always string-content per ApiMsg. Falls back to a leading system message only if the wire has none
- * (buildWireContext always includes one, so that branch is defensive).
- */
-function appendToSystemPrompt(msgs: ApiMsg[], text: string): ApiMsg[] {
-  if (!text) return msgs;
-  const i = msgs.findIndex((m) => m.role === "system");
-  if (i < 0) return [{ role: "system", content: text }, ...msgs];
-  return msgs.map((m, idx) =>
-    idx === i && m.role === "system" ? { ...m, content: m.content ? `${m.content}\n\n${text}` : text } : m,
-  );
-}
+import { useConsentQueue } from "./useConsentQueue";
+import {
+  userTimeContext,
+  hoistSystemToFront,
+  appendToSystemPrompt,
+  hostOfEndpoint,
+  stripAllImagesForText,
+  stripRemoteImagesForLocal,
+  phaseSummaryText,
+  injectRatingFeedback,
+  toInstalledProjectSkill,
+} from "./wireHelpers";
 
 /**
  * The run context for a single send (generation). send() and the tool executions / subagents it invokes share it, to support "background concurrent generation":
@@ -261,132 +215,6 @@ type RunCtx = {
   push: (m: DisplayMsg) => void;
   status: (s: string) => void;
 };
-
-/**
- * Local-model only: downgrade the image_url parts of "remote http images" in history to textual XML references (keeping the URL),
- * while inline data:base64 images (local send / the previous local image) are still kept as image_url.
- * Reason: llama-server cannot fetch remote URLs (it errors with 400 Failed to load image), but most of these history images are links
- * uploaded to OSS by cloud models at send time, with no original bytes to convert. Turning them into `<image url="…"/>` text avoids the error
- * and still lets the model know "there was an image here and its address". It does not modify convoRef / persistence, and only affects this send's wire view.
- */
-/**
- * Text-only model: remove EVERY image_url part (both inline data: and remote URLs), replacing each with a short text
- * note. A model without image support rejects the whole request the moment any image appears anywhere in history —
- * HTTP 400 "unknown variant `image_url`, expected `text`" — even for an image the user sent turns ago to a different,
- * vision-capable model. Unlike the local-model downgrade, inline images are dropped too: the provider's schema has no
- * image variant at all. Only affects this send's wire, never convoRef / persistence.
- */
-/** Host of an endpoint, for the usage log. Host only: some gateways carry a key in the query string. */
-function hostOfEndpoint(endpoint: string): string | undefined {
-  try {
-    return new URL(endpoint).host;
-  } catch {
-    return undefined;
-  }
-}
-
-function stripAllImagesForText(messages: ApiMsg[]): ApiMsg[] {
-  return messages.map((m) => {
-    if (m.role !== "user" || !Array.isArray(m.content)) return m;
-    const kept: ContentPart[] = [];
-    let imageCount = 0;
-    for (const part of m.content) {
-      if (part.type === "image_url") imageCount++;
-      else kept.push(part);
-    }
-    if (imageCount === 0) return m;
-    const note = `<image note="${imageCount} image(s) omitted — the current model cannot view images" />`;
-    const out: ContentPart[] = [];
-    let appended = false;
-    for (const part of kept) {
-      if (part.type === "text" && !appended) {
-        out.push({ type: "text", text: `${part.text}${part.text ? "\n" : ""}${note}` });
-        appended = true;
-      } else out.push(part);
-    }
-    if (!appended) out.unshift({ type: "text", text: note });
-    if (out.length === 1 && out[0].type === "text") return { ...m, content: out[0].text };
-    return { ...m, content: out };
-  });
-}
-
-function stripRemoteImagesForLocal(messages: ApiMsg[]): ApiMsg[] {
-  return messages.map((m) => {
-    if (m.role !== "user" || !Array.isArray(m.content)) return m;
-    const kept: ContentPart[] = [];
-    const remoteUrls: string[] = [];
-    for (const part of m.content) {
-      if (part.type === "image_url") {
-        const url = part.image_url?.url || "";
-        if (/^data:/i.test(url)) kept.push(part); // Locally readable inline image, keep it
-        else if (url) remoteUrls.push(url); // Remote URL, convert to text
-      } else kept.push(part);
-    }
-    if (remoteUrls.length === 0) return m;
-    const xml = remoteUrls.map((u) => `<image url="${u}" note="Historical image, not viewable by the local model" />`).join("\n");
-    const out: ContentPart[] = [];
-    let appended = false;
-    for (const part of kept) {
-      if (part.type === "text" && !appended) {
-        out.push({ type: "text", text: `${part.text}${part.text ? "\n" : ""}${xml}` }); // New object, does not modify the original part
-        appended = true;
-      } else out.push(part);
-    }
-    if (!appended) out.unshift({ type: "text", text: xml });
-    if (out.length === 1 && out[0].type === "text") return { ...m, content: out[0].text }; // Only text left → plain string
-    return { ...m, content: out };
-  });
-}
-
-/**
- * Dev-mode "phase summary" cleanup: reasoning models sometimes stuff the chain of thought + a leftover </think> into the body of a "tool-call round".
- * Phased streaming shows this body as that phase's summary, so keep only the body after the last </think> (returned as-is if none),
- * and strip leading whitespace, to avoid displaying chain-of-thought remnants as the summary.
- */
-function phaseSummaryText(raw: string): string {
-  const marker = "</think>";
-  const i = raw.lastIndexOf(marker);
-  return (i >= 0 ? raw.slice(i + marker.length) : raw).replace(/^\s+/, "");
-}
-
-/**
- * User rating (thumbs up / down) → dynamically injected wire feedback: each assistant message that carries a rating is kept as-is
- * after "stripping the rating field in place", with an English feedback system message inserted immediately after it. This only affects the temporary
- * wire view (wire) "sent to the model" — the archived assistant content contains no rating, and the rating field is never sent to the provider. The rating is
- * stored in StoredMessage.rating and dynamically rebuilt from it on every request when reading history, so as long as that reply is still in context, its feedback stays visible to the model (effective across rounds).
- */
-function injectRatingFeedback(wire: ApiMsg[]): ApiMsg[] {
-  // Fast-return the original array when there is no rating at all (the vast majority of requests take this path: zero overhead, no disturbance to the prefix cache).
-  if (!wire.some((m) => m.role === "assistant" && m.rating)) return wire;
-  const out: ApiMsg[] = [];
-  for (const m of wire) {
-    if (m.role === "assistant" && m.rating) {
-      const { rating, ...clean } = m; // Strip the memory-only rating field; never send it to the provider
-      out.push(clean);
-      out.push({
-        role: "system",
-        content: rating === "up" ? RATING_UP_FEEDBACK : RATING_DOWN_FEEDBACK,
-      });
-    } else {
-      out.push(m);
-    }
-  }
-  return out;
-}
-
-/** Project skill (LoadedProjectSkill) → InstalledSkill shape, so it can be merged into the runtime skill set and progressively disclosed by load_skill.
- *  The id is prefixed with "project:" to avoid clashing with installed skills; description falls back to name (load_skill relies on it to be discovered by the model). */
-function toInstalledProjectSkill(p: LoadedProjectSkill): InstalledSkill {
-  return {
-    id: `project:${p.path}`,
-    name: p.name,
-    version: "1",
-    description: p.description || p.name,
-    instructions: p.instructions,
-    installedAt: 0,
-    enabled: true,
-  };
-}
 
 function ChatAgent() {
   const t = useT();
@@ -487,23 +315,19 @@ function ChatAgent() {
   // The "static" part of the system message (tools / directory / skills / memory): built and cached on the first send,
   // then on every subsequent send the refreshed runtime context (date + current model) is appended to its end, without rebuilding the static part.
   const systemStaticRef = useRef<string>("");
-  // The "pending confirmation" state of a sensitive tool call: shown to the user for approval; resolveRef is used to wake the waiting Promise on selection.
-  // Sensitive-operation confirmation queue: when multiple conversations (including background ones) request sensitive operations at once, they queue FIFO and pop one at a time, to avoid overwriting each other and deadlocking.
-  // pending = the display info of the front-of-queue request; consentQueueRef holds the full queue (including each one's resolve and owning conversation).
-  const [pending, setPending] = useState<{
-    name: string;
-    args: unknown;
-    diff: string | null; // File-change preview (with line numbers); null means no diff (e.g. run_command)
-    convId: string | null; // The conversation that issued this request (used to indicate which conversation it is on the panel)
-    queued: number; // The number of requests still queued after it (excluding the current one)
-  } | null>(null);
-  const [consentSel, setConsentSel] = useState(0); // The currently highlighted option (supports up/down key navigation)
-  const consentQueueRef = useRef<
-    Array<{ convId: string | null; name: string; args: unknown; diff: string | null; resolve: (d: ConsentDecision) => void }>
-  >([]);
-  const consentPanelRef = useRef<HTMLDivElement>(null); // Auto-focus when the panel appears, to ease keyboard operation
-  // The set of tools allowed via "don't ask again" within this conversation (added after choosing always).
-  const allowedToolsRef = useRef<Set<string>>(new Set());
+  // Sensitive-operation confirmation queue (extracted to useConsentQueue): the front-of-queue `pending`
+  // for the panel, keyboard nav, request/answer/drop, and the per-conversation "don't ask again" allow-set.
+  const {
+    pending,
+    consentSel,
+    setConsentSel,
+    consentPanelRef,
+    allowedToolsRef,
+    requestConsent,
+    answerConsent,
+    dropConsentsFor,
+    onConsentKey,
+  } = useConsentQueue();
   // User choice (ask_user): resolve wakes the waiting Promise when an option is clicked.
   // ask_user's pending-answer choice cards: keyed by card id (each question is independent, multiple conversations / concurrent questions never overwrite each other).
   // Each entry records the issuing conversation, to ease unblocking by conversation on cancel / clear.
@@ -594,41 +418,36 @@ function ChatAgent() {
     if (convId === convIdRef.current) setTodos(next);
   };
 
-  // Task Memory: the model's INTERNAL mission brief (prose only). Deliberately separate from the visible
-  // todos above — it is context the model reads (pinned into the wire, preserved across compaction), never
-  // shown to the user. Per-conversation and persisted so the mission survives reopen.
-  const taskNotesByConvRef = useRef(new Map<string, string>());
-  const taskNotesFor = (convId: string | null): string =>
-    (convId ? taskNotesByConvRef.current.get(convId) : undefined) ?? "";
-  const taskMemoryFor = (convId: string | null): TaskMemory => ({ notes: taskNotesFor(convId) });
-  /** Persist (or clear when empty) a conversation's Task Memory brief. */
-  const persistTaskMemory = (convId: string | null) => {
-    if (!convId) return;
-    const tm = taskMemoryFor(convId);
-    useAgentChatStore.getState().setConversationTaskMemory(convId, isTaskMemoryEmpty(tm) ? null : tm);
-  };
-  const setTaskNotesFor = (convId: string | null, notes: string) => {
-    const trimmed = notes.trim();
+  // Task Memory: the model's INTERNAL mission brief (prose only, with provenance). Deliberately separate
+  // from the visible todos above — it is context the model reads (pinned into the wire, preserved across
+  // compaction), never shown to the user. Per-conversation and persisted so the mission survives reopen.
+  const taskMemoryByConvRef = useRef(new Map<string, TaskMemory>());
+  const taskMemoryFor = (convId: string | null): TaskMemory =>
+    (convId ? taskMemoryByConvRef.current.get(convId) : undefined) ?? emptyTaskMemory();
+  /** Write a conversation's Task Memory (persists; clears the entry + disk snapshot when empty). */
+  const setTaskMemoryFor = (convId: string | null, tm: TaskMemory) => {
     if (convId) {
-      if (trimmed) taskNotesByConvRef.current.set(convId, trimmed);
-      else taskNotesByConvRef.current.delete(convId);
+      if (isTaskMemoryEmpty(tm)) taskMemoryByConvRef.current.delete(convId);
+      else taskMemoryByConvRef.current.set(convId, tm);
+      useAgentChatStore
+        .getState()
+        .setConversationTaskMemory(convId, isTaskMemoryEmpty(tm) ? null : tm);
     }
-    persistTaskMemory(convId);
   };
 
-  // The model calls set_task_state: record its internal mission brief into Task Memory, pinned into the wire
-  // every turn and preserved across compaction. Not shown to the user. When the brief is unchanged, return a
-  // discouraging result so the model stops re-recording it every turn (it over-calls otherwise; the brief is
-  // already in context and the compaction extractor backstops it, so sparse updates are enough).
+  // The model calls set_task_state: record its internal mission brief into Task Memory (source "model"),
+  // pinned into the wire every turn and preserved across compaction. Not shown to the user. When the brief
+  // is unchanged, return a discouraging result so the model stops re-recording it every turn (it over-calls
+  // otherwise; the brief is already in context and the compaction extractor backstops it).
   const setTaskState = (ctx: RunCtx, rawArgs: Record<string, unknown>): string => {
     if (typeof rawArgs.notes !== "string") {
       return "No change — pass `notes` (your mission brief) to record it.";
     }
     const next = rawArgs.notes.trim();
-    if (next === taskNotesFor(ctx.convId)) {
+    if (next === taskMemoryFor(ctx.convId).notes) {
       return "Task state unchanged — it is already pinned in your context; do not call set_task_state again unless the plan or goal materially changes.";
     }
-    setTaskNotesFor(ctx.convId, next);
+    setTaskMemoryFor(ctx.convId, applyTaskState(taskMemoryFor(ctx.convId), { notes: next }));
     return "Task state recorded.";
   };
 
@@ -679,101 +498,6 @@ function ChatAgent() {
     dropChoicesFor(cid, "The user canceled."); // Release all of this conversation's pending-answer ask_user prompts
   };
 
-  // Push the set of conversations that currently have a pending confirmation into the store, so the sidebar can badge
-  // them. Called after every queue mutation. This is how a request made in a background conversation stays discoverable
-  // when the user is viewing a different chat.
-  const syncConsentBadges = () => {
-    const ids = new Set<string>();
-    for (const r of consentQueueRef.current) if (r.convId) ids.add(r.convId);
-    useAgentChatStore.getState().setPendingConsentIds(ids);
-  };
-
-  // Sync the front of the confirmation queue to pending (for rendering); collapse the panel if the queue is empty.
-  const showFrontConsent = () => {
-    const front = consentQueueRef.current[0];
-    if (front) {
-      setPending({
-        name: front.name,
-        args: front.args,
-        diff: front.diff,
-        convId: front.convId,
-        queued: consentQueueRef.current.length - 1,
-      });
-      setConsentSel(0);
-    } else {
-      setPending(null);
-    }
-  };
-
-  // Pop up the confirmation panel and wait for the user's decision; the first option (Yes) is highlighted by default. diff is the change preview (may be null).
-  // convId: the conversation that issued this confirmation. When multiple conversations (including background ones) request sensitive operations at once, they enqueue FIFO and pop one at a time,
-  // never overwriting each other — otherwise an earlier request would be stuck forever. The result bubble is separately gated to the active conversation via ctx.push.
-  const requestConsent = (convId: string | null, name: string, args: unknown, diff: string | null) =>
-    new Promise<ConsentDecision>((resolve) => {
-      const wasEmpty = consentQueueRef.current.length === 0;
-      consentQueueRef.current.push({ convId, name, args, diff, resolve });
-      syncConsentBadges();
-      if (wasEmpty) showFrontConsent(); // Queue was empty → show immediately; otherwise queue and wait for the ones ahead to finish
-      // Queued behind: do not change the front of the queue (do not interrupt the current choice), only refresh the "N more pending" count.
-      else setPending((p) => (p ? { ...p, queued: consentQueueRef.current.length - 1 } : p));
-      // Trigger condition 3: permission notification — the AI requests a sensitive operation and awaits authorization (only pops when the app is unfocused).
-      notifyPermissionRequest(convId, name);
-    });
-  // The user makes a choice on the front of the queue (click or Enter): resolve its Promise, dequeue it, then show the next one.
-  const answerConsent = (d: ConsentDecision) => {
-    const req = consentQueueRef.current.shift();
-    req?.resolve(d);
-    // Choosing "don't ask again" allows this tool at the conversation level (allowedToolsRef, global), and additionally allows the remaining requests for the same tool in the queue with "allow",
-    // to avoid re-prompting for the same tool right after authorizing it.
-    if (d === "always" && req) {
-      consentQueueRef.current = consentQueueRef.current.filter((r) => {
-        if (r.name === req.name) {
-          r.resolve("yes");
-          return false;
-        }
-        return true;
-      });
-    }
-    syncConsentBadges();
-    showFrontConsent();
-  };
-  // Discard all pending-confirmation requests of a conversation in the queue (ending them with "reject") and refresh the panel. Used to unblock it on cancel / clear.
-  const dropConsentsFor = (convId: string | null) => {
-    let changed = false;
-    consentQueueRef.current = consentQueueRef.current.filter((r) => {
-      if (r.convId === convId) {
-        r.resolve("no");
-        changed = true;
-        return false;
-      }
-      return true;
-    });
-    if (changed) {
-      syncConsentBadges();
-      showFrontConsent();
-    }
-  };
-  // Auto-focus when the panel appears, so up/down keys and Enter take effect directly.
-  useEffect(() => {
-    if (pending) consentPanelRef.current?.focus();
-  }, [pending]);
-  // Keyboard navigation: ↑/↓ cycle options, Enter confirms, Esc is treated as reject.
-  const onConsentKey = (e: ReactKeyboardEvent) => {
-    const n = CONSENT_OPTIONS.length;
-    if (e.key === "ArrowDown") {
-      e.preventDefault();
-      setConsentSel((i) => (i + 1) % n);
-    } else if (e.key === "ArrowUp") {
-      e.preventDefault();
-      setConsentSel((i) => (i - 1 + n) % n);
-    } else if (e.key === "Enter") {
-      e.preventDefault();
-      answerConsent(CONSENT_OPTIONS[consentSel].key);
-    } else if (e.key === "Escape") {
-      e.preventDefault();
-      answerConsent("no");
-    }
-  };
 
   // The connection config needed for sending, all derived from the "currently selected model" (maintained in settings / home page).
   const endpoint = activeModel?.endpoint ?? "";
@@ -1164,7 +888,7 @@ function ChatAgent() {
     setQueued([]); // New conversation: clear the queue panel (the new conversation has no queue yet)
     setAttachments([]); // Clear unsent attachments
     setTodosFor(convIdRef.current, []); // Clear this conversation's task list
-    setTaskNotesFor(convIdRef.current, ""); // ...and its Task Memory brief
+    setTaskMemoryFor(convIdRef.current, emptyTaskMemory()); // ...and its Task Memory brief
     turnUsageRef.current = { prompt: 0, completion: 0, total: 0, cached: 0, estimated: false };
     setSessionUsage({ prompt: 0, completion: 0, total: 0, cached: 0, estimated: false }); // Reset the session token stats
     setCtxTokens(0); // New conversation: context usage back to zero
@@ -1200,7 +924,7 @@ function ChatAgent() {
     setQueued([]);
     setAttachments([]);
     setTodosFor(id, []);
-    setTaskNotesFor(id, ""); // clear this conversation's Task Memory brief too
+    setTaskMemoryFor(id, emptyTaskMemory()); // clear this conversation's Task Memory brief too
     turnUsageRef.current = { prompt: 0, completion: 0, total: 0, cached: 0, estimated: false };
     setSessionUsage({ prompt: 0, completion: 0, total: 0, cached: 0, estimated: false });
     setCtxTokens(0);
@@ -1273,9 +997,9 @@ function ChatAgent() {
     convIdRef.current = id;
     // Restore this conversation's internal Task Memory brief from disk into the ref, so the mission survives
     // app reopen. Seed only if the ref doesn't already hold a live in-session copy.
-    if (conv.taskMemory && !taskNotesByConvRef.current.has(id)) {
+    if (conv.taskMemory && !taskMemoryByConvRef.current.has(id)) {
       const tm = normalizeTaskMemory(conv.taskMemory);
-      if (tm.notes) taskNotesByConvRef.current.set(id, tm.notes);
+      if (!isTaskMemoryEmpty(tm)) taskMemoryByConvRef.current.set(id, tm);
     }
     // Swap the todo panel to this conversation's own list (empty unless it has one in flight). Without this the
     // previous conversation's todos stayed on screen, looking as though they belonged to the conversation just opened.
@@ -1823,16 +1547,25 @@ function ChatAgent() {
     return lines.join("\n");
   };
 
-  /** Call the current model to compress the earlier history into a summary body (throws on failure, and the caller falls back to dedup-only). Counted toward this round's usage. */
+  /**
+   * Call the current model to compress earlier history into a summary body (throws on failure; the caller
+   * falls back to dedup-only). Counted toward this round's usage.
+   * priorSummary (§8.1 incremental): when set, `msgs` is only the NEWLY-covered span and the model updates
+   * the existing summary rather than re-summarising the whole span from scratch — far cheaper. When null,
+   * `msgs` is the full covered span (from-scratch: first summary, or a B1 forced drift reset).
+   */
   const summarizeHistory = async (
     msgs: ApiMsg[],
     signal?: AbortSignal,
     log?: { actor: string; convId?: string; turnId?: string },
+    priorSummary?: string | null,
   ): Promise<{ summary: string; extracted: ExtractedTaskState | null }> => {
     const sys: ApiMsg = {
       role: "system",
       content:
-        "You are a conversation summarizer. Compress the following earlier AI-assistant conversation into a concise but information-complete summary, so the subsequent conversation can seamlessly continue the context. " +
+        (priorSummary
+          ? "You are a conversation summarizer maintaining a running summary. Below is the EXISTING summary of the earlier conversation, then ADDITIONAL newer conversation. Produce an UPDATED summary that folds the new content into the existing one, preserving everything important from BOTH — do not drop details already captured in the existing summary. "
+          : "You are a conversation summarizer. Compress the following earlier AI-assistant conversation into a concise but information-complete summary, so the subsequent conversation can seamlessly continue the context. ") +
         "Be sure to preserve completely (better a bit long than to lose anything): " +
         "① the goal and key requirements of each user question; " +
         "② the conclusion / solution for each question — what was ultimately done and how it turned out; " +
@@ -1848,7 +1581,13 @@ function ChatAgent() {
         "<<<END_TASK_STATE>>>\n" +
         "Include only what is genuinely present as a durable plan / goal / constraint / decision (omit todos if none). If there is no clear mission or plan in this history, output {} between the markers. Output the summary first, then the markers.",
     };
-    const user: ApiMsg = { role: "user", content: renderTranscript(msgs) };
+    const transcript = renderTranscript(msgs);
+    const user: ApiMsg = {
+      role: "user",
+      content: priorSummary
+        ? `[Existing summary]\n${priorSummary}\n\n[Additional newer conversation]\n${transcript}`
+        : transcript,
+    };
     // Logged under the "compact" actor: these tokens are the app's own housekeeping, not the answer
     // the user asked for, and a usage report that hid them would under-count the turn.
     const data = await requestChat([sys, user], undefined, signal, undefined, log ?? { actor: "compact" });
@@ -1856,6 +1595,18 @@ function ChatAgent() {
     // Split the prose summary from the appended task-state JSON (pure helper; robust to malformed markers).
     const { summary, extracted } = parseSummaryWithTaskState(raw);
     if (!summary) throw new Error("Summary is empty");
+    // C1 (error-hardening §9): advisory-only hallucination check — flag distinctive facts (paths / large
+    // numbers) that appear in the summary but not in its source. Observability, gated to when diagnostics
+    // are on; never rejects/retries or edits the summary (summaries legitimately omit facts).
+    if (isUsageLogEnabledSync()) {
+      const sourceText = typeof user.content === "string" ? user.content : "";
+      const unverified = findUnverifiedFacts(summary, sourceText);
+      if (unverified.length) {
+        console.warn(
+          `[compaction] summary has ${unverified.length} fact(s) absent from the source (possible hallucination): ${unverified.slice(0, 8).join(", ")}`,
+        );
+      }
+    }
     return { summary, extracted };
   };
 
@@ -1894,30 +1645,54 @@ function ChatAgent() {
     }
     const { plan, summarizeMessages } = res;
     let summaryText: string | null = null;
+    let reuseCount = 0;
     if (plan.coversCount > 0) {
       const prev = compactionRef.current;
-      if (prev?.summaryText && prev.coversCount === plan.coversCount) {
-        summaryText = prev.summaryText; // Coverage unchanged → reuse the old summary, saving a model call
+      const prevReuse = prev?.reuseCount ?? 0;
+      const canReuse = !!prev?.summaryText && prev.coversCount === plan.coversCount;
+      if (canReuse && prevReuse < MAX_SUMMARY_REUSE) {
+        // Coverage unchanged and under the reuse cap → reuse the old summary (saves a model call), but
+        // COUNT it so a slowly-growing conversation can't keep an unverified summary alive forever (§B1).
+        summaryText = prev!.summaryText;
+        reuseCount = prevReuse + 1;
       } else {
+        // Regenerate. Three shapes:
+        //  - forced-from-scratch: the reuse cap was hit (canReuse but over MAX) → re-read the FULL covered
+        //    span from the verbatim originals, so drift/errors reset (§B1). Planner returned no
+        //    summarizeMessages (freeze-reuse signals reuse with an empty list), so reconstruct the span.
+        //  - incremental (§8.1): the boundary advanced past a usable prior summary → summarise only
+        //    (prior summary + the newly-covered span), avoiding a from-scratch pass over everything.
+        //  - first summary: no prior summary → from-scratch of the covered span.
+        const hasSystem = full[0]?.role === "system";
+        const body = hasSystem ? full.slice(1) : full;
+        const prevCovers = prev?.coversCount ?? 0;
+        const canIncrement =
+          !canReuse && !!prev?.summaryText && prevCovers > 0 && prevCovers < plan.coversCount;
+        const toSummarize = canIncrement
+          ? body.slice(prevCovers, plan.coversCount) // only the newly-folded messages
+          : summarizeMessages.length
+            ? summarizeMessages
+            : body.slice(0, plan.coversCount); // full covered span (first summary / forced reset)
+        const priorSummary = canIncrement ? prev!.summaryText : null;
         try {
-          const { summary, extracted } = await summarizeHistory(summarizeMessages, opts.signal, opts.log);
+          const { summary, extracted } = await summarizeHistory(toSummarize, opts.signal, opts.log, priorSummary);
           summaryText = summary;
           // The guarantee: capture any mission/plan/constraints from the span being discarded into Task
-          // Memory, non-destructively (fill-if-empty). This rescues a plan the model described but never
-          // recorded — captured exactly as its span is summarised — without clobbering a brief the model
-          // deliberately wrote. See docs/context-memory-tiers-design.md §5.3.
+          // Memory, non-destructively. Fills an empty brief or refreshes a prior auto-extracted one (§B2),
+          // never clobbering a model-authored brief. See docs/context-memory-tiers-design.md §5.3.
           if (extracted) {
             const convId = opts.log?.convId ?? convIdRef.current;
             const prevTm = taskMemoryFor(convId);
             const merged = mergeExtracted(prevTm, extracted);
-            if (merged.notes !== prevTm.notes) setTaskNotesFor(convId, merged.notes);
+            if (merged.notes !== prevTm.notes) setTaskMemoryFor(convId, merged);
           }
         } catch {
           summaryText = null; // Summary failed → fall back to dedup-only (buildWireContext ignores an empty summary)
         }
+        reuseCount = 0; // fresh summary
       }
     }
-    compactionRef.current = { ...plan, summaryText };
+    compactionRef.current = { ...plan, summaryText, reuseCount };
     if (opts.force) manualCompactRef.current = true;
     const savings = compactionSavings(compactionRef.current);
     setCompacted(savings.summarizedTurns > 0 || savings.dedupedReads > 0);
@@ -2017,7 +1792,15 @@ function ChatAgent() {
     // confirms sensitive tools, daily mode runs them directly. The "always" allowance still short-circuits repeat prompts.
     if (toolNeedsConsent(name, mode) && !allowedToolsRef.current.has(name)) {
       const previewDiff = await buildPreviewDiff(name, args);
-      const decision = await requestConsent(ctx.convId, name, args, previewDiff);
+      // §A1: warn when this mutation targets a file the model only "knows" from compressed history — its
+      // latest read/write was folded into the summary and never re-verified at the tail. Pure lookup, no cost.
+      const targetPath =
+        typeof args.path === "string" ? args.path : typeof args.destination === "string" ? args.destination : "";
+      const warning =
+        targetPath && pathProvenance(convoRef.current, compactionRef.current, targetPath) === "digest-only"
+          ? t("chat.provenanceWarning")
+          : null;
+      const decision = await requestConsent(ctx.convId, name, args, previewDiff, warning);
       if (decision === "always") allowedToolsRef.current.add(name);
       if (decision === "no") {
         const denied = "The user rejected this operation.";
@@ -2664,9 +2447,17 @@ function ChatAgent() {
           } else if (a.file && a.size <= 100 * 1024 * 1024) {
             // A synthetic file (a Blob dragged out of the webview / generated) has bytes only in memory with no other source — pass them in via IPC to persist.
             savedPaths.set(a.id, await saveAttachment({ name: a.name, bytes: await a.file.arrayBuffer() }));
+          } else if (a.kind === "image" && a.url) {
+            // A URL-only image: no local File / hostPath, only a link — happens when the user edits/resends a
+            // message (images are rebuilt from their stored URLs), on a home-page handoff, or from restored
+            // history. Materialize it from the URL (OSS link or data: URI) so it too exists in the working
+            // directory and can be EDITED, not just viewed; the main process does the download (no renderer CORS).
+            savedPaths.set(a.id, await saveAttachment({ name: a.name, url: a.url }));
           }
-        } catch {
-          /* Persist failed → fall back to a file-name note only */
+        } catch (e) {
+          // Surface the reason rather than swallowing it: a silent failure here is exactly why the model
+          // later reports "the image isn't in the working directory" and fabricates a replacement.
+          console.error(`[attachment] failed to save "${a.name}" to the working directory:`, e);
         }
       }
     }
@@ -2725,6 +2516,11 @@ function ChatAgent() {
         const saved = savedPaths.get(a.id);
         if (saved) {
           composed += `${composed ? "\n\n" : ""}[Image: ${a.name} (${formatBytes(a.size)}) has been saved to the working directory: ${saved} — to edit or process it (crop, annotate, OCR, convert, feed to a script), work on this file directly with file tools or commands; do not ask the user to place the file anywhere]`;
+        } else {
+          // Save failed (or there was nothing to save from). Tell the model the truth so it does NOT
+          // recreate the image from scratch — a redrawn copy differs from the original and is never what
+          // the user wants. It can still see the picture via image_url above.
+          composed += `${composed ? "\n\n" : ""}[Image: ${a.name} (${formatBytes(a.size)}) is attached and visible to you in this message, but it could NOT be auto-saved to the working directory. Do NOT recreate, redraw, or regenerate it from scratch — a rebuilt image will differ from the original. If you need it as an editable file on disk, ask the user to save it into the working directory (or attach it again), then edit that file.]`;
         }
       }
     }
@@ -3005,30 +2801,29 @@ function ChatAgent() {
               /* Invalid JSON arguments, call with an empty object */
             }
             const startedAt = Date.now();
-            const content =
-              tc.function.name === "ask_user"
-                ? await askUserChoice(ctx, args)
-                : tc.function.name === "update_todos"
-                  ? updateTodos(ctx, args)
-                  : tc.function.name === "set_task_state"
-                  ? setTaskState(ctx, args)
-                  : tc.function.name === "openBrowser"
-                    ? openBrowserAction(ctx, args)
-                    : tc.function.name === "browser"
-                      ? await browserControl(ctx, args)
-                      : tc.function.name === "image_generation"
-                        ? await generateImageAction(ctx, args)
-                        : tc.function.name === "load_skill"
-                        ? loadSkill(ctx, args)
-                        : tc.function.name === "save_memory"
-                          ? await saveMemory(ctx, args)
-                          : tc.function.name === "delete_memory"
-                            ? await deleteMemory(ctx, args)
-                            : tc.function.name === "search_memory"
-                              ? await searchMemory(ctx, args)
-                              : tc.function.name === "run_subagent"
-                            ? await runSubAgent(ctx, args)
-                            : await execToolCall(ctx, tc.function.name, args, tc.function.name);
+            // Renderer-handled tools dispatch by name to their local handler (each closes over component
+            // state); everything else falls through to execToolCall (the unified sandbox/consent path).
+            // A table rather than a ternary chain so adding a tool is one line and the control flow stays flat.
+            const rendererTool: Record<
+              string,
+              (ctx: RunCtx, a: Record<string, unknown>) => string | Promise<string>
+            > = {
+              ask_user: askUserChoice,
+              update_todos: updateTodos,
+              set_task_state: setTaskState,
+              openBrowser: openBrowserAction,
+              browser: browserControl,
+              image_generation: generateImageAction,
+              load_skill: loadSkill,
+              save_memory: saveMemory,
+              delete_memory: deleteMemory,
+              search_memory: searchMemory,
+              run_subagent: runSubAgent,
+            };
+            const handler = rendererTool[tc.function.name];
+            const content = handler
+              ? await handler(ctx, args)
+              : await execToolCall(ctx, tc.function.name, args, tc.function.name);
             // Usage log: the branches above are the tools the renderer handles itself (a choice card,
             // the todo list, a skill's instructions, memory, the browser panel). They never reach
             // execToolCall, which is where every other tool is logged, so without this they would be
@@ -3648,10 +3443,18 @@ function ChatAgent() {
             const ctxBudgetK = getContextBudgetK();
             const canCompact =
               pct >= MANUAL_COMPACT_MIN_PCT * 100 || (ctxBudgetK > 0 && contextTokens >= ctxBudgetK * 1000);
+            // Auto-compaction handles trimming on its own, so the fill bar only carries signal at the limit.
+            // Show it once usage passes the maximum (red/danger) threshold (≥90%), or reveal it on hover;
+            // otherwise the row is just label + Compressed badge + manual "Compress now" + the numbers.
+            const showBar = pct >= 90;
             return (
-              <div className="sticky bottom-0 z-10 mt-auto border-t border-line/70 bg-surface/60 px-4 py-2 backdrop-blur-md supports-[backdrop-filter]:bg-surface/60">
+              <div className="group sticky bottom-0 z-10 mt-auto border-t border-line/70 bg-surface/60 px-4 py-2 backdrop-blur-md supports-[backdrop-filter]:bg-surface/60">
                 <div className="mx-auto w-full max-w-3xl">
-                  <div className="mb-1 flex items-center justify-between text-[11px] text-ink-subtle">
+                  <div
+                    className={`flex items-center justify-between text-[11px] text-ink-subtle ${
+                      showBar ? "mb-1" : "group-hover:mb-1"
+                    }`}
+                  >
                     <div className="flex items-center gap-2">
                       <span>{t("chat.contextUsage")}</span>
                       {compacted && (
@@ -3677,7 +3480,13 @@ function ChatAgent() {
                       {abbreviateNumber(contextTokens)} / {abbreviateNumber(contextWindow)} · {pct}%
                     </span>
                   </div>
-                  <div className="h-1.5 w-full overflow-hidden rounded-full bg-surface-hover/70">
+                  <div
+                    className={`w-full overflow-hidden rounded-full bg-surface-hover/70 transition-all ${
+                      showBar
+                        ? "h-1.5 opacity-100"
+                        : "h-0 opacity-0 group-hover:h-1.5 group-hover:opacity-100"
+                    }`}
+                  >
                     <div
                       className={`h-full rounded-full transition-all ${barColor}`}
                       style={{ width: `${pct}%` }}

@@ -6,29 +6,42 @@
  * agent cannot forget what it is doing after older rounds are compacted. Distinct from ZERAIX.md project
  * memory (durable across sessions); this is this conversation's mission only.
  *
- * INTERNAL and INVISIBLE by design. It is prose-only (`notes`) — a free-form markdown brief the model
- * writes in its own words. It deliberately holds no structured todo list: the user-facing checklist is the
- * separate `update_todos` panel. Task Memory is context the *model* reads, not a surface the *user* sees, so
- * the model's internal planning never leaks onto the To-dos panel.
+ * INTERNAL and INVISIBLE by design. Prose-only (`notes`) — a free-form markdown brief the model writes in
+ * its own words. It deliberately holds no structured todo list: the user-facing checklist is the separate
+ * `update_todos` panel. Task Memory is context the *model* reads, not a surface the *user* sees.
+ *
+ * `source` records provenance (error-hardening §A2/§B2):
+ *   - "model"          — written by the model's own set_task_state call. PERMANENTLY IMMUNE: the extractor
+ *                        never overwrites it (it is the model's deliberate truth).
+ *   - "auto-extracted" — captured by the compaction-time extractor from a discarded span. REFRESHABLE: a
+ *                        later extraction (from a larger span) may overwrite it, so a wrong first capture
+ *                        can self-correct rather than being frozen forever.
  *
  * Two ways it is populated:
- *   - applyTaskState(): the model's own set_task_state tool call — REPLACE the brief with what it provides.
- *   - mergeExtracted(): the compaction-time extractor — NON-DESTRUCTIVE fill-if-empty. It rescues the case
- *     where the model described a plan but never recorded it (empty brief), capturing it as the span is
- *     discarded; it never overwrites a brief the model deliberately wrote.
+ *   - applyTaskState(): the model's own set_task_state — REPLACE the brief, stamp source "model".
+ *   - mergeExtracted(): the compaction-time extractor — fill when empty OR refresh a prior auto-extracted
+ *     brief; never touches a model-authored one. Stamps source "auto-extracted".
  *
  * Everything here is pure and JSON-serialisable (persisted as-is with the conversation).
  */
 
+export type TaskMemorySource = "model" | "auto-extracted";
+
 export interface TaskMemory {
   /** Free-form markdown task brief: mission, plan, constraints, decisions — in the model's own words. */
   notes: string;
+  /** Provenance of `notes` — see module doc. Irrelevant when notes is empty. */
+  source: TaskMemorySource;
 }
 
-/** A model-authored update (set_task_state): replaces the brief. */
-export type TaskStatePatch = Partial<TaskMemory>;
-/** A compaction-extracted delta: applied non-destructively (fill-if-empty). */
-export type ExtractedTaskState = Partial<TaskMemory>;
+/** A model-authored update (set_task_state): the caller supplies notes; source is stamped "model". */
+export interface TaskStatePatch {
+  notes?: string;
+}
+/** A compaction-extracted delta: the caller supplies notes; source is stamped "auto-extracted". */
+export interface ExtractedTaskState {
+  notes?: string;
+}
 
 // The brief rides every turn uncached at the wire tail, so cap it (prose, ~1K tokens).
 const MAX_NOTES = 4000; // chars
@@ -40,30 +53,40 @@ const clampStr = (s: unknown, max: number): string => {
 };
 
 export function emptyTaskMemory(): TaskMemory {
-  return { notes: "" };
+  return { notes: "", source: "model" };
 }
 
 export function isTaskMemoryEmpty(tm: TaskMemory | null | undefined): boolean {
   return !tm || !tm.notes;
 }
 
-/** Normalise any (possibly persisted / partial) object into a well-formed, bounded TaskMemory. */
+/**
+ * Normalise any (possibly persisted / partial) object into a well-formed, bounded TaskMemory. A persisted
+ * brief with no `source` (pre-dates the field) defaults to "model" — the SAFE default, so an
+ * unknown-provenance brief is treated as immune and never overwritten by the extractor.
+ */
 export function normalizeTaskMemory(raw: unknown): TaskMemory {
-  return { notes: clampStr((raw as Partial<TaskMemory> | null)?.notes, MAX_NOTES) };
+  const r = (raw as Partial<TaskMemory> | null) ?? {};
+  return {
+    notes: clampStr(r.notes, MAX_NOTES),
+    source: r.source === "auto-extracted" ? "auto-extracted" : "model",
+  };
 }
 
-/** Model-authored update (set_task_state): replaces the brief when notes is provided; else unchanged. */
+/** Model-authored update (set_task_state): replaces the brief (source "model") when notes is provided. */
 export function applyTaskState(prev: TaskMemory, patch: TaskStatePatch): TaskMemory {
-  return patch.notes != null ? { notes: clampStr(patch.notes, MAX_NOTES) } : { ...prev };
+  if (patch.notes == null) return { ...prev };
+  return { notes: clampStr(patch.notes, MAX_NOTES), source: "model" };
 }
 
 /**
- * Compaction-extracted delta: applied NON-DESTRUCTIVELY, fill-if-empty only. Rescues a plan the model
- * described but never recorded (empty brief) by capturing it as its span is discarded — without letting a
- * hallucinated extraction overwrite a brief the model deliberately wrote.
+ * Compaction-extracted delta. Applied when the brief is empty (fill) OR was itself auto-extracted (refresh
+ * — §B2, so a wrong first capture can self-correct from a larger span). A "model"-authored brief is immune
+ * and left untouched. Always stamps source "auto-extracted".
  */
 export function mergeExtracted(prev: TaskMemory, ex: ExtractedTaskState): TaskMemory {
-  if (!prev.notes && ex.notes) return { notes: clampStr(ex.notes, MAX_NOTES) };
+  const refreshable = !prev.notes || prev.source === "auto-extracted";
+  if (refreshable && ex.notes) return { notes: clampStr(ex.notes, MAX_NOTES), source: "auto-extracted" };
   return { ...prev };
 }
 
@@ -103,7 +126,7 @@ const TASK_STATE_BANNER =
 
 /**
  * Render Task Memory into the compact text block appended at the wire tail. Empty → "" (nothing injected).
- * The brief is emitted verbatim (it is already prose).
+ * The brief is emitted verbatim (it is already prose); provenance is internal metadata, not shown.
  */
 export function renderTaskMemory(tm: TaskMemory | null | undefined): string {
   if (isTaskMemoryEmpty(tm)) return "";

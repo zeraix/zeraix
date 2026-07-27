@@ -69,6 +69,7 @@ export interface StoredCompaction {
   coversCount: number;
   summarizedTurns: number;
   summaryText: string | null;
+  reuseCount?: number; // how many turns this summary has been reused (error-hardening §B1); forces re-summary at a cap
   stubs: [string, string][];
   manual: boolean; // whether the user manually triggered "compact now" (kept even when usage falls back below the threshold)
   compacted: boolean; // whether the wire view is actually compacted right now (drives the "compacted" marker)
@@ -103,6 +104,8 @@ export interface Conversation {
 export interface StoredTaskMemory {
   /** Free-form markdown task brief (mission / plan / constraints / decisions in the model's own words). */
   notes: string;
+  /** Provenance: "model" (deliberate, immune) or "auto-extracted" (refreshable). Missing → treated as "model". */
+  source?: "model" | "auto-extracted";
 }
 
 /** A project = working directory + mode. An empty workdir means the "default project" (daily mode with no folder chosen). */

@@ -210,13 +210,29 @@ async function ensureWorkdir() {
  *     webview / a program-generated Blob); their bytes only ever exist in memory, with no other source,
  *     and are written to disk after being passed in over IPC.
  *  The filename is sanitized (illegal characters and whitespace → _) and de-duplicated on name collision (-1/-2…). */
-export async function saveAttachment({ name, srcPath, bytes }) {
+export async function saveAttachment({ name, srcPath, bytes, url }) {
   await ensureWorkdir();
+  // A URL-only image has no local File or host path — only a link. This happens when the user edits /
+  // resends a message (images are reconstructed from their stored URLs), when an image is handed off from
+  // the home-page composer, or when a conversation is restored from history: in all three the original
+  // File object is gone. Download its bytes HERE in the main process — no renderer CORS limits, and a
+  // large image's base64 never has to cross IPC — so it lands in the working directory like any other
+  // attachment and the model can EDIT it (imagemagick / ffmpeg), not merely look at it.
+  let inBytes = bytes ? Buffer.from(bytes) : null;
+  let inferredExt = "";
+  if (!srcPath && !inBytes && url) {
+    const dl = await downloadAttachment(url);
+    inBytes = dl.bytes;
+    inferredExt = dl.ext;
+  }
   const base =
     path.basename(String(name || "attachment")).replace(/[\\/:*?"<>|\u0000-\u001f\s]/g, "_") || "attachment";
-  const ext = path.extname(base);
-  const stem = base.slice(0, base.length - ext.length) || "attachment";
-  let target = path.join(WORKDIR, base);
+  // Reconstructed names like "image-1" carry no extension; append the type learned on download so
+  // extension-driven tools (imagemagick, ffmpeg) recognize the format.
+  const named = !path.extname(base) && inferredExt ? `${base}.${inferredExt}` : base;
+  const ext = path.extname(named);
+  const stem = named.slice(0, named.length - ext.length) || "attachment";
+  let target = path.join(WORKDIR, named);
   for (let i = 1; ; i++) {
     try {
       await fs.access(target);
@@ -229,9 +245,64 @@ export async function saveAttachment({ name, srcPath, bytes }) {
     // FICLONE: zero-copy on reflink-capable filesystems (APFS / Btrfs / XFS); otherwise falls back to a normal copy automatically.
     await fs.copyFile(String(srcPath), target, FS.COPYFILE_FICLONE);
   } else {
-    await fs.writeFile(target, Buffer.from(bytes)); // Synthetic file: bytes only in memory, passed in over IPC and written to disk.
+    if (!inBytes) throw new Error("saveAttachment requires srcPath, bytes, or url");
+    await fs.writeFile(target, inBytes); // Synthetic / downloaded file: bytes written straight to disk.
   }
   return target;
+}
+
+// ── URL / data-URI → bytes (saveAttachment's `url` source) ─────────────────────
+const ATTACH_DL_MAX_BYTES = 100 * 1024 * 1024; // guard: never pull an unbounded download into memory
+
+/** image/* MIME → a file extension imagemagick/ffmpeg will recognize ("" when unknown). */
+function extFromMime(mime) {
+  switch (String(mime).toLowerCase()) {
+    case "image/png": return "png";
+    case "image/jpeg":
+    case "image/jpg": return "jpg";
+    case "image/webp": return "webp";
+    case "image/gif": return "gif";
+    case "image/svg+xml": return "svg";
+    case "image/bmp": return "bmp";
+    case "image/tiff": return "tiff";
+    case "image/avif": return "avif";
+    case "image/heic": return "heic";
+    case "image/x-icon":
+    case "image/vnd.microsoft.icon": return "ico";
+    default: return "";
+  }
+}
+
+/** Last-resort extension from a URL's path (…/photo.png?x=1 → "png"), used when content-type gives nothing. */
+function extFromUrlPath(u) {
+  try {
+    const e = path.extname(new URL(u).pathname).replace(/^\./, "").toLowerCase();
+    return /^[a-z0-9]{2,5}$/.test(e) ? e : "";
+  } catch {
+    return "";
+  }
+}
+
+/** Download a URL-only attachment to bytes: data: URIs decoded inline, http(s) fetched via httpGet
+ *  (main process → no CORS). Returns { bytes, ext } (ext may be ""); throws on failure so the caller's
+ *  try/catch degrades to a filename-only note rather than blocking the send. */
+async function downloadAttachment(url) {
+  const s = String(url);
+  const dm = s.match(/^data:([^;,]*)(;base64)?,([\s\S]*)$/i);
+  if (dm) {
+    const buf = dm[2] ? Buffer.from(dm[3], "base64") : Buffer.from(decodeURIComponent(dm[3]), "utf8");
+    if (buf.length > ATTACH_DL_MAX_BYTES) throw new Error(`attachment too large (${buf.length} bytes)`);
+    return { bytes: buf, ext: extFromMime(dm[1]) };
+  }
+  if (!/^https?:\/\//i.test(s)) throw new Error(`unsupported attachment url: ${s.slice(0, 32)}`);
+  const res = await httpGet(s, { accept: "image/*,*/*;q=0.8" });
+  if (!res.ok) throw new Error(`download failed: HTTP ${res.status}`);
+  const len = Number(res.headers.get("content-length") || 0);
+  if (len > ATTACH_DL_MAX_BYTES) throw new Error(`attachment too large (${len} bytes)`);
+  const ab = await res.arrayBuffer();
+  if (ab.byteLength > ATTACH_DL_MAX_BYTES) throw new Error(`attachment too large (${ab.byteLength} bytes)`);
+  const ctype = (res.headers.get("content-type") || "").split(";")[0].trim();
+  return { bytes: Buffer.from(ab), ext: extFromMime(ctype) || extFromUrlPath(s) };
 }
 
 // ── LLM config (for tools like refine_question that make a secondary model call) ──────────────────

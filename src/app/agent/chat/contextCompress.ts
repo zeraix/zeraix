@@ -32,6 +32,11 @@ export const MIN_STUB_CHARS = 400;
 /** Lower bound for manual "compress now": manual compression is disallowed when context usage is below this fraction of the window (too little content, compression is meaningless). */
 export const MANUAL_COMPACT_MIN_PCT = 0.2;
 
+/** Error-hardening §B1: after a summary has been reused this many turns, force a fresh re-summary from the
+ *  verbatim originals — even if the growth threshold hasn't tripped — so no unverified summary can live
+ *  indefinitely in a slowly-growing conversation. Trades a little cache stability for a bounded error window. */
+export const MAX_SUMMARY_REUSE = 20;
+
 /**
  * Resolve the hybrid auto-compaction trigger/target (in tokens) from the model's context window and an
  * absolute working-set budget (K tokens). The effective threshold is the MORE aggressive of the two —
@@ -94,6 +99,9 @@ export interface CompactionPlan {
 export interface CompactionState extends CompactionPlan {
   /** The history summary body corresponding to coversCount>0; null when not yet generated (in which case coversCount should fall back to 0). */
   summaryText: string | null;
+  /** How many turns this exact summary has been reused (error-hardening §B1). Reset to 0 on a fresh
+   *  summary; when it reaches MAX_SUMMARY_REUSE the caller forces a re-summary, bounding error dwell time. */
+  reuseCount?: number;
 }
 
 // ── Associate tool_call_id → {tool name, path} ────────────────────────────────────────
@@ -403,6 +411,7 @@ export function serializeCompaction(state: CompactionState): SerializedCompactio
     coversCount: state.coversCount,
     summarizedTurns: state.summarizedTurns,
     summaryText: state.summaryText,
+    reuseCount: state.reuseCount ?? 0,
     stubs: [...state.stubs],
   };
 }
@@ -414,6 +423,7 @@ export function deserializeCompaction(s: SerializedCompaction): CompactionState 
     coversCount: s.coversCount,
     summarizedTurns: s.summarizedTurns,
     summaryText: s.summaryText,
+    reuseCount: s.reuseCount ?? 0,
     stubs: new Map(s.stubs ?? []),
   };
 }
@@ -428,4 +438,41 @@ export function compactionSavings(state: CompactionState | null | undefined): {
     summarizedTurns: state.summaryText ? state.summarizedTurns : 0,
     dedupedReads: state.stubs.size,
   };
+}
+
+/**
+ * Provenance of a path's current known state, for the confirmation gate (error-hardening §A1). Determines,
+ * from the compaction state alone (no model call), whether the model's knowledge of this file comes from
+ * content still present verbatim in the wire, or only from the lossy summary:
+ *   - "verified"    — the latest read/write of the path is in the kept-verbatim or live-tail region.
+ *   - "digest-only" — the latest read/write was folded into the summary; the model is acting on compressed,
+ *                     unverified history. A high-risk mutation on this warrants a "re-read first" warning.
+ *   - "unknown"     — the path was never read/written in this conversation (a different risk; not flagged here).
+ */
+export function pathProvenance(
+  messages: ApiMsg[],
+  state: CompactionState | null | undefined,
+  rawPath: string,
+): "verified" | "digest-only" | "unknown" {
+  const path = normPath(rawPath);
+  if (!path) return "unknown";
+  const calls = indexCalls(messages);
+  const hasSystem = messages[0]?.role === "system";
+  const bodyStart = hasSystem ? 1 : 0;
+  // Messages [bodyStart, foldedEnd) are folded into the summary (gone from the wire); anything at/after it
+  // survives verbatim (kept-frozen or live tail). No summary → nothing folded.
+  const foldedEnd = state?.summaryText && state.coversCount > 0 ? bodyStart + state.coversCount : bodyStart;
+  let latestTouch = -1;
+  for (let i = 0; i < messages.length; i++) {
+    const m = messages[i];
+    if (m.role !== "assistant" || !m.tool_calls) continue;
+    for (const tc of m.tool_calls) {
+      const info = calls.get(tc.id);
+      if (info?.path === path && (READ_TOOLS.has(info.name) || MUTATORS[info.name]) && i > latestTouch) {
+        latestTouch = i;
+      }
+    }
+  }
+  if (latestTouch < 0) return "unknown";
+  return latestTouch < foldedEnd ? "digest-only" : "verified";
 }

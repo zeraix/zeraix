@@ -27,6 +27,29 @@ import {
   type CompactionState,
 } from "./contextCompress";
 
+/**
+ * C1 (error-hardening §9): distinctive facts that appear in a compaction SUMMARY but NOT in its SOURCE
+ * text — i.e. likely fabricated by the summariser. Deterministic, no model call. ADVISORY / observability
+ * ONLY: we flag *only* the present-in-summary / absent-in-source direction, because a summary legitimately
+ * OMITS and transforms facts (so "source fact missing from summary" is not an error). Even this direction
+ * has false positives — the summary may shorten a path ("auth.ts" for "src/lib/auth.ts") or aggregate a
+ * number — which is why the result is logged for measurement, never used to reject/retry or edit the
+ * summary. Scoped to high-signal facts: slashed file paths with an extension, and 3+ digit numbers.
+ */
+const PATH_RE = /(?:[A-Za-z0-9_.-]+\/)+[A-Za-z0-9_.-]+\.[A-Za-z0-9]+/g;
+const NUM_RE = /\b\d{3,}\b/g;
+export function findUnverifiedFacts(summary: string, sourceText: string): string[] {
+  if (!summary) return [];
+  const out = new Set<string>();
+  for (const re of [PATH_RE, NUM_RE]) {
+    for (const m of summary.matchAll(re)) {
+      const tok = m[0];
+      if (tok.length >= 3 && !sourceText.includes(tok)) out.add(tok);
+    }
+  }
+  return [...out];
+}
+
 /** The tool name a sub-agent delegation is issued under (its tool results are attributed separately). */
 const SUBAGENT_TOOL = "run_subagent";
 /** Read tool whose repeated calls on the same path are the "redundant re-read" signal (attention proxy). */

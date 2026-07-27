@@ -14,14 +14,15 @@ import type { InstalledSkill } from "./types";
 /** Document / Media Processing Toolbox (equipped only for sandbox execution; see runtimeSkills in page.tsx). */
 export const SANDBOX_TOOLBOX_SKILL: InstalledSkill = {
   id: "doc-media-toolbox",
-  name: "Document / Media Processing Toolbox",
+  name: "Document, Image & Media Toolbox",
   version: "2", // follows the image tag (v2)
   description:
-    "Processing and format conversion for documents / PDF / Office / OCR / images / audio & video: the current sandbox comes with a full toolchain preinstalled " +
-    "(pymupdf4llm, markitdown, pandoc, LibreOffice, RapidOCR, ffmpeg, imagemagick, etc.). " +
-    "Load this skill before such tasks and use the preinstalled tools directly per the list; do not pip/apt install anything yourself.",
+    "Edit, convert, annotate and create images / graphics / audio / video, and process documents (PDF / Office / OCR). " +
+    "Editing an existing image — resize, crop, rotate, add text or a watermark, overlay a logo, convert format, compress, SVG→PNG — is done HERE with the preinstalled imagemagick / ffmpeg / librsvg, no API or model needed; " +
+    "so is generating graphics programmatically (charts, diagrams, banners, shapes, gradients). The sandbox ships a full toolchain (imagemagick, ffmpeg, librsvg, pngquant, graphviz, pymupdf4llm, markitdown, pandoc, LibreOffice, RapidOCR, etc.). " +
+    "Load this skill whenever the user asks to work with an image, photo, picture, screenshot, icon, SVG, audio, video, PDF or Office file, then use the preinstalled tools directly; do not claim you cannot process images, and do not pip/apt install anything yourself.",
   author: "Built-in",
-  tags: ["sandbox", "pdf", "office", "ocr"],
+  tags: ["sandbox", "image", "media", "graphics", "video", "audio", "pdf", "office", "ocr"],
   allowedTools: ["run_command"],
   installedAt: 0,
   enabled: true,
@@ -50,8 +51,34 @@ export const SANDBOX_TOOLBOX_SKILL: InstalledSkill = {
 - pandoc / pypandoc: convert between md / html / docx / latex / epub
 - mammoth: docx → clean HTML/Markdown; trafilatura: web-page body text → Markdown
 
-## Images / media / graphics
-imagemagick (convert), ffmpeg (audio/video), librsvg (SVG), pngquant (PNG compression), unpaper (scanned-page cleanup), graphviz (dot). Chinese fonts (Noto CJK) are installed, so PDF / Office rendering won't produce tofu boxes.
+## Images / graphics (edit & create — no API/model needed)
+You CAN edit and create images right here; never tell the user that image editing is out of scope. Editing an existing file is what the tools below are for; to generate a brand-new picture from a text description (AI text-to-image), use the image_generation tool instead when it is available. Always write outputs into the working directory. (ImageMagick 7 exposes the same commands as \`magick …\`; \`convert\` also works.)
+- Inspect: identify in.png   (add -verbose for full metadata / EXIF)
+- Resize: convert in.jpg -resize 800x600 out.jpg   (keeps aspect; 50% = percent; 800x600! = force exact; '800x600>' = only shrink if larger)
+- Crop: convert in.jpg -crop 400x300+50+20 +repage out.jpg   (WxH+X+Y; +repage clears the virtual canvas so the geometry resets)
+- Rotate / flip: convert in.jpg -rotate 90 out.jpg   (-flip = top-bottom, -flop = left-right)
+- Convert format: convert in.png out.jpg   (also .webp / .gif / .tiff / .bmp / .ico; .heic reads when libheif is present)
+- Compress: JPEG → convert in.jpg -quality 82 out.jpg ; PNG → pngquant --quality=65-85 -o out.png in.png
+- Add text / watermark: convert in.jpg -gravity southeast -pointsize 36 -fill 'rgba(255,255,255,0.6)' -annotate +20+20 'Zeraix' out.jpg
+- Overlay a logo: convert base.png logo.png -gravity northeast -geometry +10+10 -composite out.png
+- Square thumbnail (crop to fill): convert in.jpg -thumbnail 400x400^ -gravity center -extent 400x400 out.jpg
+- Flatten transparency onto a solid background: convert in.png -background white -flatten out.jpg
+- Trim a surrounding border: convert in.png -trim +repage out.png
+- Join: convert a.png b.png +append row.png   (side by side; -append = stack vertically)
+- Create a canvas / gradient / shapes (deterministic graphics, no model): convert -size 1200x400 gradient:'#4f46e5'-'#a855f7' banner.png ; convert -size 400x400 xc:white -fill red -draw 'circle 200,200 200,100' dot.png
+- SVG → PNG (crisper than imagemagick for SVG): rsvg-convert -w 1024 in.svg -o out.png
+- Diagram from Graphviz DOT source: dot -Tpng graph.dot -o graph.png   (-Tsvg for vector)
+Note: for PDF↔image go through poppler / pdf2image / ghostscript (see the PDF section) — ImageMagick's default policy.xml blocks the PDF/PS coders.
+
+## Audio / video (ffmpeg)
+- Extract a frame: ffmpeg -i in.mp4 -ss 00:00:03 -frames:v 1 frame.png
+- Video → GIF: ffmpeg -i in.mp4 -vf "fps=12,scale=480:-1:flags=lanczos" out.gif
+- Frames → video: ffmpeg -framerate 24 -i frame_%04d.png -c:v libx264 -pix_fmt yuv420p out.mp4
+- Resize / transcode: ffmpeg -i in.mov -vf scale=1280:-2 -c:v libx264 -crf 23 out.mp4
+- Trim without re-encoding: ffmpeg -ss 00:00:05 -i in.mp4 -t 10 -c copy out.mp4
+- Extract audio: ffmpeg -i in.mp4 -vn -c:a copy out.m4a
+
+Chinese fonts (Noto CJK) are installed, so image text / PDF / Office rendering won't produce tofu boxes. Also available: unpaper (scanned-page cleanup).
 
 ## Common CLI
 rg, jq, git, curl, wget, 7z, zstd, unzip/zip, xz, make, tmux, bc, ss/lsof/htop, etc. are all available.
@@ -69,6 +96,7 @@ rg, jq, git, curl, wget, 7z, zstd, unzip/zip, xz, make, tmux, bc, ss/lsof/htop, 
 - Simple structured edits (add a row, change a cell, replace a paragraph): python-docx / openpyxl, lighter, no need to involve LibreOffice
 - Extract PDF text / tables (programmatic processing): PyMuPDF (fast) / pdfplumber (tables + layout); plain text only: pdftotext
 - Web-page body text → Markdown: trafilatura
+- Edit / convert / annotate an existing image (resize, crop, rotate, watermark, format, compress): imagemagick (convert); for SVG use rsvg-convert. This is local and needs no model — do it directly, do not refuse. To create a NEW picture from a text prompt (AI text-to-image) use the image_generation tool instead, not imagemagick.
 - Do not install: docling / marker-pdf (torch/CUDA dependencies of several GB, exceeding sandbox disk and with unreachable model sites, bound to fail),
   tesseract / paddleocr (the built-in RapidOCR already covers OCR)`,
 };

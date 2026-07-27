@@ -85,9 +85,9 @@ export const PROVIDERS: Provider[] = [
   {
     id: "minimax",
     label: "MiniMax",
-    baseUrl: "https://api.minimax.chat/v1",
+    baseUrl: "https://api.minimaxi.com/v1",
     // Non-standard: MiniMax exposes chat at /text/chatcompletion_v2, not /chat/completions.
-    chatPath: "/text/chatcompletion_v2",
+    // chatPath: "/text/chatcompletion_v2",
     models: ["MiniMax-Text-01", "abab6.5s-chat", "abab6.5g-chat"],
     note: "Some accounts require a GroupId; if it fails, switch to \"Custom\".",
   },

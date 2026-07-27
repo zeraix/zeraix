@@ -995,5 +995,6 @@
   "general.contextBudget": "上下文預算",
   "general.contextBudgetDesc": "智能體在自動壓縮較早歷史前保留的最大工作集（以 K tokens 計）。用於在大上下文視窗模型上限制上下文規模，避免單一任務攜帶數十萬 tokens。範圍 40–500；填 0 關閉此上限（僅依模型視窗）。",
   "general.contextBudgetUnit": "K tokens",
-  "general.contextBudgetOff": "關閉（僅依視窗比例）"
+  "general.contextBudgetOff": "關閉（僅依視窗比例）",
+  "chat.provenanceWarning": "⚠ 此操作依賴的檔案狀態來自已壓縮的歷史摘要，且近期未重新核實——建議先重新讀取該檔案。"
 }

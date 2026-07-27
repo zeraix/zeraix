@@ -998,5 +998,6 @@
   "general.contextBudget": "Context budget",
   "general.contextBudgetDesc": "Maximum working set (in K tokens) the agent keeps before auto-compacting older history. Caps context on large-window models so a task can't carry hundreds of thousands of tokens. Range 40–500; 0 disables the cap (use the model's window only).",
   "general.contextBudgetUnit": "K tokens",
-  "general.contextBudgetOff": "off (window-relative only)"
+  "general.contextBudgetOff": "off (window-relative only)",
+  "chat.provenanceWarning": "⚠ This operation relies on this file's state from compressed history that hasn't been re-verified recently — consider re-reading the file first."
 }

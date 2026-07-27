@@ -230,7 +230,9 @@ export const systemPromptFor = (mode: "daily" | "dev") =>
 /** Append the "working directory" constraint after the system prompt: all file / command tools are restricted to this directory. */
 export const workdirPrompt = (dir: string) =>
   `All your tool calls are restricted to the working directory: ${dir}. ` +
-  "Use paths relative to this directory (access outside it is rejected); run_command also executes inside it.";
+  "Use paths relative to this directory (access outside it is rejected); run_command also executes inside it. " +
+  "Any file or image the user uploads, pastes, or attaches is copied into this working directory before their message reaches you, and their message then carries a note with its exact saved path (e.g. \"[Image: … has been saved to the working directory: …]\"). " +
+  "When you see such a note, the upload is a normal on-disk file here: open, edit, convert, OCR, annotate, or run tools on it directly at that path. Never reply that an uploaded or pasted image/file is unavailable, that you cannot access or edit it, or that it is 'not in the working directory' — it is.";
 
 export const selCls =
   "rounded-lg border border-line-strong bg-surface px-2.5 py-1.5 text-sm outline-none transition focus:border-ring focus:ring-2 focus:ring-primary/10";

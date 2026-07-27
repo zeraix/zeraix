@@ -995,5 +995,6 @@
   "general.contextBudget": "Budget de contexte",
   "general.contextBudgetDesc": "Ensemble de travail maximal (en K tokens) que l'agent conserve avant de compacter automatiquement l'historique ancien. Limite le contexte sur les modèles à grande fenêtre pour qu'une tâche ne traîne pas des centaines de milliers de tokens. Plage 40–500 ; 0 désactive la limite (fenêtre du modèle uniquement).",
   "general.contextBudgetUnit": "K tokens",
-  "general.contextBudgetOff": "désactivé (relatif à la fenêtre uniquement)"
+  "general.contextBudgetOff": "désactivé (relatif à la fenêtre uniquement)",
+  "chat.provenanceWarning": "⚠ Cette opération repose sur l'état de ce fichier issu de l'historique compressé et non revérifié récemment ; envisagez de relire le fichier d'abord."
 }

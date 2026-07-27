@@ -995,5 +995,6 @@
   "general.contextBudget": "Orçamento de contexto",
   "general.contextBudgetDesc": "Conjunto de trabalho máximo (em K tokens) que o agente mantém antes de compactar automaticamente o histórico mais antigo. Limita o contexto em modelos de janela grande para que uma tarefa não arraste centenas de milhares de tokens. Intervalo 40–500; 0 desativa o limite (apenas a janela do modelo).",
   "general.contextBudgetUnit": "K tokens",
-  "general.contextBudgetOff": "desativado (apenas relativo à janela)"
+  "general.contextBudgetOff": "desativado (apenas relativo à janela)",
+  "chat.provenanceWarning": "⚠ Esta operação depende do estado deste arquivo obtido do histórico comprimido e não verificado recentemente; considere reler o arquivo primeiro."
 }
