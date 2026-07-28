@@ -14,7 +14,7 @@
  *
  * See docs/cache-stable-prompt-context.md.
  */
-import type { ApiMsg, ContentPart, ReminderState } from "./types";
+import type { ApiMsg, ReminderState } from "./types";
 
 /** Wrapper marking the block as operator-injected rather than user-typed. */
 const OPEN = "<system-reminder>";
@@ -138,34 +138,42 @@ export function renderSnapshot(state: ReminderState): string {
 }
 
 /**
- * Write a reminder block into a turn's content.
+ * Merge each turn's `reminderText` into its content, producing the array actually sent to the model.
  *
- * `where` matters for the prefix. A user turn is new text either way, so the block goes at the front where it is read first. A tool
- * turn has already been sent and stored, so writing into it moves the divergence point into already-cached tokens — appending puts
- * that divergence at the end of a result that can run to thousands of characters, instead of at its start.
+ * This is the ONLY place the two are combined, and it happens on the outgoing copy — never on the buffer or on disk. Keeping them
+ * apart everywhere else is what lets `content` stay "what the user typed" / "what the tool returned": the UI can render it, the
+ * summariser can read it, and a transform that rewrites content (stubbing a stale tool result, stripping images a model cannot see)
+ * cannot silently delete operator text the model has already been shown.
+ *
+ * Position follows the role, and follows the prefix. A user turn is new text on the turn it is emitted, so the block goes at the
+ * front where it is read first. A tool turn may already have been sent, so its block goes at the end: that puts any divergence
+ * after a result that can run to thousands of characters rather than before it.
  */
-export function writeReminderInto(
-  content: string | ContentPart[],
-  block: string,
-  where: "start" | "end",
-): string | ContentPart[] {
-  const join = (body: string) => (where === "start" ? `${block}\n\n${body}` : `${body}\n\n${block}`);
-  if (typeof content === "string") return content ? join(content) : block;
-  // Multimodal: merge into the first text part so no part is added and the image parts keep their order.
-  const parts = [...content];
-  const i = parts.findIndex((p) => p.type === "text");
-  if (i < 0) {
-    return where === "start"
-      ? [{ type: "text" as const, text: block }, ...parts]
-      : [...parts, { type: "text" as const, text: block }];
-  }
-  const part = parts[i] as { type: "text"; text: string };
-  parts[i] = { type: "text", text: join(part.text) };
-  return parts;
+export function materializeReminders(msgs: ApiMsg[]): ApiMsg[] {
+  if (!msgs.some((m) => (m.role === "user" || m.role === "tool") && m.reminderText)) return msgs;
+  return msgs.map((m) => {
+    if (m.role === "tool" && m.reminderText) {
+      const { reminderText, ...rest } = m;
+      return { ...rest, content: rest.content ? `${rest.content}\n\n${reminderText}` : reminderText };
+    }
+    if (m.role === "user" && m.reminderText) {
+      const { reminderText, ...rest } = m;
+      if (typeof rest.content === "string") {
+        return { ...rest, content: rest.content ? `${reminderText}\n\n${rest.content}` : reminderText };
+      }
+      // Multimodal: merge into the first text part, so no part is added and the image parts keep their order.
+      const parts = [...rest.content];
+      const i = parts.findIndex((p) => p.type === "text");
+      if (i < 0) return { ...rest, content: [{ type: "text" as const, text: reminderText }, ...parts] };
+      const part = parts[i] as { type: "text"; text: string };
+      parts[i] = { type: "text", text: `${reminderText}\n\n${part.text}` };
+      return { ...rest, content: parts };
+    }
+    return m;
+  });
 }
 
-/** Does this turn's content already carry the given block? Used by the mid-loop nudge guards, which no longer add a message to scan for. */
-export function contentHasBlock(content: string | ContentPart[], needle: string): boolean {
-  if (typeof content === "string") return content.includes(needle);
-  return content.some((p) => p.type === "text" && p.text.includes(needle));
+/** Append a block to whatever this turn already carries, so two guards firing in one round do not overwrite each other. */
+export function addBlock(existing: string | undefined, block: string): string {
+  return existing ? `${existing}\n\n${block}` : block;
 }

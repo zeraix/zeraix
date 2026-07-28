@@ -150,12 +150,12 @@ import {
   WORKDIR_SCOPE_RULE,
 } from "./constants";
 import {
-  contentHasBlock,
+  addBlock,
   diffReminder,
   foldReminders,
+  materializeReminders,
   renderReminder,
   wrapReminder,
-  writeReminderInto,
 } from "./reminders";
 import type {
   ApiMsg,
@@ -1050,9 +1050,15 @@ function ChatAgent() {
     // started. Only a record written before this field existed falls through to the compose step on the next send.
     const restoredSystem: ApiMsg[] = conv.systemPrompt ? [{ role: "system", content: conv.systemPrompt }] : [];
     convoRef.current = conv.messages.map((m): ApiMsg => {
-      // `wireText` on a tool result carries a mid-loop nudge that was appended to it. Replaying `content` alone would drop that
-      // text, so the turn would render differently than when it was sent and break the prefix from that point (see reminders.ts).
-      if (m.role === "tool") return { role: "tool", tool_call_id: m.tool_call_id ?? "", content: m.wireText ?? m.content };
+      // A tool result may carry a mid-loop nudge. It rides its own field, so `content` replays unchanged and the reminder is
+      // re-merged at wire-build time — the turn renders exactly as it was sent (see reminders.ts).
+      if (m.role === "tool")
+        return {
+          role: "tool",
+          tool_call_id: m.tool_call_id ?? "",
+          content: m.content,
+          ...(m.reminderText ? { reminderText: m.reminderText } : {}),
+        };
       if (m.role === "assistant")
         return {
           role: "assistant",
@@ -1071,9 +1077,14 @@ function ChatAgent() {
       // `wireText` is preferred over `content` when present: it is the version that carried inlined
       // text-file contents and saved attachment paths (see the persist site), which `content` omits so the
       // user's own bubble stays clean.
-      // `reminder` rides along too: it is what the compaction fold reads to reconstruct standing state, so losing it on reload
-      // would make the next send re-emit everything (see docs/cache-stable-prompt-context.md).
+      // `reminderText` and `reminder` ride along: the first is text the model has already been shown, so losing it would change
+      // this turn's bytes on the next send; the second is what the compaction fold reads to reconstruct standing state, so losing
+      // it would make the next send re-emit everything (see docs/cache-stable-prompt-context.md).
       const userText = m.wireText ?? m.content;
+      const extras = {
+        ...(m.reminderText ? { reminderText: m.reminderText } : {}),
+        ...(m.reminder ? { reminder: m.reminder } : {}),
+      };
       if (m.images?.length) {
         return {
           role: "user",
@@ -1081,10 +1092,10 @@ function ChatAgent() {
             ...(userText ? [{ type: "text" as const, text: userText }] : []),
             ...m.images.map((url) => ({ type: "image_url" as const, image_url: { url } })),
           ],
-          ...(m.reminder ? { reminder: m.reminder } : {}),
+          ...extras,
         };
       }
-      return { role: "user", content: userText, ...(m.reminder ? { reminder: m.reminder } : {}) };
+      return { role: "user", content: userText, ...extras };
     });
     convoRef.current = [...restoredSystem, ...convoRef.current];
     // Rebuild the display: tool result messages are restored as tool bubbles (arguments taken from the corresponding assistant tool_call); an assistant message that only issues
@@ -1565,6 +1576,8 @@ function ChatAgent() {
   // ── Context compaction ────────────────────────────────────────────────────────────────
   /** Render a span of history messages into a plain-text transcript for the "summarizer model" (tool results truncated, to control the summary input size). */
   const renderTranscript = (msgs: ApiMsg[]): string => {
+    // Reminders are part of what the model was shown, so the summariser sees them too — nothing is excluded from its input.
+    msgs = materializeReminders(msgs);
     const lines: string[] = [];
     for (const m of msgs) {
       if (m.role === "user") {
@@ -2796,19 +2809,16 @@ function ChatAgent() {
         ];
         const target = roundConvo[userWireIdx];
         if (blocks.length && target?.role === "user") {
-          const content = writeReminderInto(target.content, blocks.join("\n\n"), "start");
+          // The block lives in its own field; `content` stays exactly what the user typed. The two are combined only when the
+          // wire is built (materializeReminders), so the bubble, the summariser and every content transform see clean text.
+          const reminderText = addBlock(target.reminderText, blocks.join("\n\n"));
           const merged: ReminderState = { ...(target.reminder ?? {}), ...delta };
           // Rebuilt from `target` (already narrowed to the user arm) rather than spread over the union, which would widen `content`.
-          const updated: ApiMsg = { ...target, content, reminder: merged };
+          const updated: ApiMsg = { ...target, reminderText, reminder: merged };
           roundConvo = roundConvo.map((m, i) => (i === userWireIdx ? updated : m));
           if (active()) convoRef.current = roundConvo;
-          // `wireText` is the text half only; loadConversation re-attaches the images from their own field.
-          const wireText =
-            typeof content === "string"
-              ? content
-              : (content.find((p) => p.type === "text") as { text: string } | undefined)?.text ?? "";
           if (genConvId && userStoredIdx >= 0) {
-            useAgentChatStore.getState().setMessageWireText(genConvId, userStoredIdx, wireText, merged);
+            useAgentChatStore.getState().setMessageReminder(genConvId, userStoredIdx, reminderText, merged);
           }
         }
       }
@@ -2833,13 +2843,14 @@ function ChatAgent() {
         if (target?.role !== "tool") return false;
         // The per-round flag at each call site already prevents a repeat within the round; this stops a double-write if the same
         // carrier is reached twice, without making the nudge once-per-conversation.
-        if (contentHasBlock(target.content, text)) return true;
-        const content = writeReminderInto(target.content, wrapReminder(text), "end");
-        const merged: ApiMsg = { ...target, content: typeof content === "string" ? content : target.content };
-        convo = convo.map((m, i) => (i === lastToolIdx ? merged : m));
+        if (target.reminderText?.includes(text)) return true;
+        // Its own field, never the tool result's content: stubbing a stale read replaces that content wholesale, and a nudge the
+        // model has already been shown must not disappear with it.
+        const reminderText = addBlock(target.reminderText, wrapReminder(text));
+        convo = convo.map((m, i) => (i === lastToolIdx ? { ...target, reminderText } : m));
         syncView();
-        if (genConvId && lastToolStoredIdx >= 0 && typeof content === "string") {
-          useAgentChatStore.getState().setMessageWireText(genConvId, lastToolStoredIdx, content);
+        if (genConvId && lastToolStoredIdx >= 0) {
+          useAgentChatStore.getState().setMessageReminder(genConvId, lastToolStoredIdx, reminderText);
         }
         return true;
       };
@@ -2850,6 +2861,10 @@ function ChatAgent() {
         // Wire view: the "sent to the model" version of this round's local buffer derived through the compaction plan (a background conversation does not depend on the active view).
         // Also backfill tool-call pairing as a fallback: prevents assistant.tool_calls with missing results from getting a 400 from the provider when "reopening an interrupted / backend-crashed conversation".
         let wire = sanitizeToolCallPairs(buildWireContext(convo, compaction));
+        // Fold each turn's <system-reminder> block into its content — on this outgoing copy only, never on the buffer or on disk.
+        // Done after compaction so a stubbed tool result keeps the event that rode it, and after the summary fold so the banner
+        // stays adjacent to the text it summarises.
+        wire = materializeReminders(wire);
         // Remove the app's own bookkeeping keys (rating, reminder) — this is the only place either is stripped before the body is built.
         wire = stripWireMetadata(wire);
         // The runtime context (time zone, date, current model) used to be concatenated into messages[0] here on every request,

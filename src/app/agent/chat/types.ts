@@ -29,13 +29,16 @@ export type ReminderState = {
 
 export type ApiMsg =
   | { role: "system"; content: string }
-  // reminder: in-memory + archived structured copy of the state announced by this turn's <system-reminder> block. Stripped from
-  // the wire by stripWireMetadata before sending; read only by the compaction fold.
-  | { role: "user"; content: string | ContentPart[]; reminder?: ReminderState } // an array of content parts when images are included
+  // reminderText: the <system-reminder> block(s) this turn carries, kept OUT of `content` and merged in only when the wire is
+  //   built (materializeReminders). `content` therefore always means "what the user actually typed" / "what the tool returned",
+  //   which is what the UI renders and what every content transform may safely rewrite.
+  // reminder: structured copy of the standing state that block announces. Read only by the compaction fold.
+  // Both are stripped before the request body is built.
+  | { role: "user"; content: string | ContentPart[]; reminderText?: string; reminder?: ReminderState } // array content when images are included
   // rating: in-memory-only user rating (thumbs up/down), derived from the archived StoredMessage.rating. Before sending,
   // stripWireMetadata removes this field; it is never sent to the provider over the wire and never enters the archived body.
   | { role: "assistant"; content: string | null; tool_calls?: ToolCall[]; rating?: "up" | "down" }
-  | { role: "tool"; tool_call_id: string; content: string };
+  | { role: "tool"; tool_call_id: string; content: string; reminderText?: string };
 export type Usage = {
   prompt_tokens?: number;
   completion_tokens?: number;

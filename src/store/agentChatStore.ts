@@ -63,11 +63,11 @@ type AgentChatState = {
   truncateMessages: (convId: string, count: number) => void;
   /** Sets or clears the user rating for a specific message (like/dislike). Only persists to storage. */
   setMessageRating: (convId: string, index: number, rating: "up" | "down" | null) => void;
-  /** Update an already-appended message's model-facing text; used to attach a change event to a turn that is already on disk. */
-  setMessageWireText: (
+  /** Attach a change event to a message that is already on disk. Never touches `content`. */
+  setMessageReminder: (
     convId: string,
     index: number,
-    wireText: string,
+    reminderText: string,
     reminder?: StoredMessage["reminder"],
   ) => void;
   setActiveProject: (id: string) => void;
@@ -269,14 +269,15 @@ export const useAgentChatStore = create<AgentChatState>((set, get) => {
     },
 
     /**
-     * Update an already-appended message's model-facing text (and optionally its reminder payload).
+     * Attach a change event to a message that is already on disk.
      *
-     * Change events are written into a turn that has already been persisted — the user turn is stored before compaction runs, and a
-     * tool result is stored before the guard that may nudge on it. Without this the reminder would live only in memory, so it would
-     * be in the wire on one turn, gone on the next, and back after a reload — which is exactly the prefix break the whole design
-     * exists to prevent. See docs/cache-stable-prompt-context.md.
+     * The turn is always persisted before the event is known — a user turn is stored before compaction runs, and a tool result is
+     * stored before the guard that may nudge on it. Without this the reminder would live only in memory: in the wire on one turn,
+     * gone on the next, and back after a reload, which is exactly the prefix break the design exists to prevent.
+     *
+     * Writes `reminderText`, never `content`. See docs/cache-stable-prompt-context.md.
      */
-    setMessageWireText: (convId, index, wireText, reminder) => {
+    setMessageReminder: (convId, index, reminderText, reminder) => {
       const conv = get().getConversation(convId);
       if (!conv || index < 0 || index >= conv.messages.length) return;
       const pid = conv.projectId;
@@ -284,7 +285,7 @@ export const useAgentChatStore = create<AgentChatState>((set, get) => {
         conversations: s.conversations.map((c) => {
           if (c.id !== convId) return c;
           const messages = c.messages.map((m, i) =>
-            i === index ? { ...m, wireText, ...(reminder ? { reminder } : {}) } : m,
+            i === index ? { ...m, reminderText, ...(reminder ? { reminder } : {}) } : m,
           );
           return { ...c, messages, updatedAt: Date.now() };
         }),

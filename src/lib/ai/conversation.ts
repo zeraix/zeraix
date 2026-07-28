@@ -31,12 +31,19 @@ export interface StoredMessage {
    */
   wireText?: string;
   /**
-   * Structured copy of the standing state announced by this turn's <system-reminder> block (only when role==="user").
+   * The <system-reminder> block(s) this turn carried when it was sent (user and tool turns).
    *
-   * The reminder TEXT lives in `wireText`, which is what the model reads and what keeps the prefix stable across turns; this field
-   * exists so compaction can fold the state without re-parsing prose. Stripped from the wire before sending, so nothing the model
-   * needs may depend on it. Not part of the integrity hash (same as rating / name / image / reasoning).
-   * See docs/cache-stable-prompt-context.md.
+   * Kept OUT of `content` on purpose: `content` stays "what the user typed" / "what the tool returned", so the UI renders it
+   * unchanged and any transform over it (stubbing a stale tool result, stripping images) cannot destroy operator text the model
+   * has already seen. The two are merged only when the wire is built. Not part of the integrity hash (same as rating / name /
+   * image / reasoning). See docs/cache-stable-prompt-context.md.
+   */
+  reminderText?: string;
+  /**
+   * Structured copy of the standing state that `reminderText` announces (only when role==="user").
+   *
+   * Exists so compaction can fold the state without re-parsing prose. Stripped from the wire before sending, so nothing the model
+   * needs may depend on it. Not part of the integrity hash.
    */
   reminder?: {
     workdir?: string;

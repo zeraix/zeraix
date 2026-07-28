@@ -294,19 +294,17 @@ export function planCompaction(
 
 // ── Apply: produce the wire view from the full conversation + state ────────────────────────────────────────
 
-/** A mid-loop nudge, appended to the end of a tool result by reminders.ts. Matched so stubbing cannot delete it. */
-const REMINDER_TAIL = /\n\n<system-reminder>\n[\s\S]*?\n<\/system-reminder>$/;
-
-/** Replace the content of the tool results listed in stubs with stub text (other messages as-is). Pure function, doesn't mutate the arguments. */
+/**
+ * Replace the content of the tool results listed in stubs with stub text (other messages as-is). Pure function, doesn't mutate the
+ * arguments. A change event riding this turn is untouched: it lives in `reminderText`, not in `content`.
+ */
 export function applyStubs(messages: ApiMsg[], stubs: Map<string, string>): ApiMsg[] {
   if (stubs.size === 0) return messages;
-  return messages.map((m) => {
-    if (m.role !== "tool" || !stubs.has(m.tool_call_id)) return m;
-    // Keep any trailing change event. Its text was in the wire on an earlier turn, so dropping it here would break the prefix at
-    // that turn — and would silently remove a nudge the model had already been given.
-    const keep = m.content.match(REMINDER_TAIL)?.[0] ?? "";
-    return { ...m, content: stubText(stubs.get(m.tool_call_id)!) + keep };
-  });
+  return messages.map((m) =>
+    m.role === "tool" && stubs.has(m.tool_call_id)
+      ? { ...m, content: stubText(stubs.get(m.tool_call_id)!) }
+      : m,
+  );
 }
 
 /**

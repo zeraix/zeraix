@@ -143,14 +143,24 @@ export function phaseSummaryText(raw: string): string {
  */
 export function stripWireMetadata(wire: ApiMsg[]): ApiMsg[] {
   // Fast-return the original array when there is nothing to strip (the vast majority of requests: zero overhead, no cache churn).
-  if (!wire.some((m) => (m.role === "assistant" && m.rating) || (m.role === "user" && m.reminder))) return wire;
+  const dirty = (m: ApiMsg) =>
+    (m.role === "assistant" && m.rating) ||
+    ((m.role === "user" || m.role === "tool") && m.reminderText) ||
+    (m.role === "user" && m.reminder);
+  if (!wire.some(dirty)) return wire;
   return wire.map((m) => {
     if (m.role === "assistant" && m.rating) {
       const { rating: _rating, ...clean } = m;
       return clean;
     }
-    if (m.role === "user" && m.reminder) {
-      const { reminder: _reminder, ...clean } = m;
+    // reminderText should already be gone — materializeReminders consumes it. Stripped here too so a caller that skips that step
+    // cannot ship a non-standard key to a provider.
+    if (m.role === "tool" && m.reminderText) {
+      const { reminderText: _t, ...clean } = m;
+      return clean;
+    }
+    if (m.role === "user" && (m.reminderText || m.reminder)) {
+      const { reminderText: _t, reminder: _r, ...clean } = m;
       return clean;
     }
     return m;
