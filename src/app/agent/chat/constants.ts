@@ -49,9 +49,9 @@ export const UNCAPPED_TOOLS = new Set(["read_file"]);
 
 /** Resume-after-interrupt nudge (model-facing only, never displayed; persisted into the carrying user turn's wireText — see reminders.ts): written when the user sends again after interrupting the previous turn, to prompt the model to reuse existing analysis and continue. */
 export const RESUME_NUDGE =
-  "Your previous response was interrupted by the user before it finished. All tool results and analysis " +
-  "already shown above remain valid — reuse them and continue from where you left off. Do NOT re-run tool " +
-  "calls or repeat analysis you have already completed; build on the existing results to answer.";
+  "At this point the user interrupted your previous response before it finished. The tool results and analysis above it were " +
+  "still valid, so from here you should reuse them and continue rather than starting over — no re-running tool calls, no " +
+  "repeating analysis already completed.";
 
 /** Finalize reminder (model-facing only, never displayed; persisted into the last tool result's wireText — see reminders.ts): a tool has run this turn (e.g. a sub-agent returned a result),
  *  yet the model ended with an empty body (no final reply for the user — often because it wrote the conclusion into reasoning or mistook a tool result for the reply).
@@ -61,7 +61,7 @@ export const FINALIZE_NUDGE =
   "You already have everything needed — including any results returned by sub-agents (run_subagent) and " +
   "other tools shown above. Now write the FINAL answer directly to the user, in the user's language, " +
   "as normal message content (NOT inside hidden reasoning, and WITHOUT calling more tools). " +
-  "Synthesize and present the complete result; do not reply with blank content again.";
+  "Synthesize and present the complete result rather than replying with a blank body.";
 
 /** Written into the regenerated user turn when the user rated the previous reply "unhelpful" (model-facing only, never displayed; persisted with the turn): prompts it to take a different approach and improve. */
 export const FEEDBACK_DOWN_NUDGE =
@@ -92,9 +92,10 @@ export const RISKY_PATH_PATTERN =
 
 /** Forced-review reminder (model-facing only, never displayed; persisted into the last tool result's wireText — see reminders.ts): written when a risky path was modified but not reviewed and the model tries to wrap up, prompting it to delegate to a reviewer first. */
 export const FORCE_REVIEW_NUDGE =
-  "You modified files on a risky path (auth / data / security / payment / secrets) but have not run a " +
-  'review. Before concluding, call run_subagent with agent "reviewer" and a self-contained task describing ' +
-  "the change, so it can verify correctness, regressions, and security. Only report done after the review.";
+  "The tool call above modified files on a risky path (auth / data / security / payment / secrets), and no review has been run " +
+  'for it yet. Before concluding this task, call run_subagent with agent "reviewer" and a self-contained task describing that ' +
+  "change, so it can verify correctness, regressions, and security. This applies to the change just made, not to the rest of " +
+  "the conversation.";
 
 /**
  * Record-to-project-memory reminder (model-facing only, never displayed; persisted into the last tool result's wireText — see reminders.ts).
@@ -107,8 +108,8 @@ export const FORCE_REVIEW_NUDGE =
  * genuinely learned nothing durable is not pushed into inventing a note.
  */
 export const RECORD_MEMORY_NUDGE =
-  "You changed files in this project but have not recorded anything into its long-term memory " +
-  "(ZERAIX.md). Before you finish: if you worked out something durable that the project map does not " +
+  "The tool call above changed files in this project, and nothing has been recorded into its long-term memory " +
+  "(ZERAIX.md) for that work. Before concluding this task: if you worked out something durable that the project map does not " +
   "already state — what a module is responsible for, a convention or constraint the user stated, a " +
   "gotcha that cost you time — call remember_project now (pass `module` plus a one-sentence `note` to " +
   "describe a module, or `note` alone for an invariant). Record only what will still be true next week, " +

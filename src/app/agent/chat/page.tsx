@@ -982,17 +982,22 @@ function ChatAgent() {
    * compaction is not part of the integrity hash (see canonical.ts), so it does not trigger re-signing, and the existing signature stays valid.
    * Called after every change to the compaction state (auto-compaction on send / manual "compact now" / clearing on falloff), keeping the disk always current.
    */
-  const persistCompaction = (convId: string | null) => {
+  const persistCompaction = (
+    convId: string | null,
+    // Explicit state for a round whose conversation is no longer the active view: compactionRef belongs to
+    // whatever the user switched TO, so a background round must pass its own.
+    explicit?: { state: CompactionState | null; manual: boolean; ctxTokens: number },
+  ) => {
     if (!convId) return;
-    const state = compactionRef.current;
+    const state = explicit ? explicit.state : compactionRef.current;
     let stored: StoredCompaction | null = null;
     if (state) {
       const s = compactionSavings(state);
       stored = {
         ...serializeCompaction(state),
-        manual: manualCompactRef.current,
+        manual: explicit ? explicit.manual : manualCompactRef.current,
         compacted: s.summarizedTurns > 0 || s.dedupedReads > 0,
-        ctxTokens: contextTokensRef.current,
+        ctxTokens: explicit ? explicit.ctxTokens : contextTokensRef.current,
       };
     }
     useAgentChatStore.getState().setConversationCompaction(convId, stored);
@@ -1655,10 +1660,43 @@ function ChatAgent() {
    * Plan and freeze compaction at the start of each round (or manually). force=true is the manual "compact now", which ignores the threshold and compacts as much as possible.
    * Reuse memory: if a summary with the same coversCount already exists (history is append-only, so the earlier prefix is unchanged), reuse it directly, to avoid re-summarizing every round.
    */
+  /**
+   * Commit a computed compaction plan to the conversation it belongs to.
+   *
+   * The summariser call inside maybeCompact can take seconds, and the user can switch conversations while it runs. By then
+   * compactionRef / convoRef belong to a DIFFERENT conversation, so writing them would give that conversation this one's plan and
+   * persist it under its id. When the round is no longer the active view, the plan goes to the per-conversation cache (which
+   * loadConversation restores from) and to disk under the round's own id instead, and the live refs and UI state are left alone.
+   */
+  const commitCompaction = (convId: string | null, state: CompactionState | null) => {
+    const savings = state ? compactionSavings(state) : null;
+    const compactedNow = !!savings && (savings.summarizedTurns > 0 || savings.dedupedReads > 0);
+    if (convId && convId !== convIdRef.current) {
+      const cached = convId ? compactionCacheRef.current.get(convId) : undefined;
+      const ctxTokens = cached?.ctxTokens ?? 0;
+      const manual = cached?.manual ?? false;
+      compactionCacheRef.current.set(convId, { state, manual, compacted: compactedNow, ctxTokens });
+      persistCompaction(convId, { state, manual, ctxTokens });
+      return;
+    }
+    compactionRef.current = state;
+    setCompacted(compactedNow);
+    persistCompaction(convId);
+  };
+
   const maybeCompact = async (
-    opts: { force?: boolean; signal?: AbortSignal; log?: { actor: string; convId?: string; turnId?: string } } = {},
-  ) => {
-    const full = convoRef.current;
+    opts: {
+      force?: boolean;
+      signal?: AbortSignal;
+      log?: { actor: string; convId?: string; turnId?: string };
+      /** The round's own buffer and conversation, captured before any await. Omitted → the active view (manual "compact now"). */
+      messages?: ApiMsg[];
+      convId?: string | null;
+    } = {},
+  ): Promise<CompactionState | null> => {
+    // Both captured before the first await: everything below must act on the conversation this round started in.
+    const targetConvId = opts.convId !== undefined ? opts.convId : convIdRef.current;
+    const full = opts.messages ?? convoRef.current;
     const cw = activeModel?.contextWindow ?? resolveContextWindow(activeModel?.model ?? "");
     const currentTokens = countMessagesTokens(full);
     // Hybrid working-set budget: cap the trigger/target at an absolute token budget (configurable in
@@ -1678,11 +1716,10 @@ function ChatAgent() {
     if (!res) {
       // Below the threshold: if it is not a manual compaction, clear it (wire view == full conversation, most stable prefix cache); a manual compaction is kept as-is.
       if (!manualCompactRef.current) {
-        compactionRef.current = null;
-        setCompacted(false);
-        persistCompaction(convIdRef.current); // Sync to disk after clearing (remove the old snapshot)
+        commitCompaction(targetConvId, null); // Sync to disk after clearing (remove the old snapshot)
+        return null;
       }
-      return;
+      return compactionRef.current;
     }
     const { plan, summarizeMessages } = res;
     let summaryText: string | null = null;
@@ -1733,13 +1770,15 @@ function ChatAgent() {
         reuseCount = 0; // fresh summary
       }
     }
-    compactionRef.current = { ...plan, summaryText, reuseCount };
+    const next: CompactionState = { ...plan, summaryText, reuseCount };
     if (opts.force) manualCompactRef.current = true;
-    const savings = compactionSavings(compactionRef.current);
-    setCompacted(savings.summarizedTurns > 0 || savings.dedupedReads > 0);
-    // Refresh the progress bar immediately: estimate usage from the post-compaction wire size, without waiting for the next request (refreshed with the provider's exact value on the next request).
-    setCtxTokens(countMessagesTokens(buildWireContext(convoRef.current, compactionRef.current)));
-    persistCompaction(convIdRef.current); // Persist: keep compaction after close and reopen
+    commitCompaction(targetConvId, next);
+    // Refresh the progress bar immediately: estimate usage from the post-compaction wire size, without waiting for the next
+    // request. Only meaningful for the conversation actually on screen — a background round must not move the active view's bar.
+    if (!targetConvId || targetConvId === convIdRef.current) {
+      setCtxTokens(countMessagesTokens(buildWireContext(full, next)));
+    }
+    return next;
   };
 
   /** The manual "compact now" button: compact once ignoring the auto threshold, but disallowed when usage is too low (<20%), reporting the result. */
@@ -2589,6 +2628,11 @@ function ChatAgent() {
     // Index of the turn just added, in the buffer and (below) on disk. A change event is written into THIS turn after compaction
     // has run, so both positions have to be known exactly — locating it later by scanning could hit an older turn.
     const userWireIdx = convoRef.current.length - 1;
+    // The round's own buffer, captured HERE, before any await. Everything below runs after `await listTools` and
+    // `await maybeCompact` (which can spend seconds in the summariser), and the user can switch conversations in that window —
+    // after which convoRef belongs to a different conversation entirely. Re-reading it later would splice this round's turns into
+    // someone else's history. syncView() is the only thing that mirrors back, and it already checks active().
+    let roundConvo = convoRef.current;
     // Conversational memory: the user may have just stated a durable project rule ("we use npm
     // here, not pnpm"). Nothing in the repository records that, and the model does not reliably
     // volunteer remember_project, so the main process gates and extracts it. Fire-and-forget: a
@@ -2702,9 +2746,11 @@ function ChatAgent() {
       feedbackNudgeRef.current = null;
       // Start of this round: plan and freeze context compaction (only acts above the threshold, and may trigger one summarizer-model call).
       // Once frozen, any messages added during this round's tool loop are sent as-is, keeping the wire prefix stable throughout the round and hitting the prefix cache.
-      await maybeCompact({
+      const roundCompaction = await maybeCompact({
         signal: ctrl.signal,
         log: { actor: "compact", convId: genConvId, turnId },
+        messages: roundConvo,
+        convId: genConvId,
       });
       if (ctrl.signal.aborted) return;
       // ── Change events ────────────────────────────────────────────────────────────────────────────────────────────────
@@ -2739,7 +2785,7 @@ function ChatAgent() {
           disabledTools: capabilityAvailable("image_generation") ? [] : ["image_generation"],
           task: renderTaskMemory(taskMemoryFor(genConvId)),
         };
-        const delta = diffReminder(current, foldReminders(convoRef.current));
+        const delta = diffReminder(current, foldReminders(roundConvo));
         // The two one-shot nudges that fire on a turn's first request ride the same carrier. They are persisted like everything
         // else: a nudge that appears in the wire on one turn and is gone on the next breaks the prefix at that turn, which costs
         // more than the handful of tokens it saves. They carry no payload — a nudge is not standing state.
@@ -2748,13 +2794,14 @@ function ChatAgent() {
           ...(resumeFromInterrupt ? [wrapReminder(RESUME_NUDGE)] : []),
           ...(feedbackNudge ? [wrapReminder(feedbackNudge)] : []),
         ];
-        const target = convoRef.current[userWireIdx];
+        const target = roundConvo[userWireIdx];
         if (blocks.length && target?.role === "user") {
           const content = writeReminderInto(target.content, blocks.join("\n\n"), "start");
           const merged: ReminderState = { ...(target.reminder ?? {}), ...delta };
           // Rebuilt from `target` (already narrowed to the user arm) rather than spread over the union, which would widen `content`.
           const updated: ApiMsg = { ...target, content, reminder: merged };
-          convoRef.current = convoRef.current.map((m, i) => (i === userWireIdx ? updated : m));
+          roundConvo = roundConvo.map((m, i) => (i === userWireIdx ? updated : m));
+          if (active()) convoRef.current = roundConvo;
           // `wireText` is the text half only; loadConversation re-attaches the images from their own field.
           const wireText =
             typeof content === "string"
@@ -2767,8 +2814,8 @@ function ChatAgent() {
       }
       // This round's conversation buffer and compaction plan: captured as local values; afterwards the loop only mutates these two locals and never again directly reads/writes convoRef /
       // compactionRef (those belong to the "active view" and are rebuilt by loadConversation when switching conversations). Mirror them back to the view while active.
-      let convo = convoRef.current;
-      const compaction = compactionRef.current;
+      let convo = roundConvo;
+      const compaction = roundCompaction;
       const syncView = () => { if (active()) convoRef.current = convo; };
       /**
        * Write a one-shot nudge into the last tool result, and persist it there.
