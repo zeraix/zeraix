@@ -17,6 +17,7 @@
  * newly appended messages are always sent as-is, never rewritten retroactively, so the prefix [system, summary, …deduplicated tail] stays byte-stable throughout the turn,
  * hitting the prefix cache; stale reads produced by the previous turn are folded only at the "start of the next turn". Never rewrite history mid tool-loop.
  */
+import { foldReminders, renderSnapshot } from "./reminders";
 import type { ApiMsg, ContentPart } from "./types";
 import { countMessagesTokens } from "@/lib/ai/tokenizer";
 
@@ -249,7 +250,14 @@ export function planCompaction(
     const tailStubs = computeStaleStubs(messages, calls, bodyStart + keep);
     const wireWithPrev = [
       ...(hasSystem ? [messages[0]] : []),
-      ...foldSummary(opts.prev.summaryText, applyStubs(keptTail, tailStubs)),
+      // Snapshot included here too: this branch decides whether the frozen boundary can be reused by measuring the resulting
+      // wire, and leaving it out would under-count by the snapshot's size on every turn, advancing the boundary later than it
+      // should.
+      ...foldSummary(
+        opts.prev.summaryText,
+        applyStubs(keptTail, tailStubs),
+        renderSnapshot(foldReminders(body.slice(0, keep))),
+      ),
     ];
     if (estTokens(wireWithPrev) <= trigger) {
       return {
@@ -286,28 +294,43 @@ export function planCompaction(
 
 // ── Apply: produce the wire view from the full conversation + state ────────────────────────────────────────
 
+/** A mid-loop nudge, appended to the end of a tool result by reminders.ts. Matched so stubbing cannot delete it. */
+const REMINDER_TAIL = /\n\n<system-reminder>\n[\s\S]*?\n<\/system-reminder>$/;
+
 /** Replace the content of the tool results listed in stubs with stub text (other messages as-is). Pure function, doesn't mutate the arguments. */
 export function applyStubs(messages: ApiMsg[], stubs: Map<string, string>): ApiMsg[] {
   if (stubs.size === 0) return messages;
-  return messages.map((m) =>
-    m.role === "tool" && stubs.has(m.tool_call_id)
-      ? { ...m, content: stubText(stubs.get(m.tool_call_id)!) }
-      : m,
-  );
+  return messages.map((m) => {
+    if (m.role !== "tool" || !stubs.has(m.tool_call_id)) return m;
+    // Keep any trailing change event. Its text was in the wire on an earlier turn, so dropping it here would break the prefix at
+    // that turn — and would silently remove a nudge the model had already been given.
+    const keep = m.content.match(REMINDER_TAIL)?.[0] ?? "";
+    return { ...m, content: stubText(stubs.get(m.tool_call_id)!) + keep };
+  });
 }
 
-/** Merge the summary body into the first kept message after it: if it's a user message, splice into its body (avoiding an extra message / consecutive same-role), otherwise prepend a user message. */
-function foldSummary(summaryText: string, kept: ApiMsg[]): ApiMsg[] {
-  const banner = SUMMARY_PREFIX + summaryText;
+/**
+ * Merge the summary body into the first kept message after it: if it's a user message, splice into its body (avoiding an extra
+ * message / consecutive same-role), otherwise prepend a user message.
+ *
+ * `snapshot` is the standing state as of the cut, folded from the change events that fall BEFORE it (see reminders.ts). Everything
+ * before the cut is replaced by prose the summariser wrote, and the summariser may or may not mention that the working directory
+ * changed — so the constraints ride along in computed form instead, where non-determinism cannot lose them. It describes the state
+ * AT the cut, not the current state: a reminder that survives in the kept region then replays it forward correctly.
+ *
+ * The kept turn is spread rather than rebuilt, so its own `reminder` payload is not dropped.
+ */
+function foldSummary(summaryText: string, kept: ApiMsg[], snapshot?: string): ApiMsg[] {
+  const banner = SUMMARY_PREFIX + summaryText + (snapshot ? `\n\n${snapshot}` : "");
   const first = kept[0];
   if (first && first.role === "user") {
     if (typeof first.content === "string") {
-      return [{ role: "user", content: `${banner}\n\n${first.content}` }, ...kept.slice(1)];
+      return [{ ...first, content: `${banner}\n\n${first.content}` }, ...kept.slice(1)];
     }
     // Multimodal: prepend the summary as the first text part.
     const parts = first.content as ContentPart[];
     return [
-      { role: "user", content: [{ type: "text", text: banner }, ...parts] },
+      { ...first, content: [{ type: "text", text: banner }, ...parts] },
       ...kept.slice(1),
     ];
   }
@@ -334,7 +357,9 @@ export function buildWireContext(
   let prefixBody: ApiMsg[];
   if (state.summaryText && state.coversCount > 0) {
     const kept = applyStubs(body.slice(state.coversCount), state.stubs);
-    prefixBody = foldSummary(state.summaryText, kept);
+    // Folded over the pre-compaction messages, never over the wire: foldSummary rebuilds kept[0], and the wire has already had the
+    // `reminder` payloads stripped by the time anything downstream sees it.
+    prefixBody = foldSummary(state.summaryText, kept, renderSnapshot(foldReminders(body.slice(0, state.coversCount))));
   } else {
     prefixBody = applyStubs(body, state.stubs);
   }

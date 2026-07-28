@@ -1,46 +1,31 @@
 /**
  * Pure wire/prompt transforms extracted from page.tsx (no component state — inputs → outputs only).
  *
- * These shape the message array "sent to the model" for a single request: appending runtime context,
- * hoisting system messages for strict local templates, stripping/downgrading images a model can't view,
- * cleaning a phase-summary body, and injecting rating feedback. Kept out of the ChatAgent component so the
- * component holds orchestration/state, not message plumbing. All functions return new arrays/values and
- * never mutate their inputs.
+ * These shape the message array "sent to the model" for a single request: hoisting system messages for strict local templates,
+ * stripping/downgrading images a model can't view, cleaning a phase-summary body, and removing the app's own bookkeeping keys.
+ * Kept out of the ChatAgent component so the component holds orchestration/state, not message plumbing. All functions return new
+ * arrays/values and never mutate their inputs.
+ *
+ * Runtime context and the mission brief used to be spliced in here on every request; both are now change events carried in history
+ * (see reminders.ts and docs/cache-stable-prompt-context.md).
  */
 import type { ApiMsg, ContentPart } from "./types";
-import type { ResolvedModel } from "@/lib/ai/models";
 import type { LoadedProjectSkill } from "@/lib/ai/skills/project";
 import type { InstalledSkill } from "@/lib/ai/skills/types";
-import { RATING_UP_FEEDBACK, RATING_DOWN_FEEDBACK } from "./constants";
-
-/**
- * Dynamically builds the runtime info appended to the end of the system prompt: user time zone, current
- * date (YYYY-MM-DD), and the current model and provider. Called each time the system prompt is assembled
- * for a send, so it automatically reflects the latest time zone / date / selected model.
- */
-export function userTimeContext(model: ResolvedModel | null): string {
-  const now = new Date();
-  const y = now.getFullYear();
-  const m = String(now.getMonth() + 1).padStart(2, "0");
-  const d = String(now.getDate()).padStart(2, "0");
-  let tz = "";
-  try {
-    tz = Intl.DateTimeFormat().resolvedOptions().timeZone || "";
-  } catch {
-    /* Leave empty if reading the time zone fails */
-  }
-  const modelPart = model ? `\nCurrent Model: ${model.label} (${model.model})` : "";
-  return `User Time Zone: ${tz || "unknown"}\nCurrent Date: ${y}-${m}-${d}${modelPart}`;
-}
 
 /**
  * Collapse every system message into a SINGLE leading system message (contents joined in original order), rest after.
- * Local llama.cpp chat templates (Qwen / GLM / …) don't merely require the system message to be positioned first — many
- * reject *any second* `role:"system"` entry anywhere in the array (their Jinja checks `loop.first`), raising
- * "System message must be at the beginning." The runtime context + nudges are appended at the end for prefix-cache
- * stability, and several nudge/rating paths add their own separate system messages, so for local models we both hoist
- * and merge them into one message[0] just before sending. No-op when there is at most one system message and it is
- * already at the front. System messages are always string-content per ApiMsg.
+ *
+ * Local llama.cpp chat templates (Qwen / GLM / …) don't merely require the system message to be positioned first — many reject
+ * *any second* `role:"system"` entry anywhere in the array (their Jinja checks `loop.first`), raising "System message must be at
+ * the beginning."
+ *
+ * This is now a GUARD, not a transform: it should never actually fire. The runtime context, the mission brief, the rating feedback
+ * and all five nudges used to arrive as their own system messages, and merging them is what dragged every one of them into
+ * messages[0] — re-prefilling the whole conversation from token 0 each time. They are all change events carried inside existing
+ * turns now, so the only system message left is messages[0] itself and this returns its input unchanged. It stays because a future
+ * caller adding a stray system message would otherwise get a hard template error instead of a silent merge.
+ * See docs/cache-stable-prompt-context.md.
  */
 export function hoistSystemToFront(msgs: ApiMsg[]): ApiMsg[] {
   const sysIdx = msgs.reduce<number[]>((acc, m, i) => (m.role === "system" ? [...acc, i] : acc), []);
@@ -55,21 +40,6 @@ export function hoistSystemToFront(msgs: ApiMsg[]): ApiMsg[] {
   };
   const rest = msgs.filter((m) => m.role !== "system");
   return [merged, ...rest];
-}
-
-/**
- * Append text to the end of the first system message's content, merging it into the system prompt itself rather than
- * adding a second system message — so chat templates that require a single leading system message (Qwen / GLM / …) accept it.
- * System messages are always string-content per ApiMsg. Falls back to a leading system message only if the wire has none
- * (buildWireContext always includes one, so that branch is defensive).
- */
-export function appendToSystemPrompt(msgs: ApiMsg[], text: string): ApiMsg[] {
-  if (!text) return msgs;
-  const i = msgs.findIndex((m) => m.role === "system");
-  if (i < 0) return [{ role: "system", content: text }, ...msgs];
-  return msgs.map((m, idx) =>
-    idx === i && m.role === "system" ? { ...m, content: m.content ? `${m.content}\n\n${text}` : text } : m,
-  );
 }
 
 /** Host of an endpoint, for the usage log. Host only: some gateways carry a key in the query string. */
@@ -160,29 +130,31 @@ export function phaseSummaryText(raw: string): string {
 }
 
 /**
- * User rating (thumbs up / down) → dynamically injected wire feedback: each assistant message that carries a rating is
- * kept as-is after "stripping the rating field in place", with an English feedback system message inserted immediately
- * after it. Only affects the temporary wire "sent to the model" — the archived assistant content contains no rating, and
- * the rating field is never sent to the provider. Rebuilt from StoredMessage.rating on every request, so the feedback
- * stays visible to the model as long as that reply is in context.
+ * Remove the app's own bookkeeping fields from the wire, just before the request body is built.
+ *
+ * `rating` and `reminder` are non-standard keys the app hangs on messages; `page.tsx` sends `messages` verbatim, so anything left
+ * on them goes to the provider. This is the ONLY place either is stripped — deleting the call leaks both.
+ *
+ * It replaces the former injectRatingFeedback, which also expanded a rating into a `role:"system"` block after the rated message.
+ * That block was dropped: it carried one bit with no diagnosis, mostly fired for ratings the user never acted on (regenerate
+ * deletes the rated message), and on local models a single thumbs-up re-prefilled the whole conversation from token 0, because the
+ * hoist drags any system message to the front. StoredMessage.rating is untouched and still available for audit.
+ * See docs/cache-stable-prompt-context.md.
  */
-export function injectRatingFeedback(wire: ApiMsg[]): ApiMsg[] {
-  // Fast-return the original array when there is no rating at all (the vast majority of requests: zero overhead, no cache churn).
-  if (!wire.some((m) => m.role === "assistant" && m.rating)) return wire;
-  const out: ApiMsg[] = [];
-  for (const m of wire) {
+export function stripWireMetadata(wire: ApiMsg[]): ApiMsg[] {
+  // Fast-return the original array when there is nothing to strip (the vast majority of requests: zero overhead, no cache churn).
+  if (!wire.some((m) => (m.role === "assistant" && m.rating) || (m.role === "user" && m.reminder))) return wire;
+  return wire.map((m) => {
     if (m.role === "assistant" && m.rating) {
-      const { rating, ...clean } = m; // Strip the memory-only rating field; never send it to the provider
-      out.push(clean);
-      out.push({
-        role: "system",
-        content: rating === "up" ? RATING_UP_FEEDBACK : RATING_DOWN_FEEDBACK,
-      });
-    } else {
-      out.push(m);
+      const { rating: _rating, ...clean } = m;
+      return clean;
     }
-  }
-  return out;
+    if (m.role === "user" && m.reminder) {
+      const { reminder: _reminder, ...clean } = m;
+      return clean;
+    }
+    return m;
+  });
 }
 
 /** Project skill (LoadedProjectSkill) → InstalledSkill shape, so it can be merged into the runtime skill set and

@@ -30,6 +30,21 @@ export interface StoredMessage {
    * messages are unchanged. Model-facing (unlike images/steps, which are display-only).
    */
   wireText?: string;
+  /**
+   * Structured copy of the standing state announced by this turn's <system-reminder> block (only when role==="user").
+   *
+   * The reminder TEXT lives in `wireText`, which is what the model reads and what keeps the prefix stable across turns; this field
+   * exists so compaction can fold the state without re-parsing prose. Stripped from the wire before sending, so nothing the model
+   * needs may depend on it. Not part of the integrity hash (same as rating / name / image / reasoning).
+   * See docs/cache-stable-prompt-context.md.
+   */
+  reminder?: {
+    workdir?: string;
+    ctx?: { date: string; model: string; tz: string };
+    skills?: { id: string; description: string }[];
+    disabledTools?: string[];
+    task?: string;
+  };
   files?: { name: string; size: number; embedded: boolean }[]; // metadata of non-image attachments
   /** Tool calls initiated by the assistant (OpenAI-compatible structure); only present on "assistant messages that called tools". */
   tool_calls?: { id: string; type: "function"; function: { name: string; arguments: string } }[];
@@ -53,7 +68,7 @@ export interface StoredMessage {
    * The user's rating of this assistant reply (only when role==="assistant"): thumbs-up = up / thumbs-down = down.
    * This is user-feedback "metadata": not written into content and not part of the integrity hash (see canonical.ts, whose projectMessage projects
    * only fixed fields, so adding this field doesn't invalidate existing signatures, and changing the rating doesn't trigger re-signing). When reading history, a
-   * feedback hint is dynamically injected into the "wire view sent to the model" based on it (see injectRatingFeedback), but the content of this archived entry is never modified.
+   * rating is kept for audit only and is stripped from the wire before sending (see stripWireMetadata); the archived entry is never modified.
    */
   rating?: "up" | "down";
   ts: number;
@@ -95,6 +110,15 @@ export interface Conversation {
   /** Task Memory (optional): the pinned per-mission prose brief (internal, model-only). A runtime artifact
    *  like compaction; restored on reopen so the mission survives, and not part of the integrity hash. */
   taskMemory?: StoredTaskMemory;
+  /**
+   * The composed system message (messages[0]) as this conversation first sent it.
+   *
+   * It has to be frozen, not recomputed: it is the very front of the prefix, so re-deriving it against the current mode, workdir,
+   * sandbox status and skill set would invalidate the whole conversation's cache with no user-visible trigger — which is what
+   * happened on every reload, because the rebuilt buffer contains no system message and the compose step ran again.
+   * A runtime artifact like compaction / taskMemory, and not part of the integrity hash.
+   */
+  systemPrompt?: string;
   createdAt: number;
   updatedAt: number;
 }

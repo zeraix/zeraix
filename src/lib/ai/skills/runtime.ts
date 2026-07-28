@@ -2,40 +2,48 @@
  * Runtime wiring of skills within a conversation: exposes enabled skills to the main model and
  * implements progressive disclosure.
  *
- * Design note: the skill catalog is written into the load_skill tool's description, and that tool is
- * rebuilt on every send in page.tsx, so a skill newly downloaded / enabled mid-conversation can be
- * discovered by the model on the very next message, with no need to reset the conversation.
+ * The skill catalog used to live in the load_skill tool's description and in its `id` enum. That made the tool block differ between
+ * installs — and between working directories, since project skills are discovered from the folder — which breaks the prefix on
+ * templates that render tools ahead of the system prompt. The declaration below is now identical everywhere, and the catalog is
+ * announced as a change event in the conversation instead. See docs/cache-stable-prompt-context.md.
  */
 import type { InstalledSkill } from "./types";
 
-/** A sentence appended to the first-turn system prompt, telling the model "you are equipped with skills, call load_skill as needed". */
-export function skillSystemHint(enabled: InstalledSkill[]): string {
-  if (enabled.length === 0) return "";
+/**
+ * A sentence in the system prompt telling the model that skills exist and where to find the current list.
+ *
+ * Unconditional on purpose: making it depend on whether any skill happens to be enabled would make messages[0] differ per install.
+ * It points at the reminder rather than asserting that skills are present, so it stays true when the list is empty.
+ */
+export function skillSystemHint(): string {
   return (
-    "You are additionally equipped with several \"skills\". When a task matches a skill's applicable scenario, first call load_skill to obtain its full instructions, " +
-    "then act on them; do not guess at a skill's contents."
+    "You may additionally be equipped with \"skills\". Whenever any are available, they are listed for you in a system-reminder in " +
+    "the conversation, with an id and a description for each. When a task matches one, call load_skill with that id to obtain its " +
+    "full instructions and act on them; do not guess at a skill's contents. If no such list has appeared, you have no skills available."
   );
 }
 
-/** Build the load_skill tool declaration (rebuilt every turn). Returns null when no skills are enabled. */
-export function loadSkillTool(enabled: InstalledSkill[]) {
-  if (enabled.length === 0) return null;
-  const menu = enabled.map((s) => `- ${s.id}: ${s.description}`).join("\n");
+/**
+ * Build the load_skill tool declaration.
+ *
+ * Byte-identical across installs: no menu in the description, and no `enum` of ids in the parameters (llama.cpp re-serialises tool
+ * `parameters` through an order-preserving JSON parser, so an enum of install-specific ids would reach the prefix bytes). Declared
+ * unconditionally, including when nothing is enabled — a call with an unknown id already returns a clear "not enabled" result.
+ */
+export function loadSkillTool() {
   return {
     type: "function" as const,
     function: {
       name: "load_skill",
       description:
-        "Load a skill's full operating instructions, then perform that kind of task under its guidance. Enabled skills:\n" +
-        menu +
-        "\nWhen a task matches one of the above, first call this tool to get the full steps, then start.",
+        "Load a skill's full operating instructions, then perform that kind of task under its guidance. " +
+        "The skills currently available to you are listed in a system-reminder in the conversation; pass one of their ids.",
       parameters: {
         type: "object",
         properties: {
           id: {
             type: "string",
-            enum: enabled.map((s) => s.id),
-            description: "The id of the skill to load.",
+            description: "The id of the skill to load, exactly as given in the available-skills list.",
           },
         },
         required: ["id"],

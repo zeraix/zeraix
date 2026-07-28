@@ -63,6 +63,13 @@ type AgentChatState = {
   truncateMessages: (convId: string, count: number) => void;
   /** Sets or clears the user rating for a specific message (like/dislike). Only persists to storage. */
   setMessageRating: (convId: string, index: number, rating: "up" | "down" | null) => void;
+  /** Update an already-appended message's model-facing text; used to attach a change event to a turn that is already on disk. */
+  setMessageWireText: (
+    convId: string,
+    index: number,
+    wireText: string,
+    reminder?: StoredMessage["reminder"],
+  ) => void;
   setActiveProject: (id: string) => void;
   setActiveConversation: (id: string | null) => void;
   /** Flags or clears a conversation as "generating" (drives the sidebar loading spinner). Keyed by conversation ID, independent of the active conversation. */
@@ -76,6 +83,8 @@ type AgentChatState = {
   setConversationCompaction: (id: string, compaction: StoredCompaction | null) => void;
   /** Saves or clears the Task Memory (prose brief + todos) for a conversation (persists to disk only). */
   setConversationTaskMemory: (id: string, taskMemory: StoredTaskMemory | null) => void;
+  /** Freeze this conversation's composed system message, so reopening it replays the same prefix instead of recomputing one. */
+  setConversationSystemPrompt: (id: string, systemPrompt: string) => void;
   renameConversation: (id: string, title: string) => void;
   deleteConversation: (id: string) => void;
   /** Renames a project (changes its display name). */
@@ -259,6 +268,30 @@ export const useAgentChatStore = create<AgentChatState>((set, get) => {
       if (pid) markProjectDirty(pid);
     },
 
+    /**
+     * Update an already-appended message's model-facing text (and optionally its reminder payload).
+     *
+     * Change events are written into a turn that has already been persisted — the user turn is stored before compaction runs, and a
+     * tool result is stored before the guard that may nudge on it. Without this the reminder would live only in memory, so it would
+     * be in the wire on one turn, gone on the next, and back after a reload — which is exactly the prefix break the whole design
+     * exists to prevent. See docs/cache-stable-prompt-context.md.
+     */
+    setMessageWireText: (convId, index, wireText, reminder) => {
+      const conv = get().getConversation(convId);
+      if (!conv || index < 0 || index >= conv.messages.length) return;
+      const pid = conv.projectId;
+      set((s) => ({
+        conversations: s.conversations.map((c) => {
+          if (c.id !== convId) return c;
+          const messages = c.messages.map((m, i) =>
+            i === index ? { ...m, wireText, ...(reminder ? { reminder } : {}) } : m,
+          );
+          return { ...c, messages, updatedAt: Date.now() };
+        }),
+      }));
+      if (pid) markProjectDirty(pid);
+    },
+
     setActiveProject: (id) => {
       set({ activeProjectId: id });
       void get().ensureProjectLoaded(id);
@@ -317,6 +350,17 @@ export const useAgentChatStore = create<AgentChatState>((set, get) => {
         conversations: s.conversations.map((c) =>
           c.id === id ? { ...c, taskMemory: taskMemory ?? undefined } : c,
         ),
+      }));
+      // Like compaction: a runtime artifact, flushed to disk only.
+      if (pid) markProjectDirty(pid);
+    },
+
+    setConversationSystemPrompt: (id, systemPrompt) => {
+      const conv = get().getConversation(id);
+      if (!conv || conv.systemPrompt === systemPrompt) return;
+      const pid = conv.projectId;
+      set((s) => ({
+        conversations: s.conversations.map((c) => (c.id === id ? { ...c, systemPrompt } : c)),
       }));
       // Like compaction: a runtime artifact, flushed to disk only.
       if (pid) markProjectDirty(pid);

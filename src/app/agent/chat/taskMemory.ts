@@ -119,16 +119,24 @@ export function parseSummaryWithTaskState(raw: string): {
   return { summary: summary.trim(), extracted };
 }
 
-const TASK_STATE_BANNER =
-  "[TASK STATE — your pinned mission brief, preserved verbatim across context compaction so you do not " +
-  "forget the task. The conversation above may be summarised, but THIS is the source of truth for what you " +
-  "are doing. Update it via set_task_state ONLY when the plan or goal materially changes — not every turn.]";
+/**
+ * The invariant half of the task-state block: what a mission brief is and how to update it. Identical for every install and every
+ * conversation, so it belongs in messages[0] where the prefix cache covers it — see docs/cache-stable-prompt-context.md. Only the
+ * brief itself varies, and it is delivered as a change event.
+ *
+ * Worded without positional references ("the conversation above") because it no longer sits next to the brief.
+ */
+export const TASK_STATE_EXPLAINER =
+  "[TASK STATE] When a mission brief is in effect it arrives in a system-reminder marked TASK STATE, and it is the source of " +
+  "truth for what you are doing: the surrounding conversation may be summarised, but the brief is preserved verbatim so you do " +
+  "not forget the task. Update it via set_task_state ONLY when the plan or goal materially changes — not every turn.";
 
 /**
- * Render Task Memory into the compact text block appended at the wire tail. Empty → "" (nothing injected).
+ * Render Task Memory into the text carried by a change event. Empty → "" (nothing emitted).
  * The brief is emitted verbatim (it is already prose); provenance is internal metadata, not shown.
+ * The explanation of what this block is lives in messages[0] as TASK_STATE_EXPLAINER, not here.
  */
 export function renderTaskMemory(tm: TaskMemory | null | undefined): string {
   if (isTaskMemoryEmpty(tm)) return "";
-  return `${TASK_STATE_BANNER}\n\n${tm!.notes}`;
+  return `[TASK STATE]\n${tm!.notes}`;
 }

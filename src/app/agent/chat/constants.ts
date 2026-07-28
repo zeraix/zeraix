@@ -47,13 +47,13 @@ export const RENDERER_HANDLED_TOOLS = new Set([
  *  (run_command, fetch_url, search_*, browser) is genuinely unbounded and stays capped. */
 export const UNCAPPED_TOOLS = new Set(["read_file"]);
 
-/** Resume-after-interrupt nudge (fed back to the model only; not displayed / not persisted): injected when the user sends again after interrupting the previous turn, to prompt the model to reuse existing analysis and continue. */
+/** Resume-after-interrupt nudge (model-facing only, never displayed; persisted into the carrying user turn's wireText — see reminders.ts): written when the user sends again after interrupting the previous turn, to prompt the model to reuse existing analysis and continue. */
 export const RESUME_NUDGE =
   "Your previous response was interrupted by the user before it finished. All tool results and analysis " +
   "already shown above remain valid — reuse them and continue from where you left off. Do NOT re-run tool " +
   "calls or repeat analysis you have already completed; build on the existing results to answer.";
 
-/** Finalize reminder (fed back to the model only; not displayed / not persisted): a tool has run this turn (e.g. a sub-agent returned a result),
+/** Finalize reminder (model-facing only, never displayed; persisted into the last tool result's wireText — see reminders.ts): a tool has run this turn (e.g. a sub-agent returned a result),
  *  yet the model ended with an empty body (no final reply for the user — often because it wrote the conclusion into reasoning or mistook a tool result for the reply).
  *  Injected to prompt it to give a complete final reply directly, in the user's language, based on the information already gathered. Injected at most once per turn to avoid infinite loops. */
 export const FINALIZE_NUDGE =
@@ -63,31 +63,17 @@ export const FINALIZE_NUDGE =
   "as normal message content (NOT inside hidden reasoning, and WITHOUT calling more tools). " +
   "Synthesize and present the complete result; do not reply with blank content again.";
 
-/** Injected when regenerating after the user rated the previous reply "unhelpful" (fed back to the model only; not displayed / not persisted): prompts it to take a different approach and improve. */
+/** Written into the regenerated user turn when the user rated the previous reply "unhelpful" (model-facing only, never displayed; persisted with the turn): prompts it to take a different approach and improve. */
 export const FEEDBACK_DOWN_NUDGE =
   "The user rated your previous answer to this request as UNHELPFUL (thumbs down). " +
   "Regenerate a better response: take a different approach, address what was likely missing or wrong, " +
   "and be more accurate, complete, and useful. Do not simply repeat the previous answer.";
 
-/** Injected when regenerating after the user rated the previous reply "helpful" (fed back to the model only; not displayed / not persisted): prompts it to keep that approach and style. */
+/** Written into the regenerated user turn when the user rated the previous reply "helpful" (model-facing only, never displayed; persisted with the turn): prompts it to keep that approach and style. */
 export const FEEDBACK_UP_NUDGE =
   "The user rated your previous answer to this request as HELPFUL (thumbs up). " +
   "Regenerate along the same lines: keep the approach, depth, and style that the user liked, " +
   "while making the answer at least as good.";
-
-/**
- * Feedback hint injected dynamically into the wire view based on StoredMessage.rating when reading history (English; goes only into the
- * "sent to the model" wire view, not written to the archived content, and not sent with that assistant message — see injectRatingFeedback).
- * Persistent: as long as that reply remains rated in the context, every request appends this hint after it, so the model stays aware of
- * the user's feedback across turns.
- */
-export const RATING_UP_FEEDBACK =
-  "[User feedback] The user marked the assistant's response above as HELPFUL. " +
-  "Keep the approach, depth, and style of that response in your following replies.";
-export const RATING_DOWN_FEEDBACK =
-  "[User feedback] The user marked the assistant's response above as UNHELPFUL. " +
-  "Take this into account: avoid repeating its shortcomings and improve the accuracy, " +
-  "completeness, and usefulness of your following replies.";
 
 /** Tools that modify source files (used for the "risky change → forced review" check; run_command is excluded because its path is uncertain). */
 export const MUTATING_FILE_TOOLS = new Set([
@@ -104,16 +90,16 @@ export const MUTATING_FILE_TOOLS = new Set([
 export const RISKY_PATH_PATTERN =
   /(auth|login|logout|session|token|password|secret|credential|\.env|payment|billing|invoice|checkout|wallet|migration|schema|security|permission|crypto)/i;
 
-/** Forced-review reminder (fed back to the model only): injected when a risky path was modified but not reviewed and the model tries to wrap up, prompting it to delegate to a reviewer first. */
+/** Forced-review reminder (model-facing only, never displayed; persisted into the last tool result's wireText — see reminders.ts): written when a risky path was modified but not reviewed and the model tries to wrap up, prompting it to delegate to a reviewer first. */
 export const FORCE_REVIEW_NUDGE =
   "You modified files on a risky path (auth / data / security / payment / secrets) but have not run a " +
   'review. Before concluding, call run_subagent with agent "reviewer" and a self-contained task describing ' +
   "the change, so it can verify correctness, regressions, and security. Only report done after the review.";
 
 /**
- * Record-to-project-memory reminder (fed back to the model only; not displayed / not persisted).
+ * Record-to-project-memory reminder (model-facing only, never displayed; persisted into the last tool result's wireText — see reminders.ts).
  *
- * Injected when a turn modified source files but never called `remember_project`, which was the norm:
+ * Written when a turn modified source files but never called `remember_project`, which was the norm:
  * the tool exists and its description is clear, but nothing in the turn ever brings it to mind, so a
  * session would work out how a module fits together, ship the change, and drop everything it learned —
  * leaving the Module Map full of "(not yet summarised)" while the work that would have filled it in had
@@ -227,12 +213,27 @@ export const SYSTEM_PROMPT = DEV_SYSTEM_PROMPT;
 export const systemPromptFor = (mode: "daily" | "dev") =>
   mode === "dev" ? DEV_SYSTEM_PROMPT : DAILY_SYSTEM_PROMPT;
 
-/** Append the "working directory" constraint after the system prompt: all file / command tools are restricted to this directory. */
-export const workdirPrompt = (dir: string) =>
-  `All your tool calls are restricted to the working directory: ${dir}. ` +
-  "Use paths relative to this directory (access outside it is rejected); run_command also executes inside it. " +
-  "Any file or image the user uploads, pastes, or attaches is copied into this working directory before their message reaches you, and their message then carries a note with its exact saved path (e.g. \"[Image: … has been saved to the working directory: …]\"). " +
-  "When you see such a note, the upload is a normal on-disk file here: open, edit, convert, OCR, annotate, or run tools on it directly at that path. Never reply that an uploaded or pasted image/file is unavailable, that you cannot access or edit it, or that it is 'not in the working directory' — it is.";
+/**
+ * The "working directory" constraint, split into the one dynamic sentence and the invariant rules.
+ *
+ * Only the head contains the path, so only the head can differ between installs / conversations. The rules below are identical
+ * everywhere and therefore belong in messages[0], where the prefix cache (and a resident KV seed) covers them for free — see
+ * docs/cache-stable-prompt-context.md. Every reference in them is to "the working directory" by name rather than "this directory"
+ * / "here", because they no longer sit next to the sentence that names the path.
+ */
+export const workdirPrompt = (dir: string) => `All your tool calls are restricted to the working directory: ${dir}.`;
+
+/** Scope half of the rules: what "restricted to the working directory" actually means. Also used for sub-agent prompts. */
+export const WORKDIR_SCOPE_RULE =
+  "Use paths relative to the working directory (access outside it is rejected); run_command also executes inside it.";
+
+/** Upload half of the rules: only the main conversation receives user uploads, so sub-agents do not need this. */
+export const WORKDIR_UPLOAD_RULES =
+  "Any file or image the user uploads, pastes, or attaches is copied into the working directory before their message reaches you, and their message then carries a note with its exact saved path (e.g. \"[Image: … has been saved to the working directory: …]\"). " +
+  "When you see such a note, the upload is a normal on-disk file in the working directory: open, edit, convert, OCR, annotate, or run tools on it directly at that path. Never reply that an uploaded or pasted image/file is unavailable, that you cannot access or edit it, or that it is 'not in the working directory' — it is.";
+
+/** Both halves, for the main conversation's messages[0]. */
+export const WORKDIR_RULES = `${WORKDIR_SCOPE_RULE} ${WORKDIR_UPLOAD_RULES}`;
 
 export const selCls =
   "rounded-lg border border-line-strong bg-surface px-2.5 py-1.5 text-sm outline-none transition focus:border-ring focus:ring-2 focus:ring-primary/10";

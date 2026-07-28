@@ -103,6 +103,7 @@ import {
   isTaskMemoryEmpty,
   normalizeTaskMemory,
   renderTaskMemory,
+  TASK_STATE_EXPLAINER,
   applyTaskState,
   mergeExtracted,
   parseSummaryWithTaskState,
@@ -145,12 +146,23 @@ import {
   selCls,
   toolStatusText,
   workdirPrompt,
+  WORKDIR_RULES,
+  WORKDIR_SCOPE_RULE,
 } from "./constants";
+import {
+  contentHasBlock,
+  diffReminder,
+  foldReminders,
+  renderReminder,
+  wrapReminder,
+  writeReminderInto,
+} from "./reminders";
 import type {
   ApiMsg,
   Attachment,
   ChatResponse,
   ContentPart,
+  ReminderState,
   DisplayMsg,
   SubAgentStep,
   Todo,
@@ -185,14 +197,12 @@ import { ProjectSkillsPrompt } from "./ProjectSkillsPrompt";
 import { ConsentPanel } from "./ConsentPanel";
 import { useConsentQueue } from "./useConsentQueue";
 import {
-  userTimeContext,
   hoistSystemToFront,
-  appendToSystemPrompt,
   hostOfEndpoint,
   stripAllImagesForText,
   stripRemoteImagesForLocal,
   phaseSummaryText,
-  injectRatingFeedback,
+  stripWireMetadata,
   toInstalledProjectSkill,
 } from "./wireHelpers";
 
@@ -312,9 +322,8 @@ function ChatAgent() {
   const compactionCacheRef = useRef<
     Map<string, { state: CompactionState | null; manual: boolean; compacted: boolean; ctxTokens: number }>
   >(new Map());
-  // The "static" part of the system message (tools / directory / skills / memory): built and cached on the first send,
-  // then on every subsequent send the refreshed runtime context (date + current model) is appended to its end, without rebuilding the static part.
-  const systemStaticRef = useRef<string>("");
+  // messages[0] composed before the conversation record existed (first send). Attached to the record at the persist site below.
+  const pendingSystemPromptRef = useRef<string>("");
   // Sensitive-operation confirmation queue (extracted to useConsentQueue): the front-of-queue `pending`
   // for the panel, keyboard nav, request/answer/drop, and the per-conversation "don't ask again" allow-set.
   const {
@@ -341,8 +350,9 @@ function ChatAgent() {
   // Interrupt resume: set when the previous round was "stopped" by the user. On the next send (whether the same or a new question), a one-time hint is appended to the model,
   // prompting it to reuse the analysis / tool results already retained above and continue, rather than starting over. Cleared once consumed.
   const interruptedRef = useRef(false);
-  // A one-time "rating feedback" hint: set when the user thumbs up / down the previous reply and triggers a regeneration; appended to the wire only for this round's first request,
-  // not displayed and not persisted (same one-time nudge mechanism as RESUME_NUDGE). Used to let the rating influence the current conversation's next generation in real time.
+  // A one-time "rating feedback" hint: set when the user thumbs up / down the previous reply and triggers a regeneration; written
+  // into the fresh user turn by the change-events block (same one-time nudge mechanism as RESUME_NUDGE — persisted with the turn,
+  // not displayed). Used to let the rating influence the current conversation's next generation in real time.
   const feedbackNudgeRef = useRef<string | null>(null);
   // Context diagnostics (measurement phase): the last wire + tool schemas + window actually sent, so the
   // offline budget-replay harness (window.__ctxSim, dev only) can run against a real heavy task on demand.
@@ -953,7 +963,8 @@ function ChatAgent() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeConvId]);
 
-  // Load a historical conversation: rebuild the display and the API conversation (system will be filled in on demand on the next send).
+  // Load a historical conversation: rebuild the display and the API conversation (messages[0] is replayed from the frozen
+  // conv.systemPrompt; only records from before that field existed fall back to composing on the next send).
   // Lazy loading: first ensure the conversation file of the project this conversation belongs to is loaded (projectId comes from the sidebar navigation's ?p=).
   /** Snapshot the current conversation's compaction state into the session-level cache, to restore when switching back later (the fast path within this run). */
   const snapshotCompaction = (convId: string | null) => {
@@ -995,6 +1006,15 @@ function ChatAgent() {
     snapshotCompaction(convIdRef.current); // Save the old conversation's compaction state before switching away
     interruptedRef.current = false; // Switching conversations: the interrupt-resume flag does not carry across conversations
     convIdRef.current = id;
+    // Mode is a sidebar-global toggle, but messages[0] and openBrowserTool(mode) are both mode-determined — so opening a stored
+    // dev conversation while the sidebar reads "daily" silently rebuilt the prompt and the tool block with the wrong mode. Adopt
+    // the conversation's own mode and persist it the way every other writer does (putStorage also mirrors to app.config; a raw
+    // setStorage would be reverted by the file-wins hydration on the next launch). Deliberately no MODE_CHANGE_EVENT: the
+    // sidebar's handler treats that as a user toggle and navigates back to the home page, away from the conversation just opened.
+    if (conv.mode === "daily" || conv.mode === "dev") {
+      setMode(conv.mode);
+      putStorage(AGENT_MODE_KEY, conv.mode);
+    }
     // Restore this conversation's internal Task Memory brief from disk into the ref, so the mission survives
     // app reopen. Seed only if the ref doesn't already hold a live in-session copy.
     if (conv.taskMemory && !taskMemoryByConvRef.current.has(id)) {
@@ -1018,15 +1038,22 @@ function ChatAgent() {
       if (isToolkitAvailable()) await setWorkingDir(restoredDir).catch(() => {});
     }
     // Rebuild the conversation sent to the model: faithfully restore the tool-call trace (the assistant's tool_calls + tool result messages),
-    // so that when continuing the chat the model still "remembers" what it called and what results it got. system is filled back on demand on the next send.
+    // so that when continuing the chat the model still "remembers" what it called and what results it got.
+    //
+    // messages[0] is replayed from the record rather than recomposed: it is a function of mode, sandbox status and the memory
+    // bridge, so recomputing it here rewrote the front of the prefix whenever any of those had moved since the conversation
+    // started. Only a record written before this field existed falls through to the compose step on the next send.
+    const restoredSystem: ApiMsg[] = conv.systemPrompt ? [{ role: "system", content: conv.systemPrompt }] : [];
     convoRef.current = conv.messages.map((m): ApiMsg => {
-      if (m.role === "tool") return { role: "tool", tool_call_id: m.tool_call_id ?? "", content: m.content };
+      // `wireText` on a tool result carries a mid-loop nudge that was appended to it. Replaying `content` alone would drop that
+      // text, so the turn would render differently than when it was sent and break the prefix from that point (see reminders.ts).
+      if (m.role === "tool") return { role: "tool", tool_call_id: m.tool_call_id ?? "", content: m.wireText ?? m.content };
       if (m.role === "assistant")
         return {
           role: "assistant",
           content: m.content,
           ...(m.tool_calls?.length ? { tool_calls: m.tool_calls } : {}),
-          // The rating (thumbs up / down) is restored from the archive into the in-memory wire buffer; before sending, injectRatingFeedback strips the field and injects the feedback.
+          // The rating (thumbs up / down) is restored from the archive into the in-memory wire buffer; stripWireMetadata removes the field before sending.
           ...(m.rating ? { rating: m.rating } : {}),
         };
       // Rebuild the multimodal user turn. The archive splits a user message into `content` (the text the
@@ -1039,6 +1066,8 @@ function ChatAgent() {
       // `wireText` is preferred over `content` when present: it is the version that carried inlined
       // text-file contents and saved attachment paths (see the persist site), which `content` omits so the
       // user's own bubble stays clean.
+      // `reminder` rides along too: it is what the compaction fold reads to reconstruct standing state, so losing it on reload
+      // would make the next send re-emit everything (see docs/cache-stable-prompt-context.md).
       const userText = m.wireText ?? m.content;
       if (m.images?.length) {
         return {
@@ -1047,10 +1076,12 @@ function ChatAgent() {
             ...(userText ? [{ type: "text" as const, text: userText }] : []),
             ...m.images.map((url) => ({ type: "image_url" as const, image_url: { url } })),
           ],
+          ...(m.reminder ? { reminder: m.reminder } : {}),
         };
       }
-      return { role: "user", content: userText };
+      return { role: "user", content: userText, ...(m.reminder ? { reminder: m.reminder } : {}) };
     });
+    convoRef.current = [...restoredSystem, ...convoRef.current];
     // Rebuild the display: tool result messages are restored as tool bubbles (arguments taken from the corresponding assistant tool_call); an assistant message that only issues
     // tool calls and has no body is skipped in the display layer (its trace is reflected by the tool bubbles).
     const callArgs = new Map<string, { name: string; args: unknown }>();
@@ -1189,7 +1220,7 @@ function ChatAgent() {
   };
 
   // Rate an AI reply (thumbs up / down / clear): persist it to the corresponding StoredMessage.rating (not in the hash, does not change content),
-  // synchronously update the rating in the in-memory wire buffer (reflected by injectRatingFeedback on the next request), and highlight it in the display.
+  // synchronously update the rating in the in-memory wire buffer (kept for audit; stripWireMetadata removes it before sending), and highlight it in the display.
   // useCallback keeps the reference stable (independent of send / state), to avoid a full re-render of the memoized MessageItem.
   const rateMessage = useCallback(
     (displayIndex: number, storedIndex: number | undefined, rating: "up" | "down" | null) => {
@@ -1197,8 +1228,9 @@ function ChatAgent() {
       if (convId && storedIndex != null) {
         useAgentChatStore.getState().setMessageRating(convId, storedIndex, rating);
         // Sync the in-memory wire buffer: archived messages are all non-system, so "the storedIndex-th non-system message in convoRef" corresponds
-        // to that StoredMessage — locating by this correctly skips the leading system prompt and the runtime-inserted nudges (DELEGATE /
-        // FINALIZE / FORCE_REVIEW, which only enter convoRef and are not persisted), which is more robust than index + offset.
+        // to that StoredMessage — locating by this correctly skips the leading system prompt, which is more robust than index + offset.
+        // (Nudges no longer occupy messages of their own — they ride inside existing turns' content — so the only remaining skew
+        // is an empty assistant turn, which exists live but is never persisted.)
         let seen = -1;
         for (const cm of convoRef.current) {
           if (cm.role === "system") continue;
@@ -1531,7 +1563,16 @@ function ChatAgent() {
     const lines: string[] = [];
     for (const m of msgs) {
       if (m.role === "user") {
-        const txt = typeof m.content === "string" ? m.content : "[message with image]";
+        // A multimodal turn used to collapse to the bare marker, throwing away the user's own question along with any change
+        // event carried on that turn — so a nudge emitted on a message with an attached image vanished at compaction. Keep the
+        // text parts and mark the images separately.
+        const txt =
+          typeof m.content === "string"
+            ? m.content
+            : m.content
+                .map((p) => (p.type === "text" ? p.text : "[image]"))
+                .filter(Boolean)
+                .join("\n");
         lines.push(`[User] ${txt}`);
       } else if (m.role === "assistant") {
         if (m.content) lines.push(`[Assistant] ${m.content}`);
@@ -1877,8 +1918,10 @@ function ChatAgent() {
     // The subagent and the main agent share the same execution engine, and system likewise injects the command-execution environment description.
     // SUBAGENT_TOOL_DISCIPLINE is what the main agent gets from base.system.md; a sub-agent runs on its own
     // prompt alone, so without this it never learns that batched read-only calls run concurrently here.
+    // Only the scope half of the workdir rules: a sub-agent never receives user uploads, so WORKDIR_UPLOAD_RULES would be dead
+    // weight here. It does not see the main conversation's messages[0], so the rule has to be composed explicitly.
     const sys = [
-      workdir ? `${def.systemPrompt}\n${workdirPrompt(workdir)}` : def.systemPrompt,
+      workdir ? `${def.systemPrompt}\n${workdirPrompt(workdir)}\n${WORKDIR_SCOPE_RULE}` : def.systemPrompt,
       SUBAGENT_TOOL_DISCIPLINE,
       sandboxEnvHint(sandboxStatusRef.current),
     ].join("\n");
@@ -1984,8 +2027,8 @@ function ChatAgent() {
     const withBuiltin = isSandboxEngine(sandboxStatusRef.current?.active)
       ? [...list, SANDBOX_TOOLBOX_SKILL]
       : list;
-    // Stable order (sorted by id): keeps the load_skill tool description and skill hints byte-stable across multiple sends,
-    // so a change in insertion order does not disturb the prefix cache (see docs/prompt-cache-optimization.md §5.1).
+    // Stable order (sorted by id): the catalog now travels as the skills change event, and diffReminder compares arrays
+    // order-sensitively — an insertion-order flip would re-emit the whole menu even though nothing changed.
     return [...withBuiltin].sort((a, b) => a.id.localeCompare(b.id));
   };
 
@@ -2209,7 +2252,7 @@ function ChatAgent() {
 
   // The implementation of "edit user message / regenerate": updated to the latest closure on every render (capturing the latest send / states),
   // so the stably-referenced regenerate / editUser below call the latest version when clicked (avoiding useCallback capturing a stale send).
-  const resendRef = useRef<(displayIndex: number, newText: string) => void>(() => {});
+  const resendRef = useRef<(displayIndex: number, newText: string, feedbackNudge?: string | null) => void>(() => {});
 
   // Resend from "the displayIndex-th display message (must be a user message)": truncate this point and everything after it
   // (the display / wire / persistence are aligned by "user message ordinal" — user messages correspond one-to-one across all three), then resend with newText.
@@ -2227,9 +2270,11 @@ function ChatAgent() {
     }
     if (userIdx < 0) return;
     const um = disp[userIdx];
-    feedbackNudgeRef.current =
-      rating === "down" ? FEEDBACK_DOWN_NUDGE : rating === "up" ? FEEDBACK_UP_NUDGE : null;
-    resendRef.current(userIdx, um.kind === "user" ? um.content : "");
+    // Armed INSIDE resendRef, after its early returns — not here. resendRef bails when the target text is empty, which happens
+    // for an image-only turn, and arming the ref first left it set: the nudge then landed on the user's next, unrelated message.
+    // Harmless while nudges were wire-only; permanent now that they are written into the turn and persisted.
+    const nudge = rating === "down" ? FEEDBACK_DOWN_NUDGE : rating === "up" ? FEEDBACK_UP_NUDGE : null;
+    resendRef.current(userIdx, um.kind === "user" ? um.content : "", nudge);
   }, []);
 
   // Discard all pending-answer ask_user prompts of a conversation (unblocking them with the given text as the result). Used to release by conversation on cancel / clear.
@@ -2402,13 +2447,18 @@ function ChatAgent() {
       if (toolsReady)
         parts.push(
           [
-            effectiveWorkdir ? `${sysPrompt}\n${workdirPrompt(effectiveWorkdir)}` : sysPrompt,
+            // Only the invariant rules live here. The sentence that names the actual path is per-conversation, so it would break
+            // the shared prefix (and any resident KV seed) if it sat in messages[0]; it is announced as a change event instead.
+            `${sysPrompt}\n${WORKDIR_RULES}`,
             // The command-execution environment (host system or Linux sandbox) — the model chooses the command style accordingly.
             sandboxEnvHint(sandboxStatusRef.current),
           ].join("\n"),
         );
-      const hint = skillSystemHint(enabled);
-      if (hint) parts.push(hint);
+      // Invariant explanation of the task-state block; the brief itself arrives as a change event.
+      parts.push(TASK_STATE_EXPLAINER);
+      // Unconditional: gating this on "are any skills enabled" would make messages[0] differ per install. It points at the
+      // available-skills reminder rather than asserting skills exist, so it reads correctly when there are none.
+      parts.push(skillSystemHint());
       // Long-term memory switched to "retrieve on demand" (RAG, see docs/prompt-cache-optimization.md §4.3): the full memory bodies are no longer
       // poured into the frozen system prefix — that would both bloat the prefix and, when memories are added / modified mid-conversation, only show the old snapshot from the conversation's start
       // (i.e. the user's feedback that "I added a memory but the AI doesn't know it"). Here we only put one stable hint; the model pulls memory bodies on demand with search_memory
@@ -2421,15 +2471,22 @@ function ChatAgent() {
             "Use save_memory to write / update memories (pass id to overwrite an existing one), and delete_memory to delete.",
         );
       }
-      // Cache the static part into the ref (excluding the runtime context); the runtime context is refreshed on each send below.
-      systemStaticRef.current = parts.join("\n\n");
-      convoRef.current = [{ role: "system", content: systemStaticRef.current }, ...convoRef.current];
+      const composedSystem = parts.join("\n\n");
+      convoRef.current = [{ role: "system", content: composedSystem }, ...convoRef.current];
+      // Freeze it on the conversation record. Everything above is a function of mode, sandbox status and which memory bridge is
+      // present — all of which can differ by the time the conversation is reopened. The rebuilt buffer carries no system message,
+      // so without this the compose step ran again on every reload and silently rewrote the very front of the prefix.
+      if (convIdRef.current) {
+        useAgentChatStore.getState().setConversationSystemPrompt(convIdRef.current, composedSystem);
+      } else {
+        // No conversation record yet (this is the first send). Stash it so the persist site below can attach it once the record
+        // exists — the record is created a few lines down, from the same values.
+        pendingSystemPromptRef.current = composedSystem;
+      }
     }
-    // The runtime context (user time zone + current date + current model/provider) is no longer written into the system message, but appended
-    // to the "end of the wire" on each request (see the wire assembly below §4.4). Reason (prefix cache): system is at the very front of the prefix, so putting the
-    // possibly-changing runtime info there per round would invalidate the entire conversation prefix once it changes (across a day / switching models); putting it at the end of the wire
-    // only affects the last message and does not touch the history prefix. It is still generated with the current activeModel each round, so switching the conversation-bound model takes effect immediately.
-    // convoRef[0] is therefore always the purely static systemStaticRef, keeping the prefix byte-stable.
+    // Nothing variable is written into messages[0] any more: the date, the active model, the working directory, the skill menu and
+    // the mission brief are all announced downstream as change events (see reminders.ts). messages[0] is therefore a function of
+    // the mode alone, which is what lets two installs share a prefix — and a resident KV seed.
     // Binary/oversized attachments: under Electron, persist them to the working directory first (workdir is already mounted into the sandbox),
     // so the model can process them directly with file tools / sandbox commands; the browser environment keeps to file names only.
     // Images are persisted too, not just binaries: image_url only lets the model LOOK at the picture.
@@ -2529,6 +2586,9 @@ function ChatAgent() {
         ? [...(composed ? [{ type: "text" as const, text: composed }] : []), ...imageParts]
         : composed;
     convoRef.current = [...convoRef.current, { role: "user", content: userContent }];
+    // Index of the turn just added, in the buffer and (below) on disk. A change event is written into THIS turn after compaction
+    // has run, so both positions have to be known exactly — locating it later by scanning could hit an older turn.
+    const userWireIdx = convoRef.current.length - 1;
     // Conversational memory: the user may have just stated a durable project rule ("we use npm
     // here, not pnpm"). Nothing in the repository records that, and the model does not reliably
     // volunteer remember_project, so the main process gates and extracts it. Fire-and-forget: a
@@ -2555,6 +2615,11 @@ function ChatAgent() {
       if (mode === "dev" && selectedModelId) {
         store.setConversationModel(convIdRef.current, selectedModelId);
       }
+      // Freeze messages[0] on the brand-new record (it was composed above, before this record existed).
+      if (pendingSystemPromptRef.current) {
+        store.setConversationSystemPrompt(convIdRef.current, pendingSystemPromptRef.current);
+        pendingSystemPromptRef.current = "";
+      }
     }
     store.appendMessage(convIdRef.current, {
       role: "user",
@@ -2567,6 +2632,7 @@ function ChatAgent() {
       files: userFiles.length ? userFiles : undefined,
       ts: Date.now(),
     });
+    const userStoredIdx = (store.getConversation(convIdRef.current)?.messages.length ?? 0) - 1;
 
     // The conversation id this round of generation belongs to (captured as a stable local value, unaffected by switching conversations): drives the spinner on that conversation's sidebar row,
     // and lays the groundwork for later "background concurrent generation" — always record / clear by genConvId, rather than relying on the current active conversation.
@@ -2586,23 +2652,27 @@ function ChatAgent() {
     };
 
     try {
-      // Tool set = ask_user + update_todos (always available) + load_skill (when there are enabled skills, rebuilt each round to reflect newly installed skills)
-      //        + (local tools + run_subagent, Electron only).
-      const skillTool = loadSkillTool(enabled);
+      // Tool set = ask_user + update_todos + load_skill + (local tools + run_subagent, Electron only).
+      //
+      // Every declaration here must be byte-identical across installs and independent of which keys are configured: on templates
+      // that render tools BEFORE the system prompt, any difference in any declaration re-prefills the whole prompt. So nothing in
+      // this array is conditional on user state — where a capability genuinely varies, the tool is still declared and its
+      // unavailability is announced as a change event. Only `mode` is allowed to vary it, because messages[0] is mode-determined
+      // anyway. See docs/cache-stable-prompt-context.md.
       const tools = [
         askUserTool(),
         updateTodosTool(),
         setTaskStateTool(),
         openBrowserTool(mode),
         browserTool(),
-        // Only offered when some configured key can actually serve it — otherwise the model would
-        // promise an image and then fail. Read fresh each round, since keys can change mid-session.
-        ...(capabilityAvailable("image_generation") ? [imageGenerationTool()] : []),
+        // Declared even with no image key configured. Gating it here used to be the earliest per-install difference in the array;
+        // the model is told it is unusable through the disabledTools reminder instead, which costs nothing when it never changes.
+        imageGenerationTool(),
         ...(isMemoryFilesAvailable()
           ? [saveMemoryTool(), deleteMemoryTool(), searchMemoryTool()]
           : []),
-        ...(skillTool ? [skillTool] : []),
         ...(toolsReady ? [...(await listTools("openai")), subAgentTool()] : []),
+        loadSkillTool(),
       ];
       // Critical-change review guard (dev mode only): when a risky path (auth / data / security …) has been changed but no reviewer was run before wrapping up,
       // inject one forced reminder and continue the loop, nudging the model to delegate a reviewer first. Cleared after a reviewer is delegated; forced at most once per round, to avoid a deadlock.
@@ -2617,14 +2687,19 @@ function ChatAgent() {
       // inject one FINALIZE_NUDGE to nudge it to answer formally. finalizeNudged ensures at most once per round, to avoid an infinite loop.
       let didToolCall = false;
       let finalizeNudged = false;
-      // Interrupt resume: consume the previous round's "was interrupted" flag (cleared once read). If the previous round was stopped, this round's first request appends a
-      // system hint, nudging the model to reuse the analysis / tool results already retained above and continue, without repeating completed work. firstRequest ensures it is added only once.
+      // Carrier for the mid-loop nudges: the last tool result, in the buffer and on disk. Those nudges fire AFTER the assistant
+      // turn has been appended and persisted, so there is no new turn to ride and no reliable way to find the carrier by scanning
+      // (the compaction plan may already have rewritten the wire view). Tracked at each append instead. See reminders.ts.
+      let lastToolIdx = -1;
+      let lastToolStoredIdx = -1;
+      // Interrupt resume: consume the previous round's "was interrupted" flag (cleared once read). If the previous round was stopped,
+      // the user turn carries a hint nudging the model to reuse the analysis / tool results already retained above and continue,
+      // without repeating completed work. It is written once, into that turn, by the change-events block below.
       const resumeFromInterrupt = interruptedRef.current;
       interruptedRef.current = false;
-      // Rating feedback hint: consume the one-time nudge set by the previous "regenerate after thumbs up / down" (cleared once read), appended to the wire on this round's first request.
+      // Rating feedback hint: consume the one-time nudge set by the previous "regenerate after thumbs up / down" (cleared once read); written into the user turn by the change-events block below.
       const feedbackNudge = feedbackNudgeRef.current;
       feedbackNudgeRef.current = null;
-      let firstRequest = true;
       // Start of this round: plan and freeze context compaction (only acts above the threshold, and may trigger one summarizer-model call).
       // Once frozen, any messages added during this round's tool loop are sent as-is, keeping the wire prefix stable throughout the round and hitting the prefix cache.
       await maybeCompact({
@@ -2632,11 +2707,94 @@ function ChatAgent() {
         log: { actor: "compact", convId: genConvId, turnId },
       });
       if (ctrl.signal.aborted) return;
+      // ── Change events ────────────────────────────────────────────────────────────────────────────────────────────────
+      // Announce whatever moved since the last emission, into the user turn added above — never as a message of its own, because
+      // message counts are the alignment anchor for edit / regenerate, ratings and the compaction tail (see reminders.ts).
+      //
+      // Emitted HERE, after maybeCompact, because compaction is Task Memory's second writer: a brief the summariser extracted a
+      // few lines ago has to reach the model on this turn, not the next one. The turn is already on disk by now, so the disk copy
+      // is updated in place rather than written at append time.
+      //
+      // "Last emission" is FOLDED from the buffer, never cached: edit and regenerate delete turns, and a cached value would keep
+      // claiming an emission that no longer exists, silently dropping that constraint for the rest of the conversation.
+      {
+        const now = new Date();
+        const pad = (n: number) => String(n).padStart(2, "0");
+        let tz = "";
+        try {
+          tz = Intl.DateTimeFormat().resolvedOptions().timeZone || "";
+        } catch {
+          /* Leave empty if reading the time zone fails */
+        }
+        const current: ReminderState = {
+          workdir: effectiveWorkdir || "",
+          ctx: {
+            date: `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`,
+            model: activeModel ? `${activeModel.label} (${activeModel.model})` : "unknown",
+            tz: tz || "unknown",
+          },
+          skills: enabled.map((s) => ({ id: s.id, description: s.description })),
+          // Declared but unusable — the declaration stays byte-identical across installs, and this is what tells the model it
+          // cannot actually be called (see docs/cache-stable-prompt-context.md §"Tool declarations are static").
+          disabledTools: capabilityAvailable("image_generation") ? [] : ["image_generation"],
+          task: renderTaskMemory(taskMemoryFor(genConvId)),
+        };
+        const delta = diffReminder(current, foldReminders(convoRef.current));
+        // The two one-shot nudges that fire on a turn's first request ride the same carrier. They are persisted like everything
+        // else: a nudge that appears in the wire on one turn and is gone on the next breaks the prefix at that turn, which costs
+        // more than the handful of tokens it saves. They carry no payload — a nudge is not standing state.
+        const blocks = [
+          ...(delta ? [renderReminder(delta)] : []),
+          ...(resumeFromInterrupt ? [wrapReminder(RESUME_NUDGE)] : []),
+          ...(feedbackNudge ? [wrapReminder(feedbackNudge)] : []),
+        ];
+        const target = convoRef.current[userWireIdx];
+        if (blocks.length && target?.role === "user") {
+          const content = writeReminderInto(target.content, blocks.join("\n\n"), "start");
+          const merged: ReminderState = { ...(target.reminder ?? {}), ...delta };
+          // Rebuilt from `target` (already narrowed to the user arm) rather than spread over the union, which would widen `content`.
+          const updated: ApiMsg = { ...target, content, reminder: merged };
+          convoRef.current = convoRef.current.map((m, i) => (i === userWireIdx ? updated : m));
+          // `wireText` is the text half only; loadConversation re-attaches the images from their own field.
+          const wireText =
+            typeof content === "string"
+              ? content
+              : (content.find((p) => p.type === "text") as { text: string } | undefined)?.text ?? "";
+          if (genConvId && userStoredIdx >= 0) {
+            useAgentChatStore.getState().setMessageWireText(genConvId, userStoredIdx, wireText, merged);
+          }
+        }
+      }
       // This round's conversation buffer and compaction plan: captured as local values; afterwards the loop only mutates these two locals and never again directly reads/writes convoRef /
       // compactionRef (those belong to the "active view" and are rebuilt by loadConversation when switching conversations). Mirror them back to the view while active.
       let convo = convoRef.current;
       const compaction = compactionRef.current;
       const syncView = () => { if (active()) convoRef.current = convo; };
+      /**
+       * Write a one-shot nudge into the last tool result, and persist it there.
+       *
+       * These fire between tool rounds, after the assistant turn has already been appended and stored, so there is no fresh turn
+       * to ride. The tool turn is APPENDED to rather than prepended to: it has already been sent, so writing into it moves the
+       * prefix divergence into cached tokens, and putting that divergence at the end of a result costs far less than at the front
+       * of one that can run to thousands of characters.
+       *
+       * Returns false when there is no tool turn to carry it (nothing was called this round), so the caller can fall through.
+       */
+      const nudgeIntoLastTool = (text: string): boolean => {
+        const target = lastToolIdx >= 0 ? convo[lastToolIdx] : undefined;
+        if (target?.role !== "tool") return false;
+        // The per-round flag at each call site already prevents a repeat within the round; this stops a double-write if the same
+        // carrier is reached twice, without making the nudge once-per-conversation.
+        if (contentHasBlock(target.content, text)) return true;
+        const content = writeReminderInto(target.content, wrapReminder(text), "end");
+        const merged: ApiMsg = { ...target, content: typeof content === "string" ? content : target.content };
+        convo = convo.map((m, i) => (i === lastToolIdx ? merged : m));
+        syncView();
+        if (genConvId && lastToolStoredIdx >= 0 && typeof content === "string") {
+          useAgentChatStore.getState().setMessageWireText(genConvId, lastToolStoredIdx, content);
+        }
+        return true;
+      };
       // No upper limit on tool-call rounds: loop until the model gives a final reply with no tool calls, or the user interrupts.
       while (true) {
         if (ctrl.signal.aborted) return;
@@ -2644,13 +2802,11 @@ function ChatAgent() {
         // Wire view: the "sent to the model" version of this round's local buffer derived through the compaction plan (a background conversation does not depend on the active view).
         // Also backfill tool-call pairing as a fallback: prevents assistant.tool_calls with missing results from getting a 400 from the provider when "reopening an interrupted / backend-crashed conversation".
         let wire = sanitizeToolCallPairs(buildWireContext(convo, compaction));
-        // User rating → dynamically injected wire feedback (when reading history, derived to convo from StoredMessage.rating; here it lands in the wire).
-        wire = injectRatingFeedback(wire);
-        // The runtime context (user time zone + current date + current model/provider) is appended to the END OF THE SYSTEM PROMPT itself
-        // (not a separate system message), so chat templates that require a single leading system message accept it (Qwen / GLM / …).
-        // Generated with the current activeModel each round (switching the conversation-bound model takes effect immediately); it only enters the wire and is not written back to the buffer / not persisted.
-        wire = appendToSystemPrompt(wire, userTimeContext(activeModel));
-        // let wire = buildWireContext(convo, compaction);
+        // Remove the app's own bookkeeping keys (rating, reminder) — this is the only place either is stripped before the body is built.
+        wire = stripWireMetadata(wire);
+        // The runtime context (time zone, date, current model) used to be concatenated into messages[0] here on every request,
+        // which re-prefilled the entire conversation from token 0 at every midnight and every model switch — on cloud models too,
+        // since this path was never gated on isLocalModel. It is now announced once, when it changes, as a change event above.
         // Image handling, applied to the wire only (never the persisted buffer). `multimodal` here resolves
         // through modelAcceptsImages, which now answers "yes" unless the model is a local build with no
         // mmproj, or a provider actually rejected images for it before — so this strips only when we KNOW
@@ -2662,24 +2818,15 @@ function ChatAgent() {
         //  - Multimodal cloud model: leave images as-is.
         if (!activeModel?.multimodal) wire = stripAllImagesForText(wire);
         else if (isLocalModel) wire = stripRemoteImagesForLocal(wire);
-        // Interrupt-resume hint: appended only on this round's first request, and only enters the wire, not written back to the buffer, to avoid residue in later rounds / conversations.
-        if (resumeFromInterrupt && firstRequest) {
-          wire = [...wire, { role: "system", content: RESUME_NUDGE }];
-        }
-        // Rating feedback: appended only on this round's first request, and only enters the wire, not written back to the buffer (one-time, leaving no residue in later rounds / conversations).
-        if (feedbackNudge && firstRequest) {
-          wire = [...wire, { role: "system", content: feedbackNudge }];
-        }
-        firstRequest = false;
-        // Task Memory (CRITICAL tier): the pinned mission state — prose brief + todos — appended at the wire
-        // tail on EVERY request (the model needs its plan each round, not just the first). It lives outside
-        // convoRef, so compaction never summarises it; tail placement keeps the history prefix cache intact
-        // while the block stays current. This is what stops the agent forgetting its mission after older
-        // rounds are compacted. See docs/context-memory-tiers-design.md.
-        const taskBlock = renderTaskMemory(taskMemoryFor(genConvId));
-        if (taskBlock) wire = [...wire, { role: "system", content: taskBlock }];
-        // Local models: strict llama.cpp chat templates require every system message at the front, so move the trailing
-        // runtime context / nudges ahead of the user turns (see hoistSystemToFront). Cloud models keep the cache-friendly tail placement.
+        // The interrupt-resume hint and the rating-feedback hint used to be appended here, wire-only, on the first request of the
+        // round. Both are now written into the user turn itself before the loop starts (see the change-events block above), so
+        // they persist and the turn renders identically on every later request.
+        // Task Memory (CRITICAL tier) is no longer re-injected here on every request. Re-sending it each round kept the block
+        // current but cost a full re-prefill on local models, where the hoist below drags any system message to messages[0]. The
+        // brief is announced as a change event when it changes — including when the summariser extracts one during compaction,
+        // which is why change events are emitted after maybeCompact rather than at the persist site.
+        // Local models: strict llama.cpp chat templates reject any system message that is not at the very front. Nothing appends
+        // trailing system messages any more, so this is a never-firing guard (see hoistSystemToFront) kept against future callers.
         if (isLocalModel) wire = hoistSystemToFront(wire);
         // Context diagnostics (Phase 1, measurement only): snapshot exactly what is about to be sent —
         // buckets + the tool-schema tax the app's own estimate never counts + the redundant-re-read proxy.
@@ -2895,6 +3042,7 @@ function ChatAgent() {
                 ? content
                 : capToolOutput(content);
               convo = [...convo, { role: "tool", tool_call_id: tc.id, content: cappedContent }];
+              lastToolIdx = convo.length - 1;
               syncView();
               // A generated image's artifact URL is stored display-only (not in content, so it never re-enters the wire),
               // so the image bubble can be rebuilt after switching conversations. Consume the side-channel ref.
@@ -2918,6 +3066,7 @@ function ChatAgent() {
                   : {}),
                 ...(subSteps?.length ? { steps: subSteps } : {}),
               });
+              lastToolStoredIdx = (store.getConversation(genConvId)?.messages.length ?? 0) - 1;
 
               // Detect local service addresses in the tool output (e.g. an http://localhost:5173 printed by a dev server),
               // using the full output (the elided middle section may also contain a URL). Once registered, the bottom-left floating indicator displays it and polls its health.
@@ -2934,6 +3083,7 @@ function ChatAgent() {
             if (answered.has(tc.id)) continue;
             const placeholder = ctrl.signal.aborted ? t("chat.canceled") : t("chat.skipped");
             convo = [...convo, { role: "tool", tool_call_id: tc.id, content: placeholder }];
+            lastToolIdx = convo.length - 1;
             syncView();
             store.appendMessage(genConvId, {
               role: "tool",
@@ -2942,19 +3092,19 @@ function ChatAgent() {
               name: tc.function.name,
               ts: Date.now(),
             });
+            lastToolStoredIdx = (store.getConversation(genConvId)?.messages.length ?? 0) - 1;
           }
           if (ctrl.signal.aborted) return;
           continue;
         }
 
-        // Critical-change review guard: in dev mode, when a risky path has been changed but not reviewed and it wants to wrap up, inject one forced reminder and continue the loop,
-        // nudging the model to delegate a reviewer first. Forced only once (reviewForced); if the model still insists, let it through, to avoid a deadlock.
+        // Critical-change review guard: in dev mode, when a risky path has been changed but not reviewed and it wants to wrap up,
+        // nudge it to delegate a reviewer first and continue the loop. Forced at most once per round (reviewForced); if the model
+        // still insists, let it through, to avoid a deadlock. It stays able to fire again on a LATER turn — this is a safety guard,
+        // so a risky change at turn 40 must be caught even though turn 5 was.
         if (mode === "dev" && riskyChangePending && !reviewForced) {
           reviewForced = true;
-          if (!convo.some((mm) => mm.role === "system" && mm.content === FORCE_REVIEW_NUDGE)) {
-            convo = [...convo, { role: "system", content: FORCE_REVIEW_NUDGE }];
-            syncView();
-          }
+          nudgeIntoLastTool(FORCE_REVIEW_NUDGE);
           continue;
         }
 
@@ -2964,10 +3114,7 @@ function ChatAgent() {
         // Forced only once (memoryNudged), and the nudge itself allows skipping, so this cannot deadlock.
         if (mode === "dev" && learnedWithoutRecording && !memoryNudged) {
           memoryNudged = true;
-          if (!convo.some((mm) => mm.role === "system" && mm.content === RECORD_MEMORY_NUDGE)) {
-            convo = [...convo, { role: "system", content: RECORD_MEMORY_NUDGE }];
-            syncView();
-          }
+          nudgeIntoLastTool(RECORD_MEMORY_NUDGE);
           continue;
         }
 
@@ -2975,10 +3122,7 @@ function ChatAgent() {
         // Inject one FINALIZE_NUDGE to nudge it to answer formally based on the obtained information, then continue the loop. Only once, to avoid a deadlock.
         if (didToolCall && !finalizeNudged && !(msg.content ?? "").trim()) {
           finalizeNudged = true;
-          if (!convo.some((mm) => mm.role === "system" && mm.content === FINALIZE_NUDGE)) {
-            convo = [...convo, { role: "system", content: FINALIZE_NUDGE }];
-            syncView();
-          }
+          nudgeIntoLastTool(FINALIZE_NUDGE);
           continue;
         }
 
@@ -3060,12 +3204,14 @@ function ChatAgent() {
   };
 
   // On every render, refresh the "resend from a user message" implementation, capturing the latest send / state (see the note at the resendRef declaration).
-  resendRef.current = (displayIndex, newText) => {
+  resendRef.current = (displayIndex, newText, feedbackNudge) => {
     if (loading) return; // Editing / regenerating is not allowed while generating
     if (!newText.trim()) return;
     const disp = displayRef.current;
     const target = disp[displayIndex];
     if (!target || target.kind !== "user") return;
+    // Past every early return, so the resend is definitely happening: a nudge armed here cannot leak onto a later message.
+    if (feedbackNudge !== undefined) feedbackNudgeRef.current = feedbackNudge;
     // Preserve the images the user originally attached to this message: editing the text or regenerating
     // must not silently drop them. Reconstruct minimal image attachments from the stored image URLs
     // (OSS link for a cloud model, data URI for a local one — both are directly usable as image_url at

@@ -1,12 +1,4 @@
 /** ask_user / update_todos / openBrowser tool declarations (OpenAI-compatible, handled by the render layer). */
-import { isCnEdition } from "@/lib/edition";
-
-/** Default search engine for the built-in browser (switches by build edition): Google (q=) for the international edition, Baidu (wd=) for the China edition.
- *  Kept in sync with BrowserPanel's PANEL_CONFIG; used only as the example search URL in the openBrowser tool description. */
-const SEARCH_URL_EXAMPLE = isCnEdition
-  ? "https://www.baidu.com/s?wd=keyword"
-  : "https://www.google.com/search?q=keyword";
-
 /** Tool declaration for opening the built-in browser (OpenAI-compatible). Handled by the render layer; expands the browser panel on the right.
  *  The description is mode-specific: in dev mode the browser is off-limits unless the user asks for it, because opening it to
  *  investigate or to show off a fix is pure latency — the model cannot see the page, so it learns nothing the code wouldn't tell it.
@@ -39,8 +31,9 @@ export function openBrowserTool(mode: "daily" | "dev" = "daily") {
         properties: {
           url: {
             type: "string",
-            description:
-              `The URL to visit (may include a search query, e.g. ${SEARCH_URL_EXAMPLE}). Omit to just open the browser.`,
+            // No example search URL here: it used to be edition-dependent (Google vs Baidu), which made the tool block — and so
+            // the whole prompt prefix on templates that render tools first — differ between the international and China builds.
+            description: "The URL to visit; it may be a search-engine URL with a query. Omit to just open the browser.",
           },
         },
         required: [],

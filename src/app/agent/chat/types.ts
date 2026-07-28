@@ -10,11 +10,30 @@ export type ContentPart =
 /** Pending-attachment type (implementation moved to @/lib/ai/attachments, shared by the home and chat pages). */
 export type { Attachment } from "@/lib/ai/attachments";
 
+/**
+ * Standing state carried by a change event, in structured form.
+ *
+ * The same information is ALSO rendered as a <system-reminder> block inside the turn's own content — that text is what the model
+ * reads. This payload exists only so compaction can fold the state without re-parsing prose (see docs/cache-stable-prompt-context.md).
+ * It is stripped from the wire before sending, so nothing the model needs may depend on it.
+ *
+ * Only "state" reminders carry a payload. Nudges are one-shot and describe no standing constraint, so they exist purely as text.
+ */
+export type ReminderState = {
+  workdir?: string;
+  ctx?: { date: string; model: string; tz: string };
+  skills?: { id: string; description: string }[];
+  disabledTools?: string[];
+  task?: string;
+};
+
 export type ApiMsg =
   | { role: "system"; content: string }
-  | { role: "user"; content: string | ContentPart[] } // an array of content parts when images are included
+  // reminder: in-memory + archived structured copy of the state announced by this turn's <system-reminder> block. Stripped from
+  // the wire by stripWireMetadata before sending; read only by the compaction fold.
+  | { role: "user"; content: string | ContentPart[]; reminder?: ReminderState } // an array of content parts when images are included
   // rating: in-memory-only user rating (thumbs up/down), derived from the archived StoredMessage.rating. Before sending,
-  // injectRatingFeedback strips this field and inserts a feedback system message in its place; it is never sent to the provider over the wire and never enters the archived body.
+  // stripWireMetadata removes this field; it is never sent to the provider over the wire and never enters the archived body.
   | { role: "assistant"; content: string | null; tool_calls?: ToolCall[]; rating?: "up" | "down" }
   | { role: "tool"; tool_call_id: string; content: string };
 export type Usage = {
