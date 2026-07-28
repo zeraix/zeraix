@@ -58,8 +58,47 @@ export function resolveHybridBudget(
   };
 }
 
-/** Pure read tools: when the same path is read again, the earlier result is entirely redundant. */
+/** Pure read tools: a read result is redundant once a LATER read COVERS the same line span (see readRange). */
 const READ_TOOLS = new Set(["read_file"]);
+
+/**
+ * `read_file` returns a 1-based inclusive LINE SPAN, not the whole file: it takes `offset` (1-based
+ * first line, default 1) and `limit` (line count, default READ_DEFAULT_MAX_LINES), returning
+ * [offset, offset + limit - 1]. Dedup therefore has to compare spans, not just paths — an agent
+ * walking a large file emits reads like {offset:460,limit:90} / {offset:550,limit:90} /
+ * {offset:640,limit:50}, which are DISJOINT. Treating a later one as superseding an earlier one
+ * (as keying on path alone does) would stub live content the model still needs.
+ *
+ * Note a bare `read_file {path}` is NOT a whole-file read — it is [1, READ_DEFAULT_MAX_LINES], so on
+ * a longer file it does not cover later chunks either.
+ *
+ * Mirrors `read_file` in electron/tools/aiToolkit.mjs (different process, so the constant cannot be
+ * shared) — keep this in sync with READ_DEFAULT_MAX_LINES there.
+ */
+const READ_DEFAULT_MAX_LINES = 2000;
+
+/** A 1-based, inclusive line span returned by one read call. */
+export interface ReadRange {
+  start: number;
+  end: number;
+}
+
+/** Resolve a read call's arguments to the line span it actually returned. */
+function readRange(args: Record<string, unknown>): ReadRange {
+  const start = Math.max(1, Math.floor(Number(args.offset) || 1));
+  const count = Math.max(1, Math.floor(Number(args.limit) || READ_DEFAULT_MAX_LINES));
+  return { start, end: start + count - 1 };
+}
+
+/**
+ * Whether `outer` fully covers `inner`, making `inner`'s content redundant.
+ *
+ * Deliberately only containment against a SINGLE later read: coverage by the union of several later
+ * reads (read the whole file, then read every chunk of it) is not modelled. Containment is provably
+ * safe and catches the case that actually recurs — a repeated bare `read_file {path}`.
+ */
+export const covers = (outer: ReadRange, inner: ReadRange): boolean =>
+  outer.start <= inner.start && outer.end >= inner.end;
 /** Tools that change a file's content / existence: after them, an earlier read result for the same path is stale. key = which parameter to take as the path. */
 const MUTATORS: Record<string, "path" | "destination"> = {
   write_file: "path",
@@ -75,8 +114,8 @@ const normPath = (p: unknown): string =>
 
 /** Stale-read stub text (model-visible; occurs within the wire view, invisible to the user — the display view is still the full original). */
 const stubText = (path: string): string =>
-  `[…… The earlier read result for "${path}" has been omitted: the file was read again or modified afterward, ` +
-  `so rely on the later read / write result; if you still need the content at that time, call read_file again ……]`;
+  `[…… The earlier read result for "${path}" has been omitted: a later read covered the same lines, or the file was ` +
+  `modified afterward, so rely on the later read / write result; if you still need the content at that time, call read_file again ……]`;
 
 /** Prefix marker for the summary message (model-visible). */
 const SUMMARY_PREFIX =
@@ -109,24 +148,30 @@ export interface CompactionState extends CompactionPlan {
 interface CallInfo {
   name: string;
   path: string;
+  /**
+   * Read calls only: the line span the call returned (see readRange). Undefined for mutators, and
+   * also for a read whose arguments failed to parse — dedup treats an unknown span as "cannot prove
+   * redundant" and leaves the result alone, which is the safe direction.
+   */
+  range?: ReadRange;
 }
 export function indexCalls(messages: ApiMsg[]): Map<string, CallInfo> {
   const byId = new Map<string, CallInfo>();
   for (const m of messages) {
     if (m.role !== "assistant" || !m.tool_calls) continue;
     for (const tc of m.tool_calls) {
-      let args: Record<string, unknown> = {};
+      let args: Record<string, unknown> | null = null;
       try {
-        args = JSON.parse(tc.function.arguments || "{}");
+        args = JSON.parse(tc.function.arguments || "{}") as Record<string, unknown>;
       } catch {
-        /* Invalid JSON arguments: treat as having no path */
+        /* Invalid JSON arguments: treat as having no path and no span */
       }
-      const pathKey = READ_TOOLS.has(tc.function.name)
-        ? "path"
-        : MUTATORS[tc.function.name];
+      const isRead = READ_TOOLS.has(tc.function.name);
+      const pathKey = isRead ? "path" : MUTATORS[tc.function.name];
       byId.set(tc.id, {
         name: tc.function.name,
-        path: pathKey ? normPath(args[pathKey]) : "",
+        path: pathKey && args ? normPath(args[pathKey]) : "",
+        ...(isRead && args ? { range: readRange(args) } : {}),
       });
     }
   }
@@ -134,8 +179,14 @@ export function indexCalls(messages: ApiMsg[]): Map<string, CallInfo> {
 }
 
 /**
- * Compute the set of "stale-read" stubs: for each read_file result, if there is a later (higher-index) read of the same path
- * or any write afterward, that result is redundant/stale → stub it. Keep the last one. Only include results exceeding MIN_STUB_CHARS.
+ * Compute the set of "stale-read" stubs: a read_file result is redundant when a LATER read of the same
+ * path covers its whole line span, or when the path is written afterward. Only results exceeding
+ * MIN_STUB_CHARS are stubbed.
+ *
+ * Supersession is by span containment, not by path (see readRange / covers). Keying on path alone
+ * treats an agent's sequential chunk reads of one file — {offset:460,limit:90}, {offset:550,limit:90},
+ * {offset:640,limit:50} — as superseding each other and stubs live content out of the wire.
+ *
  * @param startIndex Only deduplicate messages at this index and after (in the summary scenario = the start of the kept tail, to avoid reprocessing overlap with the summarized segment).
  */
 export function computeStaleStubs(
@@ -144,30 +195,39 @@ export function computeStaleStubs(
   startIndex: number,
 ): Map<string, string> {
   const stubs = new Map<string, string>();
-  // First record for each path the "index of the last read" and the "index of the last write".
-  const lastRead = new Map<string, number>();
-  const lastTouch = new Map<string, number>(); // both read and write count as a "touch", used to judge whether a read was superseded by a later one
+  // Per path: every read and the span it returned, plus the index of the last mutation.
+  const readsByPath = new Map<string, { idx: number; range: ReadRange }[]>();
+  const lastWrite = new Map<string, number>();
   for (let i = startIndex; i < messages.length; i++) {
     const m = messages[i];
     if (m.role === "assistant" && m.tool_calls) {
       for (const tc of m.tool_calls) {
         const info = calls.get(tc.id);
         if (!info?.path) continue;
-        if (READ_TOOLS.has(info.name)) lastRead.set(info.path, i);
-        if (MUTATORS[info.name]) lastTouch.set(info.path, i);
+        if (READ_TOOLS.has(info.name) && info.range) {
+          const list = readsByPath.get(info.path);
+          if (list) list.push({ idx: i, range: info.range });
+          else readsByPath.set(info.path, [{ idx: i, range: info.range }]);
+        }
+        if (MUTATORS[info.name]) lastWrite.set(info.path, i);
       }
     }
   }
-  // Then judge each read result: if its corresponding assistant call appears before a later read / write → stale.
+  // Then judge each read result: its own call sits earlier, but supersession is decided by the later
+  // reads / writes of the same path, so comparing against this result's index is sound.
   for (let i = startIndex; i < messages.length; i++) {
     const m = messages[i];
     if (m.role !== "tool") continue;
     const info = calls.get(m.tool_call_id);
     if (!info || !READ_TOOLS.has(info.name) || !info.path) continue;
+    // No known span (unparseable arguments): cannot prove redundancy, so keep the result.
+    const range = info.range;
+    if (!range) continue;
     if (typeof m.content !== "string" || m.content.length < MIN_STUB_CHARS) continue;
-    // this read message is at position i in the array; its "call" is earlier, but the supersession relation can be judged using later reads/writes of the same path.
-    const supersededByRead = (lastRead.get(info.path) ?? -1) > i;
-    const supersededByWrite = (lastTouch.get(info.path) ?? -1) > i;
+    const supersededByWrite = (lastWrite.get(info.path) ?? -1) > i;
+    const supersededByRead = (readsByPath.get(info.path) ?? []).some(
+      (r) => r.idx > i && covers(r.range, range),
+    );
     if (supersededByRead || supersededByWrite) stubs.set(m.tool_call_id, info.path);
   }
   return stubs;
@@ -298,6 +358,245 @@ export function planCompaction(
  * Replace the content of the tool results listed in stubs with stub text (other messages as-is). Pure function, doesn't mutate the
  * arguments. A change event riding this turn is untouched: it lives in `reminderText`, not in `content`.
  */
+// ── Completed-round release (wire-only) ───────────────────────────────────────────
+
+/**
+ * How many trailing rounds keep their tool results verbatim. A "round" is delimited by user messages.
+ *
+ * 2 rather than 1 deliberately: a follow-up often refers back to what the previous round just did
+ * ("now do the same for the other file"), so the round before the live one stays intact.
+ */
+export const KEEP_ROUNDS = 2;
+
+/** Short descriptor of a tool call, kept in place of its released result so the trace survives. */
+function describeCall(name: string, argsJson: string): string {
+  let args: Record<string, unknown> = {};
+  try {
+    args = JSON.parse(argsJson || "{}") as Record<string, unknown>;
+  } catch {
+    /* unparseable arguments: fall back to the bare tool name */
+  }
+  const p =
+    typeof args.path === "string"
+      ? args.path
+      : typeof args.destination === "string"
+        ? args.destination
+        : "";
+  if (READ_TOOLS.has(name) && p) {
+    const r = readRange(args);
+    return `${name} ${p} lines ${r.start}-${r.end}`;
+  }
+  if (p) return `${name} ${p}`;
+  const firstStr = Object.values(args).find((v) => typeof v === "string" && v) as string | undefined;
+  return firstStr ? `${name} ${firstStr.slice(0, 60)}` : name;
+}
+
+const releaseText = (desc: string): string =>
+  `[…… Result released: this call belongs to a task that has since completed, so its output is no longer carried in ` +
+  `context. It was: ${desc}. Run it again if you need the content ……]`;
+
+/**
+ * Tool results belonging to rounds that already finished.
+ *
+ * Measured: the working set a round inherits is 45-77% of what that round costs, because tool output
+ * is append-only and every token in it is re-delivered on each of the round's ~20-30 model calls. Once
+ * a round is over, its raw tool output has done its job — the agent's own assistant messages, which are
+ * never touched here, still carry what it concluded, and the descriptor left behind says what ran so the
+ * model can re-run it rather than assuming it never looked.
+ *
+ * Driven by round boundaries rather than todo completions on purpose: todos are updated late and in
+ * batches (first completion landed at call 17 of 29 in one profiled round), so they recover ~8% where
+ * round boundaries reach ~26%, and forcing more frequent todo updates costs more in round trips than the
+ * eviction saves.
+ *
+ * Pure and deterministic: within a round the set cannot change (no new user message), so the wire prefix
+ * stays byte-stable and the cache holds. It shifts exactly once per round, at the boundary.
+ */
+/**
+ * Index of the first message belonging to the live region: the last `keepRounds` user turns and
+ * everything after them. 0 when the conversation is still short enough that nothing has completed.
+ *
+ * Rounds are delimited by user messages, and no user message is appended mid-round, so this value is
+ * constant for the duration of a round — which is what keeps every release below prefix-stable.
+ */
+function liveRegionStart(messages: ApiMsg[], keepRounds: number): number {
+  const userIdx: number[] = [];
+  for (let i = 0; i < messages.length; i++) if (messages[i].role === "user") userIdx.push(i);
+  if (userIdx.length <= keepRounds) return 0;
+  return userIdx[userIdx.length - keepRounds];
+}
+
+export function computeReleasedResults(
+  messages: ApiMsg[],
+  keepRounds: number = KEEP_ROUNDS,
+): Map<string, string> {
+  const released = new Map<string, string>();
+  const liveFrom = liveRegionStart(messages, keepRounds);
+  if (liveFrom <= 0) return released;
+
+  const desc = new Map<string, string>();
+  for (let i = 0; i < liveFrom; i++) {
+    const m = messages[i];
+    if (m.role === "assistant" && m.tool_calls) {
+      for (const tc of m.tool_calls) desc.set(tc.id, describeCall(tc.function.name, tc.function.arguments));
+    }
+  }
+  for (let i = 0; i < liveFrom; i++) {
+    const m = messages[i];
+    if (m.role !== "tool" || typeof m.content !== "string") continue;
+    // Already short: a descriptor would not be smaller, and rewriting it would churn the prefix for nothing.
+    if (m.content.length < MIN_STUB_CHARS) continue;
+    const d = desc.get(m.tool_call_id);
+    if (d) released.set(m.tool_call_id, d);
+  }
+  return released;
+}
+
+/**
+ * Bulky edit-tool argument fields, by tool. These carry the text the agent wrote; once the call has
+ * landed, that text is on disk and `read_file` can recover it, so the wire does not need to keep
+ * carrying it. `path` and every structural field are always preserved — `indexCalls`, `pathProvenance`
+ * and the dedup logic all key on `path`, and the tool-call shape has to stay schema-valid.
+ */
+const RELEASABLE_ARGS: Record<string, readonly string[]> = {
+  edit_file: ["old_string", "new_string"],
+  write_file: ["content"],
+  append_file: ["content"],
+};
+
+/**
+ * Elide the bulky fields of one completed edit call's arguments. Returns null when there is nothing
+ * to do (not an edit tool, unparseable arguments, or every field already small) so the caller can keep
+ * the original object and its referential equality.
+ */
+function releaseCallArguments(name: string, argsJson: string): string | null {
+  const fields = RELEASABLE_ARGS[name];
+  if (!fields) return null;
+  let args: Record<string, unknown>;
+  try {
+    args = JSON.parse(argsJson || "{}") as Record<string, unknown>;
+  } catch {
+    return null; // unparseable: leave it exactly as it was rather than rewrite it into something else
+  }
+  const path = typeof args.path === "string" ? args.path : "";
+  let changed = false;
+  for (const f of fields) {
+    const v = args[f];
+    if (typeof v !== "string" || v.length < MIN_STUB_CHARS) continue;
+    const lines = v.split("\n").length;
+    args[f] =
+      f === "old_string"
+        ? `[…… ${lines} lines elided: the text this call replaced ……]`
+        : `[…… ${lines} lines elided: this text was written to ${path || "the file"}; read_file it if you need it ……]`;
+    changed = true;
+  }
+  return changed ? JSON.stringify(args) : null;
+}
+
+/**
+ * Release the payloads the agent itself wrote, for edit calls in rounds that have completed.
+ *
+ * Measured after the tool-result fixes landed: a round's own history grew +32,005 against tool output's
+ * +5,677 — 85% of in-round growth is the agent's own emissions, nearly all of it `new_string` /
+ * `content` sitting in `tool_calls[].function.arguments` and re-sent on every later call.
+ *
+ * Scoped to completed rounds for the same reason as computeReleasedResults, and doubly so here: within
+ * the live region the model may still be reasoning about what it just wrote, and the consent-preview
+ * path in page.tsx reads these arguments to compute a diff before the call executes. Only the derived
+ * wire is affected — display, persistence, and execution all read the untouched source.
+ */
+export function releaseCallPayloads(
+  messages: ApiMsg[],
+  keepRounds: number = KEEP_ROUNDS,
+): ApiMsg[] {
+  const liveFrom = liveRegionStart(messages, keepRounds);
+  if (liveFrom <= 0) return messages;
+  let changed = false;
+  const out = messages.map((m, i) => {
+    if (i >= liveFrom || m.role !== "assistant" || !m.tool_calls) return m;
+    let touched = false;
+    const calls = m.tool_calls.map((tc) => {
+      const next = releaseCallArguments(tc.function.name, tc.function.arguments);
+      if (next === null) return tc;
+      touched = true;
+      return { ...tc, function: { ...tc.function, arguments: next } };
+    });
+    if (!touched) return m;
+    changed = true;
+    return { ...m, tool_calls: calls };
+  });
+  return changed ? out : messages;
+}
+
+/** Replace released tool results with their descriptor. Returns the input array when nothing changed. */
+export function applyReleases(messages: ApiMsg[], released: Map<string, string>): ApiMsg[] {
+  if (released.size === 0) return messages;
+  return messages.map((m) =>
+    m.role === "tool" && released.has(m.tool_call_id)
+      ? { ...m, content: releaseText(released.get(m.tool_call_id)!) }
+      : m,
+  );
+}
+
+// ── Edit-diff trimming (wire-only) ────────────────────────────────────────────────
+
+/** Tools whose result carries a unified diff appended by makeUnifiedDiff (electron/tools/aiToolkit.mjs). */
+const DIFF_TOOLS = new Set(["edit_file", "write_file", "append_file"]);
+
+/**
+ * Replace an edit tool's echoed diff with the line ranges it touched.
+ *
+ * The `+` lines of that diff ARE the `new_string` the assistant just sent, so the same code sits in
+ * the wire twice — once in the assistant's tool_call arguments, once in the echoed result. Measured
+ * on a real 6-task round: 14 edit_file results carried ~12K tokens of diff duplicating the model's
+ * own output, and because tool results are append-only every later round in that conversation
+ * re-sent all of it (docs/context-budget-profiling.md).
+ *
+ * The model keeps what it needs to act on — which file, which lines — and can read_file those ranges
+ * for the current text. This is a pure per-message projection, so the wire prefix stays byte-stable
+ * and prompt caching is unaffected (unlike a retroactive rewrite — see the dedup discussion in
+ * docs/prompt-cache-optimization.md).
+ */
+function summarizeEditDiff(content: string): string {
+  // The fenced block makeUnifiedDiff appends at the very end of the result.
+  const block = /\n```diff\n([\s\S]*?)\n```\s*$/.exec(content);
+  if (!block) return content;
+  const ranges: string[] = [];
+  // Hunk header: "@@ -old,oldCount +new,newCount @@" — the new-side range is what a re-read would use.
+  for (const h of block[1].matchAll(/^@@ -\d+,\d+ \+(\d+),(\d+) @@$/gm)) {
+    const start = Number(h[1]);
+    const count = Number(h[2]);
+    ranges.push(count > 1 ? `${start}-${start + count - 1}` : `${start}`);
+  }
+  // No parseable hunks — e.g. makeUnifiedDiff's "file too large, diff omitted" placeholder, which is
+  // already compact. Leave it alone rather than replacing one summary with another.
+  if (!ranges.length) return content;
+  return (
+    `${content.slice(0, block.index)}\n` +
+    `[…… The diff has been omitted from context: its added lines are the same text you passed as new_string just above. ` +
+    `Changed lines in the file as it now stands: ${ranges.join(", ")}. Call read_file on those ranges if you need to see ` +
+    `the current text ……]`
+  );
+}
+
+/**
+ * Apply summarizeEditDiff to every edit-tool result. Pure and deterministic; returns the original
+ * array when nothing changed so callers keep referential equality.
+ */
+export function trimEditDiffs(messages: ApiMsg[], calls: Map<string, CallInfo>): ApiMsg[] {
+  let changed = false;
+  const out = messages.map((m) => {
+    if (m.role !== "tool" || typeof m.content !== "string") return m;
+    const info = calls.get(m.tool_call_id);
+    if (!info || !DIFF_TOOLS.has(info.name)) return m;
+    const next = summarizeEditDiff(m.content);
+    if (next === m.content) return m;
+    changed = true;
+    return { ...m, content: next };
+  });
+  return changed ? out : messages;
+}
+
 export function applyStubs(messages: ApiMsg[], stubs: Map<string, string>): ApiMsg[] {
   if (stubs.size === 0) return messages;
   return messages.map((m) =>
@@ -343,10 +642,16 @@ export function buildWireContext(
   messages: ApiMsg[],
   state: CompactionState | null | undefined,
 ): ApiMsg[] {
-  if (!state) return messages;
-  const frozenLen = Math.min(state.frozenLen, messages.length);
-  const frozen = messages.slice(0, frozenLen);
-  const live = messages.slice(frozenLen);
+  // Both applied compaction or not. trimEditDiffs drops an echo that duplicates the assistant's own
+  // tool-call arguments; applyReleases drops raw tool output whose round is over. Order matters only
+  // in that releases win — a released result is already reduced to its descriptor.
+  const trimmed = trimEditDiffs(messages, indexCalls(messages));
+  const withResults = applyReleases(trimmed, computeReleasedResults(trimmed));
+  const base = releaseCallPayloads(withResults);
+  if (!state) return base;
+  const frozenLen = Math.min(state.frozenLen, base.length);
+  const frozen = base.slice(0, frozenLen);
+  const live = base.slice(frozenLen);
 
   const hasSystem = frozen[0]?.role === "system";
   const system = hasSystem ? [frozen[0]] : [];

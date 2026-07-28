@@ -18,6 +18,8 @@ import type { ApiMsg, ContentPart } from "./types";
 import { countTokens, countMessageTokens, countMessagesTokens, setTokenCache } from "@/lib/ai/tokenizer";
 import {
   indexCalls,
+  covers,
+  type ReadRange,
   planCompaction,
   buildWireContext,
   computeStaleStubs,
@@ -93,17 +95,27 @@ export interface ContextBreakdown {
  * the conversation. A high count is the signature of context loss — the model re-fetching something
  * it once had — which is exactly the correctness cost an over-aggressive budget would introduce.
  */
-export function countRedundantReads(messages: ApiMsg[], calls?: Map<string, { name: string; path: string }>): number {
+export function countRedundantReads(
+  messages: ApiMsg[],
+  calls?: Map<string, { name: string; path: string; range?: ReadRange }>,
+): number {
   const byId = calls ?? indexCalls(messages);
-  const seen = new Set<string>();
+  // Spans already read, per path. A read counts as redundant only when an EARLIER read of the same
+  // path covered its whole span: `read_file` returns a line range, so an agent walking a large file
+  // in sequential chunks is not re-reading anything. Counting by path alone made every chunk after
+  // the first a false positive and inflated this metric on exactly the heavy tasks it exists to
+  // measure. Same containment rule as computeStaleStubs — see contextCompress.covers.
+  const seen = new Map<string, ReadRange[]>();
   let rereads = 0;
   for (const m of messages) {
     if (m.role !== "assistant" || !m.tool_calls) continue;
     for (const tc of m.tool_calls) {
       const info = byId.get(tc.id);
-      if (!info || info.name !== READ_TOOL || !info.path) continue;
-      if (seen.has(info.path)) rereads++;
-      else seen.add(info.path);
+      if (!info || info.name !== READ_TOOL || !info.path || !info.range) continue;
+      const prior = seen.get(info.path);
+      if (!prior) seen.set(info.path, [info.range]);
+      else if (prior.some((r) => covers(r, info.range!))) rereads++;
+      else prior.push(info.range);
     }
   }
   return rereads;
