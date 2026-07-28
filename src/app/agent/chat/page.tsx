@@ -2773,10 +2773,11 @@ function ChatAgent() {
       /**
        * Write a one-shot nudge into the last tool result, and persist it there.
        *
-       * These fire between tool rounds, after the assistant turn has already been appended and stored, so there is no fresh turn
-       * to ride. The tool turn is APPENDED to rather than prepended to: it has already been sent, so writing into it moves the
-       * prefix divergence into cached tokens, and putting that divergence at the end of a result costs far less than at the front
-       * of one that can run to thousands of characters.
+       * The two file-change guards call this at tool-completion time, so the result is mutated BEFORE it is first sent and the
+       * model reads the nudge in time to act on it. FINALIZE_NUDGE is the exception: it can only be detected after the model has
+       * replied with an empty body, so it does rewrite an already-sent result — free in practice, because sanitizeToolCallPairs
+       * drops that empty assistant turn, leaving this tool result as the tail. Appended rather than prepended for the same reason:
+       * divergence at the end of a result that can run to thousands of characters costs far less than at its front.
        *
        * Returns false when there is no tool turn to carry it (nothing was called this round), so the caller can fall through.
        */
@@ -3095,26 +3096,25 @@ function ChatAgent() {
             lastToolStoredIdx = (store.getConversation(genConvId)?.messages.length ?? 0) - 1;
           }
           if (ctrl.signal.aborted) return;
-          continue;
-        }
-
-        // Critical-change review guard: in dev mode, when a risky path has been changed but not reviewed and it wants to wrap up,
-        // nudge it to delegate a reviewer first and continue the loop. Forced at most once per round (reviewForced); if the model
-        // still insists, let it through, to avoid a deadlock. It stays able to fire again on a LATER turn — this is a safety guard,
-        // so a risky change at turn 40 must be caught even though turn 5 was.
-        if (mode === "dev" && riskyChangePending && !reviewForced) {
-          reviewForced = true;
-          nudgeIntoLastTool(FORCE_REVIEW_NUDGE);
-          continue;
-        }
-
-        // Project-memory guard: files changed this turn and nothing was recorded. Inject one reminder and let the
-        // model take another round, the same shape as the review guard above — a prompt line alone does not survive a
-        // long turn, which is why the Module Map stays unsummarised even after the work that would fill it in.
-        // Forced only once (memoryNudged), and the nudge itself allows skipping, so this cannot deadlock.
-        if (mode === "dev" && learnedWithoutRecording && !memoryNudged) {
-          memoryNudged = true;
-          nudgeIntoLastTool(RECORD_MEMORY_NUDGE);
+          // ── File-change guards, evaluated HERE rather than at wrap-up ───────────────────────────────────────────────
+          // Both flags are known the moment the tools return, so the nudge is written into the last tool result before that
+          // result is ever sent. Two things follow. The model reads it while it can still act — it can delegate the reviewer in
+          // its very next turn instead of being told off for a conclusion it already reached. And mutating a message that has
+          // not been sent yet costs nothing: the previous request did not contain this tool result at all, so there is no
+          // divergence and no re-prefill. Nudging at wrap-up instead would rewrite a result the model had already answered.
+          //
+          // Each fires at most once per round. Neither blocks the wrap-up: the old wrap-up-time version let the model through
+          // after one nudge anyway ("if the model still insists, let it through, to avoid a deadlock"), so this is the same
+          // single nudge, delivered early enough to be preventive. They stay able to fire again on a later turn — the review
+          // guard is a safety check, so a risky change at turn 40 must be caught even though turn 5 was.
+          if (mode === "dev" && riskyChangePending && !reviewForced) {
+            reviewForced = true;
+            nudgeIntoLastTool(FORCE_REVIEW_NUDGE);
+          }
+          if (mode === "dev" && learnedWithoutRecording && !memoryNudged) {
+            memoryNudged = true;
+            nudgeIntoLastTool(RECORD_MEMORY_NUDGE);
+          }
           continue;
         }
 
