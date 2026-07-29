@@ -28,8 +28,14 @@ Notes
   legible extractable text are rendered and OCRed.
 """
 
+import sys
+
 import numpy as np
 import pymupdf
+
+# Both of these are UPSTREAM INTERNALS, not public API: `get_culled_pixmap` is a private module path inside pymupdf4llm, and
+# the FZ_STEXT_* constants below come from PyMuPDF's low-level SWIG binding. Either can move on a minor upgrade without notice,
+# so pin pymupdf4llm and pymupdf in requirements.txt and re-check this file when bumping them.
 from pymupdf4llm.ocr.get_culled_pixmap import get_pixmap
 
 FONT = pymupdf.Font("cjk")  # Droid Sans Fallback — covers CJK
@@ -57,7 +63,7 @@ def ocr_text(span) -> bool:
     return True
 
 
-def exec_ocr(page, dpi=300, pixmap=None, language="eng", keep_ocr_text=False):
+def exec_ocr(page, dpi=150, pixmap=None, language="eng", keep_ocr_text=False):
     """Page-level OCR callback for pymupdf4llm, using PP-OCRv6 (new `rapidocr`).
 
     Signature matches pymupdf4llm's ocr_function contract. `language` is unused:
@@ -89,20 +95,52 @@ def exec_ocr(page, dpi=300, pixmap=None, language="eng", keep_ocr_text=False):
 
     pix = get_pixmap(displaylist, dpi=dpi, rects=spans)
     matrix = pymupdf.Rect(pix.irect).torect(page.rect)
-    img = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width, 3)
+    # Reshape by the pixmap's ACTUAL channel count. Hardcoding 3 raises "cannot reshape array" the first time the helper hands
+    # back RGBA or grayscale, which is a crash on an unusual page rather than a degraded result. The engine wants 3 channels.
+    img = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width, pix.n)
+    if pix.n == 4:
+        # ascontiguousarray is required, not defensive: dropping alpha with a slice leaves a view that strides over the 4th
+        # byte, and an ONNX engine fed a non-contiguous buffer either copies it anyway or rejects it. Make the copy here where
+        # it is visible. The n == 3 path below is untouched and allocates nothing, as before.
+        img = np.ascontiguousarray(img[:, :, :3])
+    elif pix.n == 1:
+        img = np.repeat(img, 3, axis=2)  # already returns a fresh contiguous array
 
     # ── PP-OCRv6 call (new API returns a RapidOCROutput) ─────────────────────
-    out = _engine()(img)
+    # exec_ocr runs once per page, so an uncaught failure here — model download, a malformed image, the engine running out of
+    # memory — destroys the whole to_markdown run and every page already processed with it. Degrade this page instead.
+    try:
+        out = _engine()(img)
+    except MemoryError:
+        # NOT confined to this page: running out of memory says the machine cannot do this document, and grinding through the
+        # remaining pages would produce an empty result while hiding the reason. Fail loudly and let the caller resize or
+        # process page by page. (KeyboardInterrupt and SystemExit are BaseException, so they already pass through below.)
+        raise
+    except Exception as e:  # noqa: BLE001 - any other engine failure must stay confined to this page
+        print(f"[rapidocr_v6_api] OCR failed on page {page.number}: {e}", file=sys.stderr)
+        return
     boxes = getattr(out, "boxes", None)
     txts = getattr(out, "txts", None)
-    scores = getattr(out, "scores", None)
     if boxes is None or txts is None:
         return
-    if scores is None:
-        scores = [1.0] * len(txts)
+
+    # Nothing recognised => return BEFORE touching the page. Two reasons, and the second is a correctness one:
+    #  - insert_font embeds a full CJK font, and doing that on a page we are about to insert nothing into is pure cost, paid
+    #    per page across the document;
+    #  - the redactions below delete the existing illegible/old-OCR text on the promise that the engine restores it. With no
+    #    recognised text there is nothing to restore, so applying them would destroy content rather than replace it.
+    items = [(b, t) for b, t in zip(boxes, txts) if t and t.strip()]
+    redaction_rects = fffd_spans + ocr_spans
+    if not items:
+        # Behaviour change worth seeing: previously these spans were redacted here even with nothing to put back, which
+        # removed the page's illegible/old-OCR text and left a hole. They now survive, so the extracted markdown keeps that
+        # text (U+FFFD and all) instead of losing it. Say so rather than differing from the old behaviour in silence.
+        if redaction_rects:
+            print(f"[rapidocr_v6_api] page {page.number}: OCR recognised nothing; leaving "
+                  f"{len(redaction_rects)} illegible span(s) in place", file=sys.stderr)
+        return
 
     # Redact old OCR / illegible spans; the engine restores them.
-    redaction_rects = fffd_spans + ocr_spans
     if redaction_rects:
         for sbbox in redaction_rects:
             page.add_redact_annot(sbbox)
@@ -115,9 +153,7 @@ def exec_ocr(page, dpi=300, pixmap=None, language="eng", keep_ocr_text=False):
     page.insert_font(fontname=FONTNAME, fontbuffer=FONT.buffer)
 
     # Insert recognized text. `box` = 4 (x, y) points → build a page-space rect.
-    for box, text, conf in zip(boxes, txts, scores):
-        if not text or not text.strip():
-            continue
+    for box, text in items:
         xs = [float(p[0]) for p in box]
         ys = [float(p[1]) for p in box]
         rect = pymupdf.Rect(min(xs), min(ys), max(xs), max(ys)) * matrix

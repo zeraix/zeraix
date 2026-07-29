@@ -39,18 +39,40 @@ function jsonSock(sock) {
       const line = buf.slice(0, i).trim(); buf = buf.slice(i + 1);
       if (!line) continue;
       let m; try { m = JSON.parse(line); } catch { continue; }
-      if ('return' in m || 'error' in m) {
-        const w = waiters.shift();
-        if (w && m.error) w.reject(new Error(m.error.desc || 'error'));
-        else if (w) w.resolve(m.return);
+      if (!('return' in m || 'error' in m)) continue;
+      const head = waiters[0];
+      // A sync waiter swallows everything until its own nonce comes back, which is what makes the FIFO matching below sound:
+      // waitAgent's connect/destroy probes can leave a reply in flight, and positional matching would otherwise hand it to
+      // the first real command as that command's answer, shifting every reply after it by one.
+      //
+      // Hardening, not a fix for an observed bug. This was written while chasing "PID ld does not exist" on the theory that a
+      // misaligned queue was sending guest-exec-status a pid of undefined; that theory was never reproduced (a stale reply
+      // arriving with no waiter queued is simply dropped, so both the old and new code survive it). The real cause was the
+      // guest OOM-killer taking the python process — and qemu-ga with it — so the pid genuinely no longer existed. Kept
+      // because positional matching against a shared channel is only sound if nothing else can be in flight, and nothing else
+      // enforced that.
+      if (head && head.nonce !== undefined) {
+        if ('return' in m && m.return === head.nonce) { waiters.shift(); head.resolve(true); }
+        continue; // anything else at this point is stale: drop it rather than answer a command with it
       }
+      const w = waiters.shift();
+      if (w && m.error) w.reject(new Error(m.error.desc || 'error'));
+      else if (w) w.resolve(m.return);
     }
   });
   const send = obj => new Promise((resolve, reject) => {
     waiters.push({ resolve, reject });
     sock.write(JSON.stringify(obj) + '\n');
   });
-  return { sock, send };
+  /** Flush anything stale still in flight, through this same queue, so the next send() is aligned. */
+  const sync = (timeoutMs = 3000) => new Promise((resolve) => {
+    const nonce = ++syncSeq * 100000 + (Date.now() % 100000);
+    const w = { nonce, resolve: () => { clearTimeout(t); resolve(true); }, reject: () => { clearTimeout(t); resolve(false); } };
+    const t = setTimeout(() => { const i = waiters.indexOf(w); if (i >= 0) waiters.splice(i, 1); resolve(false); }, timeoutMs);
+    waiters.push(w);
+    sock.write(JSON.stringify({ execute: 'guest-sync', arguments: { id: nonce } }) + '\n');
+  });
+  return { sock, send, sync };
 }
 
 /** QMP: capabilities handshake + dynamic host->guest port forwards. */
@@ -119,13 +141,19 @@ export async function guestAgent({ port = +(process.env.GA_PORT || 4445) } = {})
   const sock = await connect(port);
   await guestSync(sock); // resync this fresh persistent socket + drain stale replies before FIFO
   const c = jsonSock(sock);
+  // Then flush again THROUGH the queue. guestSync above uses its own listener and its own buffer, so a reply that arrives
+  // after it returns is picked up by jsonSock and answers the first real command instead. This second pass leaves the queue
+  // aligned; see the sync waiter in jsonSock.
+  await c.sync();
 
   /** Raw guest-exec: run argv, poll to completion, throw on non-zero. */
   const exec = async (bin, arg, { input, env } = {}) => {
     const a = { path: bin, arg, 'capture-output': true };
     if (env) a.env = env; // ["K=V", ...] passed to execve verbatim (no shell parsing)
     if (input != null) a['input-data'] = Buffer.from(input).toString('base64');
-    const { pid } = await c.send({ execute: 'guest-exec', arguments: a });
+    const started = await c.send({ execute: 'guest-exec', arguments: a });
+    const pid = started?.pid;
+    if (typeof pid !== 'number') { await c.sync(); throw new Error(`guest-exec returned no pid (got ${JSON.stringify(started)}); agent channel was out of sync, resynced`); }
     for (;;) {
       const st = await c.send({ execute: 'guest-exec-status', arguments: { pid } });
       if (st.exited) {
@@ -142,8 +170,16 @@ export async function guestAgent({ port = +(process.env.GA_PORT || 4445) } = {})
     /** Non-throwing, timed run (for the run_command engine). Wraps in coreutils
      *  `timeout`; returns exit status instead of throwing. code 124 => timed out. */
     async runStatus(argv, { timeoutSec = 60 } = {}) {
-      const { pid } = await c.send({ execute: 'guest-exec', arguments: {
+      const started = await c.send({ execute: 'guest-exec', arguments: {
         path: '/usr/bin/timeout', arg: ['-k', '2', String(timeoutSec), ...argv], 'capture-output': true } });
+      const pid = started?.pid;
+      // Check the reply really is a guest-exec reply. Without this, a queue that had slipped out of alignment would send
+      // `{ pid: undefined }` to guest-exec-status and the failure would surface one step later as qemu-ga's "PID does not
+      // exist" — naming a pid rather than the misalignment that produced it. Resync so the next command starts clean.
+      if (typeof pid !== 'number') {
+        await c.sync();
+        throw new Error(`guest-exec returned no pid (got ${JSON.stringify(started)}); agent channel was out of sync, resynced`);
+      }
       for (;;) {
         const st = await c.send({ execute: 'guest-exec-status', arguments: { pid } });
         if (st.exited) {
