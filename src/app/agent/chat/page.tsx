@@ -59,7 +59,10 @@ import { isLocalEndpoint, localLlm, LOCAL_PROVIDER_ID } from "@/lib/ai/localMode
 import { setSandboxMode, onSandboxStatus, getSandboxStatus, getSandboxVmInfo, sandboxEnvHint, isSandboxEngine, type SandboxStatus } from "@/lib/ai/sandbox";
 import { useT } from "@/lib/i18n";
 import { toast } from "sonner";
-import { SUBAGENTS, SUBAGENT_TOOL_DISCIPLINE, subAgentTool } from "@/lib/ai/subagents";
+import {
+  SUBAGENTS, SUBAGENT_TOOL_DISCIPLINE, subAgentTool,
+  delegationSubject, findRepeatDelegation, repeatDelegationResult, type PriorDelegation,
+} from "@/lib/ai/subagents";
 import { SkillSelectPanel } from "./SkillSelectPanel";
 import BrowserPanel from "./BrowserPanel";
 import { getStorage } from "@zzcpt/zztool";
@@ -81,6 +84,7 @@ import { enabledSkills, loadInstalled } from "@/lib/ai/skills/store";
 import { getSkillInstructions, loadSkillTool, skillSystemHint } from "@/lib/ai/skills/runtime";
 import { SANDBOX_TOOLBOX_SKILL } from "@/lib/ai/skills/builtin";
 import { buildSystemPrompt, buildToolSet as buildToolSet_ } from "@/lib/ai/promptPrefix";
+import { ROUTED_TOOLS, resolveToolCall, routedFailureHint, unknownToolResult } from "@/lib/ai/toolRouter";
 /** The built-in skill menu as it appears in messages[0]: fixed text, identical on every install. */
 const BUILTIN_SKILL_MENU =
   "[Built-in skills] Always installed and always listed here:\n" +
@@ -276,6 +280,8 @@ function ChatAgent() {
   // live array (mutated in place as steps land), so it is current by the time the persist step reads it.
   // Safe for the same reason as above: run_subagent is not parallel-safe, so it runs in its own serial group.
   const lastSubagentStepsRef = useRef<SubAgentStep[] | null>(null);
+  /** Delegations completed in the current turn, for the repeat guard in runSubAgent (keyed by turn, never cleared — see there). */
+  const delegationsRef = useRef<{ turnId: string; done: PriorDelegation[] }>({ turnId: "", done: [] });
   const [status, setStatus] = useState(""); // While generating, show the user "what it is doing"
   const [error, setError] = useState<string | null>(null);
   const [toolsReady, setToolsReady] = useState(false);
@@ -1127,7 +1133,10 @@ function ChatAgent() {
           } catch {
             /* Invalid JSON arguments, display as an empty object */
           }
-          callArgs.set(tc.id, { name: tc.function.name, args: a });
+          // Resolved, for the same reason the tool result persists a resolved name: a call_tool entry would otherwise rebuild
+          // the bubble with the dispatcher's own {name, arguments} envelope in place of the arguments the tool actually ran on.
+          const { name: rn, args: ra } = resolveToolCall(tc.function.name, (a ?? {}) as Record<string, unknown>);
+          callArgs.set(tc.id, { name: rn, args: ra });
         }
       }
     }
@@ -1737,6 +1746,29 @@ function ChatAgent() {
   const buildToolSet = async () =>
     buildToolSet_(mode, toolsReadyRef.current ? await listTools("openai") : [], { memory: isMemoryFilesAvailable() });
 
+  /**
+   * Explain a FAILED call to a tool the model never saw a schema for.
+   *
+   * A routed tool is called from a one-line catalog signature (see toolRouter.ts), so a rejected call is the one moment its full
+   * parameter list is worth its tokens — the alternative is the model guessing again, and a guess costs a whole round trip at
+   * 50-80K prompt tokens. Only on failure, and only for routed tools: a declared tool's schema is already in every request.
+   *
+   * Reached only on the error path, so the extra listTools() round trip is free in the case that matters. Covers the toolkit's
+   * tools only: the routed renderer tools (browser / openBrowser / image_generation) never come through here, and their handlers
+   * already answer with a description of what they wanted.
+   */
+  const explainToolFailure = async (name: string, content: string): Promise<string> => {
+    if (!ROUTED_TOOLS[mode].has(name) && !content.startsWith("Unknown tool")) return content;
+    try {
+      const all = (await listTools("openai")) as Array<{ function?: { name?: string; parameters?: unknown } }>;
+      const hit = all.find((t) => t.function?.name === name);
+      if (!hit) return `${content}\n\n${unknownToolResult(name, all.flatMap((t) => (t.function?.name ? [t.function.name] : [])))}`;
+      return ROUTED_TOOLS[mode].has(name) ? content + routedFailureHint(name, hit.function?.parameters) : content;
+    } catch {
+      return content; // The hint is an optimisation; never let looking it up turn a tool error into a broken turn.
+    }
+  };
+
   const maybeCompact = async (
     opts: {
       force?: boolean;
@@ -1947,7 +1979,9 @@ function ChatAgent() {
     const result = await callTool(name, args);
     ctx.push({ kind: "tool", name: displayName, args, ok: result.ok, result: result.content });
     log(result.ok, result.content);
-    return result.content;
+    // The schema hint is model-facing only: the bubble above and the log entry keep the tool's own error, because a parameter
+    // dump is what the model needs to retry and noise to everyone reading the timeline.
+    return result.ok ? result.content : await explainToolFailure(name, result.content);
   };
 
   // Run a subagent: run an independent small loop with its dedicated system prompt + restricted tool set, and return the final conclusion text.
@@ -1957,6 +1991,30 @@ function ChatAgent() {
     const def = SUBAGENTS.find((a) => a.id === agentId);
     if (!def) return `Unknown subagent: ${agentId}`;
     if (!task) return "task must not be empty.";
+
+    // Repeat-delegation guard. Scoped to this turn, and reset by turnId rather than cleared anywhere:
+    // there is no single point where a turn is known to have ended (it can abort, be cancelled, or run in
+    // the background while another conversation is active), so keying the bucket is the only way that
+    // cannot leak one turn's delegations into the next.
+    const bucket = delegationsRef.current;
+    if (bucket.turnId !== ctx.turnId) {
+      bucket.turnId = ctx.turnId;
+      bucket.done = [];
+    }
+    const repeat = findRepeatDelegation(agentId, task, bucket.done);
+    if (repeat) {
+      const answer = repeatDelegationResult(repeat);
+      // Shown and logged like any other delegation, or the saving would be invisible: a delegation that
+      // silently never happened looks in the timeline exactly like one that was never requested.
+      ctx.push({ kind: "tool", name: `run_subagent → ${agentId}`, args: { agent: agentId, task }, ok: true, result: answer });
+      logSubagentRun({
+        agent: agentId, task, rounds: 0, steps: 0,
+        promptTokens: 0, completionTokens: 0, totalTokens: 0,
+        ms: 0, ok: true, error: "repeat: answered from an earlier delegation this turn",
+        convId: ctx.convId, turnId: ctx.turnId,
+      });
+      return answer;
+    }
     ctx.status(t("chat.subagentProcessing", { agent: agentId }));
 
     // Usage-log bookkeeping for this delegation. The sub-agent's own rounds are counted here rather
@@ -2045,6 +2103,11 @@ function ChatAgent() {
         convId: ctx.convId,
         turnId: ctx.turnId,
       });
+      // Recorded only on success: a delegation that was cancelled or errored has no answer to reuse, and
+      // re-running it is exactly the right thing for the model to do.
+      if (!error) {
+        bucket.done.push({ agent: agentId, task, subject: delegationSubject(task), conclusion });
+      }
       return conclusion;
     };
 
@@ -3008,18 +3071,38 @@ function ChatAgent() {
           const calls = msg.tool_calls;
           type ToolCall = (typeof calls)[number];
 
+          // Resolve every call ONCE, before anything dispatches or groups.
+          //
+          // A cold tool arrives wrapped as call_tool{name, arguments} (see toolRouter.ts), and everything downstream of this
+          // point keys on the tool NAME: the consent gate (toolNeedsConsent / SENSITIVE_TOOLS — open_path is routed AND
+          // sensitive, so a late unwrap would run it with no confirmation prompt, and one "don't ask again" on call_tool would
+          // whitelist every routed tool at once), the read-only batching below, the usage log, the risky-change and
+          // project-memory guards, and the persisted display name. Resolving here means none of them need to know the
+          // dispatcher exists.
+          //
+          // Keyed on the ToolCall object rather than tc.id: the objects are the same references the grouping and the settled
+          // loop iterate, so nothing depends on ids being present or unique. `tc` itself is never rewritten — the wire and the
+          // persisted tool_calls keep exactly what the model emitted, which is what keeps the prefix stable and the assistant
+          // turn valid on the next request.
+          const resolved = new Map<ToolCall, { name: string; args: Record<string, unknown> }>();
+          for (const tc of calls) {
+            let parsed: Record<string, unknown> = {};
+            try {
+              parsed = JSON.parse(tc.function.arguments || "{}");
+            } catch {
+              /* Invalid JSON arguments, call with an empty object */
+            }
+            resolved.set(tc, resolveToolCall(tc.function.name, parsed));
+          }
+          const callOf = (tc: ToolCall) => resolved.get(tc) ?? { name: tc.function.name, args: {} };
+
           // ask_user: pop a choice card and wait for the user to click.
           // update_todos: update the task list above the input box.
           // load_skill: feed back the full instructions of an enabled skill as the tool result (progressive disclosure).
           // run_subagent: delegate to a subagent and feed back its final conclusion as the tool result.
           // Other tools: executed through the unified path (including sensitive-operation confirmation).
           const runToolCall = async (tc: ToolCall) => {
-            let args: Record<string, unknown> = {};
-            try {
-              args = JSON.parse(tc.function.arguments || "{}");
-            } catch {
-              /* Invalid JSON arguments, call with an empty object */
-            }
+            const { name, args } = callOf(tc);
             const startedAt = Date.now();
             // Renderer-handled tools dispatch by name to their local handler (each closes over component
             // state); everything else falls through to execToolCall (the unified sandbox/consent path).
@@ -3040,19 +3123,19 @@ function ChatAgent() {
               search_memory: searchMemory,
               run_subagent: runSubAgent,
             };
-            const handler = rendererTool[tc.function.name];
+            const handler = rendererTool[name];
             const content = handler
               ? await handler(ctx, args)
-              : await execToolCall(ctx, tc.function.name, args, tc.function.name);
+              : await execToolCall(ctx, name, args, name);
             // Usage log: the branches above are the tools the renderer handles itself (a choice card,
             // the todo list, a skill's instructions, memory, the browser panel). They never reach
             // execToolCall, which is where every other tool is logged, so without this they would be
             // the one class of action missing from the timeline. run_subagent is absent from the set
             // because runSubAgent logs the delegation itself, with its rounds and tokens.
-            if (RENDERER_HANDLED_TOOLS.has(tc.function.name)) {
+            if (RENDERER_HANDLED_TOOLS.has(name)) {
               logToolCall({
                 actor: "main",
-                name: tc.function.name,
+                name,
                 args,
                 ok: true,
                 result: content,
@@ -3062,7 +3145,7 @@ function ChatAgent() {
                 turnId,
               });
             }
-            return { tc, args, content };
+            return { tc, name, args, content };
           };
 
           // The model is told to issue independent calls together; awaiting them one at a time threw that away and
@@ -3074,8 +3157,8 @@ function ChatAgent() {
             const prev = groups[groups.length - 1];
             if (
               prev &&
-              PARALLEL_SAFE_TOOLS.has(tc.function.name) &&
-              PARALLEL_SAFE_TOOLS.has(prev[0].function.name)
+              PARALLEL_SAFE_TOOLS.has(callOf(tc).name) &&
+              PARALLEL_SAFE_TOOLS.has(callOf(prev[0]).name)
             ) {
               prev.push(tc);
             } else {
@@ -3092,16 +3175,16 @@ function ChatAgent() {
                 ? await Promise.all(group.map(runToolCall))
                 : [await runToolCall(group[0])];
 
-            for (const { tc, args, content } of settled) {
+            for (const { tc, name, args, content } of settled) {
               // Delegating to a reviewer is treated as reviewed, clearing the pending-risky-change flag.
-              if (tc.function.name === "run_subagent" && String(args.agent ?? "") === "reviewer") {
+              if (name === "run_subagent" && String(args.agent ?? "") === "reviewer") {
                 riskyChangePending = false;
               }
               // Recording anything at all satisfies the memory guard — the reminder exists to make the model
               // consider the question once per turn, not to demand a note per file touched.
-              if (tc.function.name === "remember_project") learnedWithoutRecording = false;
+              if (name === "remember_project") learnedWithoutRecording = false;
               // Risky-change detection: a tool that modifies source files hitting the risky-path signature (taking path-like args such as path/file/dest) → mark as pending review.
-              if (MUTATING_FILE_TOOLS.has(tc.function.name)) {
+              if (MUTATING_FILE_TOOLS.has(name)) {
                 learnedWithoutRecording = true;
                 const pathVals = Object.entries(args)
                   .filter(([k, v]) => typeof v === "string" && /path|file|dir|dest|src|source|target|name/i.test(k))
@@ -3111,7 +3194,7 @@ function ChatAgent() {
 
               // Compress overly long tool output before feeding back / persisting (the full text is already in each tool's display bubble, so the UI is unaffected).
               // read_file is exempt: it returns the line range that was asked for, so there is nothing to elide.
-              const cappedContent = UNCAPPED_TOOLS.has(tc.function.name)
+              const cappedContent = UNCAPPED_TOOLS.has(name)
                 ? content
                 : capToolOutput(content);
               convo = [...convo, { role: "tool", tool_call_id: tc.id, content: cappedContent }];
@@ -3120,19 +3203,22 @@ function ChatAgent() {
               // A generated image's artifact URL is stored display-only (not in content, so it never re-enters the wire),
               // so the image bubble can be rebuilt after switching conversations. Consume the side-channel ref.
               const imageArtifact =
-                tc.function.name === "image_generation" ? lastImageArtifactRef.current : null;
+                name === "image_generation" ? lastImageArtifactRef.current : null;
               lastImageArtifactRef.current = null;
               // Likewise for a sub-agent's inner steps: display-only, stored beside the conclusion so reopening
               // the conversation shows the same operations the user watched happen.
               const subSteps =
-                tc.function.name === "run_subagent" ? lastSubagentStepsRef.current : null;
+                name === "run_subagent" ? lastSubagentStepsRef.current : null;
               lastSubagentStepsRef.current = null;
               // Persist the tool result to this conversation (store the compressed version, to avoid bloating storage / the integrity hash).
               store.appendMessage(genConvId, {
                 role: "tool",
                 content: cappedContent,
                 tool_call_id: tc.id,
-                name: tc.function.name,
+                // The RESOLVED name, not what the model emitted: this field is display-only (loadConversation rebuilds tool
+                // bubbles from it), so persisting "call_tool" would make every reopened conversation show a row of identical
+                // dispatcher bubbles instead of the tools that actually ran. The wire copy in assistant.tool_calls is untouched.
+                name,
                 ts: Date.now(),
                 ...(imageArtifact
                   ? { image: imageArtifact.image, servedBy: imageArtifact.servedBy }
@@ -3162,7 +3248,7 @@ function ChatAgent() {
               role: "tool",
               content: placeholder,
               tool_call_id: tc.id,
-              name: tc.function.name,
+              name: callOf(tc).name,
               ts: Date.now(),
             });
             lastToolStoredIdx = (store.getConversation(genConvId)?.messages.length ?? 0) - 1;

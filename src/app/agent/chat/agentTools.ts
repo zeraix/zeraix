@@ -263,6 +263,46 @@ export function setTaskStateTool() {
   };
 }
 
+/**
+ * The dispatcher for tools listed in the catalog but not declared here (see src/lib/ai/toolRouter.ts).
+ *
+ * Wording is doing real work in two places. It says the catalog is COMPLETE, because the failure this design cannot afford is a
+ * discovery round trip: a model call costs 50-80K prompt tokens against the ~1,800 the whole change saves per call, so one "which
+ * tools do I have?" exchange would undo the saving for the next thirty calls. And it points at the catalog's signatures, because a
+ * routed tool's parameters are not on the wire — the signature is all the model has to go on until a call actually fails.
+ *
+ * No `enum` of tool names in the parameters. llama.cpp re-serialises tool `parameters` through an order-preserving JSON parser, so
+ * an enum would put a per-build list into the frozen prefix bytes; loadSkillTool avoids it for the same reason.
+ */
+export function callToolTool() {
+  return {
+    type: "function" as const,
+    function: {
+      name: "call_tool",
+      description:
+        "Invoke a tool that is listed in the tool catalog in your system prompt but is not declared in this tool list. " +
+        "Pass the tool's exact name from the catalog and its arguments, named as its catalog signature shows. " +
+        "This PERFORMS the call — there is no separate discovery or loading step, and no need to ask which tools exist: " +
+        "the catalog is the complete list. If a call is rejected, the reply tells you the tool's full parameters; fix them and call again.",
+      parameters: {
+        type: "object",
+        properties: {
+          name: {
+            type: "string",
+            description: "The tool's exact name, exactly as written in the tool catalog.",
+          },
+          arguments: {
+            type: "object",
+            description:
+              "The tool's arguments, using the parameter names from its catalog signature. Pass an empty object for a tool that takes none.",
+          },
+        },
+        required: ["name", "arguments"],
+      },
+    },
+  };
+}
+
 export function updateTodosTool() {
   return {
     type: "function" as const,

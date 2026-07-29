@@ -20,6 +20,7 @@
 import { foldReminders, renderSnapshot } from "./reminders";
 import type { ApiMsg, ContentPart } from "./types";
 import { countMessagesTokens } from "@/lib/ai/tokenizer";
+import { resolveToolCall } from "@/lib/ai/toolRouter";
 
 // ── Tunable parameters ──────────────────────────────────────────────────────────────────
 /** Only start compressing when context usage exceeds this fraction of the window (hysteresis: below this value, no compression at all, keeping the prefix cache most stable). */
@@ -155,21 +156,37 @@ interface CallInfo {
    */
   range?: ReadRange;
 }
+/**
+ * The single place this file learns what a tool call actually was — and therefore the only place that
+ * has to know about tool lazy loading.
+ *
+ * A cold tool reaches the wire wrapped as `call_tool{name, arguments}` (see toolRouter.ts), and which
+ * tools are cold is a per-mode decision that changes: `delete_file` / `move_file` / `copy_file` are
+ * MUTATORS *and* routed in dev. Read through the wrapper here and every transform downstream —
+ * computeStaleStubs, pathProvenance, trimEditDiffs — keeps working on real names and real paths with
+ * no knowledge of the dispatcher. Resolving anywhere else would mean auditing this file again every
+ * time the routed set moves, and the failure would be silent: a stale read left live because the
+ * mutation that invalidated it was wearing an envelope.
+ */
 export function indexCalls(messages: ApiMsg[]): Map<string, CallInfo> {
   const byId = new Map<string, CallInfo>();
   for (const m of messages) {
     if (m.role !== "assistant" || !m.tool_calls) continue;
     for (const tc of m.tool_calls) {
-      let args: Record<string, unknown> | null = null;
+      let raw: Record<string, unknown> | null = null;
       try {
-        args = JSON.parse(tc.function.arguments || "{}") as Record<string, unknown>;
+        raw = JSON.parse(tc.function.arguments || "{}") as Record<string, unknown>;
       } catch {
         /* Invalid JSON arguments: treat as having no path and no span */
       }
-      const isRead = READ_TOOLS.has(tc.function.name);
-      const pathKey = isRead ? "path" : MUTATORS[tc.function.name];
+      const { name, args: resolvedArgs } = resolveToolCall(tc.function.name, raw ?? {});
+      // A wrapper whose own arguments were unparseable yields no inner call either, so the null stays
+      // null and the entry keeps the "cannot prove anything about this call" shape.
+      const args = raw === null ? null : resolvedArgs;
+      const isRead = READ_TOOLS.has(name);
+      const pathKey = isRead ? "path" : MUTATORS[name];
       byId.set(tc.id, {
-        name: tc.function.name,
+        name,
         path: pathKey && args ? normPath(args[pathKey]) : "",
         ...(isRead && args ? { range: readRange(args) } : {}),
       });
@@ -369,13 +386,17 @@ export function planCompaction(
 export const KEEP_ROUNDS = 2;
 
 /** Short descriptor of a tool call, kept in place of its released result so the trace survives. */
-function describeCall(name: string, argsJson: string): string {
-  let args: Record<string, unknown> = {};
+function describeCall(rawName: string, argsJson: string): string {
+  let raw: Record<string, unknown> = {};
   try {
-    args = JSON.parse(argsJson || "{}") as Record<string, unknown>;
+    raw = JSON.parse(argsJson || "{}") as Record<string, unknown>;
   } catch {
     /* unparseable arguments: fall back to the bare tool name */
   }
+  // Through the dispatcher, so the descriptor reads "read_file src/x.ts lines 460-549" rather than a
+  // uniform "call_tool" for every released result — the descriptor exists precisely so the model can
+  // tell what ran and re-run it, and a wrapper name defeats that.
+  const { name, args } = resolveToolCall(rawName, raw);
   const p =
     typeof args.path === "string"
       ? args.path
@@ -469,15 +490,21 @@ const RELEASABLE_ARGS: Record<string, readonly string[]> = {
  * to do (not an edit tool, unparseable arguments, or every field already small) so the caller can keep
  * the original object and its referential equality.
  */
-function releaseCallArguments(name: string, argsJson: string): string | null {
-  const fields = RELEASABLE_ARGS[name];
-  if (!fields) return null;
-  let args: Record<string, unknown>;
+function releaseCallArguments(rawName: string, argsJson: string): string | null {
+  let outer: Record<string, unknown>;
   try {
-    args = JSON.parse(argsJson || "{}") as Record<string, unknown>;
+    outer = JSON.parse(argsJson || "{}") as Record<string, unknown>;
   } catch {
     return null; // unparseable: leave it exactly as it was rather than rewrite it into something else
   }
+  // This is the one transform that REWRITES arguments rather than reading them, so resolving through
+  // indexCalls is not enough — the elided text has to be written back INSIDE the dispatcher's envelope,
+  // or the rewritten call would no longer satisfy call_tool's own {name, arguments} schema. When the
+  // call was not wrapped, `wrapped` is false and this behaves exactly as before.
+  const { name, args } = resolveToolCall(rawName, outer);
+  const wrapped = name !== rawName;
+  const fields = RELEASABLE_ARGS[name];
+  if (!fields) return null;
   const path = typeof args.path === "string" ? args.path : "";
   let changed = false;
   for (const f of fields) {
@@ -490,7 +517,8 @@ function releaseCallArguments(name: string, argsJson: string): string | null {
         : `[…… ${lines} lines elided: this text was written to ${path || "the file"}; read_file it if you need it ……]`;
     changed = true;
   }
-  return changed ? JSON.stringify(args) : null;
+  if (!changed) return null;
+  return JSON.stringify(wrapped ? { ...outer, name, arguments: args } : args);
 }
 
 /**

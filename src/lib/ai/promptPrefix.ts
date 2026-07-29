@@ -14,9 +14,10 @@ import { skillSystemHint, loadSkillTool } from "@/lib/ai/skills/runtime";
 import { SANDBOX_TOOLBOX_SKILL } from "@/lib/ai/skills/builtin";
 import {
   askUserTool, updateTodosTool, setTaskStateTool, openBrowserTool, browserTool, imageGenerationTool,
-  saveMemoryTool, deleteMemoryTool, searchMemoryTool,
+  saveMemoryTool, deleteMemoryTool, searchMemoryTool, callToolTool,
 } from "@/app/agent/chat/agentTools";
 import { subAgentTool } from "@/lib/ai/subagents";
+import { ROUTED_TOOLS } from "@/lib/ai/toolRouter";
 
 export type PrefixMode = "daily" | "dev";
 
@@ -62,12 +63,24 @@ export function buildSystemPrompt(mode: PrefixMode, { toolsReady = true, memory 
   // poured into the frozen system prefix — that would both bloat the prefix and, when memories are added / modified mid-conversation, only show the old snapshot from the conversation's start
   // (i.e. the user's feedback that "I added a memory but the AI doesn't know it"). Here we only put one stable hint; the model pulls memory bodies on demand with search_memory
   // (reads the current file each time → always latest, results land at the end of the wire → no bloat and no disturbance to the prefix cache).
+  // The catalog entries for the memory tools live HERE, not in the mode markdown, because this block is the one part of the
+  // prefix that varies with a capability: an install without the memory bridge must not be told about tools it does not have,
+  // and the markdown is static. Keeping the three names inside the same `if (memory)` that already gated their prose means the
+  // announcement and the capability cannot drift apart.
   if (memory) {
     parts.push(
       "[Long-term memory] You have saved a set of long-term memories for the user (retained across conversations, and possibly added / modified during this conversation). " +
         "When you need to recall the user's identity / preferences / facts / agreements, or the user mentions things like \"do you still remember…\", \"I told you…\", \"I just added a memory\", " +
-        "call search_memory to retrieve the current memories (always the latest) and answer based on them; do not speculate out of thin air, and do not assume what you saw at the conversation's start is the latest. " +
-        "Use save_memory to write / update memories (pass id to overwrite an existing one), and delete_memory to delete.",
+        "retrieve the current memories (always the latest) and answer based on them; do not speculate out of thin air, and do not assume what you saw at the conversation's start is the latest.\n" +
+        // Derived from the routing set, not hardcoded: this block is shared by both modes and the memory family is routed in dev
+        // but declared in daily. Telling a daily model to reach a declared tool through call_tool — or a dev model to "call
+        // search_memory" when it cannot see it — are the same class of mistake, and deriving the sentence prevents both.
+        (ROUTED_TOOLS[mode].has("search_memory")
+          ? "These three are not in your tool list — reach them with `call_tool`, passing the name and arguments shown:\n"
+          : "The tools:\n") +
+        "- `search_memory(query?, limit?)` — read the current memories. Do this before answering from recall.\n" +
+        "- `save_memory(title, content, id?)` — write or update a memory (pass `id` to overwrite an existing one).\n" +
+        "- `delete_memory(id)` — delete one.",
     );
   }
   return parts.join("\n\n");
@@ -80,7 +93,7 @@ export function buildSystemPrompt(mode: PrefixMode, { toolsReady = true, memory 
  * the renderer gets it over IPC, a build script reads electron/tools/toolSchemas.mjs directly.
  */
 export function buildToolSet(mode: PrefixMode, native: unknown[], { memory = true } = {}): unknown[] {
-  return [
+  const declared = [
     askUserTool(),
     updateTodosTool(),
     setTaskStateTool(),
@@ -95,4 +108,16 @@ export function buildToolSet(mode: PrefixMode, native: unknown[], { memory = tru
     ...(native.length ? [...native, subAgentTool()] : []),
     loadSkillTool(),
   ];
+  // Tool lazy loading: drop this mode's cold declarations and leave them reachable through the catalog + call_tool (see
+  // toolRouter.ts). Filtered here, after composition, rather than by editing the list above: membership is mode-dependent and
+  // decided by rules about the runtime (what the compression layer keys on, what the model under-uses), so it belongs in one
+  // reviewable set beside those rules — not scattered across a dozen conditional entries.
+  //
+  // call_tool goes at the END, at a fixed position, and unconditionally. Position and presence are prefix bytes: a dispatcher
+  // that moved with the memory flag, or appeared only under Electron, would be exactly the kind of per-install difference the
+  // rest of this function exists to avoid.
+  const routed = ROUTED_TOOLS[mode];
+  const nameOf = (t: unknown): string =>
+    (t as { function?: { name?: string } })?.function?.name ?? "";
+  return [...declared.filter((t) => !routed.has(nameOf(t))), callToolTool()];
 }

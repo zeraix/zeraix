@@ -133,7 +133,13 @@ export function subAgentTool() {
         "so the harder the problem, the more of it you lose. Available sub-agents: \n" +
         menu +
         "\nCost of delegating: the sub-agent cannot see this conversation, cannot ask the user anything, and cannot be steered once started — " +
-        "so the task must be complete and self-contained (all necessary context, plus what the output should be), and a vague task returns a vague summary.",
+        "so the task must be complete and self-contained (all necessary context, plus what the output should be), and a vague task returns a vague summary. " +
+        // Each delegation is a fresh context that starts from nothing, so N narrow delegations pay N start-up costs and each one
+        // re-discovers the same project basics. Measured: six delegations in one turn re-read ZERAIX.md six times and App.tsx five
+        // times, and two of them asked the identical question.
+        "Each delegation also starts from an empty context, so it re-discovers the project from scratch: do NOT split one " +
+        "investigation into several narrow ones. If you need the same kind of investigation for several targets, ask for all of " +
+        "them in ONE delegation. Never delegate the same question twice — if you already have a conclusion, build on it.",
       parameters: {
         type: "object",
         properties: {
@@ -151,4 +157,89 @@ export function subAgentTool() {
       },
     },
   };
+}
+
+// ── Repeat-delegation guard ───────────────────────────────────────────────────────────────
+
+/**
+ * A delegation already completed in the current turn, kept so an identical one can be answered from it.
+ *
+ * Measured (2026-07-29, turn ms5u17a5): six `explore` delegations, two of which asked the same question —
+ * "find all files related to the MarketingBuilder module" — for 140,560 and 106,767 prompt tokens and 96s
+ * of wall clock. The second produced the same answer as the first and re-read the same eight files.
+ */
+export interface PriorDelegation {
+  agent: string;
+  task: string;
+  subject: ReadonlySet<string>;
+  conclusion: string;
+}
+
+/**
+ * Directory names too generic to identify a subject: every task about this project mentions some of them,
+ * so counting them would make unrelated delegations look alike.
+ */
+const GENERIC_PATHS = new Set([
+  "src", "src/pages", "src/components", "src/features", "src/modules", "src/utils", "src/hooks",
+  "src/lib", "src/auth", "src/api", "src/styles", "src/assets", "src/services", "src/store",
+]);
+
+/**
+ * The tokens that say what a task is ABOUT: PascalCase identifiers and specific source paths.
+ *
+ * Deliberately NOT lexical similarity of the whole task. Measured on the six real delegations, plain
+ * Jaccard is actively misleading — the duplicate pair scores 0.500 while three pairs asking about
+ * *different* modules score 0.895, because the model writes them all from one template and only the
+ * module name varies. Any threshold that catches the duplicate fires on the others. Weighting the rare,
+ * naming tokens instead separates them completely: 1.00 for the duplicate, 0.00 for every other pair.
+ *
+ * A task with no such tokens yields an empty set and can never match, which is the safe direction.
+ */
+export function delegationSubject(task: string): Set<string> {
+  const ids = task.match(/\b[A-Z][a-z0-9]+(?:[A-Z][a-z0-9]+)+\b/g) ?? [];
+  const paths = (task.match(/src\/[A-Za-z0-9_/.-]+/g) ?? [])
+    .map((p) => p.replace(/[/.,'")\]]+$/, ""))
+    .filter((p) => !GENERIC_PATHS.has(p));
+  return new Set([...ids, ...paths]);
+}
+
+/** Overlap threshold. The measured gap is 1.00 (duplicate) against 0.00 (everything else), so anything in between works; this sits in the middle rather than on either edge. */
+export const REPEAT_DELEGATION_MIN_OVERLAP = 0.5;
+
+/**
+ * The earlier delegation this one repeats, or null.
+ *
+ * Scoped to the current turn by the caller, matching the existing MAX_SAME_TOOL_CALLS rule — across turns
+ * the project has usually changed and re-asking is legitimate.
+ */
+export function findRepeatDelegation(
+  agent: string,
+  task: string,
+  prior: readonly PriorDelegation[],
+): PriorDelegation | null {
+  const subject = delegationSubject(task);
+  if (subject.size === 0) return null;
+  for (const p of prior) {
+    if (p.agent !== agent || p.subject.size === 0) continue;
+    let shared = 0;
+    for (const s of subject) if (p.subject.has(s)) shared++;
+    const union = subject.size + p.subject.size - shared;
+    if (union > 0 && shared / union >= REPEAT_DELEGATION_MIN_OVERLAP) return p;
+  }
+  return null;
+}
+
+/**
+ * What the model gets back instead of a second identical investigation.
+ *
+ * The prior conclusion, not a refusal: the answer is the same one the delegation would have produced, so
+ * returning it costs nothing and keeps the model moving. Saying which task it came from is what lets the
+ * model notice the overlap and ask something genuinely different if it meant to.
+ */
+export function repeatDelegationResult(prior: PriorDelegation): string {
+  return (
+    `You already delegated this to \`${prior.agent}\` earlier in this turn — the task was: "${prior.task}"\n` +
+    `Rather than run the same investigation again, here is what it reported:\n\n${prior.conclusion}\n\n` +
+    `If you need something this does not cover, ask for that specifically rather than repeating the request.`
+  );
 }
