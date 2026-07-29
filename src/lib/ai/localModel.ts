@@ -207,6 +207,9 @@ export interface LocalLlmFitOption {
 export interface LocalLlmRecommendation {
   budgetGB: number;
   ctx: number;
+  /** KV quantizations this build offers, best first (electron/llm/localModels.KV_BITS_OFFERED). The picker renders exactly these,
+   *  so adding a quantization is a main-process edit only. */
+  kvBitsOffered?: number[];
   primary: LocalLlmFitOption | null;
   options: LocalLlmFitOption[];
 }

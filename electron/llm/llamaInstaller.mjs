@@ -16,7 +16,7 @@ import { execFileSync } from "node:child_process";
 import { app } from "electron";
 import { detectHardware } from "./localModels.mjs";
 import { localDataDir } from "../tools/sandbox/vmpaths.mjs";
-import { LLAMA_VERSION } from "../versions.mjs";
+import { LLAMA_VERSION, MAC_LLAMA_TAG } from "../versions.mjs";
 import { getAppConfig } from "../appConfig.mjs";
 
 // The llama.cpp release version was moved to the single source electron/versions.mjs (alongside VM_VERSION); re-exported here. To upgrade: change it there and re-run publish:llama.
@@ -148,8 +148,19 @@ export function migrateLegacyLayout() {
     try { const oldLlama = path.join(folder, "llama"); if (fs.existsSync(oldLlama) && fs.readdirSync(oldLlama).length === 0) fs.rmdirSync(oldLlama); } catch { /* ignore */ }
   } catch { /* best effort */ }
 }
+/**
+ * The version directory a build installs into.
+ *
+ * macOS runs the fork, pinned by MAC_LLAMA_TAG; every other platform runs the CDN's upstream LLAMA_VERSION. The directory has to
+ * carry whichever one it actually IS: with both under `LLAMA_VERSION`, bumping the mac tag would leave the old binary sitting at
+ * an unchanged path, installedBin() would find it, and the new build would never be fetched.
+ */
+export function llamaVersionDir() {
+  return (process.platform === "darwin" && MAC_LLAMA_TAG) ? MAC_LLAMA_TAG : LLAMA_VERSION;
+}
+
 export function installDir(variant = llamaVariant()) {
-  return path.join(llamaRoot(), LLAMA_VERSION, variant);
+  return path.join(llamaRoot(), llamaVersionDir(), variant);
 }
 /** Returns the executable path if installed, otherwise null. */
 export function installedBin(variant = llamaVariant()) {
@@ -159,7 +170,23 @@ export function installedBin(variant = llamaVariant()) {
 }
 
 /** llama runtime root directory (.../llama, containing all versions/variants). For UI display / opening the folder. */
+/**
+ * The macOS fork build, published as a GitHub release asset.
+ *
+ * Returns null on any other platform, which is what keeps Windows on the CDN's upstream binary. MAC_LLAMA_TAG is the release tag;
+ * bump it when a new mac build ships. Overridable by env for testing against a pre-release.
+ */
+export function macForkAsset() {
+  if (process.platform !== "darwin" || process.arch !== "arm64") return null;
+  const repo = process.env.ZERAIX_LLAMA_REPO || "zeraix/llama-server-releases";
+  const tag = process.env.ZERAIX_LLAMA_TAG || MAC_LLAMA_TAG;
+  const asset = `llama-${tag.replace(/^mac-/, "")}-bin-macos-arm64.tar.gz`;
+  return { url: `https://github.com/${repo}/releases/download/${tag}/${asset}`, tag, asset };
+}
+
 export function llamaRootDir() { return llamaRoot(); }
+
+
 
 /** Names of installed llama version directories (containing any variant's executable). Used to distinguish "not installed" from "an old version is installed and can be updated". */
 export function installedLlamaVersions() {
@@ -179,7 +206,7 @@ export function pruneOldVersions() {
     const root = llamaRoot(); // <folder>/bin
     if (!fs.existsSync(root)) return;
     for (const name of fs.readdirSync(root)) {
-      if (name === LLAMA_VERSION) continue; // keep the current version
+      if (name === llamaVersionDir()) continue; // keep the version actually in use (mac tag on darwin, CDN pin elsewhere)
       const vdir = path.join(root, name);
       if (isVersionDir(vdir)) { try { fs.rmSync(vdir, { recursive: true, force: true }); } catch { /* ignore */ } } // only delete genuine old-version bin directories
     }
@@ -217,8 +244,15 @@ export async function ensureInstalled(onProgress = () => {}, variant = llamaVari
 
   const dir = installDir(variant);
   fs.mkdirSync(dir, { recursive: true });
-  const key = `${CDN_PREFIX}llama/${LLAMA_VERSION}/${variant}.tar.gz`;
-  const url = `${CDN_BASE}/${key.split("/").map(encodeURIComponent).join("/")}`;
+  // macOS pulls the FORK build from GitHub; every other platform keeps the pinned upstream build from the CDN.
+  //
+  // The KV disk tier, the resident-seed path and the MoE expert pool exist only in the fork, and only its mac build is published.
+  // Windows must keep the stock binary until a fork build exists for it — which is why this is a platform switch and not a version
+  // bump: the two platforms are deliberately on different builds.
+  const mac = macForkAsset();
+  const url = mac
+    ? mac.url
+    : `${CDN_BASE}/${`${CDN_PREFIX}llama/${LLAMA_VERSION}/${variant}.tar.gz`.split("/").map(encodeURIComponent).join("/")}`;
   const tmp = path.join(app.getPath("temp"), `llama-${LLAMA_VERSION}-${variant}.tar.gz`);
   fs.rmSync(tmp, { force: true });
 

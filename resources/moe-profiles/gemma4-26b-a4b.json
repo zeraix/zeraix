@@ -1,0 +1,159 @@
+{
+ "model": "gemma-4-26B-A4B",
+ "n_expert": 128,
+ "pool_ubatch": 6,
+ "slot_floor": 48,
+ "draft": 2,
+ "layers": [
+  {
+   "il": 0,
+   "slots": 0,
+   "miss": null
+  },
+  {
+   "il": 1,
+   "slots": 0,
+   "miss": null
+  },
+  {
+   "il": 2,
+   "slots": 0,
+   "miss": null
+  },
+  {
+   "il": 3,
+   "slots": 0,
+   "miss": null
+  },
+  {
+   "il": 4,
+   "slots": 48,
+   "miss": 11.1
+  },
+  {
+   "il": 5,
+   "slots": 48,
+   "miss": 9.7
+  },
+  {
+   "il": 6,
+   "slots": 48,
+   "miss": 6.7
+  },
+  {
+   "il": 7,
+   "slots": 48,
+   "miss": 7.7
+  },
+  {
+   "il": 8,
+   "slots": 48,
+   "miss": 8.4
+  },
+  {
+   "il": 9,
+   "slots": 48,
+   "miss": 7.8
+  },
+  {
+   "il": 10,
+   "slots": 48,
+   "miss": 4.0
+  },
+  {
+   "il": 11,
+   "slots": 48,
+   "miss": 4.7
+  },
+  {
+   "il": 12,
+   "slots": 48,
+   "miss": 4.6
+  },
+  {
+   "il": 13,
+   "slots": 48,
+   "miss": 4.7
+  },
+  {
+   "il": 14,
+   "slots": 48,
+   "miss": 4.7
+  },
+  {
+   "il": 15,
+   "slots": 48,
+   "miss": 7.7
+  },
+  {
+   "il": 16,
+   "slots": 48,
+   "miss": 4.5
+  },
+  {
+   "il": 17,
+   "slots": 48,
+   "miss": 5.5
+  },
+  {
+   "il": 18,
+   "slots": 48,
+   "miss": 6.0
+  },
+  {
+   "il": 19,
+   "slots": 48,
+   "miss": 6.1
+  },
+  {
+   "il": 20,
+   "slots": 48,
+   "miss": 6.0
+  },
+  {
+   "il": 21,
+   "slots": 48,
+   "miss": 7.6
+  },
+  {
+   "il": 22,
+   "slots": 48,
+   "miss": 6.9
+  },
+  {
+   "il": 23,
+   "slots": 48,
+   "miss": 6.9
+  },
+  {
+   "il": 24,
+   "slots": 48,
+   "miss": 9.0
+  },
+  {
+   "il": 25,
+   "slots": 48,
+   "miss": 8.4
+  },
+  {
+   "il": 26,
+   "slots": 48,
+   "miss": 10.1
+  },
+  {
+   "il": 27,
+   "slots": 48,
+   "miss": 11.9
+  },
+  {
+   "il": 28,
+   "slots": 48,
+   "miss": 13.7
+  },
+  {
+   "il": 29,
+   "slots": 48,
+   "miss": 12.7
+  }
+ ]
+}

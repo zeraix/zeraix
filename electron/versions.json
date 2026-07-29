@@ -3,5 +3,13 @@
   "vm": {
     "amd64": "sha-d37b5e4d3c15",
     "arm64": "sha-e45397068284"
+  },
+  "seedPrefix": {
+    "daily": "c87598bf2bb3ffa1",
+    "dev": "66db8f52eefb21c2"
+  },
+  "macLlama": {
+    "tag": "mac-v1",
+    "kvdVersion": 5
   }
 }

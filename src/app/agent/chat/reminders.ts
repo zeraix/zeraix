@@ -89,6 +89,9 @@ function renderBody(state: ReminderState, atCut: boolean): string {
   if (state.workdir !== undefined) {
     lines.push(`${since}, the working directory is: ${state.workdir}`);
   }
+  if (state.env !== undefined) {
+    lines.push(state.env);
+  }
   if (state.ctx) {
     const { date, model, tz } = state.ctx;
     lines.push(`${since}, the date is ${date}, the model answering is ${model}, and the user's time zone is ${tz}.`);

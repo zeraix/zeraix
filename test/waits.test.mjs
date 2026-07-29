@@ -116,16 +116,20 @@ test("an event nobody is waiting for is reported, not silently dropped", async (
 
 test("a deadline that elapsed while the app was closed fails the run", async () => {
   const root = freshRoot();
+  // Stepped by a shared clock rather than trusting the wall clock: shutdown/closeDb/openDb below usually take a millisecond or
+  // two, but nothing guarantees it, and a deadline that is not yet due sweeps nothing.
+  let clock = Date.now();
   saveWorkflow(waiting("wf-expire", { key: "reply:acme", timeoutMs: 1 }));
 
-  const mgr = createExecutionManager();
+  const mgr = createExecutionManager({ now: () => clock });
   const res = await mgr.run({ workflowId: "wf-expire" });
   assert.equal(repo.pendingWaits().length, 1);
   await mgr.shutdown();
 
   closeDb();
   openDb();
-  const mgr2 = createExecutionManager();
+  clock += 1000;
+  const mgr2 = createExecutionManager({ now: () => clock });
   mgr2.recoverInterrupted(); // what runs at startup
 
   await waitFor(() => repo.getRun(res.runId).state === "FAILED", 8000);
@@ -182,11 +186,17 @@ test("a silent candidate is dropped, the rest of the batch continues", async () 
   def.variables = [{ key: "list", type: "json", default: '["silent","chatty"]' }];
   saveWorkflow(def);
 
-  const mgr = createExecutionManager();
+  // A stepped clock, not the wall clock. The deadline is `now() + timeoutMs`, and the sweep takes everything with
+  // `deadline_at <= now()`. With the real clock a 1 ms timeout is only overdue if a whole millisecond happens to pass between
+  // opening the wait and sweeping — on an idle machine it does not, so nothing expires and the batch never advances. Stepping
+  // the clock puts the deadline unambiguously in the past, so this tests the sweep rather than the machine's speed.
+  let clock = Date.now();
+  const mgr = createExecutionManager({ now: () => clock });
   const res = await mgr.run({ workflowId: "wf-drop" });
   assert.equal(res.suspended, true);
 
   // The first candidate never replies and its deadline lapses.
+  clock += 1000;
   mgr.expireOverdueWaits();
   await waitFor(() => repo.pendingWaits().some((w) => w.match_key === "reply:chatty"), 8000);
 

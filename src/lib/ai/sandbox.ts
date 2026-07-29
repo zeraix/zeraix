@@ -52,9 +52,13 @@ export function sandboxEnvHint(st: SandboxStatus | null): string {
         : p === "linux"
           ? "Linux（bash）"
           : "Host Machine";
+  // Also states which built-in skill this costs. The toolbox skill is listed unconditionally in the system prompt (it is fixed
+  // text, so it must be, to keep the prompt prefix identical on every install) — so the model has to be told here when the
+  // sandbox that actually provides its toolchain is not running, or it will load a skill whose tools do not exist.
   return (
     `【Command Execution Environment】run_command / check_project are currently executed directly on the ${osName},` +
-    "Please use commands that match the system. If an 【Execution Environment Switch】 notice appears in the tool output, switch to the matching commands as instructed."
+    "Please use commands that match the system. If an 【Execution Environment Switch】 notice appears in the tool output, switch to the matching commands as instructed. " +
+    "The built-in doc-media-toolbox skill is UNAVAILABLE while running on the host: its imagemagick / ffmpeg / pandoc / OCR toolchain lives in the sandbox image. Do not load it, and say plainly that media and document processing needs the sandbox rather than attempting it."
   );
 }
 

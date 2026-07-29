@@ -190,8 +190,8 @@ export async function repoDetail(endpoint, repo) {
  * Uses the HF tree API (recursive to cover subdirectories, e.g. unsloth puts some tiers in a <QUANT>/ subdirectory). Mirrors support this path too.
  * Returns { weights:[{path,size}], mmproj:{path,size}|null, mtp:{path,size}|null }; throws on no match (the caller falls back to -hf).
  */
-async function listRepoFiles(endpoint, repo, quant, { vision, mtp } = {}) {
-  const url = `${endpoint}/api/models/${repo}/tree/main?recursive=1`;
+async function listRepoFiles(endpoint, repo, quant, { vision, mtp, revision = "main" } = {}) {
+  const url = `${endpoint}/api/models/${repo}/tree/${encodeURIComponent(revision)}?recursive=1`;
   const res = await fetch(url, { headers: authHeaders() });
   if (!res.ok) throw new Error(`HF tree ${res.status}`);
   const list = await res.json();
@@ -229,14 +229,14 @@ async function listRepoFiles(endpoint, repo, quant, { vision, mtp } = {}) {
 
 /** Download a single file (resumable + per-chunk progress). Writes to <dest>.part and atomically renames to dest only once complete —
  *  so "final name exists" ⇔ "fully downloaded"; an interruption leaves only .part (never mistaken for downloaded). onBytes(delta) reports newly written bytes. */
-async function downloadFile(endpoint, repo, file, dest, onBytes, signal) {
+async function downloadFile(endpoint, repo, file, dest, onBytes, signal, revision = "main") {
   if (file.size && fs.existsSync(dest) && fs.statSync(dest).size === file.size) { onBytes(file.size); return; } // final name already complete: skip
   const part = dest + ".part";
   let have = fs.existsSync(part) ? fs.statSync(part).size : 0;
   if (file.size && have > file.size) { fs.rmSync(part, { force: true }); have = 0; } // .part abnormally large → re-download
   if (file.size && have === file.size) { fs.renameSync(part, dest); onBytes(have); return; } // .part already full → finalize
 
-  const url = `${endpoint}/${repo}/resolve/main/${file.path.split("/").map(encodeURIComponent).join("/")}`;
+  const url = `${endpoint}/${repo}/resolve/${encodeURIComponent(revision)}/${file.path.split("/").map(encodeURIComponent).join("/")}`;
   const headers = { ...authHeaders() };
   if (have > 0 && file.size) headers.Range = `bytes=${have}-`;
   const res = await fetch(url, { headers, signal, redirect: "follow" });
@@ -262,25 +262,42 @@ async function downloadFile(endpoint, repo, file, dest, onBytes, signal) {
  * Returns { modelPath, mmprojPath, mtpPath, templatePath }. Existing files auto-resume/skip. Cancellation (signal.abort) throws, keeping the downloaded portion for the next resume.
  * `manifest` (optional): extra fields (display name, gguf descriptor, catalog modelId …) persisted to destDir/manifest.json on completion —
  * the model library lists installed models off these manifests, so non-catalog downloads survive restarts (see localServer.listDownloaded).
+ *
+ * `revision` (optional, default "main"): pin a commit sha or tag. Catalog models on the KV tier MUST pin one, because a resident
+ * seed is only valid for the exact GGUF it was generated against — model_key covers KV geometry but NOT the chat template, which
+ * lives inside the GGUF. If a repo re-uploads with a changed template, "main" silently renders a different prefix and the seed
+ * stops matching, with no error anywhere. Both the file listing and every file fetch use the same revision, so a re-upload
+ * mid-download cannot mix files from two commits either.
  */
-export async function downloadModel({ endpoint, repo, quant, vision, mtp, destDir, manifest = null }, onProgress = () => {}, signal) {
-  const { weights, mmproj, mtp: mtpFile, template } = await listRepoFiles(endpoint, repo, quant, { vision, mtp });
+/** Resolve a repo ref to its commit sha, so a community download records which snapshot it actually got. Null on failure. */
+export async function resolveRevision(endpoint, repo, ref = "main") {
+  try {
+    const r = await fetch(`${endpoint}/api/models/${repo}/revision/${encodeURIComponent(ref)}`, { headers: authHeaders() });
+    if (!r.ok) return null;
+    return (await r.json())?.sha || null;
+  } catch { return null; }
+}
+
+export async function downloadModel({ endpoint, repo, quant, vision, mtp, destDir, manifest = null, revision = "main" }, onProgress = () => {}, signal) {
+  const { weights, mmproj, mtp: mtpFile, template } = await listRepoFiles(endpoint, repo, quant, { vision, mtp, revision });
   const all = [...weights, ...(mmproj ? [mmproj] : []), ...(mtpFile ? [mtpFile] : []), ...(template ? [template] : [])];
   const total = all.reduce((s, f) => s + (f.size || 0), 0);
   fs.mkdirSync(destDir, { recursive: true });
 
+  // onProgress gets the byte counts alongside the percentage, so a caller downloading MORE than the weights (the seed archives
+  // that follow) can fold both into one bar instead of showing the user two separate 0-100 sweeps.
   let done = 0, lastPct = -1;
   const bump = (d) => {
     done += d;
-    if (total > 0) { const p = Math.min(100, Math.floor((done / total) * 100)); if (p !== lastPct) { lastPct = p; onProgress(p); } }
+    if (total > 0) { const p = Math.min(100, Math.floor((done / total) * 100)); if (p !== lastPct) { lastPct = p; onProgress(p, { done, total }); } }
   };
-  for (const f of all) await downloadFile(endpoint, repo, f, path.join(destDir, path.basename(f.path)), bump, signal);
-  if (lastPct !== 100) onProgress(100);
+  for (const f of all) await downloadFile(endpoint, repo, f, path.join(destDir, path.basename(f.path)), bump, signal, revision);
+  if (lastPct !== 100) onProgress(100, { done: total, total });
 
   // Written only after every file is finalized (same "complete ⇔ present" convention as the atomic rename above). Failure is non-fatal:
   // listDownloaded falls back to synthesizing an entry from the directory names.
   try {
-    fs.writeFileSync(path.join(destDir, "manifest.json"), JSON.stringify({ repo, quant, vision: !!mmproj, mtp: !!mtpFile, templateFile: template ? path.basename(template.path) : null, bytes: total, ...(manifest || {}) }, null, 2));
+    fs.writeFileSync(path.join(destDir, "manifest.json"), JSON.stringify({ repo, quant, revision, vision: !!mmproj, mtp: !!mtpFile, templateFile: template ? path.basename(template.path) : null, bytes: total, ...(manifest || {}) }, null, 2));
   } catch { /* ignore */ }
 
   return {

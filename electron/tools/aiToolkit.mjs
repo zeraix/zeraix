@@ -106,7 +106,7 @@ function isAppKillingCommand(cmd) {
 
 // ── Limits / defaults ────────────────────────────────────────────────────────
 const MAX_READ_BYTES = 2 * 1024 * 1024; // read_file per-file cap: 2MB
-const READ_DEFAULT_MAX_LINES = 2000; // read_file: lines returned when no explicit limit is given
+export const READ_DEFAULT_MAX_LINES = 2000; // read_file: lines returned when no explicit limit is given
 const READ_MAX_CHARS = 200_000; // read_file per-call ceiling; a line cap cannot bound a minified single-line file
 const MAX_MATCHES = 200; // search_* result cap
 const MAX_LINE_LEN = 400; // search_in_files per-line echo cap
@@ -1443,94 +1443,9 @@ export async function runTool(name, args = {}) {
 }
 
 // ── Tool declarations (JSON Schema) ────────────────────────────────────────────
-const str = (description) => ({ type: "string", description });
-const bool = (description) => ({ type: "boolean", description });
-const num = (description) => ({ type: "number", description });
-const fn = (name, description, properties, required) => ({
-  name,
-  description,
-  parameters: { type: "object", properties, required },
-});
 
 /** Corresponds one-to-one with the caller's C++ declarations. */
-const TOOLS = [
-  fn("read_file",
-     `Read the UTF-8 text content of a file. Small files come back whole. For a large file, read the slice you actually need via offset/limit instead of pulling in the entire file — use search_in_files first to find the line you want, then read around it. The result says which lines you got and whether more remain (up to ${READ_DEFAULT_MAX_LINES} lines per call by default).`,
-     { path: str("File path."),
-       offset: num("First line to read, 1-based. Defaults to 1 (start of file)."),
-       limit: num(`How many lines to read from offset. Defaults to ${READ_DEFAULT_MAX_LINES}.`) },
-     ["path"]),
-  fn("open_path",
-     "Open a file or folder in the host's DEFAULT APPLICATION for the user to see (view an image, play a video/audio, open a document/PDF, reveal a folder). This runs on the host machine. Use THIS — not run_command — to open/show/play a file: run_command in daily mode runs inside an isolated headless Linux sandbox with no GUI, so it cannot launch the host's apps. Path is resolved inside the working directory.",
-     { path: str("Path to the file or folder to open, relative to the working directory.") }, ["path"]),
-  fn("write_file", "Write UTF-8 text to a file, overwriting it.",
-     { path: str("File path."), content: str("Full text to write.") }, ["path", "content"]),
-  fn("edit_file", "Replace a literal string in a file. Without replace_all the match must be unique.",
-     { path: str("File path."),
-       old_string: str("Exact text to replace (literal, not regex)."),
-       new_string: str("Replacement text."),
-       replace_all: bool("Replace every occurrence; defaults to false.") },
-     ["path", "old_string", "new_string"]),
-  fn("append_file", "Append UTF-8 text to a file (creating it if needed).",
-     { path: str("File path."), content: str("Text to append.") }, ["path", "content"]),
-  fn("delete_file", "Delete a file.",
-     { path: str("File path.") }, ["path"]),
-  fn("copy_file", "Copy a file to a new path (overwrites the destination).",
-     { source: str("Source path."), destination: str("Destination path.") }, ["source", "destination"]),
-  fn("move_file", "Move or rename a file (overwrites the destination).",
-     { source: str("Source path."), destination: str("Destination path.") }, ["source", "destination"]),
-  fn("file_info", "Get metadata for a file or directory (size, type, modified time).",
-     { path: str("Path to inspect.") }, ["path"]),
-  fn("list_directory", "List the entries of a directory (defaults to the working directory).",
-     { path: str("Directory path; optional.") }, []),
-  fn("create_directory", "Create a directory (including parents).",
-     { path: str("Directory path to create.") }, ["path"]),
-  fn("search_files", "Find files by name using a glob pattern, recursively.",
-     { pattern: str("Glob, e.g. *.txt or report*.md.") }, ["pattern"]),
-  fn("search_in_files",
-     "Search file contents recursively and return each match WITH surrounding context lines, so you usually don't need to open the file afterward. Prefer ONE precise search (use regex / a filename pattern) over many broad ones.",
-     { query: str("Text or regular expression to search for."),
-       pattern: str("Optional filename glob to scope the search, e.g. *.md or *.{ts,tsx}."),
-       regex: bool("Treat query as a JavaScript regular expression; defaults to false (plain substring)."),
-       ignore_case: bool("Case-insensitive match; defaults to false."),
-       context: num("Context lines to show around each match (0–5, default 2).") },
-     ["query"]),
-  fn("run_command",
-     "Run a shell command in the working directory and return its output. For long-running / persistent processes (dev servers, watchers, `npm run dev`, `pnpm start`, vite/webpack/nodemon, etc.) pass background:true so it keeps running instead of being killed at the 60s timeout — the tool returns early with the startup output (including any http://localhost:PORT). (Such commands are also auto-detected as background.) Starting a dev server is not a reason to open a browser: report the URL to the user, and only open it if they asked or the work is finished.",
-     { command: str("The shell command line to execute."),
-       background: bool("Run as a persistent, non-blocking background process (dev servers / watchers / long-running tasks). Not killed at the timeout.") },
-     ["command"]),
-  fn("stop_service",
-     "Stop a background service (e.g. a dev server) you started earlier via run_command, by its pid (from the start result) or url. ALWAYS use this to stop such services — NEVER use taskkill/kill/pkill on node/electron or the app itself, which would kill this application or unrelated processes.",
-     { pid: num("The pid of the background service to stop (from the run_command start result)."),
-       url: str("Alternatively the service URL, e.g. http://localhost:8081.") }, []),
-  fn("check_project",
-     "Compile and test the project, auto-detecting its type (Node/TS → tsc/lint/test, Rust → cargo check/test, Go → go build/test, Python → compileall/pytest). Call this after modifying code to verify it still builds and passes; fix any reported failures.",
-     { skip_tests: bool("Only run compilation / type-check, skip tests; defaults to false.") }, []),
-  fn("refine_question",
-     "Refine a vague or colloquial question into a clear, specific, self-contained one that is easier to search and answer. Returns only the refined question, in the same language as the input.",
-     { question: str("The original (possibly vague) question to refine."),
-       context: str("Optional surrounding conversation/context to clarify intent; not answered, only used to understand the question.") },
-     ["question"]),
-  fn("init_command",
-     "Initialize or refresh project memory: bring ZERAIX.md at the working-directory root up to date and return it — a structured map of the project (repo type, tech stack, key config files, directory structure, scripts, README) that later turns read instead of rescanning the repo. Use this when the user asks to initialize / analyze / understand the project, explain the codebase, or 'what's in this folder'. Cheap to call repeatedly: it only rebuilds the sections whose underlying files actually changed, and writes nothing when the project is unchanged, so call it at the start of a task rather than assuming an existing ZERAIX.md is current. Sections a human has written or frozen are never overwritten. Pass refresh:true to force every generated section to be rebuilt. Only reads config/text files (never binaries) and skips node_modules/.git/dist/build/coverage/.next etc.",
-     { refresh: bool("Rebuild every generated section even if its inputs are unchanged; defaults to false, which rebuilds only what went stale.") },
-     []),
-  fn("remember_project",
-     "Record something you learned about THIS project into its long-term memory (ZERAIX.md), so future sessions start knowing it instead of rediscovering it. Call this whenever you worked something out that the project map does not already state — especially right after reading code or running a sub-agent to answer a question about how part of the codebase works, and whenever the user explains a convention, constraint or gotcha ('we use npm here, not pnpm', 'never touch fs from the renderer'). Two uses: pass `module` plus a one-sentence `note` to replace that module's line in the Module Map with a description based on what you actually read (this pins the line so it is never regenerated); or pass `note` alone to append a durable fact to the project's Invariants & Gotchas section. Keep each note to one specific, self-contained sentence, and record only things that will still be true next week — not what you are doing right now.",
-     { note: str("One clear sentence. As a module description: what that directory is responsible for and its entry point. As a standalone note: an invariant, convention, constraint or gotcha worth knowing before touching this project."),
-       module: str("Optional module path exactly as it appears in the Module Map, e.g. 'electron' or 'src/lib'. Omit to append a general note instead.") },
-     ["note"]),
-  fn("web_search",
-     "Search the web and get ranked results (title, URL, snippet) back as text, directly — WITHOUT opening the visible browser panel. This is your built-in, fastest way to look things up online: current events, facts that may have changed since training, documentation, library/API usage, exact error messages, product/price info, etc. Prefer web_search over openBrowser for information lookups. Typical flow: web_search to find sources → fetch_url on the most relevant result to read it → answer and cite the URL. Do NOT answer from memory when the user asks about anything current, niche, or verifiable; search first. Only use openBrowser instead when the user needs to visually SEE a page, or the page requires interaction / login / JavaScript.",
-     { query: str("The search query. Prefer concise, keyword-style queries; for precise lookups include distinctive terms (exact error text, proper names, version numbers). Use the user's language unless an English query would find better sources."),
-       count: num("Number of results to return (1–10, default 6). Ask for more only when you need to compare several sources.") },
-     ["query"]),
-  fn("fetch_url",
-     "Fetch a single web page or HTTP(S) API by URL and return its main readable text (HTML is stripped to text; JSON / plain text is returned as-is) — headless, without opening the visible browser. Use it to read a specific result from web_search, or any URL you already know (docs page, raw file, JSON API). It does NOT execute JavaScript and cannot log in, click, or fill forms; for pages that need rendering / interaction, or that the user should see on screen, use openBrowser + browser instead. Long pages are truncated, so target the specific page you need rather than large index pages.",
-     { url: str("Absolute http(s) URL to fetch.") },
-     ["url"]),
-];
+import { TOOLS } from "./toolSchemas.mjs";
 
 /**
  * Return the tool declarations in the target LLM format:

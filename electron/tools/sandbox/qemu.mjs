@@ -20,7 +20,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { spawn } from "node:child_process";
+import { spawn, execFileSync } from "node:child_process";
 import crypto from "node:crypto";
 import https from "node:https";
 import { app } from "electron";
@@ -341,18 +341,26 @@ async function boot(onProgress, forceConfigured = false) {
     p.on("exit", (c) => (c ? rej(new Error(`qemu-img exit ${c}`)) : res()));
     p.on("error", rej);
   });
+  reapOrphanVm(vd, overlay);
   // Capture qemu's own stdout/stderr to vd/qemu.log (was stdio:"ignore", leaving no way to diagnose a process crash).
   // This is the "host-side" qemu output (HVF errors, assertions, sleep/wake failures, etc.); the guest kernel/systemd output is in console.log instead.
+  let lastStderr = "";
   const qlog = fs.createWriteStream(path.join(vd, "qemu.log"), { flags: "a" });
   try { qlog.write(`\n===== qemu started ${new Date().toISOString()} =====\n`); } catch { /* ignore */ }
   const proc = spawn(qemuBin(), qemuArgs(vd, overlay), { stdio: ["ignore", "pipe", "pipe"] });
   proc.stdout.on("data", (b) => { try { qlog.write(b); } catch { /* ignore */ } });
-  proc.stderr.on("data", (b) => { try { qlog.write(b); } catch { /* ignore */ } });
+  // Remember the last stderr line: qemu reports a fatal startup problem there and then exits, so by the time the exit handler
+  // runs the reason is otherwise only in qemu.log. "Address already in use" in particular has a specific, actionable cause.
+  proc.stderr.on("data", (b) => {
+    const t = String(b).trim();
+    if (t) lastStderr = t.split("\n").pop();
+    try { qlog.write(b); } catch { /* ignore */ }
+  });
   const exitCb = onExitCb; // bind the callback at the time this proc starts (after a restart, old and new procs each correspond to their own; see the engine.disposing guard)
   proc.on("exit", (code, signal) => {
     try { qlog.write(`\n===== qemu exited code=${code} signal=${signal ?? "-"} @ ${new Date().toISOString()} =====\n`); qlog.end(); } catch { /* ignore */ }
     vm = null; try { ninep?.close(); } catch {} ninep = null;
-    try { exitCb?.(code, signal); } catch { /* ignore */ }
+    try { exitCb?.(code, signal, lastStderr); } catch { /* ignore */ }
   });
   const ports = await qmp({ port: QMP_PORT });
   const guest = await guestAgent({ port: GA_PORT }); // includes waiting for the guest to be ready
@@ -521,4 +529,30 @@ export function dispose() {
   try { vm?.ports.quit(); } catch { /* best effort */ }
   try { vm?.proc.kill(); } catch { /* best effort */ }
   vm = null;
+}
+
+/**
+ * Kill a qemu left behind by a previous run, before starting a new one.
+ *
+ * QMP_PORT / GA_PORT / the ssh forward are fixed, so exactly one VM can exist at a time. If the app dies without disposing —
+ * crash, force quit, `pkill` — qemu is orphaned and keeps holding the port. Every later launch then dies instantly with
+ * "Failed to find an available port: Address already in use", exit code 1, and the sandbox silently degrades to native
+ * execution until someone finds the stray process by hand. Observed in the wild; qemu.log had five unmatched "qemu started"
+ * lines.
+ *
+ * Scoped to OUR VM: matched on the overlay path in the process's own -drive argument, so an unrelated qemu on this machine is
+ * never touched. Best-effort — a failure here just means the spawn below reports the port conflict as it did before.
+ */
+function reapOrphanVm(vd, overlay) {
+  try {
+    // -ax: other users' processes are not ours to kill, but they would still hold the port; listing them lets us say so.
+    const out = execFileSync("ps", ["-axo", "pid=,command="], { encoding: "utf8", timeout: 5000 });
+    for (const line of out.split("\n")) {
+      if (!line.includes("qemu-system-") || !line.includes(overlay)) continue;
+      const pid = Number(line.trim().split(/\s+/)[0]);
+      if (!pid || pid === process.pid) continue;
+      console.warn(`[sandbox] reaping orphaned VM (pid ${pid}) left by a previous session`);
+      try { process.kill(pid, "SIGTERM"); } catch { /* already gone */ }
+    }
+  } catch { /* ps unavailable: fall through and let the spawn report the conflict */ }
 }

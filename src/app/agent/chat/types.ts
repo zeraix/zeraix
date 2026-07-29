@@ -21,6 +21,8 @@ export type { Attachment } from "@/lib/ai/attachments";
  */
 export type ReminderState = {
   workdir?: string;
+  /** Where run_command actually runs: the Linux sandbox, or the host directly. Flips when the VM comes up or falls back. */
+  env?: string;
   ctx?: { date: string; model: string; tz: string };
   skills?: { id: string; description: string }[];
   disabledTools?: string[];

@@ -80,6 +80,11 @@ import { useAgentChatStore } from "@/store/agentChatStore";
 import { enabledSkills, loadInstalled } from "@/lib/ai/skills/store";
 import { getSkillInstructions, loadSkillTool, skillSystemHint } from "@/lib/ai/skills/runtime";
 import { SANDBOX_TOOLBOX_SKILL } from "@/lib/ai/skills/builtin";
+import { buildSystemPrompt, buildToolSet as buildToolSet_ } from "@/lib/ai/promptPrefix";
+/** The built-in skill menu as it appears in messages[0]: fixed text, identical on every install. */
+const BUILTIN_SKILL_MENU =
+  "[Built-in skills] Always installed and always listed here:\n" +
+  `- ${SANDBOX_TOOLBOX_SKILL.id}: ${SANDBOX_TOOLBOX_SKILL.description}`;
 import { loadEnabledProjectSkills } from "@/lib/ai/skills/project";
 import type { InstalledSkill } from "@/lib/ai/skills/types";
 import { makeUnifiedDiff } from "./diffUtil";
@@ -274,6 +279,10 @@ function ChatAgent() {
   const [status, setStatus] = useState(""); // While generating, show the user "what it is doing"
   const [error, setError] = useState<string | null>(null);
   const [toolsReady, setToolsReady] = useState(false);
+  // Mirror, for callers that outlive the render they were created in. __seedPrefix is registered in a mount-only effect, so it
+  // closes over the FIRST render's toolsReady (false) permanently — reading the state there silently drops the whole local-tool
+  // block from the captured prefix, which would produce a seed that never matches a real request.
+  const toolsReadyRef = useRef(false);
   const [proxyReady, setProxyReady] = useState(false);
   // Working directory: AI tool calls (read/write files / run commands) are confined to this directory.
   const [workdir, setWorkdir] = useState("");
@@ -545,7 +554,13 @@ function ChatAgent() {
   // packaged app the user actually runs a heavy task in.
   useEffect(() => {
 
-    const w = window as unknown as { __ctxSim?: (...budgetsK: number[]) => unknown };
+    const w = window as unknown as {
+      __ctxSim?: (...budgetsK: number[]) => unknown;
+      __seedPrefix?: () => Promise<unknown>;
+    };
+    // Kept for inspecting a live install ("what is this app actually sending?"). Seed generation no longer needs it: the prefix
+    // is a pure function of mode in promptPrefix.ts, so scripts/capture-prefix.mjs computes it without an app at all.
+    w.__seedPrefix = async () => ({ system: composeSystemPrompt(), tools: await buildToolSet() });
     const K = (n: number) => `${(n / 1000).toFixed(1)}K`;
     w.__ctxSim = (...budgetsK: number[]) => {
       try {
@@ -606,6 +621,7 @@ function ChatAgent() {
     };
     return () => {
       delete w.__ctxSim;
+      delete w.__seedPrefix;
     };
   }, []);
 
@@ -618,6 +634,7 @@ function ChatAgent() {
       setActiveModel(resolveActiveModel()); // The currently selected model → the endpoint / model / key used for sending
       const ready = isToolkitAvailable();
       setToolsReady(ready);
+      toolsReadyRef.current = ready;
       setProxyReady(isLlmProxyAvailable());
       // Usage log: read the switch once so the per-tool-call log helpers can answer synchronously.
       // Off by default, in which case every logging call below is a no-op.
@@ -1381,16 +1398,22 @@ function ChatAgent() {
       return assemble();
     };
 
+    // Tell llama-server which conversation this request belongs to, so its disk tier can restore that conversation's own KV by id
+    // (T1) instead of re-prefilling, and can spill the tip back under the same id when the turn ends. Local only: it means nothing
+    // to a cloud provider, and a non-standard header on a strict endpoint is a needless risk.
+    const localHeaders =
+      log?.convId && isLocalEndpoint(endpoint) ? { "X-Conversation-Id": log.convId } : undefined;
+
     // Browser fallback: connect directly to the provider endpoint.
     let data: ChatResponse;
     // Local llama-server (127.0.0.1): forced through the main-process proxy (a Node environment, with no render-layer cross-origin (CORS) restriction).
     if (isLlmProxyAvailable() && isLocalEndpoint(endpoint)) {
       if (wantStream && isLlmStreamAvailable()) {
         data = streamErr(
-          await chatStreamViaProxy({ endpoint, apiKey: apiKey.trim() || "local", body, meta }, handleChunk, signal),
+          await chatStreamViaProxy({ endpoint, apiKey: apiKey.trim() || "local", body, headers: localHeaders, meta }, handleChunk, signal),
         );
       } else {
-        const res = await chatViaProxy({ endpoint, apiKey: apiKey.trim() || "local", body, meta });
+        const res = await chatViaProxy({ endpoint, apiKey: apiKey.trim() || "local", body, headers: localHeaders, meta });
         if (!res.ok) {
           throw new Error(localErr(res.status, res.error));
         }
@@ -1696,6 +1719,23 @@ function ChatAgent() {
     setCompacted(compactedNow);
     persistCompaction(convId);
   };
+
+  /**
+   * Compose messages[0], and build the tool array.
+   *
+   * Both are pulled out of send() so seed generation can obtain the EXACT prefix the app sends without driving the UI and without
+   * reimplementing the composition. A seed is keyed on the bytes of [messages[0] + tools]; if the generator built those bytes by
+   * its own route, a divergence would show up as a seed that silently never matches. One code path, two callers.
+   */
+  /**
+   * messages[0] and the tool array both come from src/lib/ai/promptPrefix.ts, so send() and the seed generator compose them by
+   * exactly one code path. The native schemas are fetched over IPC here; the generator reads them straight off disk.
+   */
+  const composeSystemPrompt = (): string =>
+    buildSystemPrompt(mode, { toolsReady: toolsReadyRef.current, memory: isMemoryFilesAvailable() });
+
+  const buildToolSet = async () =>
+    buildToolSet_(mode, toolsReadyRef.current ? await listTools("openai") : [], { memory: isMemoryFilesAvailable() });
 
   const maybeCompact = async (
     opts: {
@@ -2076,9 +2116,10 @@ function ChatAgent() {
   const runtimeSkills = () => {
     // The installed skills the user enabled + the enabled project skills (.claude/.cursor/.zeraix) + conditionally-equipped built-in skills.
     const list = [...enabledSkills(installedSkillsRef.current), ...projectSkillsRef.current];
-    const withBuiltin = isSandboxEngine(sandboxStatusRef.current?.active)
-      ? [...list, SANDBOX_TOOLBOX_SKILL]
-      : list;
+    // The built-in toolbox is NOT added here. messages[0] lists it unconditionally, so including it would list it twice — and
+    // worse, the list would change whenever the VM came up or fell back, which is exactly the churn the skills change event
+    // exists to avoid. Whether it is usable right now is carried by the environment event instead.
+    const withBuiltin = list;
     // Stable order (sorted by id): the catalog now travels as the skills change event, and diffReminder compares arrays
     // order-sensitively — an insertion-order flip would re-emit the whole menu even though nothing changed.
     return [...withBuiltin].sort((a, b) => a.id.localeCompare(b.id));
@@ -2103,7 +2144,17 @@ function ChatAgent() {
   const loadSkill = (ctx: RunCtx, rawArgs: Record<string, unknown>): string => {
     const id = String(rawArgs.id ?? "");
     const enabled = runtimeSkills();
-    const text = getSkillInstructions(enabled, id);
+    // The built-in toolbox is advertised in messages[0] unconditionally — it has to be, or the prompt prefix would differ per
+    // install — so the model can legitimately ask for it. But its whole toolchain (imagemagick, ffmpeg, pandoc, OCR) lives in the
+    // sandbox image, so handing over the instructions while running natively would send it off to call tools that do not exist.
+    // Only resolve it while the sandbox is actually up.
+    const sandboxUp = isSandboxEngine(sandboxStatusRef.current?.active);
+    const text =
+      id === SANDBOX_TOOLBOX_SKILL.id && !sandboxUp
+        ? `Skill not enabled: ${id} requires the Linux sandbox, which is not running right now (commands are executing directly on the host). ` +
+          "Its tools are not installed on this machine — do not try to run them. Tell the user that media / document processing needs the sandbox, " +
+          "and that it can be restarted from the sandbox status indicator."
+        : getSkillInstructions(sandboxUp ? [...enabled, SANDBOX_TOOLBOX_SKILL] : enabled, id);
     const ok = !text.startsWith("Skill not enabled");
     ctx.status(ok ? t("chat.loadingSkill", { id }) : t("chat.skillDisabled"));
     ctx.push({ kind: "tool", name: `load_skill → ${id}`, args: { id }, ok, result: text });
@@ -2493,37 +2544,7 @@ function ChatAgent() {
     // so that continuing to send after loading a historical conversation also backfills system.
     const enabled = runtimeSkills();
     if (convoRef.current[0]?.role !== "system") {
-      const parts: string[] = [];
-      // Select the system prompt by the current mode: dev mode leans toward writing code / modifying projects, daily mode leans toward everyday tasks.
-      const sysPrompt = systemPromptFor(mode);
-      if (toolsReady)
-        parts.push(
-          [
-            // Only the invariant rules live here. The sentence that names the actual path is per-conversation, so it would break
-            // the shared prefix (and any resident KV seed) if it sat in messages[0]; it is announced as a change event instead.
-            `${sysPrompt}\n${WORKDIR_RULES}`,
-            // The command-execution environment (host system or Linux sandbox) — the model chooses the command style accordingly.
-            sandboxEnvHint(sandboxStatusRef.current),
-          ].join("\n"),
-        );
-      // Invariant explanation of the task-state block; the brief itself arrives as a change event.
-      parts.push(TASK_STATE_EXPLAINER);
-      // Unconditional: gating this on "are any skills enabled" would make messages[0] differ per install. It points at the
-      // available-skills reminder rather than asserting skills exist, so it reads correctly when there are none.
-      parts.push(skillSystemHint());
-      // Long-term memory switched to "retrieve on demand" (RAG, see docs/prompt-cache-optimization.md §4.3): the full memory bodies are no longer
-      // poured into the frozen system prefix — that would both bloat the prefix and, when memories are added / modified mid-conversation, only show the old snapshot from the conversation's start
-      // (i.e. the user's feedback that "I added a memory but the AI doesn't know it"). Here we only put one stable hint; the model pulls memory bodies on demand with search_memory
-      // (reads the current file each time → always latest, results land at the end of the wire → no bloat and no disturbance to the prefix cache).
-      if (isMemoryFilesAvailable()) {
-        parts.push(
-          "[Long-term memory] You have saved a set of long-term memories for the user (retained across conversations, and possibly added / modified during this conversation). " +
-            "When you need to recall the user's identity / preferences / facts / agreements, or the user mentions things like \"do you still remember…\", \"I told you…\", \"I just added a memory\", " +
-            "call search_memory to retrieve the current memories (always the latest) and answer based on them; do not speculate out of thin air, and do not assume what you saw at the conversation's start is the latest. " +
-            "Use save_memory to write / update memories (pass id to overwrite an existing one), and delete_memory to delete.",
-        );
-      }
-      const composedSystem = parts.join("\n\n");
+      const composedSystem = composeSystemPrompt();
       convoRef.current = [{ role: "system", content: composedSystem }, ...convoRef.current];
       // Freeze it on the conversation record. Everything above is a function of mode, sandbox status and which memory bridge is
       // present — all of which can differ by the time the conversation is reopened. The rebuilt buffer carries no system message,
@@ -2716,21 +2737,7 @@ function ChatAgent() {
       // this array is conditional on user state — where a capability genuinely varies, the tool is still declared and its
       // unavailability is announced as a change event. Only `mode` is allowed to vary it, because messages[0] is mode-determined
       // anyway. See docs/cache-stable-prompt-context.md.
-      const tools = [
-        askUserTool(),
-        updateTodosTool(),
-        setTaskStateTool(),
-        openBrowserTool(mode),
-        browserTool(),
-        // Declared even with no image key configured. Gating it here used to be the earliest per-install difference in the array;
-        // the model is told it is unusable through the disabledTools reminder instead, which costs nothing when it never changes.
-        imageGenerationTool(),
-        ...(isMemoryFilesAvailable()
-          ? [saveMemoryTool(), deleteMemoryTool(), searchMemoryTool()]
-          : []),
-        ...(toolsReady ? [...(await listTools("openai")), subAgentTool()] : []),
-        loadSkillTool(),
-      ];
+      const tools = await buildToolSet();
       // Critical-change review guard (dev mode only): when a risky path (auth / data / security …) has been changed but no reviewer was run before wrapping up,
       // inject one forced reminder and continue the loop, nudging the model to delegate a reviewer first. Cleared after a reviewer is delegated; forced at most once per round, to avoid a deadlock.
       let riskyChangePending = false;
@@ -2787,6 +2794,9 @@ function ChatAgent() {
         }
         const current: ReminderState = {
           workdir: effectiveWorkdir || "",
+          // The command environment, announced on change rather than baked into messages[0]. It depends on the VM being up, and
+          // the VM can fall back to native mid-conversation — a system prompt frozen at the first send cannot express either.
+          env: sandboxEnvHint(sandboxStatusRef.current),
           ctx: {
             date: `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`,
             model: activeModel ? `${activeModel.label} (${activeModel.model})` : "unknown",

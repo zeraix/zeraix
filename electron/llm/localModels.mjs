@@ -23,6 +23,66 @@ export const QUANTS = [
 ];
 
 // Capability high → small. active = activated parameters (MoE); arch is only used to estimate KV.
+/**
+ * Models a resident seed is PUBLISHED for.
+ *
+ * A seed is a build artifact, not a capability: `scripts/gen-seed.mjs` runs each of these models against each mode and uploads the
+ * result. A model is on this list only once its seed has been generated and pushed. Nothing else is gated on it — see
+ * kvTierEnabled for the disk tier itself, which every model on mac gets.
+ *
+ * Every entry also needs a pinned `revision` below, because the seed is only valid for the exact GGUF it was built against (the
+ * chat template ships inside the file and model_key does not cover it). seedAvailable enforces that.
+ */
+export const SEED_MODELS = new Set(["qwen3.6-35b-a3b", "gemma4-26b-a4b", "gemma4-e4b", "gemma4-12b"]);
+
+/**
+ * Models the MoE expert pool is enabled for.
+ *
+ * An allowlist because the pool needs a per-model ROUTING PROFILE (which experts to keep resident), so it applies only to
+ * mixture-of-experts models, and only where a profile has been generated and shipped. E4B and 12B are dense (`moe: false`) —
+ * there is nothing for a pool to do.
+ *
+ * Without a profile the fork's pool stays inert by design rather than pinning blind index-order experts, so a missing file
+ * degrades to stock behaviour instead of degrading quality.
+ */
+export const MOE_POOL_MODELS = new Set(["gemma4-26b-a4b", "qwen3.6-35b-a3b"]);
+
+/** macOS only, same reason as the KV tier: the pool exists only in the fork's build, and only its mac build is published. */
+export function moePoolEnabled(modelId) {
+  if (process.platform !== "darwin") return false;
+  return !!modelId && MOE_POOL_MODELS.has(String(modelId));
+}
+
+/**
+ * Whether the KV disk tier runs. macOS only, and no model gate.
+ *
+ * The tier lives in the fork's llama-server, and only the mac build of that is published — Windows installs the pinned upstream
+ * binary from the CDN, which has none of these flags. Keeping the platform check here (rather than only relying on the binary
+ * probe) means Windows never even creates a disk directory.
+ *
+ * It takes no model id because nothing about it is model-specific. The server content-addresses the KV layout itself into a
+ * `model_key` (model geometry + KV quant + SWA + rotation flag), files units under `<dir>/<model_key>/`, and a mismatched layout
+ * simply never matches — so an unknown GGUF gets prefix reuse across restarts with no way to collide with another model's units.
+ * Seeds are a separate, optional accelerator on top: see seedAvailable.
+ */
+export function kvTierEnabled() {
+  return process.platform === "darwin";
+}
+
+/**
+ * Whether a published seed exists to download for this model.
+ *
+ * Strictly narrower than kvTierEnabled: the tier works with no seed at all — it just starts cold and warms up as the user talks.
+ * A seed only removes the first prefill. So this gates the DOWNLOAD, never the tier.
+ *
+ * Requires the pinned revision as well as list membership: the seed key embeds `r<revision8>` (see seeds.seedKey), so a model with no
+ * pin would request a URL that can never exist and 404 on every launch.
+ */
+export function seedAvailable(modelId) {
+  if (!kvTierEnabled() || !modelId || !SEED_MODELS.has(String(modelId))) return false;
+  return !!MODELS.find((m) => m.id === modelId)?.revision;
+}
+
 export const MODELS = [
   {
     id: "qwen3.6-35b-a3b", name: "Qwen3.6-35B-A3B", params: 35, active: 3, moe: true, vision: true, mtp: true, mtpEmbedded: true,
@@ -31,6 +91,11 @@ export const MODELS = [
     // mtpEmbedded:true = use unsloth's "-MTP-GGUF" repo: the MTP (multi-token prediction) head is embedded in the weights themselves (self-speculative, no separate drafter file),
     // and it also ships UD quants + mmproj. At launch, --spec-type draft-mtp enables self-speculative decoding (turning off vision/MTP only affects loading/toggles; the weights still come from this repo).
     hf: "unsloth/Qwen3.6-35B-A3B-MTP-GGUF", arch: { L: 48, kvH: 4, hd: 128 }, maxCtx: 262144,
+    // Pinned commit. Required for any model on SEED_MODELS: a resident seed is only valid for the exact GGUF it was built
+    // against, because the chat template ships inside the file and model_key does not cover it. Leaving this on "main" means a
+    // repo re-upload silently changes the rendered prefix and every published seed stops matching, with no error. Bump it and
+    // regenerate seeds together. null = track main (fine for models with no seed).
+    revision: "5bc3e238d916f48a861bac2f8a1990a0e9b7e98d",
     // unsloth ships only UD dynamic quants; pick a UD tag by device-memory tier (i.e. the :QUANT in -hf). memGB = total Mac unified memory / discrete-GPU VRAM.
     quantTiers: [
       { minMemGB: 31, quant: "UD-Q4_K_XL", bpw: 4.5 },
@@ -46,6 +111,7 @@ export const MODELS = [
   // vision:true: all three repos bundle an mmproj (mmproj-F16.gguf etc.); at launch, explicitly pass --mmproj to load the vision projector; if you don't need vision, turn it off in the UI (saves ~1GB resident).
   {
     id: "gemma4-26b-a4b", name: "Gemma 4 26B-A4B", params: 26, active: 4, moe: true, vision: true, mtp: true,
+    revision: "7b92b5b28818151e8669af2e45e88d6086f490dd", // pinned: see the note on qwen above — required for seeded models
     hf: "unsloth/gemma-4-26B-A4B-it-qat-GGUF", arch: { L: 48, kvH: 8, hd: 256, swa: { every: 6, window: 1024 } }, maxCtx: 262144,
     quantTiers: [
       { minMemGB: 18, quant: "UD-Q4_K_XL", bpw: 4.37 }, // 14.2 GB
@@ -56,6 +122,7 @@ export const MODELS = [
     // mtp:true: dense 12B decoding is bandwidth-bound (reads ~6.7GB per token); speculative decoding gives ~1.5–2× speedup. The drafter (MTP/…-Q4_0-MTP.gguf,
     // ~254MB) is in the same repo as the main weights and is fetched alongside them during auto-download (hfDownload), then passed to llama-server via -md; not enabled on the -hf fallback path.
     id: "gemma4-12b", name: "Gemma 4 12B", params: 12, active: 12, moe: false, vision: true, mtp: true,
+    revision: "980b060c40a8539ac159e0501a3e0f66a6365af3", // pinned: see the note on qwen above — required for seeded models
     hf: "unsloth/gemma-4-12B-it-qat-GGUF", arch: { L: 48, kvH: 8, hd: 256, swa: { every: 6, window: 1024 } }, maxCtx: 262144,
     quantTiers: [
       { minMemGB: 12, quant: "UD-Q4_K_XL", bpw: 4.48 }, // 6.72 GB
@@ -64,6 +131,7 @@ export const MODELS = [
   },
   {
     id: "gemma4-e4b", name: "Gemma 4 E4B", params: 8, active: 8, moe: false, vision: true, mtp: true,
+    revision: "8c5a9e4fd5482e2be20fe0bf013b4c262a8f4265", // pinned: see the note on qwen above — required for seeded models
     // ≈4.5B effective parameters (8B raw, MatFormer + Per-Layer Embeddings); top pick for low-end laptops (4–5GB is enough).
     // Native tool-calling tokens, well suited for agents. Q4_0 loses quality, so use UD-Q4_K_XL.
     hf: "unsloth/gemma-4-E4B-it-qat-GGUF", arch: { L: 34, kvH: 4, hd: 256, swa: { every: 6, window: 1024 } }, maxCtx: 131072,
@@ -221,29 +289,46 @@ export function bestQuant(model, budgetGB, ctx, kvBits) {
 export const MIN_CTX = 32768;
 
 // Automatic context tiering (largest to smallest): pick "the largest -c that fits" by device memory, capped at the model's native window (maxCtx).
-// The ladder bottoms out at MIN_CTX (32K): below that the system prompt alone eats the window, so those rungs are never
-// offered. Within a tier prefer KV q8 (near-lossless), and only drop to q4 (half the size) when it doesn't fit, to unlock a larger context.
+// The ladder bottoms out at MIN_CTX (32K): below that the system prompt alone eats the window, so those rungs are never offered.
 export const CTX_LADDER = [262144, 131072, 65536, 32768];
+
+/**
+ * KV cache quantisations offered for catalog models, best first.
+ *
+ * ONE list, and everything follows from it: the model library's picker lists exactly these, pickCtxKv chooses from exactly these,
+ * and gen-seed builds a seed for each. Adding a quantisation later is an edit here plus a seed regeneration — not a hunt through
+ * a UI array, a fit ladder and a build script that must be kept in agreement by hand.
+ *
+ * Just q4 today. The server mixes the KV cache types into the model_key it files disk units under, so a seed built at one
+ * quantisation is invisible to a server running at another — offering a choice we do not publish a seed for means some users
+ * silently get a cold prefill. q4 rather than q8 because it is what most Macs end up on anyway: the KV cache is the part that
+ * scales with context, and halving it is what lets a 24-32 GB machine hold a long conversation at all.
+ */
+export const KV_BITS_OFFERED = [4];
+
+/** KV cache type for a kvBits value: the -ctk/-ctv argument, and part of the server's model_key. */
+export const kvTypeName = (kvBits) => (kvBits === 8 ? "q8_0" : kvBits === 4 ? "q4_0" : "f16");
 
 /**
  * Pick context length and KV quantization for a "model + quant": { ctx, kvBits }.
  * cap is the larger of the usable budget and deviceMem*0.78 (a compromise with the device-memory "fits" criterion used for tiered models).
  * 0.78 rather than 0.75: the KV estimate is already conservative (q4 is actually 4.5bpw, i.e. +12%; the SWA window uses the upper bound), so loosening it lets 26B-A4B reach
  * 128K on 24G (18.4GB ≈ 77%, close to the macOS Metal wired ceiling of ~75–80%; if an extreme combo fails on first launch, turn off vision / drop a tier).
- * When not even the 32K rung fits, fall back to { 16K, q4 } (the leanest combo). This is deliberately *below* MIN_CTX:
- * it is a last resort for low-memory devices that would otherwise be unable to launch anything at all, and it is never
- * user-selectable — the 32K floor governs what can be browsed and chosen, not this internal rescue path.
+ * Context is traded before KV precision: the outer loop walks the ladder down, and each rung tries every offered quantisation.
+ * When not even the 32K rung fits, fall back to 16K at the leanest offered quantisation. That is deliberately *below* MIN_CTX:
+ * a last resort for low-memory devices that would otherwise be unable to launch anything at all, and never user-selectable —
+ * the 32K floor governs what can be browsed and chosen, not this internal rescue path.
  */
 export function pickCtxKv(model, bpw, hw, budgetGB, vision = false) {
   const cap = Math.max(budgetGB || 0, deviceMemGB(hw) * 0.78);
   const maxCtx = model.maxCtx || MIN_CTX;
   for (const ctx of CTX_LADDER) {
     if (ctx > maxCtx) continue;
-    for (const kvBits of [8, 4]) {
+    for (const kvBits of KV_BITS_OFFERED) {
       if (computeFit(model, { bpw }, ctx, kvBits, vision).totalGB <= cap) return { ctx, kvBits };
     }
   }
-  return { ctx: 16384, kvBits: 4 };
+  return { ctx: 16384, kvBits: KV_BITS_OFFERED[KV_BITS_OFFERED.length - 1] };
 }
 
 // Device capacity available to a model: unified memory (Mac) uses the total; a discrete GPU can span VRAM + system memory via "partial offload", so take the sum of both;
@@ -353,7 +438,9 @@ export function recommend(hw, budgetGB, { ctx = MIN_CTX, kvBits = 8, vision = fa
     pickFrom(options.filter((o) => o.quant.quality >= 85 && o.ctx >= 32768)) ||
     options.find((o) => o.quant.quality >= 85) ||
     options[0] || null;
-  return { budgetGB: round(budgetGB), ctx, kvBits, primary, options };
+  // kvBitsOffered travels with the recommendation so the renderer lists what this process actually supports, instead of holding
+  // its own copy that has to be remembered when a quantisation is added. KV_BITS_OFFERED stays the single source.
+  return { budgetGB: round(budgetGB), ctx, kvBits, kvBitsOffered: [...KV_BITS_OFFERED], primary, options };
 }
 
 /**
@@ -381,7 +468,7 @@ export function recommend(hw, budgetGB, { ctx = MIN_CTX, kvBits = 8, vision = fa
  * Local first: given modelPath → `-m FILE` (+ explicit `--mmproj FILE` when vision), the weights already downloaded by us (with progress/resume);
  * if not auto-downloaded (fallback path) → `-hf repo:quant` is fetched by llama itself, and only then, when noMmproj=true, is --no-mmproj used to turn off the automatic vision projector.
  */
-export function buildServerArgs({ hf, modelPath = null, hw, ctx = MIN_CTX, port = 8080, kvBits = 8, mtpDraft = null, specMtp = false, mmproj = null, noMmproj = false, kvCacheDir = null, ngl = null, chatTemplate = null, chatTemplateFile = null, extraArgs = [] }) {
+export function buildServerArgs({ hf, modelPath = null, hw, ctx = MIN_CTX, port = 8080, kvBits = 8, mtpDraft = null, specMtp = false, mmproj = null, noMmproj = false, kvCacheDir = null, kvDiskDir = null, parallel = 0, ngl = null, chatTemplate = null, chatTemplateFile = null, extraArgs = [] }) {
   const args = modelPath ? ["-m", modelPath] : ["-hf", hf];
   args.push(
     "--host", "127.0.0.1",
@@ -395,9 +482,22 @@ export function buildServerArgs({ hf, modelPath = null, hw, ctx = MIN_CTX, port 
   // An explicit template file outranks a built-in name, which in turn outranks the GGUF's embedded template.
   if (chatTemplateFile) args.push("--chat-template-file", String(chatTemplateFile));
   else if (chatTemplate) args.push("--chat-template", String(chatTemplate)); // override a broken embedded template with a built-in
-  const kvType = kvBits === 8 ? "q8_0" : kvBits === 4 ? "q4_0" : "f16";
+  const kvType = kvTypeName(kvBits);
   if (kvType !== "f16") args.push("-ctk", kvType, "-ctv", kvType);
   if (kvCacheDir) args.push("--slot-save-path", kvCacheDir);
+  // Two slots so a second conversation can stay warm alongside the active one, instead of evicting it. Naming the count is what
+  // keeps it CHEAPER than leaving it unset: unset means auto = 4 slots, and n_seq_max sizes the iSWA cache
+  // (min(size_base, n_swa + n_ubatch * n_seq_max)), so every extra slot costs SWA memory on a Gemma-class model.
+  //
+  // `--kv-unified` states the requirement in the argv rather than leaning on a default. Without a unified pool llama-context
+  // derives `n_ctx_seq = n_ctx / n_seq_max` (src/llama-context.cpp) instead of `n_ctx_seq = n_ctx`, which would halve every
+  // conversation's usable context and shard the KV into private lanes with no prefix sharing — the opposite of what the disk
+  // tier below is built around. The mac fork already resolves an explicit --parallel to unified unless --no-kv-unified is
+  // passed, so this is belt-and-braces, not a workaround.
+  if (parallel > 0) args.push("--parallel", String(parallel), "--kv-unified");
+  // KV disk tier: spill/restore prompt prefixes across restarts, and the folder resident seeds are installed into
+  // (<dir>/<model_key>/). Must be durable — unlike --slot-save-path above, these files are meant to survive a reboot.
+  if (kvDiskDir) args.push("--kv-disk-path", kvDiskDir);
   if (mtpDraft) args.push("-md", mtpDraft); // Gemma: separate MTP drafter file
   // MTP speculative-decoding flag (b9936): Gemma needs an -md drafter; Qwen weights embed the MTP head → the flag alone enables self-speculation.
   // Omitted when there's no separate drafter and it's not embedded (specMtp=false), to avoid draft-mtp erroring out when it can't find an MTP head.

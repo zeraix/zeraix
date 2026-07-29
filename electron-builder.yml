@@ -120,6 +120,10 @@ extraResources:
     filter:
       - "darwin-*/**"
       - "win32-*/**"
+  # MoE expert-pool routing profiles (2 KB each, one per MoE model). Bundled rather than downloaded: they are tiny and tied to the
+  # model catalog, so there is nothing to gain from a CDN. localServer reads them from process.resourcesPath when packaged.
+  - from: resources/moe-profiles
+    to: moe-profiles
 
 # Keep only the English language pack
 # Filter locales/*.pak on Windows/Linux; filter .lproj directories on macOS

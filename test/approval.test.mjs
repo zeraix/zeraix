@@ -177,18 +177,21 @@ test("a decision cannot be made twice", async () => {
 
 test("a deadline that elapsed while the app was closed is honoured at next start", async () => {
   const root = freshRoot();
-  // 1ms deadline: by the time we sweep, it is long past — the same situation as a 48h deadline
-  // that expires overnight with the app shut down.
+  // A short deadline stepped over by a shared clock — the same situation as a 48h deadline that expires overnight with the app
+  // shut down. Stepping it rather than trusting the wall clock is what makes "long past" true: shutdown/closeDb/openDb below
+  // usually take a millisecond or two, but nothing guarantees it, and a deadline that is not yet due sweeps nothing.
+  let clock = Date.now();
   saveWorkflow(gatedWorkflow("wf-expire", { approvalTimeoutMs: 1 }));
 
-  const mgr = createExecutionManager();
+  const mgr = createExecutionManager({ now: () => clock });
   const res = await mgr.run({ workflowId: "wf-expire" });
   assert.equal(repo.pendingApprovals().length, 1);
   await mgr.shutdown();
 
   closeDb();
   openDb();
-  const mgr2 = createExecutionManager();
+  clock += 1000;
+  const mgr2 = createExecutionManager({ now: () => clock });
   // recoverInterrupted() is what runs at startup; it must sweep deadlines too.
   mgr2.recoverInterrupted();
 
@@ -206,8 +209,14 @@ test("onApprovalTimeout 'approve' lets the run proceed when the deadline passes"
   const root = freshRoot();
   saveWorkflow(gatedWorkflow("wf-auto", { approvalTimeoutMs: 1, onApprovalTimeout: "approve" }));
 
-  const mgr = createExecutionManager();
+  // A stepped clock, not the wall clock. The deadline is `now() + approvalTimeoutMs`, and the sweep takes everything with
+  // `deadline_at <= now()`. With the real clock a 1 ms timeout is only overdue if a whole millisecond happens to pass between
+  // creating the approval and sweeping — on an idle machine it does not, so the run stays AWAITING_APPROVAL and the test fails.
+  // Stepping the clock puts the deadline unambiguously in the past, so this tests the sweep rather than the machine's speed.
+  let clock = Date.now();
+  const mgr = createExecutionManager({ now: () => clock });
   const res = await mgr.run({ workflowId: "wf-auto" });
+  clock += 1000;
   mgr.expireOverdueApprovals();
   await waitFor(() => repo.getRun(res.runId).state === "SUCCEEDED", 8000);
 

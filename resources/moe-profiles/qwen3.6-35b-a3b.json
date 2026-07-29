@@ -1,0 +1,214 @@
+{
+ "model": "Qwen3.6-35B-A3B",
+ "n_expert": 256,
+ "pool_ubatch": 6,
+ "slot_floor": 48,
+ "draft": 2,
+ "layers": [
+  {
+   "il": 0,
+   "slots": 0,
+   "miss": null
+  },
+  {
+   "il": 1,
+   "slots": 0,
+   "miss": null
+  },
+  {
+   "il": 2,
+   "slots": 0,
+   "miss": null
+  },
+  {
+   "il": 3,
+   "slots": 0,
+   "miss": null
+  },
+  {
+   "il": 4,
+   "slots": 48,
+   "miss": 30.2
+  },
+  {
+   "il": 5,
+   "slots": 48,
+   "miss": 24.1
+  },
+  {
+   "il": 6,
+   "slots": 48,
+   "miss": 21.1
+  },
+  {
+   "il": 7,
+   "slots": 48,
+   "miss": 18.1
+  },
+  {
+   "il": 8,
+   "slots": 48,
+   "miss": 14.3
+  },
+  {
+   "il": 9,
+   "slots": 48,
+   "miss": 16.6
+  },
+  {
+   "il": 10,
+   "slots": 48,
+   "miss": 22.5
+  },
+  {
+   "il": 11,
+   "slots": 48,
+   "miss": 23.3
+  },
+  {
+   "il": 12,
+   "slots": 48,
+   "miss": 18.3
+  },
+  {
+   "il": 13,
+   "slots": 48,
+   "miss": 16.9
+  },
+  {
+   "il": 14,
+   "slots": 48,
+   "miss": 13.7
+  },
+  {
+   "il": 15,
+   "slots": 48,
+   "miss": 14.2
+  },
+  {
+   "il": 16,
+   "slots": 48,
+   "miss": 14.8
+  },
+  {
+   "il": 17,
+   "slots": 48,
+   "miss": 15.1
+  },
+  {
+   "il": 18,
+   "slots": 48,
+   "miss": 14.4
+  },
+  {
+   "il": 19,
+   "slots": 48,
+   "miss": 13.1
+  },
+  {
+   "il": 20,
+   "slots": 48,
+   "miss": 12.2
+  },
+  {
+   "il": 21,
+   "slots": 48,
+   "miss": 13.4
+  },
+  {
+   "il": 22,
+   "slots": 48,
+   "miss": 18.4
+  },
+  {
+   "il": 23,
+   "slots": 48,
+   "miss": 20.1
+  },
+  {
+   "il": 24,
+   "slots": 48,
+   "miss": 16.2
+  },
+  {
+   "il": 25,
+   "slots": 48,
+   "miss": 14.9
+  },
+  {
+   "il": 26,
+   "slots": 48,
+   "miss": 13.3
+  },
+  {
+   "il": 27,
+   "slots": 48,
+   "miss": 14.2
+  },
+  {
+   "il": 28,
+   "slots": 48,
+   "miss": 15.7
+  },
+  {
+   "il": 29,
+   "slots": 48,
+   "miss": 14.3
+  },
+  {
+   "il": 30,
+   "slots": 48,
+   "miss": 14.5
+  },
+  {
+   "il": 31,
+   "slots": 48,
+   "miss": 13.3
+  },
+  {
+   "il": 32,
+   "slots": 48,
+   "miss": 18.0
+  },
+  {
+   "il": 33,
+   "slots": 48,
+   "miss": 20.1
+  },
+  {
+   "il": 34,
+   "slots": 48,
+   "miss": 18.2
+  },
+  {
+   "il": 35,
+   "slots": 48,
+   "miss": 15.2
+  },
+  {
+   "il": 36,
+   "slots": 48,
+   "miss": 16.8
+  },
+  {
+   "il": 37,
+   "slots": 48,
+   "miss": 18.3
+  },
+  {
+   "il": 38,
+   "slots": 48,
+   "miss": 20.1
+  },
+  {
+   "il": 39,
+   "slots": 48,
+   "miss": 24.2
+  },
+  {
+   "il": 40,
+   "slots": 0,
+   "miss": null
+  }
+ ]
+}

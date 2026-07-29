@@ -19,6 +19,36 @@ export const LLAMA_VERSION = data.llama;
 export const VM_VERSION = data.vm; // { amd64, arm64 }
 
 /**
+ * Hash of the [messages[0] + tools] prefix the app currently sends — the seed release tag.
+ *
+ * A build-time constant because the main process cannot compute it: the prompt and tool declarations are composed in the renderer.
+ * Regenerate with `npm run seed:capture && npm run seed:gen`, then bump this to the prefixHash the generator prints. Stale value =
+ * the app asks for a seed tag that does not exist, gets a 404, and prefills cold. Wrong value that DOES exist would be worse, but
+ * cannot happen: the server refuses any archive whose model_key is not its own.
+ */
+/**
+ * The macOS fork build: its GitHub release tag, and the KV disk format version that build writes.
+ *
+ * ONE record, because they are one fact. KVD_VER lives in the fork's common/kv-disk.cpp and is not exposed anywhere the app can
+ * read it — not in --version, not in the startup log — so the app has to assert it. Keeping it beside the tag means bumping the
+ * binary puts the format version directly under your cursor; as two separate keys it was a number nobody would think to check.
+ *
+ * Getting it wrong is silent, which is why it matters: the seed key embeds kvd<N>, so a stale value asks for an archive that
+ * exists, downloads ~300 MB, and is then rejected by the reader (which compares the header and fails closed) — leaving a cold
+ * prefill and no error. Bump both together, or better, teach the server to print KVD_VER and read it back.
+ *
+ * macOS runs the fork; Windows stays on the CDN's pinned upstream `llama` version above. Two separate builds, not two versions of
+ * one.
+ */
+export const MAC_LLAMA = data.macLlama ?? { tag: null, kvdVersion: null };
+export const MAC_LLAMA_TAG = MAC_LLAMA.tag;
+export const SEED_KVD = MAC_LLAMA.kvdVersion;
+
+export const SEED_PREFIX = data.seedPrefix || null;
+
+
+
+/**
  * GGUF `general.architecture` tags the pinned llama.cpp build (LLAMA_VERSION) can load — used by the model-library Browse tab
  * to stamp Hub search results supported / unsupported (an arch missing from GGUF metadata shows as "unknown"; nothing is hard-blocked,
  * since this list can lag behind upstream). Update together with LLAMA_VERSION; catalog-model archs must always be present.

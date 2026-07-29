@@ -20,7 +20,8 @@ export const SANDBOX_TOOLBOX_SKILL: InstalledSkill = {
     "Edit, convert, annotate and create images / graphics / audio / video, and process documents (PDF / Office / OCR). " +
     "Editing an existing image — resize, crop, rotate, add text or a watermark, overlay a logo, convert format, compress, SVG→PNG — is done HERE with the preinstalled imagemagick / ffmpeg / librsvg, no API or model needed; " +
     "so is generating graphics programmatically (charts, diagrams, banners, shapes, gradients). The sandbox ships a full toolchain (imagemagick, ffmpeg, librsvg, pngquant, graphviz, pymupdf4llm, markitdown, pandoc, LibreOffice, RapidOCR, etc.). " +
-    "Load this skill whenever the user asks to work with an image, photo, picture, screenshot, icon, SVG, audio, video, PDF or Office file, then use the preinstalled tools directly; do not claim you cannot process images, and do not pip/apt install anything yourself.",
+    "Load this skill whenever the user asks to work with an image, photo, picture, screenshot, icon, SVG, audio, video, PDF or Office file, then use the preinstalled tools directly; do not claim you cannot process images, and do not pip/apt install anything yourself. " +
+    "REQUIRES the Linux sandbox: the whole toolchain is preinstalled in the sandbox image, not on the user's machine. When commands are running directly on the host, this skill is unavailable and its tools will not be found — the Command Execution Environment note in the conversation says which is in effect.",
   author: "Built-in",
   tags: ["sandbox", "image", "media", "graphics", "video", "audio", "pdf", "office", "ocr"],
   allowedTools: ["run_command"],

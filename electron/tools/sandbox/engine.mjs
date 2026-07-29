@@ -81,14 +81,23 @@ function setStatus(phase, extra = {}) {
  *  downgrade the "ready" status and broadcast it, otherwise getSandboxStatus would keep reporting ready
  *  and the UI dialog/badge would wrongly show "running". Ignored while disposing=true during an intentional
  *  dispose/restart (that is an expected shutdown). After downgrading, the engine auto-falls back to native (getEngine depends on ready). */
-function handleVmExit(code, signal) {
+function handleVmExit(code, signal, stderr = "") {
   if (disposing || !ready) return;
   ready = false;
   sandbox = null;
   initPromise = null; // allow re-initialization later (e.g. when the user clicks "update/restart")
-  const how = signal ? `signal ${signal}` : `code ${code ?? "?"}`; // killed/suspended → signal; self-exit → exit code. See vd/qemu.log for details
-  setStatus("error", { reason: `Execution environment exited (${how}) — fell back to native execution; see qemu.log for details` });
-  console.warn(`[sandbox] VM exited unexpectedly (${how}); falling back to native`);
+  const how = signal ? `signal ${signal}` : `code ${code ?? "?"}`; // killed/suspended → signal; self-exit → exit code
+  // Name the cause when qemu told us one. "Address already in use" is by far the most common and the least self-explanatory:
+  // the VM's control ports are fixed, so a qemu orphaned by a crash or force-quit keeps them and every later start dies on the
+  // spot. Startup reaps that orphan now, so seeing this means something ELSE holds the port — worth saying, rather than making
+  // the user open qemu.log to find out.
+  const why = /Address already in use/i.test(stderr)
+    ? "another process is using the sandbox's control port (4444/4445/2222) — a VM from a previous session, or another app"
+    : stderr
+      ? stderr.slice(0, 200)
+      : "see qemu.log for details";
+  setStatus("error", { reason: `Execution environment exited (${how}): ${why}. Fell back to running commands directly on this machine.` });
+  console.warn(`[sandbox] VM exited unexpectedly (${how}): ${why}; falling back to native`);
 }
 
 /** The renderer syncs the current mode (daily / dev). dev mode routes back to native immediately. */

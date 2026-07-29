@@ -16,17 +16,37 @@ import fs from "node:fs";
 import os from "node:os";
 import https from "node:https";
 import { spawn, execSync } from "node:child_process";
+import { app } from "electron";
 import {
   detectHardware, usableModelMemoryGB, recommend as recommendModels, buildServerArgs,
-  MODELS, autoQuantId, quantBpw, gpuLayers, localSupported, MIN_LOCAL_MEM_GB, isSharedGpu, pickCtxKv, computeFit, descriptorFromGguf, MIN_CTX,
+  MODELS, autoQuantId, quantBpw, gpuLayers, localSupported, MIN_LOCAL_MEM_GB, isSharedGpu, pickCtxKv, computeFit, descriptorFromGguf, MIN_CTX, kvTierEnabled, seedAvailable, moePoolEnabled, KV_BITS_OFFERED,
 } from "./localModels.mjs";
-import { ensureInstalled, installedBin, llamaVariant, fallbackVariant, detectCuda, LLAMA_VERSION, localFilesBase, installDir, llamaRootDir, installedLlamaVersions, migrateLegacyLayout } from "./llamaInstaller.mjs";
-import { downloadModel, searchModels, repoDetail, TRUSTED_AUTHORS } from "./hfDownload.mjs";
-import { SUPPORTED_ARCHS } from "../versions.mjs";
+import { ensureInstalled, installedBin, llamaVariant, fallbackVariant, detectCuda, llamaVersionDir, localFilesBase, installDir, llamaRootDir, installedLlamaVersions, migrateLegacyLayout } from "./llamaInstaller.mjs";
+import { downloadModel, searchModels, repoDetail, resolveRevision, TRUSTED_AUTHORS } from "./hfDownload.mjs";
+import { SUPPORTED_ARCHS, SEED_PREFIX, SEED_KVD } from "../versions.mjs";
 import { getAppConfig, setAppConfig } from "../appConfig.mjs";
+import { ensureSeed, seedSize, seedInstalled, seedKey } from "./seeds.mjs";
+// The renderer mirrors daily/dev into the sandbox engine, which is the main process's only view of the current mode.
+import { getSandboxStatus } from "../tools/sandbox/engine.mjs";
 
 const DEFAULT_PORT = Number(process.env.LLAMA_PORT || 8080);
 const KV_DIR = path.join(os.tmpdir(), "zeraix-llama-kv");
+// KV disk tier + resident seeds. Deliberately NOT under tmpdir like KV_DIR above: the point of the tier is to survive a restart,
+// and downloaded seeds live here too (in a <model_key>/ sub-folder the server creates). Sibling of models/, so version pruning —
+// which scans only bin/ — leaves it alone.
+const kvDiskDir = () => path.join(localFilesBase(), "kv");
+
+/**
+ * Per-model MoE routing profiles, BUNDLED with the app rather than downloaded.
+ *
+ * 2 KB of JSON tuned per model by the sweep in the fork (kv-cache-disk-design-docs/moe-pool), so there is nothing to gain from a
+ * CDN — unlike seeds, whose size is the only reason they are fetched at all. Packaged: resources/moe-profiles beside the asar;
+ * dev: the repo folder.
+ */
+const moeProfileDir = () =>
+  app.isPackaged
+    ? path.join(process.resourcesPath, "moe-profiles")
+    : path.join(app.getAppPath(), "resources", "moe-profiles");
 
 // Hugging Face endpoint used by -hf to fetch GGUF. Before startup, test huggingface.co reachability: if a direct connection fails (blocked / DNS poisoning / timeout)
 // switch to the mirror hf-mirror.com, otherwise connect directly to huggingface.co. The HF_ENDPOINT env var can force an override. The result is cached in this process.
@@ -110,7 +130,7 @@ export function status() {
     endpoint: `http://127.0.0.1:${state.port}/v1/chat/completions`,
     installed: !!installedBin(state.installedVariant || undefined),
     installedVariant: state.installedVariant,
-    version: LLAMA_VERSION,
+    version: llamaVersionDir(),
     variant: state.variant,
     probe: state.probe,
     error: state.error,
@@ -125,10 +145,40 @@ export function onStatus(cb) { listeners.add(cb); return () => listeners.delete(
 
 function pushLog(s) { state.log.push(s); if (state.log.length > 300) state.log.shift(); ensureLog(); if (logStream) { try { logStream.write(s); } catch { /* ignore */ } } }
 
+/**
+ * Bring on-disk state in line with the current pins. Runs once per launch, before anything reads the model list.
+ *
+ * Two steps: drop pre-versioning installs, whose revision is unknown and unknowable, then reclaim what the current pins have
+ * superseded — old model versions and the seeds keyed to them.
+ *
+ * Both delete without asking, for the same reason: what they remove can never be loaded again. A superseded version directory
+ * names a revision the catalog no longer points at, and an unversioned directory has no revision at all, so neither can satisfy
+ * the pinned path the launcher builds. Keeping them costs tens of gigabytes to no end; the cost of removing them is one
+ * re-download.
+ *
+ * Never throws: storage housekeeping must not be able to stop the app from launching.
+ */
+function runStorageMaintenance() {
+  try {
+    for (const r of deleteUnversionedModelDirs()) {
+      if (r.removed) pushLog(`[llama] removed unversioned ${r.modelId} ${r.quant} (${(r.bytes / 1e9).toFixed(1)} GB) — revision unknown, it will be re-downloaded\n`);
+      else if (r.error) pushLog(`[llama] could not remove unversioned ${r.modelId} ${r.quant}: ${r.error}\n`);
+    }
+    let freed = 0;
+    for (const r of sweepSuperseded()) {
+      if (r.removed) { freed++; pushLog(`[llama] reclaimed (${r.why}): ${path.basename(r.dir)}\n`); }
+    }
+    if (freed) pushLog(`[llama] storage maintenance: ${freed} superseded item(s) removed\n`);
+  } catch (e) {
+    pushLog(`[llama] storage maintenance skipped: ${e?.message ?? e}\n`);
+  }
+}
+
 // ── Hardware / recommendation ──────────────────────────────────────────────
 /** Coarse detection (before install, wizard step 0/1): hardware + available memory + CUDA availability + whether the minimum threshold is met. */
 export function getHardware() {
   migrateLegacyLayout(); // on first launch with the new layout, move legacy models/bin/logs into the dedicated folder (same-disk rename, sub-second)
+  runStorageMaintenance();
   ensureLogFile();       // ensure the "run log" button can always open the log file under the current folder
   const hw = detectHardware();
   return { hw, cuda: detectCuda(), supported: localSupported(hw), minMemGB: MIN_LOCAL_MEM_GB };
@@ -224,16 +274,24 @@ export async function migrateStorageTo(newDir) {
 /** GGUF model download directory (models/<repo_>/<quant>/). */
 export function modelsDir() { return path.join(localFilesBase(), "models"); }
 
-/** llama runtime info: version / installed versions / whether updatable (the llama version in versions.json differs from the installed one) / directory. */
+/**
+ * llama runtime info: version / installed versions / whether updatable / directory.
+ *
+ * "The version" is llamaVersionDir(), NOT LLAMA_VERSION. They differ on macOS, which runs the fork tag (mac-v1) while
+ * LLAMA_VERSION is the upstream build the CDN serves to Windows. Comparing the installed directory against LLAMA_VERSION there
+ * meant `["mac-v1"].includes("b9946")` — false forever, so the UI showed a permanent "new version b9946 available (mac-v1
+ * installed)" badge offering to replace the fork with a build that has none of the KV disk, seed or MoE-pool flags.
+ */
 export function llamaInfo() {
   const versions = installedLlamaVersions();
-  const upToDate = versions.includes(LLAMA_VERSION);
+  const want = llamaVersionDir();
+  const upToDate = versions.includes(want);
   let variant = state.installedVariant || null;
   if (!variant && upToDate) { // when state is not yet populated, find the installed variant of the current version from disk
-    try { variant = fs.readdirSync(path.join(llamaRootDir(), LLAMA_VERSION)).find((v) => !!installedBin(v)) || null; } catch { /* ignore */ }
+    try { variant = fs.readdirSync(path.join(llamaRootDir(), want)).find((v) => !!installedBin(v)) || null; } catch { /* ignore */ }
   }
   return {
-    version: LLAMA_VERSION,
+    version: want,
     installedVersions: versions,
     installed: versions.length > 0,
     upToDate,
@@ -292,8 +350,137 @@ function localModelFiles(dir) {
 }
 /** Whether a model's quantization is "fully installed": main weights complete, no .part, and mmproj present when the model has vision.
  *  The MTP drafter is treated as an optional accelerator (not counted toward "complete"): when missing, fetch on demand before startup (~hundred MB), to avoid "un-installing" an already installed model. */
+/**
+ * Where a model's weights live: `models/<repo_>/<revision8>/<quant>/`.
+ *
+ * Version is the OUTER directory on purpose — retiring a model version is then one `rm -rf` covering every quant of it, rather
+ * than hunting a version folder under each quant separately. Revision and quant are independent axes: one repo revision ships
+ * many quants, so the revision does not tell you which file you took.
+ *
+ * Models with no pinned revision (community downloads) keep the flat `<repo_>/<quant>/` layout — there is no version to key on.
+ */
+
+/**
+ * Delete pre-versioning installs: `<repo_>/<quant>/` with weights directly inside.
+ *
+ * Deleted, not moved. A flat directory was downloaded tracking `main`, and what `main` pointed at that day is recorded nowhere —
+ * so its revision is unknown, and there is no cheap way to find out. Renaming it into `<rev8>/` would be a claim about the bytes
+ * that nothing checked, and the directory name would then become the only evidence for it. That was the previous behaviour and it
+ * was wrong: on a real install it labelled three of four models with a revision they were not.
+ *
+ * So the choice is between an unverified label and a re-download, and the re-download wins. It costs bandwidth once; a wrong
+ * label costs a model that silently never matches its published seed, with nothing anywhere to say why.
+ *
+ * Only catalog models with a pinned revision — a community download has no pin to be wrong about, so it keeps its flat path.
+ *
+ * `dryRun` returns the plan without touching anything. Returns [{ modelId, quant, dir, bytes, removed, error }].
+ */
+export function deleteUnversionedModelDirs({ dryRun = false } = {}) {
+  const base = modelsDir();
+  const out = [];
+  let repoDirs = [];
+  try { repoDirs = fs.readdirSync(base, { withFileTypes: true }).filter((d) => d.isDirectory()); } catch { return out; }
+  for (const rd of repoDirs) {
+    const model = MODELS.find((m) => m.hf && m.hf.replace(/\//g, "_") === rd.name);
+    if (!model?.revision) continue;
+    let children = [];
+    try { children = fs.readdirSync(path.join(base, rd.name), { withFileTypes: true }).filter((d) => d.isDirectory()); } catch { continue; }
+    for (const c of children) {
+      if (/^[0-9a-f]{8}$/.test(c.name)) continue; // a version dir, not the old layout
+      const dir = path.join(base, rd.name, c.name);
+      if (!localModelFiles(dir).weights.length) continue; // not a quant dir holding weights
+      const rec = { modelId: model.id, quant: c.name, dir, bytes: dirBytes(dir), removed: false, error: null };
+      if (!dryRun) {
+        try { fs.rmSync(dir, { recursive: true, force: true }); rec.removed = true; } catch (e) { rec.error = e.message; }
+      }
+      out.push(rec);
+    }
+  }
+  return out;
+}
+
+/** Total size of the files directly inside a directory. Used only to report how much a delete reclaims. */
+function dirBytes(dir) {
+  try {
+    return fs.readdirSync(dir).reduce((n, f) => {
+      try { const s = fs.statSync(path.join(dir, f)); return n + (s.isFile() ? s.size : 0); } catch { return n; }
+    }, 0);
+  } catch { return 0; }
+}
+
+/**
+ * Reclaim what a version bump superseded: old model versions, and the seeds that belonged to them.
+ *
+ * Run after the catalog's pins change. Two sweeps, kept together because they retire for the same reason — a model version bump
+ * invalidates both the weights directory AND every seed keyed on that revision.
+ *
+ * Models: any `<repo_>/<rev8>/` that is not the current pin. Safe to delete outright — unlike the legacy layout, a version dir
+ * says exactly which revision it is, so there is no ambiguity about what is being removed.
+ *
+ * Seeds: the marker files record `<model>-<mode>` and the key they installed, and the key embeds `r<rev8>`. A marker whose
+ * revision is not the current pin means those KV units can never be borrowed again. The unit directory is keyed by model_key
+ * rather than revision, so it is removed via the marker rather than by name.
+ */
+export function sweepSuperseded({ dryRun = false } = {}) {
+  const removed = [];
+  const rm = (dir, why, extra) => {
+    const rec = { dir, why, ...extra, removed: false, error: null };
+    if (!dryRun) {
+      try { fs.rmSync(dir, { recursive: true, force: true }); rec.removed = true; } catch (e) { rec.error = e.message; }
+    }
+    removed.push(rec);
+  };
+
+  const base = modelsDir();
+  let repoDirs = [];
+  try { repoDirs = fs.readdirSync(base, { withFileTypes: true }).filter((d) => d.isDirectory()); } catch { repoDirs = []; }
+  for (const rd of repoDirs) {
+    const model = MODELS.find((m) => m.hf && m.hf.replace(/\//g, "_") === rd.name);
+    if (!model?.revision) continue;
+    const want = String(model.revision).slice(0, 8);
+    let vers = [];
+    try { vers = fs.readdirSync(path.join(base, rd.name), { withFileTypes: true }).filter((d) => d.isDirectory()); } catch { continue; }
+    for (const v of vers) {
+      if (!/^[0-9a-f]{8}$/.test(v.name) || v.name === want) continue;
+      rm(path.join(base, rd.name, v.name), "superseded model version", { modelId: model.id, version: v.name, wanted: want });
+    }
+  }
+
+  const kv = kvDiskDir();
+  let entries = [];
+  try { entries = fs.readdirSync(kv); } catch { entries = []; }
+  const liveKeys = new Set();
+  // Every seed we would install today is live; anything else in the directory belongs to a prefix, revision or KV quantisation
+  // that is no longer used. Iterating KV_BITS_OFFERED rather than the running launch's setting matters — a user who switches
+  // quantisation and back must not have the first seed swept while the second is in use.
+  for (const m of MODELS) {
+    if (!seedAvailable(m.id)) continue;
+    for (const mode of ["daily", "dev"]) {
+      if (!SEED_PREFIX?.[mode]) continue;
+      for (const kvBits of KV_BITS_OFFERED) {
+        liveKeys.add(`.seed-${m.id}-${mode}-${seedKey({ prefixHash: SEED_PREFIX[mode], revision: m.revision, kvdVersion: SEED_KVD, kvBits })}`);
+      }
+    }
+  }
+  for (const e of entries) {
+    if (!e.startsWith(".seed-") || liveKeys.has(e)) continue;
+    // The marker's body is the model_key directory it installed; remove that, then the marker.
+    let unitDir = null;
+    try { unitDir = fs.readFileSync(path.join(kv, e), "utf8").trim(); } catch { /* unreadable marker */ }
+    if (unitDir && /^\d+$/.test(unitDir)) rm(path.join(kv, unitDir), "seed for a superseded prefix or model version", { marker: e });
+    rm(path.join(kv, e), "stale seed marker", { marker: e });
+  }
+  return removed;
+}
+
+export function modelQuantDir(model, quant) {
+  const repo = (model.hf || model.repo || "").replace(/\//g, "_");
+  const rev = model.revision ? String(model.revision).slice(0, 8) : null;
+  return rev ? path.join(modelsDir(), repo, rev, quant) : path.join(modelsDir(), repo, quant);
+}
+
 function isModelInstalled(model, quant) {
-  const dir = path.join(modelsDir(), (model.hf || "").replace(/\//g, "_"), quant);
+  const dir = modelQuantDir(model, quant);
   const f = localModelFiles(dir);
   if (f.hasPart || !f.weights.length) return false;
   if (model.vision && !f.mmproj) return false; // vision projector required
@@ -315,8 +502,18 @@ export function listDownloaded() {
   for (const rd of repoDirs) {
     let quantDirs = [];
     try { quantDirs = fs.readdirSync(path.join(base, rd.name), { withFileTypes: true }).filter((d) => d.isDirectory()); } catch { continue; }
-    for (const qd of quantDirs) {
-      const dir = path.join(base, rd.name, qd.name);
+    // A catalog model's repo dir now holds <revision8>/<quant>/; the flat <quant>/ shape is a pre-versioning install. Expand one
+    // level where a version dir is present so both layouts list correctly during the transition.
+    const expanded = [];
+    for (const d of quantDirs) {
+      const inner = path.join(base, rd.name, d.name);
+      const sub = (() => { try { return fs.readdirSync(inner, { withFileTypes: true }).filter((x) => x.isDirectory()); } catch { return []; } })();
+      const isVersionDir = /^[0-9a-f]{8}$/.test(d.name) && sub.length > 0;
+      if (isVersionDir) for (const q of sub) expanded.push({ name: q.name, rel: path.join(d.name, q.name), version: d.name });
+      else expanded.push({ name: d.name, rel: d.name, version: null });
+    }
+    for (const qd of expanded) {
+      const dir = path.join(base, rd.name, qd.rel);
       const f = localModelFiles(dir);
       if (f.hasPart || !f.weights.length) continue; // in-progress or empty download
       let manifest = null;
@@ -360,18 +557,27 @@ export function deleteLocalModel(opts = {}) {
   const base = modelsDir();
   if (!dir || !path.resolve(dir).startsWith(path.resolve(base) + path.sep)) return { ok: false, error: "invalid dir" };
   if (state.model?.dir && path.resolve(state.model.dir) === path.resolve(dir)) return { ok: false, error: "running" };
-  try { fs.rmSync(dir, { recursive: true, force: true }); return { ok: true }; }
-  catch (e) { return { ok: false, error: String(e?.message ?? e) }; }
+  try {
+    fs.rmSync(dir, { recursive: true, force: true });
+    // Then the now-empty `<rev8>/`, and the `<repo_>/` above it. NOT the version directory outright: one version can hold
+    // several quants, they are separate rows in the model list, and deleting one must not take the others. A `.DS_Store` does
+    // not count as content — macOS writes one the moment Finder looks at the folder, which would keep every husk alive.
+    for (let p = path.dirname(path.resolve(dir)); p.startsWith(path.resolve(base) + path.sep); p = path.dirname(p)) {
+      if (fs.readdirSync(p).some((e) => e !== ".DS_Store")) break;
+      fs.rmSync(p, { recursive: true, force: true });
+    }
+    return { ok: true };
+  } catch (e) { return { ok: false, error: String(e?.message ?? e) }; }
 }
 
 /** The build variant selected per useCuda and whether it is installed (wizard step 1: show "install / installed", to avoid re-downloading). */
 export function installInfo(opts = {}) {
   const hw = detectHardware();
   const variant = llamaVariant(hw, { preferCuda: !!opts.useCuda });
-  return { variant, installed: !!installedBin(variant), version: LLAMA_VERSION };
+  return { variant, installed: !!installedBin(variant), version: llamaVersionDir() };
 }
 
-/** Install status of the two candidate variants, with / without CUDA, so the wizard defaults to the "installed" one (to avoid a redundant download). Version follows LLAMA_VERSION; an upgrade counts as not installed. */
+/** Install status of the two candidate variants, with / without CUDA, so the wizard defaults to the "installed" one (to avoid a redundant download). Version follows llamaVersionDir() (the mac fork tag on darwin, the CDN pin elsewhere); an upgrade counts as not installed. */
 export function installStatus() {
   const hw = detectHardware();
   const cuda = detectCuda();
@@ -379,7 +585,7 @@ export function installStatus() {
   const withCuda = cuda.available ? llamaVariant(hw, { preferCuda: true }) : null;
   const variants = [{ useCuda: false, variant: noCuda, installed: !!installedBin(noCuda) }];
   if (withCuda && withCuda !== noCuda) variants.push({ useCuda: true, variant: withCuda, installed: !!installedBin(withCuda) });
-  return { version: LLAMA_VERSION, cuda, variants };
+  return { version: llamaVersionDir(), cuda, variants };
 }
 
 /** Recommend a model: merge the probed real VRAM (opts.vramGB) into hw to get a layer-offload-aware recommendation.
@@ -643,32 +849,44 @@ export function start(opts = {}) {
 
   const visionOn = r.vision && opts.vision !== false; // true only when the model supports vision and the toggle is not off
   const mtpOn = !!r.mtp && opts.mtp !== false;  // MTP speculative decoding (model supports it and the toggle is not off, on by default)
-  // Context / KV quantization auto-tiering: when not explicitly specified, pick the largest -c that fits per "model + quantization + device memory" (capped at the native window),
-  // preferring KV q8, and automatically dropping to q4 when it does not fit to unlock a larger context (see localModels.pickCtxKv). Custom -hf (no catalog entry) falls back to 16K/q8.
+  // Context / KV quantization auto-tiering: when not explicitly specified, pick the largest -c that fits per "model + quantization + device memory"
+  // (capped at the native window), at one of the offered KV quantizations (see localModels.pickCtxKv).
+  // The fallback for a custom -hf model with no catalog entry is 16K at the first offered quantization, NOT a hardcoded one — a
+  // launch that quietly runs at a quantization we publish no seed for would take a cold prefill with nothing to explain it.
   const pick = !opts.ctx && r.model ? pickCtxKv(r.model, r.bpw, hw, usableModelMemoryGB(hw), visionOn) : null;
   const ctx = Number(opts.ctx || (pick ? pick.ctx : 16384));
-  const kvBits = Number(opts.kvBits || (pick ? pick.kvBits : 8));
+  const kvBits = Number(opts.kvBits || (pick ? pick.kvBits : KV_BITS_OFFERED[0]));
   state.port = Number(opts.port || 0); // 0 = request a random free port from the kernel inside launch
   state.ctx = ctx;
-  const modelDir = r.repo && r.quant ? path.join(localFilesBase(), "models", r.repo.replace(/\//g, "_"), r.quant) : null;
+  // Uniform layout: <repo_>/<rev8>/<quant>/. A catalog model uses its pinned revision; a community model uses whatever `main`
+  // resolved to when it was fetched, so its provenance is recoverable too. Resolution is async, so it is filled in below.
+  let modelRevision = MODELS.find((m) => m.id === r.id)?.revision || null;
+  let modelDir = r.repo && r.quant ? modelQuantDir({ hf: r.repo, revision: modelRevision }, r.quant) : null;
   state.model = { hf: r.hf, label: r.label, multimodal: visionOn, id: r.id, name: r.name, ctx, dir: modelDir, repo: r.repo || null, quant: r.quant || null, chatTemplate: r.chatTemplate || null }; // ctx = the -c at startup, used by the renderer as the model's real context window; dir/repo/quant let the model library match "running"; chatTemplate = optional built-in template override
   state.ready = false;
   state.error = null;
   state.log = [];
   state.pct = 0;
   try { fs.mkdirSync(KV_DIR, { recursive: true }); } catch { /* ignore */ }
+  // mac only — the Windows binary has no --kv-disk-path, so it should never even get a directory.
+  try { if (kvTierEnabled()) fs.mkdirSync(kvDiskDir(), { recursive: true }); } catch { /* ignore */ }
 
   // Prefer reusing the variant installed in wizard step 1; otherwise choose now per useCuda (launch will ensure it is installed).
   const variant = state.installedVariant || llamaVariant(hw, { preferCuda: !!opts.useCuda });
   const gen = ++launchGen; // this startup's generation id; checked after awaits inside launch, abandon spawn if stale
-  launch(variant, { r, hw, ctx, kvBits, visionOn, mtpOn, gen });
+  launch(variant, { r, hw, ctx, kvBits, visionOn, mtpOn, gen, modelDir, modelRevision });
   emit();
   return status();
 }
 
 /** Install (download if needed) the given variant -> bring up llama-server; if a GPU build fails before ready, automatically fall back to the next level (the CPU variant has no fallback, so no infinite recursion). */
 async function launch(variant, cfg) {
-  const { r, hw, ctx, kvBits = 8, visionOn, mtpOn, gen } = cfg;
+  const { r, hw, ctx, kvBits = KV_BITS_OFFERED[0], visionOn, mtpOn, gen } = cfg;
+  // Computed in start() from the catalog pin, and carried in cfg — NOT closed over, because start() and launch() are separate
+  // functions and a fallback retry re-enters launch() with the same cfg. `let`: a community model has no pin, so the branch
+  // below resolves `main` and reassigns both. The reassignment does not need to travel back to start(); what the UI reads is
+  // state.model.dir, which that branch updates directly.
+  let { modelDir = null, modelRevision = null } = cfg;
   const stale = () => gen != null && gen !== launchGen; // this startup has been superseded by a later start/stop
   const mtpSeparate = !!r.model?.mtp && !r.model?.mtpEmbedded; // Gemma: standalone MTP drafter file (needs download + -md)
   state.variant = variant;
@@ -691,8 +909,40 @@ async function launch(variant, cfg) {
   try { fs.mkdirSync(modelsDir, { recursive: true }); } catch { /* ignore */ }
   let modelPath = null, mmprojPath = null, mtpPath = null, templatePath = null;
   if (r.repo && r.quant) {
-    const destDir = path.join(modelsDir, r.repo.replace(/\//g, "_"), r.quant);
+    // Versioned path, matching isModelInstalled. Reassigned after the revision is resolved for a community model, which is why
+    // it is `let` — a flat destDir here would write the download to the pre-migration location.
+    let destDir = modelDir || path.join(modelsDir, r.repo.replace(/\//g, "_"), r.quant);
     const local = localModelFiles(destDir);
+    // Seed planning sits OUTSIDE the download branch on purpose. A seed download that was paused leaves a .part with the weights
+    // already complete, so the next launch takes the "already installed" path — and if the seed work lived only in the download
+    // branch, that partial could never resume. Weights complete does not mean seeds complete.
+    //
+    // Sizes come from a HEAD up front so the bar can be weighted by total bytes rather than sweeping 0-100 per file; a seed that
+    // is already installed, or whose size is unknown, contributes 0 and the bar simply reflects the rest.
+    //
+    // Seeds are optional. The disk tier runs for every model on mac with or without one — a model with no published seed just
+    // starts cold and warms up as the user talks. seedAvailable is therefore only about whether there is an asset to fetch.
+    const seedPlan = [];
+    for (const sm of seedAvailable(r.id) ? ["daily", "dev"] : []) {
+      if (!SEED_PREFIX?.[sm]) continue;
+      // kvBits is part of the seed's identity, so the seed fetched is the one for the quantisation THIS launch will run at.
+      const spec = { endpoint: hfEnd, modelId: r.id, mode: sm, prefixHash: SEED_PREFIX[sm],
+        revision: MODELS.find((m) => m.id === r.id)?.revision, kvdVersion: SEED_KVD, kvBits };
+      if (seedInstalled(kvDiskDir(), `${r.id}-${sm}`, seedKey(spec))) continue;
+      seedPlan.push({ spec, bytes: await seedSize(spec) });
+    }
+    // Its own controller: the download's is scoped to the branch below and cleared when that finishes, but a seed pass can run
+    // with no download at all (weights already present) and still has to be stoppable.
+    const ac0 = new AbortController();
+    state.dlAbort = ac0;
+    const seedTotal = seedPlan.reduce((n, x) => n + x.bytes, 0);
+    let seedDone = 0, comboLast = -1, modelBytes = 0;
+    const combo = (modelDone, modelTotal, thisSeedDone) => {
+      const total = modelTotal + seedTotal;
+      if (!total) return;
+      const p = Math.min(100, Math.floor(((modelDone + seedDone + thisSeedDone) / total) * 100));
+      if (p !== comboLast) { comboLast = p; state.pct = p; emit(); }
+    };
     const drafterMissing = mtpSeparate && !local.mtp; // needs a standalone drafter but not present locally -> needs to be fetched (~hundred MB)
     if (r.model && isModelInstalled(r.model, r.quant) && !drafterMissing) {
       // Fully installed (and no missing drafter): use the local files directly, skipping the download phase (do not show "downloading").
@@ -704,13 +954,23 @@ async function launch(variant, cfg) {
       const ac = new AbortController();
       state.dlAbort = ac;
       try {
+        // A community model has no pin, so resolve the ref it is about to fetch and use that as its version directory. Failure
+        // just means the flat path, which is what it had before — not worth blocking a download over.
+        if (!modelRevision && r.repo) {
+          modelRevision = await resolveRevision(hfEnd, r.repo, "main");
+          if (modelRevision) { modelDir = modelQuantDir({ hf: r.repo, revision: modelRevision }, r.quant); destDir = modelDir; state.model.dir = modelDir; }
+        }
         state.phase = "fetching"; state.pct = 0; emit();
         // Always download mmproj (when the model has vision) and the standalone MTP drafter (Gemma), so the runtime can freely toggle vision/MTP without re-downloading;
         // when an installed model is only missing the drafter, downloadModel skips the existing weights/vision projector and fetches only the drafter. Qwen has a built-in MTP (no standalone file).
         const out = await downloadModel(
           // manifest: identifies the directory for listDownloaded (community models keep their gguf header for restarts, see descriptorFromGguf).
-          { endpoint: hfEnd, repo: r.repo, quant: r.quant, vision: !!r.vision, mtp: mtpSeparate, destDir, manifest: { name: r.name, modelId: r.id, gguf: r.meta || null } },
-          (pct) => { if (pct !== state.pct) { state.pct = pct; emit(); } },
+          // revision: catalog models on the KV tier pin an exact commit — a seed is only valid for the GGUF it was built against,
+          // and the chat template lives inside that file. Community/non-catalog downloads keep tracking main.
+          { endpoint: hfEnd, repo: r.repo, quant: r.quant, vision: !!r.vision, mtp: mtpSeparate, destDir,
+            revision: modelRevision || "main",
+            manifest: { name: r.name, modelId: r.id, gguf: r.meta || null, revision: MODELS.find((m) => m.id === r.id)?.revision || null } },
+          (pct, b) => { if (b) { modelBytes = b.total; combo(b.done, b.total, 0); } },
           ac.signal,
         );
         modelPath = out.modelPath; mmprojPath = out.mmprojPath; mtpPath = out.mtpPath || null;
@@ -723,6 +983,29 @@ async function launch(variant, cfg) {
         if (state.dlAbort === ac) state.dlAbort = null;
       }
     }
+
+    // Seeds, after the branch above so they run whether or not the weights were fetched this launch. Must land before
+    // llama-server starts: the startup scan is what makes a seed resident, so one installed afterwards does nothing until the
+    // next restart. Aborting is a pause, not a failure — the .part survives and the next attempt resumes from it.
+    //
+    // The phase has to be announced here, not only in the download branch above. "fetching" is what makes the model card show a
+    // percentage and a progress bar; when the weights are already present the launch is otherwise still in "loading", which
+    // renders as a bare spinner — so a few hundred MB of seed would download with nothing on screen moving. The spawn below
+    // sets the phase back to "loading".
+    // Phase only — never the percentage. combo() spans weights AND seeds as ONE bar, so the model download already left it at
+    // ~97% (the seeds are the remaining few percent). Zeroing here sent it 97 -> 0 -> 97 -> 100. On the already-installed path
+    // there is nothing to preserve: pct is still 0 from the top of launch(), and combo() then drives 0 -> 100 over the seeds.
+    if (seedPlan.length) { state.phase = "fetching"; emit(); }
+    for (const { spec, bytes } of seedPlan) {
+      if (ac0.signal.aborted) break;
+      const status = await ensureSeed({
+        ...spec, kvDiskDir: kvDiskDir(), onLog: pushLog, signal: ac0.signal,
+        onProgress: (pct) => combo(modelBytes, modelBytes, Math.floor((pct / 100) * bytes)),
+      });
+      seedDone += bytes;
+      pushLog(`[seed] ${spec.mode}: ${status}\n`);
+    }
+    if (state.dlAbort === ac0) state.dlAbort = null;
     // Resolved after both branches by re-scanning the directory, so it picks up a template that was just downloaded and
     // one the user dropped in by hand since the last launch alike (see findTemplateFile for the priority order).
     const tpl = localModelFiles(destDir).template;
@@ -745,13 +1028,24 @@ async function launch(variant, cfg) {
   const useMtp = !!mtpOn && haveMtp;
   const mtpDraft = useMtp && mtpSeparate ? mtpPath : null;
   if (mtpOn && !haveMtp) pushLog("[llama] MTP is enabled but no drafter found, speculative decoding not enabled this time\n");
-  const args = buildServerArgs({ modelPath, mmproj: visionOn ? mmprojPath : null, mtpDraft, specMtp: useMtp, hw, ctx, port: state.port, kvBits, kvCacheDir: KV_DIR, ngl, chatTemplate: r.chatTemplate, chatTemplateFile: templatePath });
+  // macOS installs the fork build from GitHub (see llamaInstaller.macForkAsset), so these flags are always supported there;
+  // kvTierEnabled is exactly the darwin check. Every model gets the tier — the server content-addresses the KV layout into its
+  // own model_key and files units under <dir>/<model_key>/, so an unknown GGUF cannot collide with another model's units.
+  const kvTier = kvTierEnabled();
+  // MoE expert pool: enabled by pointing LLAMA_MOE_POOL_PROFILE at a per-model routing profile. MoE models on mac only, and only
+  // when the profile is actually present — without one the fork leaves the pool inert by design rather than pinning blind
+  // index-order experts, so a missing file degrades to stock speed instead of degrading output.
+  const moeProfile = moePoolEnabled(r.model?.id) ? path.join(moeProfileDir(), `${r.model.id}.json`) : null;
+  const moeOn = !!moeProfile && fs.existsSync(moeProfile);
+  if (moeProfile && !moeOn) pushLog(`[llama] MoE pool profile missing (${path.basename(moeProfile)}) — pool inert\n`);
+  else if (moeOn) pushLog(`[llama] MoE pool profile: ${path.basename(moeProfile)}\n`);
+  const args = buildServerArgs({ modelPath, mmproj: visionOn ? mmprojPath : null, mtpDraft, specMtp: useMtp, hw, ctx, port: state.port, kvBits, kvCacheDir: KV_DIR, kvDiskDir: kvTier ? kvDiskDir() : null, parallel: kvTier ? 2 : 0, ngl, chatTemplate: r.chatTemplate, chatTemplateFile: templatePath });
   if (templatePath) pushLog(`[llama] chat template file: ${path.basename(templatePath)}${r.chatTemplate ? ` (overrides the "${r.chatTemplate}" built-in)` : ""}\n`);
   else if (r.chatTemplate) pushLog(`[llama] chat template override: ${r.chatTemplate}\n`);
   pushLog(`[llama] argv: ${bin} ${args.join(" ")}\n`); // full startup command (for troubleshooting)
   let proc;
   try {
-    proc = spawn(bin, args, { stdio: ["ignore", "pipe", "pipe"], env: { ...process.env, HF_ENDPOINT: hfEnd, LLAMA_CACHE: modelsDir } });
+    proc = spawn(bin, args, { stdio: ["ignore", "pipe", "pipe"], env: { ...process.env, HF_ENDPOINT: hfEnd, LLAMA_CACHE: modelsDir, ...(moeOn ? { LLAMA_MOE_POOL_PROFILE: moeProfile } : {}) } });
   } catch (e) {
     const fb = fallbackVariant(variant);
     if (fb) { pushLog(`[llama] start of ${variant} failed (${String(e?.message ?? e)}) -> falling back to ${fb}\n`); return launch(fb, cfg); }

@@ -47,6 +47,7 @@ export interface StoredMessage {
    */
   reminder?: {
     workdir?: string;
+    env?: string;
     ctx?: { date: string; model: string; tz: string };
     skills?: { id: string; description: string }[];
     disabledTools?: string[];

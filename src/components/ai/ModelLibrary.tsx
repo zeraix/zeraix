@@ -93,6 +93,9 @@ export default function ModelLibrary() {
   const [migrating, setMigrating] = useState(false);
 
   const KV_LABEL: Record<number, string> = { 8: t("ml.kv.q8"), 4: t("ml.kv.q4"), 16: t("ml.kv.f16") };
+  // What the main process offers, not a list held here — see LocalLlmRecommendation.kvBitsOffered. The fallback only covers the
+  // moment before the first recommendation arrives.
+  const kvChoices = rec?.kvBitsOffered?.length ? rec.kvBitsOffered : [4];
   const kvTag = (v: number) => (v === 16 ? "f16" : `q${v}_0`);
   const modelNote = (id: string, fallback: string) => { const s = t(`local.note.${id}`); return s === `local.note.${id}` ? fallback : s; };
 
@@ -104,13 +107,19 @@ export default function ModelLibrary() {
     setHw(h); setLlama(li); setRec(r); setStatus(st); setDownloaded(dl); setStorage(sg);
     try { localStorage.setItem(HW_KEY, JSON.stringify(h)); } catch { /* ignore */ }
     setUseCuda(li?.variant?.includes("cuda") ?? false);
+    const offered = r.kvBitsOffered?.length ? r.kvBitsOffered : [4];
     const recDefaults: Record<string, ModelOpts> = {};
-    for (const o of r.options) recDefaults[o.model.id] = { quant: o.quant.id, ctx: o.ctx ?? 16384, kvBits: o.kvBits ?? 8, vision: true, mtp: true };
+    for (const o of r.options) recDefaults[o.model.id] = { quant: o.quant.id, ctx: o.ctx ?? 16384, kvBits: o.kvBits ?? offered[0], vision: true, mtp: true };
     setDefaults(recDefaults);
     const persisted = loadPersisted();
     setOpts((prev) => {
       const next = { ...prev };
-      for (const o of r.options) next[o.model.id] = prev[o.model.id] ?? persisted[o.model.id] ?? recDefaults[o.model.id];
+      for (const o of r.options) {
+        const chosen = prev[o.model.id] ?? persisted[o.model.id] ?? recDefaults[o.model.id];
+        // A setting saved before this build may name a KV quantization no longer offered. Left alone it would launch at that
+        // quantization while the picker showed something else, and silently miss the seed — so pull it back onto the list.
+        next[o.model.id] = offered.includes(chosen.kvBits) ? chosen : { ...chosen, kvBits: recDefaults[o.model.id].kvBits };
+      }
       return next;
     });
   }, [bridge]);
@@ -482,8 +491,8 @@ export default function ModelLibrary() {
                       </div>
                     </label>
                     <label className="flex flex-col gap-1 text-xs text-ink-subtle">{t("ml.kvQuant")}
-                      <select className="rounded-md border border-line-strong bg-surface px-2 py-1 text-ink disabled:opacity-50" value={mo.kvBits} disabled={locked} onChange={(e) => setOpt(o.model.id, { kvBits: Number(e.target.value) })}>
-                        {[8, 4, 16].map((v) => <option key={v} value={v}>{KV_LABEL[v]}</option>)}
+                      <select className="rounded-md border border-line-strong bg-surface px-2 py-1 text-ink disabled:opacity-50" value={mo.kvBits} disabled={locked || kvChoices.length < 2} onChange={(e) => setOpt(o.model.id, { kvBits: Number(e.target.value) })}>
+                        {kvChoices.map((v) => <option key={v} value={v}>{KV_LABEL[v]}</option>)}
                       </select>
                     </label>
                     {o.model.vision && (
