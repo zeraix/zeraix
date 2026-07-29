@@ -15,7 +15,9 @@
  * confined per-command to the mount set by bwrap (homeRoot ∪ explicit extras), bound on posix as an "isomorphic
  * path" (host path == guest path, so tool output paths match on both sides).
  *
- * Falls back to native before ready / on failure. Requires real-machine boot verification (see sandbox/qemu/README).
+ * A sandbox failure is reported as a failed command, never re-run on the host (see sandboxFailure below). Routing to
+ * native at all — dev mode, engine=native, before the VM is ready — is engine.mjs's decision, not this module's.
+ * Requires real-machine boot verification (see sandbox/qemu/README).
  */
 import fs from "node:fs";
 import os from "node:os";
@@ -26,7 +28,6 @@ import https from "node:https";
 import { app } from "electron";
 
 import { emitService } from "./events.mjs";
-import * as native from "./native.mjs";
 import { qmp, guestAgent } from "./control.mjs";
 import { startNinepServer } from "./ninep-server.mjs";
 import { vmDir, vmVersion, guestArch, localDataDir } from "./vmpaths.mjs";
@@ -45,6 +46,94 @@ const isWin = process.platform === "win32";
 const QMP_PORT = 4444;
 const GA_PORT = 4445;
 const GUEST_MNT = "/mnt/hostfs"; // Mount point of the host root inside the guest (firstboot.sh mounts it via 9p; must match)
+/**
+ * Backing directory for the sandbox's /tmp, on the guest's DISK rather than in RAM.
+ *
+ * bwrap used `--tmpfs /tmp`, which is RAM: a command writing a page raster there was competing with its own heap inside a 2 GiB
+ * VM. It lands in run.qcow2 now — a throwaway overlay that boot() deletes and recreates every time — so the contents still
+ * vanish with the VM and never reach the host. Verified from inside: `df /tmp` reports /dev/vda, not tmpfs.
+ *
+ * This was NOT the cause of the OOM kills that prompted it: every one of those recorded `shmem-rss:0kB`, which is where tmpfs
+ * pages would show, so nothing was in /tmp at the time. It removes a ceiling rather than the one that was being hit.
+ *
+ * Space is shared with the swapfile on a 6 GiB disk and is not generous — measured at 77% used with 1.4 GiB free while a job
+ * was running. Growing it means passing a size to qemu-img create (boot() recreates the overlay anyway) plus resize2fs in the
+ * guest; /dev/vda is a bare filesystem with no partition table, so nothing else is needed.
+ *
+ * One directory for the whole VM session, not one per command: /tmp is then shared between commands, which is what someone
+ * writing an intermediate file in one step and reading it in the next expects. The old per-command tmpfs discarded it.
+ */
+const GUEST_TMP = "/var/tmp/sandbox-tmp";
+
+/**
+ * The PP-OCRv6 adapter, shadowed from the host over the copy baked into the image.
+ *
+ * The image does `COPY rapidocr_v6_api.py /opt/ocr/` (Dockerfile), so without this the file only changes by rebuilding and
+ * republishing the rootfs — a new VM_VERSION and a ~1 GB download for every user, to alter a default. That is the wrong price
+ * for a file that is application logic: it is the pymupdf4llm↔RapidOCR integration, the piece most likely to need tuning.
+ *
+ * Binding the single FILE, not /opt/ocr as a directory: in dev the host source sits in sandbox/qemu/ alongside the Dockerfile
+ * and the build context, none of which should appear inside the sandbox. The image copy stays as the fallback — if the host
+ * file is missing (older build, resource not staged) the bind is skipped and the baked-in version is used.
+ */
+const GUEST_OCR_ADAPTER = "/opt/ocr/rapidocr_v6_api.py";
+const ocrAdapterHostPath = () =>
+  app.isPackaged
+    ? path.join(process.resourcesPath, "ocr", "rapidocr_v6_api.py")
+    : path.join(app.getAppPath(), "sandbox", "qemu", "rapidocr_v6_api.py");
+const SWAPFILE = "/var/swapfile";
+const SWAP_MIB = 2048;
+
+/**
+ * Give the guest swap. The image ships with none.
+ *
+ * Without it a transient spike is not a slowdown, it is a kill: the guest kernel logged twelve
+ * `Out of memory: Killed process (python3)` in one boot, every one at roughly the RAM ceiling, with `Total swap = 0kB`. OCR
+ * loading a model and rasterising a page peaks well above its steady state, and there was nothing to page it out to.
+ *
+ * A file rather than a partition, created here rather than in the image, so it needs no rootfs rebuild — same reasoning as
+ * GUEST_TMP. It lands in run.qcow2, the throwaway overlay, so it costs host disk only while the VM is alive and is discarded
+ * with it. fallocate is a metadata operation, so this adds no measurable boot time; dd is the fallback for a filesystem where
+ * fallocate cannot produce a swap-eligible extent.
+ *
+ * Confirmed working and on the fast path: the guest logged `Adding 2097148k swap on /var/swapfile` at 1.8 s uptime, and the
+ * overlay stayed at 8.5 MB afterwards — dd would have pushed 2 GiB into it. Subsequent runs of the same OCR workload stopped
+ * being killed, at the SAME 2048 MiB of RAM that was being killed before, which is what identifies swap rather than RAM as
+ * the fix.
+ *
+ * Best-effort: a guest that will not take swap should still boot and run commands, it just keeps the old OOM behaviour.
+ */
+async function enableSwap(guest) {
+  // Braces are required, not style: `&&` and `||` have equal precedence and associate left-to-right, so an ungrouped
+  // `a && b || c && d` runs `c`'s tail after `a && b` SUCCEEDS — here that meant re-running mkswap on an already-active
+  // swapfile. Each alternative has to be one grouped command.
+  const make = (alloc) => `{ ${[
+    `${alloc}`,
+    `chmod 600 ${SWAPFILE}`,
+    `mkswap ${SWAPFILE} >/dev/null 2>&1`,
+    `swapon ${SWAPFILE} 2>/dev/null`,
+  ].join(" && ")}; }`;
+  const script = [
+    // fallocate first: it only writes metadata, so the common path costs milliseconds rather than the seconds it takes to
+    // push 2 GiB through virtio-blk into a growing qcow2. swapon can still refuse the result — on some filesystems a
+    // fallocate'd file's extents are unwritten and swap needs them mapped — so fall back to dd on the whole sequence, not
+    // just on fallocate failing. That is the slow path, and the timing below says when it was taken.
+    `${make(`fallocate -l ${SWAP_MIB}M ${SWAPFILE} 2>/dev/null`)} || ${make(`dd if=/dev/zero of=${SWAPFILE} bs=1M count=${SWAP_MIB} status=none`)} || true`,
+    // MiB of swap the kernel reports as active; 0 means it did not take. Read from /proc, which is always there —
+    // `free` comes from procps and a minimal image is not guaranteed to ship it.
+    `awk '/^SwapTotal:/ {print int($2/1024)}' /proc/meminfo`,
+  ].join("; ");
+  const t0 = Date.now();
+  try {
+    const { out } = await guest.exec("/bin/bash", ["-lc", script]);
+    const mib = parseInt(String(out).trim().split("\n").pop(), 10) || 0;
+    const ms = Date.now() - t0;
+    if (mib > 0) console.log(`[sandbox/qemu] swap enabled: ${mib} MiB in ${ms} ms`);
+    else console.warn(`[sandbox/qemu] swap did NOT activate (${ms} ms) — the guest keeps its previous out-of-memory behaviour`);
+  } catch (e) {
+    console.warn(`[sandbox/qemu] swap setup failed after ${Date.now() - t0} ms: ${e?.message ?? e}`);
+  }
+}
 const shq = (s) => `'${String(s).replace(/'/g, `'\\''`)}'`; // bash single-quote escaping inside the guest
 // VM disk/kernel are downloaded from a public CDN on first run (docker.zeraix.com fronts the public read-only entry of the zeraix-docker bucket).
 const VM_CDN = (process.env.ZERAIX_CDN || "https://docker.zeraix.com").replace(/\/+$/, "");
@@ -53,8 +142,6 @@ let vm = null; // { proc, ports, guest }
 let ninep = null; // Windows: in-process 9p-over-TCP server backing the host share
 let homeRoot = ""; // The common root from provision (parent directory of the session workdir)
 let extraRoots = []; // Explicitly selected folders outside the root (accumulated; merged into the bwrap bind set per command)
-let degraded = ""; // Non-empty = this session has degraded to native and will not retry
-let degradeNoticeShown = false;
 const EXTRA_ROOTS_MAX = 16;
 
 // Background long-lived service table: hostPort -> { gpid, hostPort, guestPort, url, command, log }
@@ -165,6 +252,14 @@ function ensureRoot(cwd) {
 /** bubblewrap flags (excluding argv[0] and the trailing command): only bind the mount set from /mnt/hostfs, chdir cwd.
  *  Network is open by default (no --unshare-net) -- commands inside the sandbox can reach the internet directly: pip / npm / git / curl, etc.
  *  DNS and routing are provided by the guest's SLIRP network (firstboot.sh configures 10.0.2.x + nameserver). */
+/** bwrap args that overlay the host's OCR adapter onto the image's, or nothing when the host copy is absent. */
+function ocrAdapterBind() {
+  const host = ocrAdapterHostPath();
+  // Reached through the 9p share like every other host path (mapRoot), not by any special channel.
+  try { if (fs.existsSync(host)) return ["--ro-bind", mapRoot(host).src, GUEST_OCR_ADAPTER]; } catch { /* fall through */ }
+  return [];
+}
+
 function bwrapFlags(cwd) {
   const binds = [homeRoot, ...extraRoots].filter(Boolean).flatMap((r) => {
     const { src, dst } = mapRoot(r);
@@ -173,14 +268,35 @@ function bwrapFlags(cwd) {
   const { dst: chdir } = mapRoot(cwd || homeRoot || HOME);
   return [
     "--ro-bind", "/usr", "/usr", "--ro-bind", "/etc", "/etc", "--ro-bind", "/opt", "/opt",
+    // Shadow the image's OCR adapter with the host's, AFTER /opt is bound so it lands on top. See GUEST_OCR_ADAPTER.
+    ...ocrAdapterBind(),
     "--symlink", "usr/lib", "/lib", "--symlink", "usr/lib64", "/lib64",
     "--symlink", "usr/bin", "/bin", "--symlink", "usr/sbin", "/sbin",
-    "--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp",
+    "--proc", "/proc", "--dev", "/dev",
+    // /tmp on the guest DISK, not a tmpfs — see GUEST_TMP. A page raster or an intermediate file written here no longer
+    // eats the same RAM the command itself needs.
+    "--bind", GUEST_TMP, "/tmp",
     // Put the toolbox venv first on PATH INSIDE the sandbox (bwrap runs every command), so
     // python/pip/unoserver/… resolve. Explicit --setenv so it holds regardless of how the
     // guest-agent/login-shell env would otherwise flow in. (Image also sets it in
     // /etc/profile.d for direct login/SSH shells.)
     "--setenv", "PATH", "/opt/venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+    // The rest of the image's runtime ENV, for the same reason. A Dockerfile `ENV` lives in image METADATA; the rootfs is
+    // exported and booted by qemu, so systemd and the guest agent never see any of it. Whatever a sandbox command needs has to
+    // be named here — the Dockerfile declaring it is intent, not effect.
+    //
+    //   PYTHONPATH  /opt/ocr holds rapidocr_v6_api.py (COPYed by the image, and /opt is ro-bound above, so the file was
+    //               always there) and the image declares ENV PYTHONPATH=/opt/ocr, which by the above never reached the guest.
+    //               `from rapidocr_v6_api import exec_ocr` failed with ModuleNotFoundError while `import pymupdf4llm` on the
+    //               same line succeeded — so the interpreter was the guest venv and only the path was missing. NOT yet
+    //               confirmed fixed by running the import in the guest.
+    //   LANG        the toolbox handles CJK documents; ghostscript/poppler/unoserver read the locale for encoding. Python
+    //               coerces C -> C.UTF-8 on its own (PEP 538), the native tools do not.
+    //   PYTHONUNBUFFERED  every command's stdout is redirected to a log file, so block buffering would hold a long-running
+    //               script's output back until it exits instead of streaming it.
+    "--setenv", "PYTHONPATH", "/opt/ocr",
+    "--setenv", "LANG", "C.UTF-8",
+    "--setenv", "PYTHONUNBUFFERED", "1",
     ...binds, "--chdir", chdir,
     // NOT --unshare-user: bwrap runs as root in the guest, and a user namespace makes the 9p
     // share (security_model=none) refuse the bind source with EPERM. bwrap-as-root still confines
@@ -201,6 +317,10 @@ function qemuArgs(vd, overlay) {
   const con = !isWin && process.arch === "arm64" ? "ttyAMA0" : "ttyS0"; // virt=pl011 / q35=16550
   const a = [
     "-smp", String(cpus), "-m", String(mem),
+    // cache=writeback. cache=none was tried, on the theory that the host cache for this image was inflating qemu's footprint,
+    // and measured NO change: 3.25 GB before, 3.34 GB after, at the same -m 2048. vmmap shows why — the excess over guest RAM
+    // is qemu's own process memory (~1.2 GB: 282 MB of libraries plus writable regions), not page cache for the disk. So
+    // writeback stays, because it is the faster mode and the slower one bought nothing.
     "-drive", `if=none,file=${overlay},format=qcow2,id=hd0,cache=writeback,discard=unmap`,
     // romfile= disables the PCI option ROM (efi-virtio.rom): we kernel-boot / never PXE-boot,
     // and a relocated (bundled) qemu can't find qemu's data dir, so requiring the ROM would
@@ -208,6 +328,11 @@ function qemuArgs(vd, overlay) {
     "-device", "virtio-blk-pci,drive=hd0,romfile=",
     "-netdev", "user,id=net0,hostfwd=tcp:127.0.0.1:2222-:22",
     "-device", "virtio-net-pci,netdev=net0,romfile=",
+    // No virtio-balloon here, deliberately. `virtio-balloon-pci,free-page-reporting=on,deflate-on-oom=on` was tried and
+    // measured WORSE on macOS/HVF: resident went from 3.78 GB to 4.93 GB against a 4.83 GB ceiling, i.e. the guest ended up
+    // having touched 100% of its RAM. The mechanism was not established — the plausible reading is that reporting free pages
+    // makes the guest walk them while the host-side discard does not actually decommit on Darwin, but that was not verified.
+    // The measurement is the reason it is absent; treat the explanation as a guess.
     // Windows has no virtio-9p (fsdev compiled out); the host share is instead an in-process
     // 9p-over-TCP server mounted post-boot (winShareMount). macOS/Linux share via virtio-9p here.
     ...(isWin ? [] : ["-fsdev", `local,id=hostfs,path=${shareRoot},security_model=none`,
@@ -364,6 +489,10 @@ async function boot(onProgress, forceConfigured = false) {
   });
   const ports = await qmp({ port: QMP_PORT });
   const guest = await guestAgent({ port: GA_PORT }); // includes waiting for the guest to be ready
+  // Backing store for the sandbox's /tmp (see GUEST_TMP / bwrapFlags). Created here rather than in the image so it needs no
+  // rootfs rebuild. 1777 = the mode /tmp is expected to have (world-writable, sticky).
+  try { await guest.exec("/bin/mkdir", ["-p", "-m", "1777", GUEST_TMP]); } catch { /* bwrap falls back to failing loudly if absent */ }
+  await enableSwap(guest);
   vm = { proc, ports, guest };
   if (isWin) await winShareMount(guest); // Windows host share: 9p-over-tcp (no virtio-9p)
   return vm;
@@ -379,24 +508,26 @@ export async function provision(rootHost, onProgress, extras = [], forceConfigur
 }
 
 // ── Foreground execution ─────────────────────────────────────────────────────────────────
-async function degradeRun(cmd, opts, reason) {
-  if (!degraded) {
-    degraded = reason;
-    console.warn(`[sandbox/qemu] degraded to native: ${reason}`);
-  }
-  const r = await native.run(cmd, opts);
-  if (!degradeNoticeShown) {
-    degradeNoticeShown = true;
-    const hint = `(Note: the QEMU sandbox is unavailable -- ${reason}. This and subsequent commands have been run directly on the host.)`;
-    return { ...r, stderr: r.stderr ? `${r.stderr}\n${hint}` : hint };
-  }
-  return r;
+/**
+ * A sandbox failure is reported as a failed command. It is NOT retried on the host.
+ *
+ * Falling back to native was worse than failing in three ways. It broke the guarantee — the sandbox exists so a command runs
+ * confined, and quietly running it on the user's real filesystem instead is the one outcome the feature is meant to prevent.
+ * It was a one-way latch, so a single hiccup silently moved every later command in the session onto the host, with the notice
+ * shown only once. And it disguised the cause: the guest toolbox has pymupdf4llm/rapidocr/ghostscript and the host does not,
+ * so the fallback turned "the sandbox broke" into "ModuleNotFoundError: No module named 'pymupdf4llm'" — an error pointing at
+ * the user's script instead of at the sandbox.
+ *
+ * Exit code 126 is the shell's "command found but not executable": the closest standard code for "could not be run here".
+ */
+function sandboxFailure(reason) {
+  console.warn(`[sandbox/qemu] command not run: ${reason}`);
+  return { stdout: "", stderr: `Sandbox unavailable: ${reason}\nThe command was NOT run. It is not retried on the host, because it would then run outside the sandbox and against the host's own toolchain.`, code: 126, killed: false };
 }
 
 /** Foreground execution: inside the guest, bwrap confined to the mount set, bash -c cmd, with a timeout; never throws. */
 export async function run(cmd, opts = {}) {
   const { cwd, timeoutMs, maxBuffer } = opts;
-  if (degraded) return degradeRun(cmd, opts, degraded);
   try {
     if (!vm) throw new Error("vm not ready");
     ensureRoot(cwd);
@@ -407,7 +538,7 @@ export async function run(cmd, opts = {}) {
     const cap = (s) => (maxBuffer && s.length > maxBuffer ? s.slice(0, maxBuffer) : s);
     return { stdout: cap(out), stderr: cap(err), code, killed };
   } catch (e) {
-    return degradeRun(cmd, opts, `exec failed: ${e?.message ?? e}`);
+    return sandboxFailure(`exec failed: ${e?.message ?? e}`);
   }
 }
 
@@ -420,10 +551,12 @@ const pickPort = (s) => {
 
 /**
  * Start a long-lived command in the background inside the guest (bwrap-confined + network allowed), scan early output for a port, QMP hostfwd
- * to the same port on the host, and return a host-reachable URL. On stop, the forward is removed too. If the launch channel fails, falls back to native.
+ * to the same port on the host, and return a host-reachable URL. On stop, the forward is removed too. A launch-channel failure
+ * is reported, not run on the host — same reasoning as sandboxFailure above, and a long-lived service escaping the sandbox is
+ * worse than a one-shot command doing so.
  */
 export async function startBackground(cmd, opts = {}) {
-  if (degraded || !vm) return native.startBackground(cmd, opts);
+  if (!vm) return sandboxFailure("vm not ready");
   const cwd = opts.cwd;
   ensureRoot(cwd);
   const log = `/tmp/zx-svc-${++svcSeq}.log`;
@@ -435,8 +568,8 @@ export async function startBackground(cmd, opts = {}) {
   try {
     const { out } = await vm.guest.exec("/bin/bash", ["-lc", script], { env: [`SVC_CMD=${cmd}`] });
     gpid = parseInt(String(out).trim(), 10) || 0;
-  } catch {
-    return native.startBackground(cmd, opts);
+  } catch (e) {
+    return sandboxFailure(`service launch failed: ${e?.message ?? e}`);
   }
 
   // Early readiness scan: read the log, match READY / extract the port / 8s cap (same cadence as native).
@@ -519,7 +652,7 @@ export async function unexposePort(hostPort) {
 
 /** Prewarm: merge a new directory into the mount set (no rebuild needed, the broadcast root already covers everything). */
 export function prewarm(cwd) {
-  if (!degraded && cwd) ensureRoot(cwd);
+  if (cwd) ensureRoot(cwd);
 }
 
 /** Exit cleanup: remove all forwards + shut down the VM. */
@@ -536,9 +669,8 @@ export function dispose() {
  *
  * QMP_PORT / GA_PORT / the ssh forward are fixed, so exactly one VM can exist at a time. If the app dies without disposing —
  * crash, force quit, `pkill` — qemu is orphaned and keeps holding the port. Every later launch then dies instantly with
- * "Failed to find an available port: Address already in use", exit code 1, and the sandbox silently degrades to native
- * execution until someone finds the stray process by hand. Observed in the wild; qemu.log had five unmatched "qemu started"
- * lines.
+ * "Failed to find an available port: Address already in use", exit code 1, and every command then fails until someone finds
+ * the stray process by hand. Observed in the wild; qemu.log had five unmatched "qemu started" lines.
  *
  * Scoped to OUR VM: matched on the overlay path in the process's own -drive argument, so an unrelated qemu on this machine is
  * never touched. Best-effort — a failure here just means the spawn below reports the port conflict as it did before.

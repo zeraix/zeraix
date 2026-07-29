@@ -36,7 +36,22 @@ import * as native from "./native.mjs";
 
 export { setServiceEventHandler } from "./events.mjs";
 
-// Default sandbox config (can be overridden by app.config [sandbox]).
+/**
+ * Default sandbox config (overridable per install via app.config [sandbox]).
+ *
+ * `memory` stays at 2048 and deliberately does NOT scale with host RAM. OCR was being OOM-killed here — the guest kernel
+ * logged repeated `Out of memory: Killed process (python3) anon-rss:~1.91GB` with `Total swap = 0kB` — but raising `-m` was
+ * not what fixed it. Adding SWAP was (see enableSwap in qemu.mjs), and swap costs disk while `-m` costs the host directly.
+ * Measured on a 36 GB host, same workload:
+ *
+ *     -m 4608 + swap    3.78 GB resident
+ *     -m 2048 + swap    3.25 GB resident, and no OOM
+ *
+ * The guest keeps every page it touches and there is no way to get them back — a virtio-balloon with free-page-reporting was
+ * tried and measured WORSE (see the note in qemu.mjs where the device would go). So `-m` is a permanent cost for a sandbox
+ * that is idle most of the time, on a machine that also has to hold a local model of ~25 GB. Raise it per install for a job
+ * that genuinely needs more.
+ */
 const DEFAULTS = {
   engine: "auto",
   image: "docker.zeraix.com/botshub/sandbox:h-d0c4ebb4cec9",

@@ -124,6 +124,11 @@ extraResources:
   # model catalog, so there is nothing to gain from a CDN. localServer reads them from process.resourcesPath when packaged.
   - from: resources/moe-profiles
     to: moe-profiles
+  # The PP-OCRv6 adapter, shipped so it can be updated with the app. The VM image also bakes a copy in at /opt/ocr, but
+  # changing that one costs a rootfs rebuild and a ~1 GB re-download per user; qemu.mjs binds this over it (GUEST_OCR_ADAPTER).
+  # Staged straight from the docker build context so there is ONE copy of the file in the repo and the two cannot drift.
+  - from: sandbox/qemu/rapidocr_v6_api.py
+    to: ocr/rapidocr_v6_api.py
 
 # Keep only the English language pack
 # Filter locales/*.pak on Windows/Linux; filter .lproj directories on macOS
