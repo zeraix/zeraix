@@ -612,6 +612,7 @@
   "ml.mtpOn": "켜기(추측 디코딩, 더 빠름)",
   "ml.mtpOff": "끄기",
   "ml.estimate": "예상 사용량 {gb} GB · 컨텍스트 {ctx} · KV {kv}",
+  "ml.ctxTooBig": "{gb} GB 필요, 이 기기의 {budget} GB 예산 초과",
   "ml.openFolder": "폴더 열기",
   "ml.openWeightsDir": "가중치 폴더 열기",
   "ml.deleteRunningTitle": "실행 중에는 삭제할 수 없습니다 — 먼저 중지하세요",

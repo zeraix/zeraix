@@ -23,13 +23,16 @@ import {
   type DownloadedLocalModel,
   type HfSearchItem,
   type HfRepoDetail,
+  type LocalLlmEstimate,
 } from "@/lib/ai/localModel";
 
 type Opt = LocalLlmRecommendation["options"][number];
 /** Minimum selectable context window — mirrors MIN_CTX in electron/llm/localModels.mjs. The agent system prompt alone
- *  already approaches 8K, so a smaller window leaves no room for tools or history and is never offered. */
-const MIN_CTX = 32768;
-const CTX_LADDER = [32768, 65536, 131072, 262144, 524288, 1048576];
+ *  already approaches 8K, so a smaller window leaves no room for tools or history and is never offered.
+ *  Mirrors MIN_CTX + CTX_LADDER in localModels.mjs - the fitting rungs now come from estimate(), and these are only
+ *  the fallback shown before the first estimate lands and the bounds for the typed-value input. */
+const MIN_CTX = 65536;
+const CTX_LADDER = [65536, 98304, 131072, 200704, 262144];
 /** Context presets for a given native window: the standard rungs at or below it, always ending at the window itself
  *  (so a non-power-of-2 max like 40960 gets its exact value as the top button). Empty when the model can't reach MIN_CTX. */
 const ctxPresets = (maxCtx: number): number[] => {
@@ -80,13 +83,13 @@ export default function ModelLibrary() {
   const [repoDlg, setRepoDlg] = useState<string | null>(null);
   const [repoInfo, setRepoInfo] = useState<HfRepoDetail | null>(null); // null = loading
   const [repoQuant, setRepoQuant] = useState("");
-  const [repoCtx, setRepoCtx] = useState(32768);
+  const [repoCtx, setRepoCtx] = useState(65536);
   const [repoKv, setRepoKv] = useState(8);
   const [repoTmpl, setRepoTmpl] = useState(""); // chat-template override for the open repo ("" = model's own)
   const [repoEst, setRepoEst] = useState<number | null>(null);
   const [opts, setOpts] = useState<Record<string, ModelOpts>>({});
   const [defaults, setDefaults] = useState<Record<string, ModelOpts>>({});
-  const [est, setEst] = useState<Record<string, number>>({});
+  const [est, setEst] = useState<Record<string, LocalLlmEstimate>>({});
   const [useCuda, setUseCuda] = useState(false);
   const [busy, setBusy] = useState(false);
   const [storage, setStorage] = useState<LocalLlmStorage | null>(null);
@@ -139,12 +142,12 @@ export default function ModelLibrary() {
     if (!bridge || !rec) return;
     let cancelled = false;
     (async () => {
-      const next: Record<string, number> = {};
+      const next: Record<string, LocalLlmEstimate> = {};
       for (const o of rec.options) {
         const mo = opts[o.model.id];
         if (!mo) continue;
         const e = await bridge.estimate({ modelId: o.model.id, quant: mo.quant, ctx: mo.ctx, kvBits: mo.kvBits, vision: mo.vision, mtp: mo.mtp });
-        if (e) next[o.model.id] = e.totalGB;
+        if (e) next[o.model.id] = e;
       }
       if (!cancelled) setEst(next);
     })();
@@ -246,7 +249,7 @@ export default function ModelLibrary() {
     const isRunning = !!isThis && !!status?.ready && !installing;
     const isFetching = !!isThis && status?.phase === "fetching";
     const isLoading = !!isThis && !status?.ready && (status?.phase === "fetching" || status?.phase === "loading");
-    return { mo, dl, anyDl, isThis, isRunning, isFetching, isLoading, sizeGB: est[o.model.id] };
+    return { mo, dl, anyDl, isThis, isRunning, isFetching, isLoading, sizeGB: est[o.model.id]?.totalGB, fit: est[o.model.id] };
   };
 
   const start = (o: Opt, mo: ModelOpts) => { setBusy(true); bridge.start({ modelId: o.model.id, quantId: mo.quant, ctx: mo.ctx, kvBits: mo.kvBits, vision: mo.vision, mtp: mo.mtp, useCuda }).finally(() => setBusy(false)); };
@@ -487,7 +490,15 @@ export default function ModelLibrary() {
                           className="w-14 bg-transparent px-2 py-1 text-right text-ink disabled:opacity-50" /><span className="pr-2 text-ink-muted">K</span>
                       </span>
                       <div className="flex flex-wrap gap-1">
-                        {CTX_LADDER.filter((c) => c <= maxCtx).map((c) => <button key={c} type="button" disabled={locked} onClick={() => setOpt(o.model.id, { ctx: c })} className={`rounded-md px-1.5 py-0.5 text-[11px] transition ${mo.ctx === c ? "bg-primary/15 font-medium text-primary" : "bg-surface-muted text-ink-subtle hover:bg-surface-muted/70"}`}>{fmtK(c)}</button>)}
+                        {/* Rungs come from the main process, which sizes each one against the same memory budget the
+                            launcher uses. A rung that does not fit is shown disabled with its cost rather than hidden,
+                            so "why can I not pick 256K" has a visible answer. Before the first estimate arrives there
+                            is no verdict yet, so every rung at or below the native window stays enabled. */}
+                        {(s.fit?.rungs ?? CTX_LADDER.filter((c) => c <= maxCtx).map((c) => ({ ctx: c, totalGB: 0, fits: true })))
+                          .map((r: { ctx: number; totalGB: number; fits: boolean }) => <button key={r.ctx} type="button" disabled={locked || !r.fits}
+                            title={r.fits ? undefined : t("ml.ctxTooBig", { gb: r.totalGB, budget: s.fit?.budgetGB ?? 0 })}
+                            onClick={() => setOpt(o.model.id, { ctx: r.ctx })}
+                            className={`rounded-md px-1.5 py-0.5 text-[11px] transition ${mo.ctx === r.ctx ? "bg-primary/15 font-medium text-primary" : "bg-surface-muted text-ink-subtle hover:bg-surface-muted/70"} ${r.fits ? "" : "cursor-not-allowed opacity-40"}`}>{fmtK(r.ctx)}</button>)}
                       </div>
                     </label>
                     <label className="flex flex-col gap-1 text-xs text-ink-subtle">{t("ml.kvQuant")}

@@ -612,6 +612,7 @@
   "ml.mtpOn": "Ativado (especulativo, mais rápido)",
   "ml.mtpOff": "Desativado",
   "ml.estimate": "Uso est. {gb} GB · contexto {ctx} · KV {kv}",
+  "ml.ctxTooBig": "Requer {gb} GB, acima do orçamento de {budget} GB desta máquina",
   "ml.openFolder": "Abrir pasta",
   "ml.openWeightsDir": "Abrir pasta de pesos",
   "ml.deleteRunningTitle": "Não é possível excluir durante a execução — pare primeiro",

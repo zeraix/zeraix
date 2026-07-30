@@ -612,6 +612,7 @@
   "ml.mtpOn": "Attivo (speculativo, più veloce)",
   "ml.mtpOff": "Disattivato",
   "ml.estimate": "Uso stim. {gb} GB · contesto {ctx} · KV {kv}",
+  "ml.ctxTooBig": "Richiede {gb} GB, oltre il budget di {budget} GB di questa macchina",
   "ml.openFolder": "Apri cartella",
   "ml.openWeightsDir": "Apri cartella dei pesi",
   "ml.deleteRunningTitle": "Impossibile eliminare durante l'esecuzione — fermalo prima",

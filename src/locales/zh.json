@@ -615,6 +615,7 @@
   "ml.mtpOn": "开启（投机解码更快）",
   "ml.mtpOff": "关闭",
   "ml.estimate": "预计占用 {gb} GB · 上下文 {ctx} · KV {kv}",
+  "ml.ctxTooBig": "需要 {gb} GB，超出本机 {budget} GB 预算",
   "ml.openFolder": "打开文件夹",
   "ml.openWeightsDir": "打开权重文件夹",
   "ml.deleteRunningTitle": "运行中不可删除，请先停止",

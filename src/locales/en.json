@@ -615,6 +615,7 @@
   "ml.mtpOn": "On (speculative, faster)",
   "ml.mtpOff": "Off",
   "ml.estimate": "Est. usage {gb} GB · context {ctx} · KV {kv}",
+  "ml.ctxTooBig": "Needs {gb} GB, over this machine's {budget} GB budget",
   "ml.openFolder": "Open folder",
   "ml.openWeightsDir": "Open weights folder",
   "ml.deleteRunningTitle": "Can't delete while running — stop it first",
