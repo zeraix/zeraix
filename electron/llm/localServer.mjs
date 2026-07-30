@@ -13,7 +13,6 @@ import http from "node:http";
 import net from "node:net";
 import path from "node:path";
 import fs from "node:fs";
-import os from "node:os";
 import https from "node:https";
 import { spawn, execSync } from "node:child_process";
 import { app } from "electron";
@@ -30,8 +29,7 @@ import { ensureSeed, seedSize, seedInstalled, seedKey } from "./seeds.mjs";
 import { getSandboxStatus } from "../tools/sandbox/engine.mjs";
 
 const DEFAULT_PORT = Number(process.env.LLAMA_PORT || 8080);
-const KV_DIR = path.join(os.tmpdir(), "zeraix-llama-kv");
-// KV disk tier + resident seeds. Deliberately NOT under tmpdir like KV_DIR above: the point of the tier is to survive a restart,
+// KV disk tier + resident seeds. Deliberately NOT under tmpdir: the point of the tier is to survive a restart,
 // and downloaded seeds live here too (in a <model_key>/ sub-folder the server creates). Sibling of models/, so version pruning —
 // which scans only bin/ — leaves it alone.
 const kvDiskDir = () => path.join(localFilesBase(), "kv");
@@ -891,7 +889,6 @@ export function start(opts = {}) {
   state.error = null;
   state.log = [];
   state.pct = 0;
-  try { fs.mkdirSync(KV_DIR, { recursive: true }); } catch { /* ignore */ }
   // mac only — the Windows binary has no --kv-disk-path, so it should never even get a directory.
   try { if (kvTierEnabled()) fs.mkdirSync(kvDiskDir(), { recursive: true }); } catch { /* ignore */ }
 
@@ -1063,13 +1060,83 @@ async function launch(variant, cfg) {
   const moeOn = !!moeProfile && fs.existsSync(moeProfile);
   if (moeProfile && !moeOn) pushLog(`[llama] MoE pool profile missing (${path.basename(moeProfile)}) — pool inert\n`);
   else if (moeOn) pushLog(`[llama] MoE pool profile: ${path.basename(moeProfile)}\n`);
-  const args = buildServerArgs({ modelPath, mmproj: visionOn ? mmprojPath : null, mtpDraft, specMtp: useMtp, hw, ctx, port: state.port, kvBits, kvCacheDir: KV_DIR, kvDiskDir: kvTier ? kvDiskDir() : null, parallel: kvTier ? 2 : 0, ngl, chatTemplate: r.chatTemplate, chatTemplateFile: templatePath });
+  const args = buildServerArgs({ modelPath, mmproj: visionOn ? mmprojPath : null, mtpDraft, specMtp: useMtp, hw, ctx, port: state.port, kvBits, kvDiskDir: kvTier ? kvDiskDir() : null, parallel: kvTier ? 2 : 0, ngl, chatTemplate: r.chatTemplate, chatTemplateFile: templatePath });
   if (templatePath) pushLog(`[llama] chat template file: ${path.basename(templatePath)}${r.chatTemplate ? ` (overrides the "${r.chatTemplate}" built-in)` : ""}\n`);
   else if (r.chatTemplate) pushLog(`[llama] chat template override: ${r.chatTemplate}\n`);
   pushLog(`[llama] argv: ${bin} ${args.join(" ")}\n`); // full startup command (for troubleshooting)
   let proc;
   try {
-    proc = spawn(bin, args, { stdio: ["ignore", "pipe", "pipe"], env: { ...process.env, HF_ENDPOINT: hfEnd, LLAMA_CACHE: modelsDir, ...(moeOn ? { LLAMA_MOE_POOL_PROFILE: moeProfile } : {}) } });
+    // LLAMA_MOE_RING travels WITH the profile, never without it. The pool keeps expert weights file-backed instead of wiring
+    // the whole GGUF, which is what makes a 22 GB model fit next to everything else — but it fills the pool on demand, and
+    // with nothing streaming the prefill path that first fill is enormous. The ring streams whole layers through rotating
+    // buffers and is the prefill half of the same design; the fork ships it off by default, so the app was running the pool's
+    // memory cost with none of its prefill mitigation.
+    //
+    // Measured cold (purged page cache), Qwen3.6-35B-A3B, 8373-token prompt, first request after start:
+    //
+    //     pool only     227.9 s / 184.6 s      36.9 / 45.5 t/s     <- what shipped
+    //     pool + ring    21.0 s                406.4 t/s
+    //     no pool        16.9 s                502.7 t/s           (but wires all ~22 GB)
+    //
+    // The ring recovers ~81% of the fully-wired prefill speed and costs one slow request per server start instead of a
+    // pathological one. Only the FIRST request is affected either way — later ones hit a warm pool and were always fast.
+    //
+    // GGML_METAL_SEG_ASYNC and GGML_METAL_NO_RESIDENCY travel with the pool for the same reason the ring does — every
+    // published pool measurement, and every byte-identity run against upstream, set all four. Both are read by PRESENCE
+    // and both are OFF by default, so omitting them silently ran a configuration that was never benchmarked:
+    //   SEG_ASYNC     encode+commit all segments up front, gated on an MTLSharedEvent, instead of commit+wait per
+    //                 segment. Qwen3.6-35B-A3B is 41 segments per forward, so without it every token pays 41 GPU
+    //                 round trips.
+    // GGML_METAL_NO_RESIDENCY is deliberately NOT set, though every benchmark arm sets it. Residency sets cover
+    // Metal buffers only; with a pool profile the loader ALLOCATES the device weight buffer and the pooled experts
+    // stay in CPU_Mapped mmap, so disabling residency never protects the pages that actually thrash — it only stops
+    // the pool's own slot buffers and the KV from being wired, which on a machine that is already swapping is the
+    // opposite of what we want. Adding it here changed no measured number; leaving it off is the app's original
+    // behaviour. (ggml reads it by PRESENCE: `use_residency_sets = getenv(...) == nil`.)
+    // LLAMA_MOE_SMALL_PREFILL: feed a prefill of <= N tokens through the pool in decode-shaped graphs instead of
+    // handing it to the ring. The ring stages EVERY expert of a layer per forward — a flat cost that a short
+    // prefill cannot amortise — so a 30-token follow-up paid the same as a 500-token one. Measured in this app,
+    // Qwen3.6-35B-A3B, 30-token turn: 23831 ms -> 2222 ms.
+    //
+    // 64 rather than the fork's default of 32. The default was measured on a WARM standalone server, where a ring
+    // forward costs ~1-4 s and break-even sits near 32; under the app the weights do not stay in page cache, a ring
+    // forward costs ~8-12 s, and the pool wins far further out. Measured here, same conversation, same prompts:
+    //
+    //   prefill    pool (this path)        ring
+    //     27 tok     2215 ms  (82 ms/tok)    23831 ms      <- pool wins by 10x
+    //     31 tok     2342 ms  (76 ms/tok)
+    //    235 tok    26229 ms (112 ms/tok)    12149 ms      <- ring wins by 2.2x
+    //    297 tok         -                    6873 ms
+    //
+    // The pool's per-token cost RISES with N here (76 -> 112 ms), so break-even lands at ~98-143 tokens. 256 was
+    // tried and made the 235-token first turn 2.2x slower. 96 sits below the bottom of that range: being under
+    // break-even only forgoes a little, being over it costs double.
+    // LLAMA_MOE_RING_SLOTS: ring buffers, and therefore prefetch depth — the fork derives depth as slots - 2,
+    // since layer il-1 may still be executing while the host stages il+depth. 4 slots stages two layers ahead
+    // instead of one, at the cost of one more full-expert buffer.
+    //
+    // Measured back to back on the 1658-token harness case (all byte-identical to upstream):
+    //     native 5, slots 4   prefill 421.12   decode 23.98   wired 12113 MiB
+    //     native 4, slots 4   prefill 424.82   decode 23.20   wired 11886 MiB
+    //     native 4, slots 3   prefill 414.94   decode 22.99   wired 10341 MiB
+    //     native 3, slots 3   prefill 413.05   decode 23.18   wired 10438 MiB
+    // The spread between them is inside this machine's noise floor (2-4x on repeated identical requests), so
+    // none of it separates the configurations - only the wired column is measured reliably, and slots 4 costs
+    // ~1.5 GB over slots 3. Chosen deliberately rather than derived from those numbers.
+    //
+    // LLAMA_MOE_POOL_FILL_THREADS: expert-fill misses issued concurrently (fork default 3). A miss is a page
+    // fault plus a memcpy through a file-backed mapping — latency, not bandwidth — so width hides it.
+    //
+    // 8 helps DECODE, not prefill, and that is the half that governs how the app feels: a prefill misses once
+    // in a burst, but every decoded token routes fresh experts, so misses are continuous. Mean decode across
+    // consecutive app runs: 14.8 -> 15.2 -> 16.0 -> 17.3 t/s, the last being this setting (with a 23.1 peak).
+    // Small prefill was unchanged (27 tok 1946 -> 2091 ms, 31 tok 2198 -> 2167 ms, both inside a ~+-30% noise
+    // floor), which is why judging this knob on prefill alone said "no effect" and was the wrong measurement.
+    //
+    // Confounded, not proven: those runs also differ in cache warmth and other env, so the trend is suggestive
+    // rather than isolated. Kept because it costs NO memory — slot count and pool footprint are untouched, so
+    // the 24 GB target is unaffected — and the evidence points one way.
+    proc = spawn(bin, args, { stdio: ["ignore", "pipe", "pipe"], env: { ...process.env, HF_ENDPOINT: hfEnd, LLAMA_CACHE: modelsDir, ...(moeOn ? { LLAMA_MOE_POOL_PROFILE: moeProfile, LLAMA_MOE_RING: "1", GGML_METAL_SEG_ASYNC: "1", LLAMA_MOE_SMALL_PREFILL: "64", LLAMA_MOE_POOL_FILL_THREADS: "8", LLAMA_MOE_RING_SLOTS: "4" } : {}) } });
   } catch (e) {
     const fb = fallbackVariant(variant);
     if (fb) { pushLog(`[llama] start of ${variant} failed (${String(e?.message ?? e)}) -> falling back to ${fb}\n`); return launch(fb, cfg); }

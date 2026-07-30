@@ -449,8 +449,6 @@ export function recommend(hw, budgetGB, { ctx = MIN_CTX, kvBits = 8, vision = fa
  *   -ngl N          offload N layers to the GPU (Metal/CUDA/Vulkan); for a discrete GPU, partial-offload by VRAM and leave the rest on CPU
  *   -fa on          flash attention (faster + saves KV VRAM on long contexts)
  *   -ctk/-ctv q8_0  KV cache quantization
- *   --cache-reuse   reuse prefixes across requests (prefix sharing)
- *   --slot-save-path persist KV to disk (today's "SSD KV", whole-slot granularity, not vmlx's chunked paged-SSD)
  *   -md FILE        speculative-decoding drafter file (Gemma: separate MTP drafter; takes effect with --spec-type draft-mtp)
  *   --spec-type draft-mtp  enable MTP speculative decoding (b9936). Gemma points -md at a separate drafter;
  *                   Qwen "-MTP-GGUF" weights embed the MTP head → only this flag is needed, no -md (self-speculative). Without -md and not embedded, this flag is omitted.
@@ -468,23 +466,43 @@ export function recommend(hw, budgetGB, { ctx = MIN_CTX, kvBits = 8, vision = fa
  * Local first: given modelPath → `-m FILE` (+ explicit `--mmproj FILE` when vision), the weights already downloaded by us (with progress/resume);
  * if not auto-downloaded (fallback path) → `-hf repo:quant` is fetched by llama itself, and only then, when noMmproj=true, is --no-mmproj used to turn off the automatic vision projector.
  */
-export function buildServerArgs({ hf, modelPath = null, hw, ctx = MIN_CTX, port = 8080, kvBits = 8, mtpDraft = null, specMtp = false, mmproj = null, noMmproj = false, kvCacheDir = null, kvDiskDir = null, parallel = 0, ngl = null, chatTemplate = null, chatTemplateFile = null, extraArgs = [] }) {
+export function buildServerArgs({ hf, modelPath = null, hw, ctx = MIN_CTX, port = 8080, kvBits = 8, mtpDraft = null, specMtp = false, mmproj = null, noMmproj = false, kvDiskDir = null, parallel = 0, ngl = null, chatTemplate = null, chatTemplateFile = null, extraArgs = [] }) {
   const args = modelPath ? ["-m", modelPath] : ["-hf", hf];
   args.push(
     "--host", "127.0.0.1",
     "--port", String(port),
     "-c", String(ctx),
     "-ngl", String(ngl != null ? ngl : (hw && hw.backend === "cpu" ? 0 : 999)),
+    // Not optional while the KV cache is quantized: llama_init_from_model rejects a quantized V cache
+    // without it ("V cache quantization requires flash_attn"), so -ctv q4_0 below forces -fa on.
     "-fa", "on",
     "--jinja",
-    "--cache-reuse", "256",
   );
   // An explicit template file outranks a built-in name, which in turn outranks the GGUF's embedded template.
   if (chatTemplateFile) args.push("--chat-template-file", String(chatTemplateFile));
   else if (chatTemplate) args.push("--chat-template", String(chatTemplate)); // override a broken embedded template with a built-in
   const kvType = kvTypeName(kvBits);
   if (kvType !== "f16") args.push("-ctk", kvType, "-ctv", kvType);
-  if (kvCacheDir) args.push("--slot-save-path", kvCacheDir);
+  // Salvage the one prefix break a reasoning model creates every turn. The model generates
+  // `assistant\n<think>…</think>VISIBLE`, the template strips the think block when replaying that turn,
+  // so the cached prefix dies at the first token of the reply and VISIBLE is recomputed. cache-reuse
+  // slides past the gap, finds VISIBLE still in the cache, and SHIFTS it into position instead.
+  //   measured spans that must qualify: 33 (a tool-call message), 185 (a short reply), 418 (parallel
+  //   tool calls) - so the old value of 256 caught only the largest of the three.
+  //
+  // The server drops this to 0 at startup unless llama_memory_can_shift() is true, and every model we
+  // ship currently fails that test - Gemma on the iSWA branch, Qwen on M-RoPE:
+  //
+  //     llama_kv_cache::get_can_shift()       false when n_pos_per_embd() > 1   <- Qwen3.6 (IMROPE)
+  //     llama_kv_cache_iswa::get_can_shift()  requires base size == SWA size    <- every Gemma
+  //
+  // (It is NOT disabled by multimodal any more; the fork made that decision per request instead.)
+  //
+  // Kept anyway: it costs nothing while inert, and it is correct the moment a model qualifies. --swa-full
+  // would clear the Gemma row, but it is NOT the cheap flag it looks like - the server's effective n_swa
+  // becomes 0, which feeds derive_model_key (so every seed and pool unit is orphaned under a new
+  // model_key) and switches context checkpoints from windowed to whole-state. Nothing clears the Qwen row.
+  args.push("--cache-reuse", "32");
   // Two slots so a second conversation can stay warm alongside the active one, instead of evicting it. Naming the count is what
   // keeps it CHEAPER than leaving it unset: unset means auto = 4 slots, and n_seq_max sizes the iSWA cache
   // (min(size_base, n_swa + n_ubatch * n_seq_max)), so every extra slot costs SWA memory on a Gemma-class model.
@@ -496,8 +514,17 @@ export function buildServerArgs({ hf, modelPath = null, hw, ctx = MIN_CTX, port 
   // passed, so this is belt-and-braces, not a workaround.
   if (parallel > 0) args.push("--parallel", String(parallel), "--kv-unified");
   // KV disk tier: spill/restore prompt prefixes across restarts, and the folder resident seeds are installed into
-  // (<dir>/<model_key>/). Must be durable — unlike --slot-save-path above, these files are meant to survive a reboot.
+  // (<dir>/<model_key>/). Must be durable: unlike a temp-dir cache, these files are meant to survive a reboot.
   if (kvDiskDir) args.push("--kv-disk-path", kvDiskDir);
+  // A byte budget, because without one the directory only ever grows. The server's GC treats a conversation as live while
+  // its committed tip manifest exists, and deleting a conversation in the app does not remove that tip — so at the default
+  // 0 the GC does an orphan-sweep only (crash leftovers), the LRU-by-mtime eviction it implements never runs, and every
+  // conversation ever held keeps its KV forever. Measured at 1.6 GB across four models before this was set.
+  //
+  // 10 GiB: large enough that an active conversation is never evicted mid-use (a 256K-context spill is well under 1 GiB),
+  // small enough to bound the directory on a laptop. Eviction is by tip mtime and resident conversations rewrite their tip
+  // every turn, so the LRU victim is always something untouched — and anything evicted in error is simply re-spilled.
+  if (kvDiskDir) args.push("--kv-disk-mib", "10240");
   if (mtpDraft) args.push("-md", mtpDraft); // Gemma: separate MTP drafter file
   // MTP speculative-decoding flag (b9936): Gemma needs an -md drafter; Qwen weights embed the MTP head → the flag alone enables self-speculation.
   // Omitted when there's no separate drafter and it's not embedded (specMtp=false), to avoid draft-mtp erroring out when it can't find an MTP head.
