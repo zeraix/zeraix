@@ -46,6 +46,47 @@ const moeProfileDir = () =>
     ? path.join(process.resourcesPath, "moe-profiles")
     : path.join(app.getAppPath(), "resources", "moe-profiles");
 
+/**
+ * Ring buffer count, passed to the server as LLAMA_MOE_RING_SLOTS and used by the memory estimate.
+ *
+ * Named rather than written twice: the estimate has to model the same buffer the server actually allocates, and a literal in
+ * the spawn env with a second literal in the sizing code is how the two silently drift apart.
+ */
+const MOE_RING_SLOTS = 4;
+
+/**
+ * The pool profile for a model, as the memory estimate needs it: { layers, n_expert, ringSlots }.
+ *
+ * Read here rather than in localModels because that module is deliberately free of filesystem access. Cached per model - this
+ * is called once per model per recommend(), and the file never changes within a run. A missing or unparseable profile returns
+ * null, which sizes the model as fully resident: the same answer as before the pool existed, and the safe direction to be
+ * wrong in, since the server also leaves the pool inert when the profile is absent.
+ */
+const moeProfileCache = new Map();
+function moePoolInfo(modelId) {
+  if (!moePoolEnabled(modelId)) return null;
+  if (moeProfileCache.has(modelId)) return moeProfileCache.get(modelId);
+  let info = null;
+  try {
+    const p = JSON.parse(fs.readFileSync(path.join(moeProfileDir(), `${modelId}.json`), "utf8"));
+    if (Array.isArray(p.layers) && p.n_expert > 0) {
+      info = { layers: p.layers, n_expert: p.n_expert, ringSlots: MOE_RING_SLOTS };
+    }
+  } catch { /* no profile shipped for this model, or it is malformed */ }
+  moeProfileCache.set(modelId, info);
+  return info;
+}
+
+/** Pool info for every catalog model that has one, keyed by id - the shape localModels.recommend expects. */
+function moePools() {
+  const out = {};
+  for (const m of MODELS) {
+    const info = moePoolInfo(m.id);
+    if (info) out[m.id] = info;
+  }
+  return out;
+}
+
 // Hugging Face endpoint used by -hf to fetch GGUF. Before startup, test huggingface.co reachability: if a direct connection fails (blocked / DNS poisoning / timeout)
 // switch to the mirror hf-mirror.com, otherwise connect directly to huggingface.co. The HF_ENDPOINT env var can force an override. The result is cached in this process.
 let _hfEndpoint = null;
@@ -334,7 +375,7 @@ export function estimate(opts = {}) {
   const ctx = Math.max(256, Number(opts.ctx || 16384));
   const kvBits = Number(opts.kvBits || 8);
   const vision = !!opts.vision && !!model.vision;
-  const fit = computeFit(model, { bpw }, ctx, kvBits, vision);
+  const fit = computeFit(model, { bpw }, ctx, kvBits, vision, moePoolInfo(model.id));
   // MTP standalone drafter (Gemma, ~hundred MB resident); Qwen's built-in MTP head is already counted in the weights, so extra overhead is ignored.
   const mtpGB = opts.mtp !== false && model.mtp && !model.mtpEmbedded ? 0.2 : 0;
   return { totalGB: Math.round((fit.totalGB + mtpGB) * 10) / 10, weightGB: fit.weightGB, kvGB: fit.kvGB };
@@ -624,7 +665,7 @@ export function recommend(opts = {}) {
   }
   if (shared) { hw.unified = true; hw.shared = true; } // integrated GPU: VRAM is system memory, capacity/offload follow the Apple Silicon unified-memory approach
   const budget = usableModelMemoryGB(hw, opts.budgetGB);
-  return recommendModels(hw, budget, { ctx: opts.ctx || 16384, vision: opts.vision !== false });
+  return recommendModels(hw, budget, { ctx: opts.ctx || 16384, vision: opts.vision !== false, pools: moePools() });
 }
 
 // ── Model browsing (Hub discovery for the Browse tab) ─────────────────
@@ -875,7 +916,7 @@ export function start(opts = {}) {
   // (capped at the native window), at one of the offered KV quantizations (see localModels.pickCtxKv).
   // The fallback for a custom -hf model with no catalog entry is 16K at the first offered quantization, NOT a hardcoded one — a
   // launch that quietly runs at a quantization we publish no seed for would take a cold prefill with nothing to explain it.
-  const pick = !opts.ctx && r.model ? pickCtxKv(r.model, r.bpw, hw, usableModelMemoryGB(hw), visionOn) : null;
+  const pick = !opts.ctx && r.model ? pickCtxKv(r.model, r.bpw, hw, usableModelMemoryGB(hw), visionOn, moePoolInfo(r.model.id)) : null;
   const ctx = Number(opts.ctx || (pick ? pick.ctx : 16384));
   const kvBits = Number(opts.kvBits || (pick ? pick.kvBits : KV_BITS_OFFERED[0]));
   state.port = Number(opts.port || 0); // 0 = request a random free port from the kernel inside launch

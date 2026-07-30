@@ -86,6 +86,9 @@ export function seedAvailable(modelId) {
 export const MODELS = [
   {
     id: "qwen3.6-35b-a3b", name: "Qwen3.6-35B-A3B", params: 35, active: 3, moe: true, vision: true, mtp: true, mtpEmbedded: true,
+    // Share of the weights held in expert tensors (ffn_*_exps), measured from the UD-Q4_K_XL GGUF: 20.12 of 22.84 GB.
+    // Only the pooled fraction of these is resident; see moeResidentGB. Absent => the model is sized as fully resident.
+    expertFrac: 0.881,
     // vision:true = this GGUF repo ships a vision projector (mmproj). At launch, explicitly pass --mmproj to load the same repo's vision projector (vision on, default);
     // if vision is off, pass --no-mmproj to skip it (saves ~1GB of resident memory, see VISION_OVERHEAD_GB). Whether an mmproj actually exists follows the HF repo.
     // mtpEmbedded:true = use unsloth's "-MTP-GGUF" repo: the MTP (multi-token prediction) head is embedded in the weights themselves (self-speculative, no separate drafter file),
@@ -98,7 +101,10 @@ export const MODELS = [
     revision: "5bc3e238d916f48a861bac2f8a1990a0e9b7e98d",
     // unsloth ships only UD dynamic quants; pick a UD tag by device-memory tier (i.e. the :QUANT in -hf). memGB = total Mac unified memory / discrete-GPU VRAM.
     quantTiers: [
-      { minMemGB: 31, quant: "UD-Q4_K_XL", bpw: 4.5 },
+      // bpw measured from the shipped GGUF (22.85 GB / 35B params), not the nominal 4.5 of a plain Q4_K: unsloth's UD
+      // quants keep selected tensors at higher precision, and at 4.5 the catalog under-estimated this model by 13.9%.
+      // UD-Q3_K_XL below is still the nominal figure - that tier is not installed here, so there was nothing to measure.
+      { minMemGB: 31, quant: "UD-Q4_K_XL", bpw: 5.22 },
       { minMemGB: 23, quant: "UD-Q3_K_XL", bpw: 3.6 },
       // UD-Q2_K_XL (~14GB weights) leaves too little headroom for KV/context on a 16G machine, commented out for now; enable it if you need to barely run 35B on 16G.
       // { minMemGB: 16, quant: "UD-Q2_K_XL", bpw: 2.6 },
@@ -111,6 +117,8 @@ export const MODELS = [
   // vision:true: all three repos bundle an mmproj (mmproj-F16.gguf etc.); at launch, explicitly pass --mmproj to load the vision projector; if you don't need vision, turn it off in the UI (saves ~1GB resident).
   {
     id: "gemma4-26b-a4b", name: "Gemma 4 26B-A4B", params: 26, active: 4, moe: true, vision: true, mtp: true,
+    // Measured from the UD-Q4_K_XL GGUF: 12.85 of 14.23 GB in expert tensors. See moeResidentGB.
+    expertFrac: 0.903,
     revision: "7b92b5b28818151e8669af2e45e88d6086f490dd", // pinned: see the note on qwen above — required for seeded models
     hf: "unsloth/gemma-4-26B-A4B-it-qat-GGUF", arch: { L: 48, kvH: 8, hd: 256, swa: { every: 6, window: 1024 } }, maxCtx: 262144,
     quantTiers: [
@@ -267,15 +275,49 @@ export function kvGB(model, ctx, kvBits) {
   return per(gL, ctx) + per(L - gL, Math.min(ctx, swa.window));
 }
 
-export function computeFit(model, quant, ctx, kvBits, vision = false) {
-  const w = weightGB(model, quant);
+/**
+ * Resident weight bytes when the MoE expert pool is driving this model.
+ *
+ * Without a pool every byte of the GGUF is resident, which is what weightGB assumes. With one, the pooled experts stay
+ * file-backed (CPU_Mapped mmap) and only a slice is held on the device:
+ *
+ *   non-expert weights          always resident (attention, embeddings, norms)
+ *   native layers (slots = 0)   all n_expert experts resident - these are the layers the profile excluded from pooling
+ *   pooled layers               slots of n_expert experts resident
+ *   ring buffers                n_ring whole layers
+ *
+ * The last two do NOT add up. The fork places the ring and the pool at the same offsets in one buffer and allocates
+ * max(ring_bytes, pool_bytes) - legal because a graph uses one or the other, never both, and the switch invalidates the
+ * other's residency. Summing them overstates a 24 GB machine's usage by a whole ring.
+ *
+ * Sizing a pooled model as fully resident is not conservative, it is wrong in the direction that hurts: on Qwen3.6-35B it
+ * reads 19.7 GB against an actual 8.5 GB, so the context ladder drops rungs and the quant tier steps down for memory that
+ * was never going to be used.
+ *
+ * `remap_bytes` (the per-layer expert index tables) is ignored - tens of MB against a budget quoted in whole GB.
+ */
+export function moeResidentGB(model, quant, pool) {
+  const total = weightGB(model, quant);
+  if (!pool || !model.expertFrac) return total;
+  const layers = pool.layers || [];
+  if (!layers.length || !pool.n_expert) return total;
+  const expertsGB = total * model.expertFrac;
+  const perLayer = expertsGB / layers.length;
+  const nativeGB = layers.filter((l) => !(l.slots > 0)).length * perLayer;
+  const poolGB = layers.reduce((a, l) => a + (l.slots > 0 ? perLayer * (l.slots / pool.n_expert) : 0), 0);
+  const ringGB = (pool.ringSlots || 0) * perLayer;
+  return total - expertsGB + nativeGB + Math.max(poolGB, ringGB);
+}
+
+export function computeFit(model, quant, ctx, kvBits, vision = false, pool = null) {
+  const w = moeResidentGB(model, quant, pool);
   const kv = kvGB(model, ctx, kvBits);
   const overhead = OVERHEAD_BASE_GB + (model.moe ? 0.4 : 0) + (vision && model.vision ? VISION_OVERHEAD_GB : 0);
   return { weightGB: round(w), kvGB: round(kv), overheadGB: round(overhead), totalGB: round(w + kv + overhead) };
 }
 
-export function bestQuant(model, budgetGB, ctx, kvBits) {
-  for (const q of QUANTS) if (computeFit(model, q, ctx, kvBits).totalGB <= budgetGB) return q;
+export function bestQuant(model, budgetGB, ctx, kvBits, pool = null) {
+  for (const q of QUANTS) if (computeFit(model, q, ctx, kvBits, false, pool).totalGB <= budgetGB) return q;
   return null;
 }
 
@@ -319,13 +361,13 @@ export const kvTypeName = (kvBits) => (kvBits === 8 ? "q8_0" : kvBits === 4 ? "q
  * a last resort for low-memory devices that would otherwise be unable to launch anything at all, and never user-selectable —
  * the 32K floor governs what can be browsed and chosen, not this internal rescue path.
  */
-export function pickCtxKv(model, bpw, hw, budgetGB, vision = false) {
+export function pickCtxKv(model, bpw, hw, budgetGB, vision = false, pool = null) {
   const cap = Math.max(budgetGB || 0, deviceMemGB(hw) * 0.78);
   const maxCtx = model.maxCtx || MIN_CTX;
   for (const ctx of CTX_LADDER) {
     if (ctx > maxCtx) continue;
     for (const kvBits of KV_BITS_OFFERED) {
-      if (computeFit(model, { bpw }, ctx, kvBits, vision).totalGB <= cap) return { ctx, kvBits };
+      if (computeFit(model, { bpw }, ctx, kvBits, vision, pool).totalGB <= cap) return { ctx, kvBits };
     }
   }
   return { ctx: 16384, kvBits: KV_BITS_OFFERED[KV_BITS_OFFERED.length - 1] };
@@ -347,27 +389,27 @@ export function localSupported(hw) {
 }
 
 // Pick a model's quant: if it has quantTiers (e.g. the flagship uses unsloth UD tiers), pick a UD tag by device memory; otherwise use the generic QUANTS.
-function selectQuant(model, hw, budgetGB, ctx, kvBits) {
+function selectQuant(model, hw, budgetGB, ctx, kvBits, pool = null) {
   if (model.quantTiers) {
     const mem = deviceMemGB(hw);
     const t = model.quantTiers.find((x) => mem >= x.minMemGB);
     return t ? { id: t.quant, bpw: t.bpw, quality: 90, label: t.quant } : null;
   }
-  return bestQuant(model, budgetGB, ctx, kvBits);
+  return bestQuant(model, budgetGB, ctx, kvBits, pool);
 }
 
 // The quant tags this model offers in the UI quant dropdown, each one's size, and whether it fits: quants with fits=false are disabled (not selectable) in the UI.
 // Tiered models (quantTiers) judge fits by deviceMem ≥ minMemGB (same criterion as selectQuant); the rest use the generic QUANTS with totalGB ≤ budget.
 // Each quant runs pickCtxKv on its own: size is estimated from "the ctx/kv auto-selected for that quant", and ctx is returned alongside for the UI to display.
 // When vision is on and the model supports vision, the size includes the vision-projector overhead (matching the actual launch).
-function modelQuants(model, hw, budgetGB, vision = false) {
+function modelQuants(model, hw, budgetGB, vision = false, pool = null) {
   const mem = deviceMemGB(hw);
   const list = model.quantTiers
     ? model.quantTiers.map((t) => ({ id: t.quant, bpw: t.bpw, fitsByMem: mem >= t.minMemGB }))
     : QUANTS.map((q) => ({ id: q.id, bpw: q.bpw, fitsByMem: null }));
   return list.map((q) => {
-    const pick = pickCtxKv(model, q.bpw, hw, budgetGB, vision);
-    const totalGB = computeFit(model, { bpw: q.bpw }, pick.ctx, pick.kvBits, vision).totalGB;
+    const pick = pickCtxKv(model, q.bpw, hw, budgetGB, vision, pool);
+    const totalGB = computeFit(model, { bpw: q.bpw }, pick.ctx, pick.kvBits, vision, pool).totalGB;
     return { id: q.id, totalGB, ctx: pick.ctx, kvBits: pick.kvBits, fits: q.fitsByMem ?? totalGB <= budgetGB };
   });
 }
@@ -414,16 +456,20 @@ function speedHint(model, hw) {
 
 /** List all models that fit within the hardware budget (each with its best quant) and highlight the primary. Each entry includes ngl (GPU-offloaded layers) and layers (total layers) for the UI to display.
  *  vision (the vision toggle, normally passed in by the UI): when on and the model supports vision, the size estimate includes the vision-projector overhead. */
-export function recommend(hw, budgetGB, { ctx = MIN_CTX, kvBits = 8, vision = false } = {}) {
+export function recommend(hw, budgetGB, { ctx = MIN_CTX, kvBits = 8, vision = false, pools = null } = {}) {
   const vram = hw.unified ? 0 : (hw.gpu && hw.gpu.vramGB) || 0;
   const options = [];
   for (const model of MODELS) {
-    const q = selectQuant(model, hw, budgetGB, ctx, kvBits);
+    // The MoE pool changes what "fits": pooled experts stay file-backed, so a pooled model is sized by moeResidentGB
+    // rather than by its whole GGUF. Supplied by the caller (localServer owns the profile directory) so this module stays
+    // free of filesystem access; absent => every model is sized as fully resident, which is the pre-pool behaviour.
+    const pool = pools?.[model.id] || null;
+    const q = selectQuant(model, hw, budgetGB, ctx, kvBits, pool);
     if (!q) continue;
     const v = vision && !!model.vision;
-    const pick = pickCtxKv(model, q.bpw, hw, budgetGB, v); // each model auto-selects ctx / KV quant (overriding the 16K baseline argument)
+    const pick = pickCtxKv(model, q.bpw, hw, budgetGB, v, pool); // each model auto-selects ctx / KV quant (overriding the 16K baseline argument)
     const ngl = hw.unified ? 999 : hw.backend === "cpu" ? 0 : gpuLayers(model, q.bpw, pick.ctx, pick.kvBits, vram);
-    options.push({ model, quant: q, fit: computeFit(model, q, pick.ctx, pick.kvBits, v), speed: speedHint(model, hw), ctx: pick.ctx, kvBits: pick.kvBits, quants: modelQuants(model, hw, budgetGB, v), ngl, layers: model.arch.L });
+    options.push({ model, quant: q, fit: computeFit(model, q, pick.ctx, pick.kvBits, v, pool), speed: speedHint(model, hw), ctx: pick.ctx, kvBits: pick.kvBits, quants: modelQuants(model, hw, budgetGB, v, pool), ngl, layers: model.arch.L });
   }
   // primary: quality first, and larger context is better — first look for ≥128K (the heavy-use target), then fall back to ≥32K (16K is tight even for the ~6K system prompt), then a final fallback.
   // No YaRN needed: every model in the catalog has a native window ≥128K (E4B 128K, the rest 256K), so the cost of long context is only in KV (already estimated with sliding-window/quant tiering).
