@@ -80,6 +80,24 @@ const nextConfig = {
       },
     },
   },
+
+  /**
+   * The same *.md raw-text import, for webpack. `turbopack.rules` above is read ONLY by the
+   * Turbopack bundler, so `next dev --webpack` has no loader for Markdown and fails with
+   * "Module parse failed: Unexpected character '#'" on src/app/agent/chat/system/*.md.
+   *
+   * Turbopack is the default for dev and build; webpack is the escape hatch behind
+   * `pnpm electron:dev:webpack` / `pnpm dev:webpack`. It exists because Turbopack's dev server
+   * leaked multi-GB on Apple Silicon (vercel/next.js#92052, fixed in 16.3 by evicting the compile
+   * cache to disk). Keep the two rule sets in step - a loader added to one must be added to both,
+   * or the escape hatch breaks exactly when it is needed.
+   */
+  // nextConfig is not annotated as NextConfig, so the parameter gets no contextual type - take it
+  // from Next's own signature rather than `any`, so it tracks upstream instead of drifting.
+  webpack: (config: Parameters<NonNullable<NextConfig["webpack"]>>[0]) => {
+    config.module.rules.push({ test: /\.md$/, use: "raw-loader" });
+    return config;
+  },
 };
 
 export default nextConfig;
