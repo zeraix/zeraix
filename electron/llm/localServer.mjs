@@ -1128,12 +1128,18 @@ async function launch(variant, cfg) {
     //   SEG_ASYNC     encode+commit all segments up front, gated on an MTLSharedEvent, instead of commit+wait per
     //                 segment. Qwen3.6-35B-A3B is 41 segments per forward, so without it every token pays 41 GPU
     //                 round trips.
-    // GGML_METAL_NO_RESIDENCY is deliberately NOT set, though every benchmark arm sets it. Residency sets cover
-    // Metal buffers only; with a pool profile the loader ALLOCATES the device weight buffer and the pooled experts
-    // stay in CPU_Mapped mmap, so disabling residency never protects the pages that actually thrash — it only stops
-    // the pool's own slot buffers and the KV from being wired, which on a machine that is already swapping is the
-    // opposite of what we want. Adding it here changed no measured number; leaving it off is the app's original
-    // behaviour. (ggml reads it by PRESENCE: `use_residency_sets = getenv(...) == nil`.)
+    //   NO_RESIDENCY  stop Metal from wiring its buffers. Set because the machine wires far more than the process
+    //                 accounts for: measured on Qwen3.6-35B (24 GiB Mac), system wired went 2.64 -> 15.31 GiB while
+    //                 llama-server's own phys_footprint was 9.11 GiB and its dirty Metal/ggml buffers 8.86 GiB.
+    //                 That leaves ~3.6 GiB wired belonging to no process, and residency sets are the mechanism that
+    //                 would do it. Wiring is exactly what hurts here: the widened warmup stages EVERY expert of
+    //                 every pooled layer through one ring forward, so the whole expert set wants to sit in page
+    //                 cache, and wired pages are pages the cache cannot have.
+    //                 The earlier argument for leaving it off — "residency covers Metal buffers only, and the
+    //                 pooled experts are CPU_Mapped mmap, so it cannot protect the pages that thrash" — is right
+    //                 about what it protects and wrong about what it costs. UNVERIFIED that this reclaims the
+    //                 3.6 GiB; that is what setting it measures. (ggml reads it by PRESENCE:
+    //                 `use_residency_sets = getenv(...) == nil`.)
     // LLAMA_MOE_SMALL_PREFILL: feed a prefill of <= N tokens through the pool in decode-shaped graphs instead of
     // handing it to the ring. The ring stages EVERY expert of a layer per forward — a flat cost that a short
     // prefill cannot amortise — so a 30-token follow-up paid the same as a 500-token one. Measured in this app,
@@ -1177,7 +1183,7 @@ async function launch(variant, cfg) {
     // Confounded, not proven: those runs also differ in cache warmth and other env, so the trend is suggestive
     // rather than isolated. Kept because it costs NO memory — slot count and pool footprint are untouched, so
     // the 24 GB target is unaffected — and the evidence points one way.
-    proc = spawn(bin, args, { stdio: ["ignore", "pipe", "pipe"], env: { ...process.env, HF_ENDPOINT: hfEnd, LLAMA_CACHE: modelsDir, ...(moeOn ? { LLAMA_MOE_POOL_PROFILE: moeProfile, LLAMA_MOE_RING: "1", GGML_METAL_SEG_ASYNC: "1", LLAMA_MOE_SMALL_PREFILL: "64", LLAMA_MOE_POOL_FILL_THREADS: "8", LLAMA_MOE_RING_SLOTS: "4" } : {}) } });
+    proc = spawn(bin, args, { stdio: ["ignore", "pipe", "pipe"], env: { ...process.env, HF_ENDPOINT: hfEnd, LLAMA_CACHE: modelsDir, ...(moeOn ? { LLAMA_MOE_POOL_PROFILE: moeProfile, LLAMA_MOE_RING: "1", GGML_METAL_SEG_ASYNC: "1", GGML_METAL_NO_RESIDENCY: "1", LLAMA_MOE_SMALL_PREFILL: "64", LLAMA_MOE_POOL_FILL_THREADS: "8", LLAMA_MOE_RING_SLOTS: String(MOE_RING_SLOTS) } : {}) } });
   } catch (e) {
     const fb = fallbackVariant(variant);
     if (fb) { pushLog(`[llama] start of ${variant} failed (${String(e?.message ?? e)}) -> falling back to ${fb}\n`); return launch(fb, cfg); }
