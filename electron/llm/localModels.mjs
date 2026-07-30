@@ -93,7 +93,18 @@ export const MODELS = [
     // if vision is off, pass --no-mmproj to skip it (saves ~1GB of resident memory, see VISION_OVERHEAD_GB). Whether an mmproj actually exists follows the HF repo.
     // mtpEmbedded:true = use unsloth's "-MTP-GGUF" repo: the MTP (multi-token prediction) head is embedded in the weights themselves (self-speculative, no separate drafter file),
     // and it also ships UD quants + mmproj. At launch, --spec-type draft-mtp enables self-speculative decoding (turning off vision/MTP only affects loading/toggles; the weights still come from this repo).
-    hf: "unsloth/Qwen3.6-35B-A3B-MTP-GGUF", arch: { L: 48, kvH: 4, hd: 128 }, maxCtx: 262144,
+    hf: "unsloth/Qwen3.6-35B-A3B-MTP-GGUF",
+    // Read from the GGUF, not guessed: block_count 41, head_count_kv 2, key/value_length 256, and
+    // full_attention_interval 4 - so only 1 layer in 4 holds KV cells at all. The other 3 in 4 are GDN-recurrent,
+    // whose state is a fixed [S,S,H] blob per sequence with no per-token cells, hence window 0 rather than a
+    // sliding window. The previous { L:48, kvH:4, hd:128 } over-stated KV by 4.4x (6.44 GB vs 1.48 GB at 256K),
+    // which is what made the context ladder refuse rungs this machine can hold.
+    // UNDER-counts by the recurrent state itself, which is real but not per-token and not modelled here.
+    arch: { L: 41, kvH: 2, hd: 256, swa: { every: 4, window: 0 } }, maxCtx: 262144,
+    // The 30 GDN-recurrent layers the window-0 above excludes from KV. Their state is NOT per-token: a fixed
+    // [state, state, heads] blob per layer per sequence, from the GGUF's ssm.state_size 128 and
+    // ssm.inner_size 4096 (=> 4096/128 = 32 value heads), plus a conv_kernel 4 x 8192 window. F32.
+    recurrent: { layers: 30, state: 128, heads: 32, conv: 4 * 8192 },
     // Pinned commit. Required for any model on SEED_MODELS: a resident seed is only valid for the exact GGUF it was built
     // against, because the chat template ships inside the file and model_key does not cover it. Leaving this on "main" means a
     // repo re-upload silently changes the rendered prefix and every published seed stops matching, with no error. Bump it and
@@ -104,8 +115,16 @@ export const MODELS = [
       // bpw measured from the shipped GGUF (22.85 GB / 35B params), not the nominal 4.5 of a plain Q4_K: unsloth's UD
       // quants keep selected tensors at higher precision, and at 4.5 the catalog under-estimated this model by 13.9%.
       // UD-Q3_K_XL below is still the nominal figure - that tier is not installed here, so there was nothing to measure.
-      { minMemGB: 31, quant: "UD-Q4_K_XL", bpw: 5.22 },
-      { minMemGB: 23, quant: "UD-Q3_K_XL", bpw: 3.6 },
+      // minMemGB is where the quant measurably fits WITH the expert pool, not where the whole GGUF would.
+      // At 256K context, q4 KV, vision on, and the native/pooled split moeNativePlan derives for that machine:
+      //   UD-Q4_K_XL  fits from 18 GB (16.7 of a 16.8 GB budget on 24 GB, 17 layers native)
+      //   UD-Q3_K_XL  fits from 16 GB
+      // Set one Apple-Silicon config above each: 24 GB gets q4 at the full 256K, 16/18 GB stays on q3. The margin
+      // is deliberate - moeResidentGB models the dirty allocation only, and neither the GDN recurrent state nor
+      // the page cache the pooled experts want is charged against this budget.
+      // Was 31/23, sized when the model was counted as fully resident (22.84 GB rather than 8.5-13.3).
+      { minMemGB: 20, quant: "UD-Q4_K_XL", bpw: 5.22 },
+      { minMemGB: 16, quant: "UD-Q3_K_XL", bpw: 3.6 },
       // UD-Q2_K_XL (~14GB weights) leaves too little headroom for KV/context on a 16G machine, commented out for now; enable it if you need to barely run 35B on 16G.
       // { minMemGB: 16, quant: "UD-Q2_K_XL", bpw: 2.6 },
     ],
@@ -122,7 +141,13 @@ export const MODELS = [
     revision: "7b92b5b28818151e8669af2e45e88d6086f490dd", // pinned: see the note on qwen above — required for seeded models
     hf: "unsloth/gemma-4-26B-A4B-it-qat-GGUF", arch: { L: 48, kvH: 8, hd: 256, swa: { every: 6, window: 1024 } }, maxCtx: 262144,
     quantTiers: [
-      { minMemGB: 18, quant: "UD-Q4_K_XL", bpw: 4.37 }, // 14.2 GB
+      // 16, not 18: with the expert pool the weights are 7.3-8.6 GB resident rather than the whole 14.2 GB file,
+      // and the model fits a 16 GB Mac at 64K (11.2 of an 11.2 GB budget, 7 layers native) or 128K with vision
+      // off. 14 GB and below fits at no rung at all, so this is the real floor.
+      // Which CONTEXT is affordable is decided per rung by estimate(), not here - the tier only answers "can this
+      // machine run the model at all". Gating the model on the memory a 256K context needs hid it from machines
+      // that can run it perfectly well at 64K.
+      { minMemGB: 16, quant: "UD-Q4_K_XL", bpw: 4.37 }, // 14.2 GB on disk
     ],
     notes: "MoE ~4B active → fast decode, high quality. Multimodal (images only, no audio)."
   },
@@ -253,8 +278,33 @@ export function isSharedGpu(name, uma) {
 export function usableModelMemoryGB(hw, overrideGB) {
   if (typeof overrideGB === "number" && overrideGB > 0) return round(overrideGB);
   if (hw.unified) {
-    const reserve = Math.min(8, Math.max(3, hw.totalMemGB * 0.22));
-    return round(Math.max(2, Math.min(hw.totalMemGB * 0.7, hw.totalMemGB - reserve)));
+    // 65% of unified memory, or "all but 3 GB" on a machine too small for that to leave a usable OS.
+    //
+    // Was min(8, max(3, T*0.22)) inside a min against T*0.7. Those two constants could never bind: reserve
+    // exceeds 0.3*T only when the 3 GB floor does (T < 10), and the 8 GB cap only applies above 36 GB where
+    // 8 is already below 0.3*T. Same shape, three numbers fewer.
+    //
+    // 0.68, and the margin here is expensive. Measured on a 36 GiB Mac, one factor step at a time:
+    //
+    //                 native  pooled  wired         free   decode      prefill (small/large)
+    //     0.70        36/41      5    27.60 (77%)   0.06   31.64 t/s   69.3 / 147.8 t/s
+    //     0.68        34/41      7    -             -      -           -            <- UNMEASURED
+    //     0.65        32/41      9    25.48 (71%)   0.07   26.24 t/s   32.5 /  65.1 t/s
+    //
+    // Cost tracks the POOLED layers that remain, not the native layers gained: 36 -> 32 native is 5 -> 9 pooled,
+    // nearly doubling the ring/pool work per forward, which is why four layers cost 17% of decode and half of
+    // prefill rather than the few percent a diminishing-returns reading predicts. There is no flat region at the
+    // top to shave.
+    //
+    // 0.65 was tried and reverted: the 2 GiB it freed bought nothing usable. Free memory reads ~0.07 GiB at both
+    // settings - macOS using everything for cache, not a shortage - and the compressor moved 0.46 GiB. 0.68 keeps
+    // most of the speed (34/41 rather than 32/41) while holding ~1 GiB back for the QEMU sandbox, which was not
+    // running during any of these measurements and is the one unmodelled claim on this memory. Decode at 0.68
+    // should land near 28-29 t/s if the curve between the measured points is smooth - that has NOT been checked.
+    //
+    // NOT 0.8: a 24 GiB Mac would have ~0.1 GiB of page cache left after macOS (~2.65 GiB wired) and Electron
+    // (~1.7 GiB), and the pool re-reads its file-backed experts on every ring forward without it.
+    return round(Math.max(2, hw.totalMemGB < 10 ? hw.totalMemGB - 3 : hw.totalMemGB * 0.68));
   }
   // Discrete GPU: partial offload can use "available VRAM + available system memory" (layers that don't fit stay on CPU); if VRAM is unreadable, use system memory only.
   const usableVram = hw.gpu && hw.gpu.vramGB ? Math.max(0, hw.gpu.vramGB - 1.2) : 0;
@@ -309,9 +359,147 @@ export function moeResidentGB(model, quant, pool) {
   return total - expertsGB + nativeGB + Math.max(poolGB, ringGB);
 }
 
+/**
+ * Minimum slots a pooled layer needs, and the floor every sizing path must agree on.
+ *
+ * One ubatch of routing has to fit or the layer thrashes on every forward. pool_ubatch is (draft + 1) x parallel -
+ * the draft tokens of every concurrent sequence land in one graph - and each token routes n_expert_used experts.
+ *
+ * Reproduces every shipped profile: qwen 6 x 8 = 48, gemma 6 x 8 = 48, and the 9 GB gemma reference 5 x 8 = 40.
+ * Derived rather than read from the file's slot_floor, because that value was computed for whatever --parallel and
+ * draft depth the profiling run used; changing either here would silently leave the floor too low.
+ *
+ * Exported so the estimate and the launch plan cannot drift: sizing must model the SAME floor the server gets.
+ */
+export function moeSlotFloor(profile, { parallel = 2, nExpertUsed = 8 } = {}) {
+  if (!profile?.n_expert) return 0;
+  return Math.min(profile.n_expert, Math.max(1, ((profile.draft ?? 0) + 1) * parallel * nExpertUsed));
+}
+
+/**
+ * The cheapest configuration the planner can produce: always-native layers native, every other layer at the floor.
+ *
+ * This is what the context ladder and quant choice must be sized against - the plan only ever spends MORE than
+ * this, so anything the floor cannot afford is genuinely unaffordable. Reading the file's own `slots` instead
+ * would size against whatever split the profiling machine happened to use.
+ */
+export function moeFloorPool(profile, { parallel = 2, nExpertUsed = 8, ringSlots = 0 } = {}) {
+  if (!profile?.layers?.length || !profile?.n_expert) return null;
+  const floor = moeSlotFloor(profile, { parallel, nExpertUsed });
+  return {
+    layers: profile.layers.map((l) => ({ ...l, slots: l.miss == null ? 0 : floor })),
+    n_expert: profile.n_expert,
+    ringSlots,
+  };
+}
+
+/**
+ * Choose which layers run NATIVE (experts on the GPU, stock FFN, pool skipped) for THIS machine.
+ *
+ * The shipped profile is a measurement, not a decision: it carries a per-layer miss rate taken on one reference
+ * machine. How many layers to keep native is a property of the host, so baking it into the file gives a 16 GB Mac
+ * the split that suited a 64 GB one. This derives it instead.
+ *
+ * Two inputs decide it:
+ *
+ *   miss == null   never pooled during profiling, so unmeasurable and always native. The generator excluded these
+ *                  deliberately (layers 0-3 and the last); treat that as the floor, not something to re-litigate.
+ *   miss present   rank descending and promote while the budget holds. Highest miss first because a native layer
+ *                  does not make its misses cheaper, it deletes them.
+ *
+ * Why more native is the right direction when memory allows: promoting a layer costs its full expert set on the
+ * device but frees BOTH its pool slots and the page cache its file-backed copy wanted, so total demand falls
+ * slightly while wired rises. The binding limit is therefore what can be wired, which is exactly what
+ * usableModelMemoryGB already answers - so this reuses it rather than inventing a second budget.
+ *
+ * Marginal cost per layer is `per - per*slots/n_expert` until the pool shrinks to the ring's size, after which
+ * max() pins and each further layer costs the full `per`. That knee (~N=19 on Qwen3.6/24 GB) falls out of the
+ * loop naturally because the fit is recomputed each step; it does not need special-casing.
+ */
+export function moeNativePlan(model, profile, {
+  bpw, budgetGB, ctx, kvBits, vision = false, ringSlots = 0, parallel = 2, nExpertUsed = 8,
+} = {}) {
+  const src = profile?.layers || [];
+  if (!src.length || !profile?.n_expert) return null;
+  const NE = profile.n_expert;
+  const quant = { bpw };
+  const floor = moeSlotFloor(profile, { parallel, nExpertUsed });
+  const ranked = src.filter((l) => l.miss != null).sort((a, b) => (b.miss ?? 0) - (a.miss ?? 0));
+  const native = new Set(src.filter((l) => l.miss == null).map((l) => l.il));
+  const extra = new Map();                       // il -> slots above the floor
+  const build = () => src.map((l) => ({ ...l, slots: native.has(l.il) ? 0 : Math.min(NE, floor + (extra.get(l.il) || 0)) }));
+  const fitOf = (layers) => computeFit(model, quant, ctx, kvBits, vision, { layers, n_expert: NE, ringSlots }).totalGB;
+  const fits = (layers) => fitOf(layers) <= budgetGB;
+  // Pass 1 - promote to native by miss, highest first. A native layer does not make its misses cheaper, it
+  // deletes them, so this is the best use of memory until the budget runs out.
+  for (const cand of ranked) {
+    native.add(cand.il);
+    if (!fits(build())) { native.delete(cand.il); break; }
+  }
+  // Pass 2 - waterfill whatever is left over onto the remaining pooled layers, proportional to miss rate. The
+  // leftover is real: pass 1 stops at the first layer that does not fit, and a native layer costs ~5x a slot
+  // granule, so the gap below the budget is usually big enough to matter. Slots above the floor do not remove
+  // misses but do reduce them, which is the only lever left once no further layer can go native.
+  const pooled = src.filter((l) => !native.has(l.il) && (l.miss ?? 0) > 0);
+  const headroom = budgetGB - fitOf(build());
+  if (pooled.length && headroom > 0 && model.expertFrac) {
+    const perSlotGB = (weightGB(model, quant) * model.expertFrac / src.length) / NE;
+    let budgetSlots = Math.floor(headroom / perSlotGB);
+    const totalMiss = pooled.reduce((a, l) => a + l.miss, 0);
+    for (const l of pooled.sort((a, b) => b.miss - a.miss)) {
+      if (budgetSlots <= 0) break;
+      const want = Math.min(NE - floor, Math.floor(budgetSlots * (l.miss / totalMiss)) + 1, budgetSlots);
+      if (want > 0) { extra.set(l.il, want); budgetSlots -= want; }
+    }
+    // Trim if the proportional pass overshot - fit is the authority, not the estimate that drove it.
+    while (extra.size && !fits(build())) {
+      const worst = [...extra.entries()].sort((a, b) => b[1] - a[1])[0];
+      if (worst[1] <= 1) { extra.delete(worst[0]); } else { extra.set(worst[0], worst[1] - Math.ceil(worst[1] / 4)); }
+    }
+  }
+  const layers = build();
+  const pool = { layers, n_expert: NE, ringSlots };
+  return {
+    layers,
+    native: layers.filter((l) => !l.slots).map((l) => l.il).sort((a, b) => a - b),
+    residentGB: moeResidentGB(model, quant, pool),
+    // False when even the floor configuration overruns the budget - the routing floor is not negotiable (below it
+    // a layer thrashes every forward), so the caller must give something else up: a smaller ctx, fewer parallel
+    // slots, or a leaner quant. Reported rather than silently returning a plan that does not fit.
+    fits: fitOf(layers) <= budgetGB,
+    totalGB: fitOf(layers),
+  };
+}
+
+/**
+ * Per-sequence state that is NOT the attention KV cache, and the checkpoint memory on top of it.
+ *
+ * Two terms kvGB cannot express, because neither scales with context the way a KV cache does:
+ *
+ *   live recurrent state   a fixed blob per recurrent layer per sequence, held (1 + n_rs_seq) times over for
+ *                          speculative rollback. n_rs_seq is the draft depth (2 with the pool profile), and the
+ *                          sequence count is the slots plus any resident seed sequences.
+ *   checkpoint             one more copy per slot. Qwen has no sliding window on its attention layers, so
+ *                          n_swa == 0 and checkpoints are "whole-state" - but that means the whole RECURRENT
+ *                          state, not the sequence: they are taken with LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY,
+ *                          "work only with partial states, such as SWA KV cache or recurrent cache", while the
+ *                          full-attention KV is the inverse flag (BASE_ONLY) and is not in them. With the disk
+ *                          tier on only the newest stays resident, so it is one per slot.
+ *
+ * Both terms are therefore FIXED - no ctx anywhere. On Qwen3.6-35B: 0.80 GB live + 0.40 GB checkpoint = 1.20 GB
+ * flat, at any context length.
+ */
+export function recurrentGB(model, { seqs = 4, rsGroups = 3, slots = 2 } = {}) {
+  const r = model.recurrent;
+  if (!r) return 0;
+  const perLayerSeq = (r.state * r.state * r.heads + r.conv) * 4; // F32
+  const stateBytes = perLayerSeq * r.layers * rsGroups;
+  return (stateBytes * (seqs + slots)) / 1e9;
+}
+
 export function computeFit(model, quant, ctx, kvBits, vision = false, pool = null) {
   const w = moeResidentGB(model, quant, pool);
-  const kv = kvGB(model, ctx, kvBits);
+  const kv = kvGB(model, ctx, kvBits) + recurrentGB(model);
   const overhead = OVERHEAD_BASE_GB + (model.moe ? 0.4 : 0) + (vision && model.vision ? VISION_OVERHEAD_GB : 0);
   return { weightGB: round(w), kvGB: round(kv), overheadGB: round(overhead), totalGB: round(w + kv + overhead) };
 }
@@ -323,16 +511,19 @@ export function bestQuant(model, budgetGB, ctx, kvBits, pool = null) {
 
 /**
  * Minimum usable context window for a local model. The agent system prompt alone already approaches 8K, so anything
- * below this leaves no room for tools, history, or a real answer — a model that cannot reach 32K is not worth listing.
+ * below this leaves no room for tools, history, or a real answer — a model that cannot reach 64K is not worth listing.
  * Enforced in three places: Hub search results (hfDownload.searchModels), the selectable context rungs (CTX_LADDER +
  * the UI presets/input), and the recommender's per-model cap. Models whose window is *unknown* are kept (fail open),
  * since HF metadata is frequently incomplete and a wrong exclusion is worse than a wrong inclusion.
  */
-export const MIN_CTX = 32768;
+export const MIN_CTX = 65536;
 
 // Automatic context tiering (largest to smallest): pick "the largest -c that fits" by device memory, capped at the model's native window (maxCtx).
-// The ladder bottoms out at MIN_CTX (32K): below that the system prompt alone eats the window, so those rungs are never offered.
-export const CTX_LADDER = [262144, 131072, 65536, 32768];
+// The ladder bottoms out at MIN_CTX (64K): below that the system prompt alone eats the window, so those rungs are never offered.
+// 256K / 196K / 128K / 96K / 64K, descending - pickCtxKv walks it down and takes the first rung that fits.
+// Finer than powers of two on purpose: the gap between 128K and 256K is 2.15 GB of KV on a 26B-class model,
+// which is several native layers' worth, so a machine that just misses 256K should not fall all the way to 128K.
+export const CTX_LADDER = [262144, 200704, 131072, 98304, 65536];
 
 /**
  * KV cache quantisations offered for catalog models, best first.
@@ -362,7 +553,12 @@ export const kvTypeName = (kvBits) => (kvBits === 8 ? "q8_0" : kvBits === 4 ? "q
  * the 32K floor governs what can be browsed and chosen, not this internal rescue path.
  */
 export function pickCtxKv(model, bpw, hw, budgetGB, vision = false, pool = null) {
-  const cap = Math.max(budgetGB || 0, deviceMemGB(hw) * 0.78);
+  // The budget, and only the budget. This used to be max(budgetGB, deviceMem * 0.78) - a deliberate loosening
+  // from when weights were counted at their whole-GGUF size and the honest budget refused rungs the machine
+  // could actually hold. Now that pooled models are sized by what they make resident, the fudge only makes this
+  // disagree with estimate()'s per-rung verdict: it would default a 16 GB Mac to 128K on 26B while the UI showed
+  // that same rung disabled. One budget, one answer.
+  const cap = budgetGB || 0;
   const maxCtx = model.maxCtx || MIN_CTX;
   for (const ctx of CTX_LADDER) {
     if (ctx > maxCtx) continue;
@@ -481,7 +677,7 @@ export function recommend(hw, budgetGB, { ctx = MIN_CTX, kvBits = 8, vision = fa
   const pickFrom = (list) => (list.length === 0 ? null : lowBw && list.length > 1 ? [...list].sort((a, b) => activeOf(a) - activeOf(b))[0] : list[0]);
   const primary =
     pickFrom(options.filter((o) => o.quant.quality >= 85 && o.ctx >= 131072)) ||
-    pickFrom(options.filter((o) => o.quant.quality >= 85 && o.ctx >= 32768)) ||
+    pickFrom(options.filter((o) => o.quant.quality >= 85 && o.ctx >= MIN_CTX)) ||
     options.find((o) => o.quant.quality >= 85) ||
     options[0] || null;
   // kvBitsOffered travels with the recommendation so the renderer lists what this process actually supports, instead of holding
