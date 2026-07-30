@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import { localLlm } from "@/lib/ai/localModel";
 import type { AgentMode } from "@/constants/Agent";
 import type { Attachment } from "@/lib/ai/attachments";
 import {
@@ -378,6 +379,10 @@ export const useAgentChatStore = create<AgentChatState>((set, get) => {
     deleteConversation: (id) => {
       const conv = get().getConversation(id);
       if (!conv) return;
+      // Drop this conversation's KV on the local server too. The server keeps it on disk for as long as its tip manifest
+      // exists and nothing else removes one, so without this the KV outlives the conversation permanently. Fire-and-forget:
+      // no local model running is the common case and must not block or fail the delete.
+      void localLlm()?.eraseConversationKv(id);
       const pid = conv.projectId;
       const remaining = get().conversations.filter((c) => c.projectId === pid && c.id !== id);
       set((s) => ({

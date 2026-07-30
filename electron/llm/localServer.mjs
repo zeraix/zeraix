@@ -119,6 +119,30 @@ const umaCache = new Map();
 let umaScanned = false; // whether uma has already been captured from stderr within this launch (stop scanning once captured, to avoid re-parsing)
 
 /** Current outward-facing status snapshot (structured-cloneable, for IPC to the renderer). */
+/**
+ * Tell the running server to forget a conversation's persisted KV.
+ *
+ * The server keeps a conversation's KV on disk for as long as its tip manifest exists, and nothing else ever removes one —
+ * so without this call, deleting a conversation in the UI left its KV behind permanently and the kv directory only grew.
+ * The server also detaches any slot still holding it, otherwise an eviction spill would write the tip straight back.
+ *
+ * Best-effort and never throws: the server may not be running, may be an older build without the route, or may be mid-restart.
+ * None of those should make deleting a conversation fail — the worst case is the KV lingering until the byte budget evicts it.
+ */
+export async function eraseConversationKv(conversationId) {
+  const id = String(conversationId || "").trim();
+  if (!id || !state.port || !state.proc) return { ok: false, reason: "server not running" };
+  try {
+    const res = await fetch(`http://127.0.0.1:${state.port}/kv/conversation/${encodeURIComponent(id)}`, { method: "DELETE" });
+    if (!res.ok) return { ok: false, reason: `HTTP ${res.status}` };
+    const body = await res.json().catch(() => ({}));
+    if (body?.erased) pushLog(`[llama] forgot KV for deleted conversation ${id}\n`);
+    return { ok: true, erased: !!body?.erased };
+  } catch (e) {
+    return { ok: false, reason: String(e?.message ?? e) };
+  }
+}
+
 export function status() {
   return {
     running: !!state.proc,

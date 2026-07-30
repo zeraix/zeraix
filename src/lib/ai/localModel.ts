@@ -259,6 +259,9 @@ export interface LocalLlmBridge {
   listModels(): Promise<DownloadedLocalModel[]>;
   /** Delete a downloaded model (rejected if it's currently running). */
   deleteModel(opts: { dir: string }): Promise<{ ok: boolean; error?: string }>;
+  /** Forget a deleted conversation's persisted KV on the local server. Best-effort: resolves ok:false when no server is
+   *  running, so deleting a conversation never depends on the model being up. */
+  eraseConversationKv(conversationId: string): Promise<{ ok: boolean; erased?: boolean; reason?: string }>;
   /** GGUF model download directory. */
   modelsDir(): Promise<string>;
   /** Estimate memory usage based on the options. Non-catalog models pass { repo, meta } instead of modelId. */
