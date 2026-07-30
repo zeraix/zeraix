@@ -85,36 +85,47 @@ export function diffReminder(current: ReminderState, last: ReminderState): Remin
  */
 function renderBody(state: ReminderState, atCut: boolean): string {
   const lines: string[] = [];
+  // The "from this turn on" framing is stated ONCE as a lead-in rather than repeated per item. It has to
+  // survive - a long conversation accumulates several of these with different values, and each must read as
+  // something that happened at a point rather than a claim about the present - but repeating it per line
+  // cost ~5 tokens x however many items changed, on every turn that carries a reminder.
   const since = atCut ? "As of this point in the conversation" : "From this turn on";
-  if (state.workdir !== undefined) {
-    lines.push(`${since}, the working directory is: ${state.workdir}`);
-  }
+  const lead = `${since}:`;
+  // Ordered LEAST volatile first. Every reminder sits inside a user turn, so the prefix the KV can reuse
+  // ends at the first byte that differs from last time. Leading with the workdir path and today's date put
+  // the two values most likely to have changed at the front, throwing away the match for everything behind
+  // them; leading with the static sandbox prose keeps that part shared and confines the break to the tail.
   if (state.env !== undefined) {
     lines.push(state.env);
-  }
-  if (state.ctx) {
-    const { date, model, tz } = state.ctx;
-    lines.push(`${since}, the date is ${date}, the model answering is ${model}, and the user's time zone is ${tz}.`);
   }
   if (state.skills) {
     lines.push(
       state.skills.length
-        ? `${since}, these skills are available — call load_skill with an id to get its full instructions:\n` +
+        ? `- skills available — call load_skill with an id for its full instructions:\n` +
             state.skills.map((s) => `- ${s.id}: ${s.description}`).join("\n")
-        : `${since}, no skills are available; do not call load_skill.`,
+        : `- no skills available; do not call load_skill.`,
     );
   }
   if (state.disabledTools) {
     lines.push(
       state.disabledTools.length
-        ? `${since}, these declared tools are NOT usable and calling them will fail: ${state.disabledTools.join(", ")}. Say so plainly rather than promising the result.`
-        : `${since}, every declared tool is usable again.`,
+        ? `- these declared tools are NOT usable and will fail: ${state.disabledTools.join(", ")}. Say so plainly rather than promising the result.`
+        : `- every declared tool is usable again.`,
     );
   }
   if (state.task !== undefined) {
     lines.push(state.task ? state.task : "The mission brief has been cleared.");
   }
-  return lines.join("\n\n");
+  // Most volatile LAST: the workdir changes per project and the date changes daily, so anything placed
+  // after them would lose its cached prefix every time either moves.
+  if (state.workdir !== undefined) {
+    lines.push(`- working directory: ${state.workdir}`);
+  }
+  if (state.ctx) {
+    const { date, model, tz } = state.ctx;
+    lines.push(`- date ${date}; model ${model}; time zone ${tz}.`);
+  }
+  return lines.length ? [lead, ...lines].join("\n") : "";
 }
 
 /** A change event, for the turn that carries it. */

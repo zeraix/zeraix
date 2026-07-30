@@ -38,9 +38,12 @@ export function isSandboxEngine(active: string | null | undefined): boolean {
 export function sandboxEnvHint(st: SandboxStatus | null): string {
   if (st && isSandboxEngine(st.active)) {
     return (
-      "【Command Execution Environment】`run_command` / `check_project` are currently executed inside an isolated Linux (Debian, bash) sandbox: " +
-      "Use Linux commands (ls, grep, curl, etc.) instead of Windows commands. File tools and terminal commands share the same working directory " +
-      "(the host directory has been mounted into the sandbox). If an 【Execution Environment Switch】 notice appears in the tool output, switch to the matching commands as instructed."
+      // Kept SHORT on purpose: this rides every conversation's first turn, and the system prompt already
+      // describes the sandbox and its toolchain at length — it explicitly defers here only for WHICH
+      // environment is live. Restating what the sandbox is would be paying ~100 tokens a conversation to
+      // repeat the seed.
+      "【Command Execution Environment】`run_command` / `check_project` run in the Linux sandbox (Debian, bash); use Linux commands. " +
+      "File tools share its working directory. On an 【Execution Environment Switch】 notice, switch accordingly."
     );
   }
   const p = st?.hostPlatform ?? "";
@@ -56,9 +59,9 @@ export function sandboxEnvHint(st: SandboxStatus | null): string {
   // text, so it must be, to keep the prompt prefix identical on every install) — so the model has to be told here when the
   // sandbox that actually provides its toolchain is not running, or it will load a skill whose tools do not exist.
   return (
-    `【Command Execution Environment】run_command / check_project are currently executed directly on the ${osName},` +
-    "Please use commands that match the system. If an 【Execution Environment Switch】 notice appears in the tool output, switch to the matching commands as instructed. " +
-    "The built-in doc-media-toolbox skill is UNAVAILABLE while running on the host: its imagemagick / ffmpeg / pandoc / OCR toolchain lives in the sandbox image. Do not load it, and say plainly that media and document processing needs the sandbox rather than attempting it."
+    `【Command Execution Environment】run_command / check_project run directly on the ${osName}; use matching commands. ` +
+    "On an 【Execution Environment Switch】 notice, switch accordingly. " +
+    "doc-media-toolbox is UNAVAILABLE on the host (its toolchain lives in the sandbox image): do not load it, and say media/document work needs the sandbox."
   );
 }
 
