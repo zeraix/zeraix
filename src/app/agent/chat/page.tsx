@@ -212,6 +212,7 @@ import {
   stripRemoteImagesForLocal,
   phaseSummaryText,
   stripWireMetadata,
+  applyReasoningPolicy,
   toInstalledProjectSkill,
 } from "./wireHelpers";
 
@@ -1089,6 +1090,9 @@ function ChatAgent() {
           ...(m.tool_calls?.length ? { tool_calls: m.tool_calls } : {}),
           // The rating (thumbs up / down) is restored from the archive into the in-memory wire buffer; stripWireMetadata removes the field before sending.
           ...(m.rating ? { rating: m.rating } : {}),
+          // Thinking text is restored too, or reopening mid tool-loop would replay a prompt missing the <think> blocks the model
+          // itself produced — the same prefix break this field exists to avoid. applyReasoningPolicy still gates who receives it.
+          ...(m.reasoning ? { reasoning_content: m.reasoning } : {}),
         };
       // Rebuild the multimodal user turn. The archive splits a user message into `content` (the text the
       // bubble renders) and `images` (the URLs), so replaying `content` alone silently dropped every image
@@ -2115,7 +2119,9 @@ function ChatAgent() {
     while (true) {
       if (ctx.signal.aborted) return finish("(canceled)", "cancelled");
       ctx.status(t("chat.subagentThinking", { agent: agentId }));
-      const data = await requestChat(convo, subTools, ctx.signal, undefined, subLog);
+      // The subagent bypasses the main wire pipeline, so the policy is applied here too — without it the thinking text carried
+      // on `convo` below would reach every provider, including the ones that reject the field.
+      const data = await requestChat(applyReasoningPolicy(convo, isLocalModel), subTools, ctx.signal, undefined, subLog);
       rounds++;
       const u = data.usage;
       if (u) {
@@ -2126,7 +2132,19 @@ function ChatAgent() {
       if (ctx.signal.aborted) return finish("(canceled)", "cancelled");
       const msg = data.choices?.[0]?.message;
       if (!msg) return finish("(no response from subagent)", "no response");
-      convo = [...convo, msg];
+      // Rebuilt field-by-field rather than spread: the response type allows `null` for the reasoning fields, while the wire
+      // buffer wants "absent or a string". A subagent runs its own tool loop against the same model, so it has the same
+      // prefix break to avoid — carry the thinking text, and let applyReasoningPolicy above decide who actually receives it.
+      const subReasoning = (msg.reasoning_content ?? msg.reasoning ?? "").trim();
+      convo = [
+        ...convo,
+        {
+          role: "assistant",
+          content: msg.content,
+          ...(msg.tool_calls?.length ? { tool_calls: msg.tool_calls } : {}),
+          ...(subReasoning ? { reasoning_content: subReasoning } : {}),
+        },
+      ];
 
       if (msg.tool_calls && msg.tool_calls.length > 0) {
         const runOne = async (tc: (typeof msg.tool_calls)[number]) => {
@@ -2940,6 +2958,8 @@ function ChatAgent() {
         wire = materializeReminders(wire);
         // Remove the app's own bookkeeping keys (rating, reminder) — this is the only place either is stripped before the body is built.
         wire = stripWireMetadata(wire);
+        // Replay thinking text to local models on exactly the turns their chat template renders it back on, and to nobody else.
+        wire = applyReasoningPolicy(wire, isLocalModel);
         // The runtime context (time zone, date, current model) used to be concatenated into messages[0] here on every request,
         // which re-prefilled the entire conversation from token 0 at every midnight and every model switch — on cloud models too,
         // since this path was never gated on isLocalModel. It is now announced once, when it changes, as a change event above.
@@ -3038,12 +3058,14 @@ function ChatAgent() {
           : msg.content ?? "";
         // The phase summary of a tool-call round enters the "thinking process" timeline (asPhase); a final reply with no tool calls becomes a standalone bubble.
         renderTurn(reasoningText, finalContent, !!msg.tool_calls?.length);
-        // Only merge content + tool_calls into the wire buffer: reasoning_content is an output-side artifact and feeding it back would be rejected by some providers.
+        // reasoning_content rides the buffer so it is available to replay, but applyReasoningPolicy decides whether it reaches
+        // the wire: local models only, and only for turns after the last user query, which is exactly what their chat template
+        // renders back. Remote providers never see it — some reject the field outright.
         convo = [
           ...convo,
           msg.tool_calls?.length
-            ? { role: "assistant", content: msg.content, tool_calls: msg.tool_calls }
-            : { role: "assistant", content: msg.content },
+            ? { role: "assistant", content: msg.content, tool_calls: msg.tool_calls, ...(reasoningText ? { reasoning_content: reasoningText } : {}) }
+            : { role: "assistant", content: msg.content, ...(reasoningText ? { reasoning_content: reasoningText } : {}) },
         ];
         syncView();
 

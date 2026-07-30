@@ -62,15 +62,18 @@ export interface StoredMessage {
   name?: string;
   /** A generated image's artifact URL and engine (only on an image_generation tool result): used to rebuild the image
    *  bubble after reload — the tool's text content is only a note, so without this the picture vanishes on switching
-   *  conversations. Display-only, not fed to the model, not part of the integrity hash (same as name / reasoning). */
+   *  conversations. Display-only, not fed to the model, not part of the integrity hash (same as name / steps). */
   image?: string;
   servedBy?: string;
   /** The tool calls a sub-agent made inside its own loop (only on a run_subagent tool result). The sub-agent
    *  conversation itself is never persisted — only its conclusion goes into content — so without this the
    *  steps the user watched in real time would disappear the moment the conversation is reopened.
-   *  Display-only, never fed to the model, not part of the integrity hash (same as name / image / reasoning). */
+   *  Display-only, never fed to the model, not part of the integrity hash (same as name / image). */
   steps?: { name: string; args: unknown; ok: boolean; result: string }[];
-  /** The reasoning model's "deep thinking" body (only when role==="assistant"): used only to rebuild the UI thinking block, never fed back to the model, not part of the integrity hash. */
+  /** The reasoning model's "deep thinking" body (only when role==="assistant"): rebuilds the UI thinking block, and — for LOCAL
+   *  models only — is replayed to the model as `reasoning_content` on the turns their chat template renders it back on (see
+   *  applyReasoningPolicy). Remote providers never receive it. Not part of the integrity hash, which covers persisted content
+   *  for tamper-detection and signing, not what a prompt renders to. */
   reasoning?: string;
   /**
    * The user's rating of this assistant reply (only when role==="assistant"): thumbs-up = up / thumbs-down = down.

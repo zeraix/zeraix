@@ -167,6 +167,39 @@ export function stripWireMetadata(wire: ApiMsg[]): ApiMsg[] {
   });
 }
 
+/**
+ * Decide which assistant turns replay their thinking text, and to whom.
+ *
+ * A local chat template renders `reasoning_content` back into the prompt, but only for assistant turns AFTER the last user
+ * query — both families compute the same guard by different means:
+ *
+ *     Qwen   walk messages backwards, stop at the first user message not wrapped in <tool_response>  -> last_query_index
+ *     Gemma  forward scan, index of the last role:"user" message                                     -> last_user_idx
+ *     gate   render thinking iff  loop.index0 > that index
+ *
+ * So the rule is symmetric, and both directions matter:
+ *
+ *   inside a tool loop   template WILL render it   -> we must send it, or the replayed prompt no longer matches what the
+ *                                                     model generated and the cached prefix dies at the assistant reply
+ *   after a new user query  template DROPS it      -> sending it changes nothing; we strip it so nothing accumulates
+ *
+ * Remote providers get none of it: it is an output-side field and some reject it outright.
+ *
+ * Tool results travel as role:"tool" in this app (never a <tool_response>-wrapped user turn), so "the last user query" is
+ * simply the last role:"user" message — the tool_response special case in Qwen's template cannot arise here.
+ */
+export function applyReasoningPolicy(wire: ApiMsg[], isLocal: boolean): ApiMsg[] {
+  if (!wire.some((m) => m.role === "assistant" && m.reasoning_content)) return wire;
+  let lastUser = -1;
+  for (let i = 0; i < wire.length; i++) if (wire[i].role === "user") lastUser = i;
+  return wire.map((m, i) => {
+    if (m.role !== "assistant" || !m.reasoning_content) return m;
+    if (isLocal && i > lastUser) return m;
+    const { reasoning_content: _r, ...clean } = m;
+    return clean;
+  });
+}
+
 /** Project skill (LoadedProjectSkill) → InstalledSkill shape, so it can be merged into the runtime skill set and
  *  progressively disclosed by load_skill. The id is prefixed with "project:" to avoid clashing with installed skills;
  *  description falls back to name (load_skill relies on it to be discovered by the model). */

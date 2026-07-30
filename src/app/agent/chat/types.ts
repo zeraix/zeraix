@@ -39,7 +39,12 @@ export type ApiMsg =
   | { role: "user"; content: string | ContentPart[]; reminderText?: string; reminder?: ReminderState } // array content when images are included
   // rating: in-memory-only user rating (thumbs up/down), derived from the archived StoredMessage.rating. Before sending,
   // stripWireMetadata removes this field; it is never sent to the provider over the wire and never enters the archived body.
-  | { role: "assistant"; content: string | null; tool_calls?: ToolCall[]; rating?: "up" | "down" }
+  // reasoning_content: the model's own thinking text, replayed back to LOCAL models only. A local chat template renders it
+  //   into the prompt for assistant turns after the last user query (Gemma reads `reasoning`/`reasoning_content`, Qwen only
+  //   `reasoning_content`), so withholding it makes the replayed prompt differ from what the model actually generated and
+  //   breaks the cached prefix mid tool-loop. applyReasoningPolicy decides which turns keep it and drops it for every remote
+  //   provider. Carried on the buffer so it survives a reload; never sent to a cloud provider.
+  | { role: "assistant"; content: string | null; tool_calls?: ToolCall[]; rating?: "up" | "down"; reasoning_content?: string }
   | { role: "tool"; tool_call_id: string; content: string; reminderText?: string };
 export type Usage = {
   prompt_tokens?: number;
