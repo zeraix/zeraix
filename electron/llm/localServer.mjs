@@ -89,6 +89,27 @@ const MOE_EXPERT_USED = 8;
  */
 const MOE_NO_RESIDENCY = false;
 
+/**
+ * Stage every expert through one ring forward during warmup (LLAMA_MOE_WARMUP_RING). OFF.
+ *
+ * The pool picks its path per graph on n_tokens, and a {bos, eos} warmup is 2 tokens - so it takes the slot pool,
+ * filling only the few experts those two tokens route. The fork can widen the warmup past pool_ubatch to force
+ * the ring path instead, which stages every expert of every pooled layer.
+ *
+ * Measured on Qwen3.6-35B-A3B, 235-token opening turn: prefill 12126 -> 9441 ms, load 8.3 -> 17.6 s. It moves
+ * ~8.5 s onto the load to buy 2.7 s on the first message - a net loss in summed seconds, justified only by where
+ * the time lands.
+ *
+ * Off, and the fork now defaults it off too - this passes LLAMA_MOE_WARMUP_RING=1 to opt IN. Kept as a flag
+ * rather than deleted because a heavily pooled profile on a small machine is still the case it was written for.
+ *
+ * The split is derived per host now, and on a machine with room most layers are native (34 of 41 on a 36 GiB
+ * Mac). Native experts are copied into the Metal device buffer at load and are already resident, so there are
+ * few pooled layers left for the warmup to stage and the first prefill it protected is already fast. It also
+ * fires on every model start, including the ones where the user switches away without sending anything.
+ */
+const MOE_WARMUP_RING = false;
+
 /** Env the pool needs, or {} when it is not running. Built here rather than inline in spawn() so the set is
  *  readable and a flag like MOE_NO_RESIDENCY is one line rather than an edit inside a 300-character literal. */
 function moeEnv(moeProfile) {
@@ -96,10 +117,15 @@ function moeEnv(moeProfile) {
     LLAMA_MOE_POOL_PROFILE: moeProfile,
     LLAMA_MOE_RING: "1",
     GGML_METAL_SEG_ASYNC: "1",
-    LLAMA_MOE_SMALL_PREFILL: "64",
+    // 0 = OFF. See the note at buildServerArgs below: the split can only route a prefill through the pool
+    // by cutting it into pool_ubatch-wide (6) graphs, and a different batch shape regroups the attention
+    // reduction, so the answer stops matching upstream's. That is not tunable - the pool cannot serve a
+    // wide graph by construction - so it is byte-identity OR the speed-up, and correctness wins.
+    LLAMA_MOE_SMALL_PREFILL: "0",
     LLAMA_MOE_POOL_FILL_THREADS: "8",
     LLAMA_MOE_RING_SLOTS: String(MOE_RING_SLOTS),
     ...(MOE_NO_RESIDENCY ? { GGML_METAL_NO_RESIDENCY: "1" } : {}),
+    ...(MOE_WARMUP_RING ? { LLAMA_MOE_WARMUP_RING: "1" } : {}),
   };
 }
 
@@ -1235,7 +1261,7 @@ async function launch(variant, cfg) {
   // index-order experts, so a missing file degrades to stock speed instead of degrading output.
   const moeProfile = moeProfileFor(r.model, { hw, bpw: r.bpw, ctx, kvBits, vision: visionOn, log: pushLog });
   const moeOn = !!moeProfile;
-  const args = buildServerArgs({ modelPath, mmproj: visionOn ? mmprojPath : null, mtpDraft, specMtp: useMtp, hw, ctx, port: state.port, kvBits, kvDiskDir: kvTier ? kvDiskDir() : null, parallel: kvTier ? 2 : 0, ngl, chatTemplate: r.chatTemplate, chatTemplateFile: templatePath });
+  const args = buildServerArgs({ modelPath, mmproj: visionOn ? mmprojPath : null, mtpDraft, specMtp: useMtp, hw, ctx, port: state.port, kvBits, kvDiskDir: kvTier ? kvDiskDir() : null, parallel: kvTier ? 2 : 0, ngl, chatTemplate: r.chatTemplate, chatTemplateFile: templatePath, reasoningBudget: r.model?.reasoningBudget ?? null, reasoningBudgetMessage: r.model?.reasoningBudgetMessage ?? null });
   if (templatePath) pushLog(`[llama] chat template file: ${path.basename(templatePath)}${r.chatTemplate ? ` (overrides the "${r.chatTemplate}" built-in)` : ""}\n`);
   else if (r.chatTemplate) pushLog(`[llama] chat template override: ${r.chatTemplate}\n`);
   pushLog(`[llama] argv: ${bin} ${args.join(" ")}\n`); // full startup command (for troubleshooting)
@@ -1281,6 +1307,31 @@ async function launch(variant, cfg) {
     // The pool's per-token cost RISES with N here (76 -> 112 ms), so break-even lands at ~98-143 tokens. 256 was
     // tried and made the 235-token first turn 2.2x slower. 96 sits below the bottom of that range: being under
     // break-even only forgoes a little, being over it costs double.
+    //
+    // SET TO 0 - OFF. The table above is kept because it was true when measured, and it is now OBSOLETE: it was
+    // taken on a profile with 1 native layer and 40 pooled. The ring's cost is flat PER POOLED LAYER, so once
+    // host-ptr aliasing (the model file is mapped, not copied) and the corrected kvGB freed memory for native
+    // layers, that cost collapsed. Re-measured on Qwen3.6-35B-A3B, 32-token turn, profiles derived by
+    // moeNativePlan for each machine, prefill t/s:
+    //
+    //   pooled layers    split OFF (ring)    split ON (pool)
+    //     40 (old)             6.9               17.7      <- the table above: pool wins 2.6x
+    //     27 (16 GB)          57.4               23.7      <- pool now LOSES 2.4x
+    //     23 (24 GB)          71.7               25.5      <- loses 2.8x
+    //      2 (39 GB)         121.2               30.9      <- loses 3.9x
+    //
+    // The ring tracks pooled-layer count (6.9 -> 121 t/s); the pool barely moves (17.7 -> 30.9). The crossover is
+    // above 27 pooled layers, which moeNativePlan no longer produces on any machine the app supports.
+    //
+    // So 0 is both the correct and the fast setting. Correctness matters independently, because the split cannot
+    // be byte-identical by construction: the pool only serves graphs up to pool_ubatch = (draft+1) x parallel = 6,
+    // so routing a prefill through it means cutting it into 6-token graphs, and a different batch shape regroups
+    // the attention reduction - on gemma-4-26B-A4B at q4_0 a 42-token prompt answers 816 bytes split against 790
+    // unsplit, where 790 is upstream's. Widening the pool is no escape: the slot floor is
+    // pool_ubatch x n_expert_used, so a pool wide enough for a 42-token graph needs 336 slots against n_expert
+    // 128 - every expert resident, which is the pool's purpose gone.
+    //
+    // Revisit only if pooled-layer counts rise again (a much larger model, or a much smaller machine).
     // LLAMA_MOE_RING_SLOTS: ring buffers, and therefore prefetch depth — the fork derives depth as slots - 2,
     // since layer il-1 may still be executing while the host stages il+depth. 4 slots stages two layers ahead
     // instead of one, at the cost of one more full-expert buffer.

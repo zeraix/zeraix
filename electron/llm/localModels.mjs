@@ -1,7 +1,17 @@
 /**
  * Local model catalog + hardware-based recommendations + llama-server launch args (main process, pure logic, no side effects).
  *
- * Size is estimated as "parameter count × bits-per-weight (bpw)"; architecture dimensions (layers / KV heads / head dim) are approximate, used only to estimate the KV cache.
+ * Weights are estimated as `params × bpw / 8` (weightGB). Two DIFFERENT things are called bpw here, and they must not be swapped:
+ *   QUANTS[].bpw      nominal bits per weight for a quant type (Q4_K_M 4.85, ...), for models with no measured tier.
+ *   quantTiers[].bpw  CALIBRATED so that `params × bpw / 8` equals the shipped GGUF's tensor bytes. It is NOT the true bpw,
+ *                     because `params` is the rounded marketing figure: 26B-A4B is really 25.23B weights at a true 4.51 bpw,
+ *                     and 26 x 4.51/8 would over-count it by 0.44 GB. Measured: E4B 7.46B/4.50, 12B 11.91B/4.50,
+ *                     26B-A4B 25.23B/4.51 (the three Gemmas share the UD-Q4_K_XL recipe), Qwen 35.51B/5.15.
+ *                     So re-derive a tier bpw as tensor_bytes*8/NOMINAL params, never as the model's real bits per weight.
+ * Neither is related to `kvBits`/kvBitsEffective(), which is bits per KV element.
+ * KV is NOT estimated from the approximate arch dimensions any more: the four shipped models carry `arch.kvElems`, KV elements per
+ * cell read from the GGUF, because Gemma 4 uses a different head count AND head dim on its full-attention vs window layers, which one
+ * kvH/hd pair cannot express. `arch.L`/`kvH`/`hd` remain for the -ngl layer split and as the fallback for any model without kvElems.
  * The catalog includes the Qwen3.6 flagship + Gemma 4 QAT (E4B/12B/26B-A4B, targeting low-end → mid-range); the UI also allows entering any `user/repo:QUANT` directly,
  * so this list is a recommendation, not a restriction. GGUF repo names / quant availability follow Hugging Face; please verify before shipping.
  */
@@ -89,6 +99,25 @@ export const MODELS = [
     // Share of the weights held in expert tensors (ffn_*_exps), measured from the UD-Q4_K_XL GGUF: 20.12 of 22.84 GB.
     // Only the pooled fraction of these is resident; see moeResidentGB. Absent => the model is sized as fully resident.
     expertFrac: 0.881,
+    // Cap thinking at N tokens (--reasoning-budget). Qwen3.6's template FORCES thinking open - add_generation_prompt
+    // emits a bare `<think>\n` - so every turn reasons whether or not it needs to. Measured across a session, 1242
+    // of 2526 generated tokens were thinking that the template then discards at the next user turn: 49%, with
+    // individual turns at 91-98%. Decode is ~56% of an agentic turn's wall clock and scales with tokens generated,
+    // so this is the largest single lever on how the model feels.
+    //
+    // A sampler, not a prompt hint: it forces the closing tag at the budget, so it holds regardless of the model's
+    // inclination. 1000 leaves the ordinary 100-500 token turns untouched and only truncates the runaways.
+    // Gemma models are not capped - none of them showed this behaviour.
+    reasoningBudget: 1000,
+    // Injected immediately before the closing tag when the budget runs out, INSIDE the thinking stream - so it
+    // reads as the model's own last thought. Without it the reasoning is severed mid-sentence and whatever comes
+    // next starts from a broken train of thought.
+    //
+    // Deliberately neutral about WHAT happens next. An earlier wording ("let me answer with what I have") biased
+    // the turn toward replying, which is wrong whenever the model was mid-plan on a tool call: the budget can run
+    // out in a turn whose next act is a tool call, and telling it to answer talks it out of the call it needed to
+    // make. "Move on to the next step" fits both.
+    reasoningBudgetMessage: "\n\nI have enough to go on. Let me move on to the next step.\n",
     // vision:true = this GGUF repo ships a vision projector (mmproj). At launch, explicitly pass --mmproj to load the same repo's vision projector (vision on, default);
     // if vision is off, pass --no-mmproj to skip it (saves ~1GB of resident memory, see VISION_OVERHEAD_GB). Whether an mmproj actually exists follows the HF repo.
     // mtpEmbedded:true = use unsloth's "-MTP-GGUF" repo: the MTP (multi-token prediction) head is embedded in the weights themselves (self-speculative, no separate drafter file),
@@ -100,7 +129,13 @@ export const MODELS = [
     // sliding window. The previous { L:48, kvH:4, hd:128 } over-stated KV by 4.4x (6.44 GB vs 1.48 GB at 256K),
     // which is what made the context ladder refuse rungs this machine can hold.
     // UNDER-counts by the recurrent state itself, which is real but not per-token and not modelled here.
-    arch: { L: 41, kvH: 2, hd: 256, swa: { every: 4, window: 0 } }, maxCtx: 262144,
+    // kvElems = KV elements per cell (K+V, summed over the layers in that group), read from the GGUF.
+    // full: 11 attention layers x head_count_kv 2 x (key_length 256 + value_length 256). 11 is not an
+    // estimate: full_attention_interval=4 and models/qwen35moe.cpp marks layer i recurrent when
+    // (i+1) % 4 != 0 for i < n_layer(), so the 40-layer trunk has 10 full-attention layers and the
+    // nextn/MTP layer (index 40) is dense attention too. swa: 0 - the 30 GDN-recurrent layers hold no
+    // growing KV; their fixed state is recurrentGB's job.
+    arch: { L: 41, kvH: 2, hd: 256, swa: { every: 4, window: 0 }, kvElems: { full: 11264, swa: 0 } }, maxCtx: 262144,
     // The 30 GDN-recurrent layers the window-0 above excludes from KV. Their state is NOT per-token: a fixed
     // [state, state, heads] blob per layer per sequence, from the GGUF's ssm.state_size 128 and
     // ssm.inner_size 4096 (=> 4096/128 = 32 value heads), plus a conv_kernel 4 x 8192 window. F32.
@@ -117,11 +152,14 @@ export const MODELS = [
       // UD-Q3_K_XL below is still the nominal figure - that tier is not installed here, so there was nothing to measure.
       // minMemGB is where the quant measurably fits WITH the expert pool, not where the whole GGUF would.
       // At 256K context, q4 KV, vision on, and the native/pooled split moeNativePlan derives for that machine:
-      //   UD-Q4_K_XL  fits from 18 GB (16.7 of a 16.8 GB budget on 24 GB, 17 layers native)
-      //   UD-Q3_K_XL  fits from 16 GB
-      // Set one Apple-Silicon config above each: 24 GB gets q4 at the full 256K, 16/18 GB stays on q3. The margin
-      // is deliberate - moeResidentGB models the dirty allocation only, and neither the GDN recurrent state nor
-      // the page cache the pooled experts want is charged against this budget.
+      //   UD-Q4_K_XL  fits from 20 GB (16.3 of a 16.3 GB budget on 24 GB, 12 layers native)
+      //   UD-Q3_K_XL  fits from 16 GB (10.7 of 10.9)
+      // Both figures moved with the budget factor (0.70 -> 0.68) and again when kvGB was corrected against the
+      // GGUF geometry; q4's floor is 13.3 GB, so it now needs mem*0.68 >= 13.3, i.e. 20 GB rather than 18.
+      // 24 GB gets q4 at the full 256K, 16/18 GB stays on q3. Note the q4 threshold below is now AT its fit
+      // point rather than a config above it: an 18 GB Mac is excluded by 1.1 GB, not by a deliberate margin.
+      // What margin remains is that moeResidentGB models the dirty allocation only - neither the GDN recurrent
+      // state nor the page cache the pooled experts want is charged against this budget.
       // Was 31/23, sized when the model was counted as fully resident (22.84 GB rather than 8.5-13.3).
       { minMemGB: 20, quant: "UD-Q4_K_XL", bpw: 5.22 },
       { minMemGB: 16, quant: "UD-Q3_K_XL", bpw: 3.6 },
@@ -139,15 +177,20 @@ export const MODELS = [
     // Measured from the UD-Q4_K_XL GGUF: 12.85 of 14.23 GB in expert tensors. See moeResidentGB.
     expertFrac: 0.903,
     revision: "7b92b5b28818151e8669af2e45e88d6086f490dd", // pinned: see the note on qwen above — required for seeded models
-    hf: "unsloth/gemma-4-26B-A4B-it-qat-GGUF", arch: { L: 48, kvH: 8, hd: 256, swa: { every: 6, window: 1024 } }, maxCtx: 262144,
+    // GGUF: block_count 30 (5 full-attention + 25 window), head_count_kv 2 on the full layers and 8 on the
+    // window ones, key/value_length 512 full and 256 SWA. L stays 48 because it feeds the -ngl split, not KV.
+    hf: "unsloth/gemma-4-26B-A4B-it-qat-GGUF", arch: { L: 48, kvH: 8, hd: 256, swa: { every: 6, window: 1024 }, kvElems: { full: 10240, swa: 102400 } }, maxCtx: 262144,
     quantTiers: [
       // 16, not 18: with the expert pool the weights are 7.3-8.6 GB resident rather than the whole 14.2 GB file,
-      // and the model fits a 16 GB Mac at 64K (11.2 of an 11.2 GB budget, 7 layers native) or 128K with vision
-      // off. 14 GB and below fits at no rung at all, so this is the real floor.
+      // and the model fits a 16 GB Mac at 64K (10.9 of a 10.9 GB budget, 7 layers native) or the full 256K with
+      // vision off (7 native there too; 11 at 64K). 14 GB and below fits at no rung at all, so this is the real
+      // floor. Vision on tops out at 192K. The reachable context grew when kvGB was corrected against the GGUF
+      // geometry - this model's KV at 256K was over-counted by 2.6 GB, which had capped a 16 GB Mac at 128K.
       // Which CONTEXT is affordable is decided per rung by estimate(), not here - the tier only answers "can this
       // machine run the model at all". Gating the model on the memory a 256K context needs hid it from machines
       // that can run it perfectly well at 64K.
-      { minMemGB: 16, quant: "UD-Q4_K_XL", bpw: 4.37 }, // 14.2 GB on disk
+      { minMemGB: 16, quant: "UD-Q4_K_XL", bpw: 4.38 }, // 14.25 GB on disk / 26B params. Was 4.37, which is
+      // 14.20 GB - a 47 MB under-count, and under-counting weights is the direction that overruns the budget.
     ],
     notes: "MoE ~4B active → fast decode, high quality. Multimodal (images only, no audio)."
   },
@@ -156,7 +199,9 @@ export const MODELS = [
     // ~254MB) is in the same repo as the main weights and is fetched alongside them during auto-download (hfDownload), then passed to llama-server via -md; not enabled on the -hf fallback path.
     id: "gemma4-12b", name: "Gemma 4 12B", params: 12, active: 12, moe: false, vision: true, mtp: true,
     revision: "980b060c40a8539ac159e0501a3e0f66a6365af3", // pinned: see the note on qwen above — required for seeded models
-    hf: "unsloth/gemma-4-12B-it-qat-GGUF", arch: { L: 48, kvH: 8, hd: 256, swa: { every: 6, window: 1024 } }, maxCtx: 262144,
+    // GGUF: block_count 48 (8 full-attention + 40 window), head_count_kv 1 on the full layers and 8 on the
+    // window ones - the clearest case that one kvH/hd pair cannot describe both groups.
+    hf: "unsloth/gemma-4-12B-it-qat-GGUF", arch: { L: 48, kvH: 8, hd: 256, swa: { every: 6, window: 1024 }, kvElems: { full: 8192, swa: 163840 } }, maxCtx: 262144,
     quantTiers: [
       { minMemGB: 12, quant: "UD-Q4_K_XL", bpw: 4.48 }, // 6.72 GB
     ],
@@ -167,7 +212,12 @@ export const MODELS = [
     revision: "8c5a9e4fd5482e2be20fe0bf013b4c262a8f4265", // pinned: see the note on qwen above — required for seeded models
     // ≈4.5B effective parameters (8B raw, MatFormer + Per-Layer Embeddings); top pick for low-end laptops (4–5GB is enough).
     // Native tool-calling tokens, well suited for agents. Q4_0 loses quality, so use UD-Q4_K_XL.
-    hf: "unsloth/gemma-4-E4B-it-qat-GGUF", arch: { L: 34, kvH: 4, hd: 256, swa: { every: 6, window: 1024 } }, maxCtx: 131072,
+    // window 512, read from the GGUF (gemma4.attention.sliding_window); 26B and 12B are 1024. It was 1024
+    // here, which double-counted every SWA layer — and kvGB now multiplies this by the slot count, so a
+    // wrong window is amplified rather than absorbed.
+    // GGUF: block_count 42 (7 full-attention + 35 window), head_count_kv 2 throughout, key/value_length
+    // 512 full and 256 SWA. L stays 34 because it feeds the -ngl split, not KV.
+    hf: "unsloth/gemma-4-E4B-it-qat-GGUF", arch: { L: 34, kvH: 4, hd: 256, swa: { every: 6, window: 512 }, kvElems: { full: 14336, swa: 35840 } }, maxCtx: 131072,
     quantTiers: [
       { minMemGB: 8, quant: "UD-Q4_K_XL", bpw: 4.22 }, // 4.22 GB
     ],
@@ -286,21 +336,23 @@ export function usableModelMemoryGB(hw, overrideGB) {
     //
     // 0.68, and the margin here is expensive. Measured on a 36 GiB Mac, one factor step at a time:
     //
-    //                 native  pooled  wired         free   decode      prefill (small/large)
-    //     0.70        36/41      5    27.60 (77%)   0.06   31.64 t/s   69.3 / 147.8 t/s
-    //     0.68        34/41      7    -             -      -           -            <- UNMEASURED
-    //     0.65        32/41      9    25.48 (71%)   0.07   26.24 t/s   32.5 /  65.1 t/s
+    //                 native  pooled  wired         compressor  decode      prefill @ ~223 tok
+    //     0.70        36/41      5    27.60 (77%)   4.07        31.64 t/s   93 t/s
+    //     0.68        34/41      7    26.36 (73%)   3.65        28.99 t/s   64 t/s
+    //     0.65        32/41      9    25.48 (71%)   3.61        26.24 t/s   34 t/s
     //
     // Cost tracks the POOLED layers that remain, not the native layers gained: 36 -> 32 native is 5 -> 9 pooled,
     // nearly doubling the ring/pool work per forward, which is why four layers cost 17% of decode and half of
     // prefill rather than the few percent a diminishing-returns reading predicts. There is no flat region at the
     // top to shave.
     //
-    // 0.65 was tried and reverted: the 2 GiB it freed bought nothing usable. Free memory reads ~0.07 GiB at both
-    // settings - macOS using everything for cache, not a shortage - and the compressor moved 0.46 GiB. 0.68 keeps
-    // most of the speed (34/41 rather than 32/41) while holding ~1 GiB back for the QEMU sandbox, which was not
-    // running during any of these measurements and is the one unmodelled claim on this memory. Decode at 0.68
-    // should land near 28-29 t/s if the curve between the measured points is smooth - that has NOT been checked.
+    // 0.68 is where the curve turns. It gives back 1.24 GiB and drops off the 77% ceiling for 8% of decode;
+    // the next step down costs another 9% and buys only 0.88 GiB more. The margin is for the QEMU sandbox, which
+    // was not running during any of these measurements and is the one unmodelled claim on this memory.
+    //
+    // Compare prefill at a MATCHED token count. Aggregated per-session means are worthless here: prefill speed
+    // depends strongly on size (under ~120 tokens the fixed cost dominates and every setting converges near
+    // 15 t/s), so a different mix of turn sizes swamps the setting being measured.
     //
     // NOT 0.8: a 24 GiB Mac would have ~0.1 GiB of page cache left after macOS (~2.65 GiB wired) and Electron
     // (~1.7 GiB), and the pool re-reads its file-backed experts on every ring forward without it.
@@ -315,14 +367,74 @@ export function weightGB(model, quant) {
   return (model.params * quant.bpw) / 8;
 }
 
-export function kvGB(model, ctx, kvBits) {
-  const { L, kvH, hd, swa } = model.arch;
-  const per = (layers, len) => (layers * kvH * hd * 2 * len * (kvBits / 8)) / 1e9;
-  if (!swa) return per(L, ctx);
-  // Sliding-window attention (e.g. Gemma 4's 5:1): out of every `every` layers only 1 is full attention counted at ctx, the rest hold only a window's worth of KV
-  // (llama.cpp iSWA cache is allocated per window). Counting everything at full length would overestimate Gemma's KV by ~5–6×, making the context tier too small.
-  const gL = Math.ceil(L / swa.every);
-  return per(gL, ctx) + per(L - gL, Math.min(ctx, swa.window));
+/**
+ * KV cache size. Two caches, sized independently by llama.cpp:
+ *
+ *   base (full attention)   n_ctx_seq cells                                    = ctx
+ *   window (SWA)            GGML_PAD(min(n_ctx_seq, n_swa*n_seq_max + n_ubatch), 256) cells,
+ *                           and the mac fork gives each slot its OWN region of that size,
+ *                           so the buffer is `slots` times it
+ *
+ * Both SWA factors used to be missing: the term was one window's worth, which at slots=2 was low by
+ * 3x on E4B and 5x on 26B-A4B. n_ubatch is 512 because the server is launched without -ub (llama.cpp
+ * default, common.h) and slots is 2 because that is what buildServerArgs passes whenever the KV disk
+ * tier is on. The regions are vm_allocate with the boot clear skipped, so pages commit only as a
+ * slot's window is touched — a fully warm server is the worst case this counts, not the steady state.
+ *
+ * `arch.kvElems` is KV elements per cell (K + V, summed over every layer in that group), read from
+ * the GGUF. It replaces the old uniform `kvH * hd * 2 * L` shape, which CANNOT express these models:
+ * Gemma 4 uses a different head count AND a different head dim on its two layer kinds (12B: 1 head x
+ * 512 on full attention, 8 x 256 on the window layers), so no single kvH/hd pair is right for both.
+ * `swa: 0` means the non-attention layers hold no growing KV at all (Qwen's GDN-recurrent layers -
+ * their fixed state is recurrentGB's job, not this).
+ */
+/**
+ * Bits per stored KV value. q4_0 and q8_0 are BLOCK quantized: 32 values share one ggml_half scale
+ * (ggml-common.h block_q4_0 = 2 + 16 bytes, block_q8_0 = 2 + 32), so the real width is
+ * nominal + 16/32 = nominal + 0.5 bits. f16 has no block overhead.
+ *
+ * This was previously left out. Nothing was absorbing it: the budget factor (0.68, memBudgetGB) is tuned
+ * against native/pooled layer counts and its margin is reserved for the QEMU sandbox, not for KV error.
+ * While the layer geometry over-counted, the omission was masked — the net estimate still came out high.
+ * With the geometry exact it would make every model read 11% LOW, which is the direction that causes an
+ * OOM rather than a refused rung.
+ */
+export const kvBitsEffective = (kvBits) => (kvBits === 4 || kvBits === 8 ? kvBits + 0.5 : 16);
+
+/**
+ * How the running server will be configured, because the window cache depends on both and they are NOT
+ * the same everywhere:
+ *
+ *   slots    macOS gets `--parallel 2` (buildServerArgs, whenever the KV tier is on, i.e. darwin).
+ *            Everywhere else no --parallel is passed and the server auto-resolves to 4.
+ *   regions  Only the mac fork gives each slot its OWN window region, so only there is the buffer
+ *            slots x size_swa. Windows and Intel macs run the CDN's upstream binary (llamaInstaller
+ *            macForkAsset: arm64 darwin only), where the window cache is ONE cache of size_swa.
+ *
+ * Assuming regions everywhere would over-count Windows by ~0.8 GB on 26B-A4B at 4 slots; assuming 2
+ * slots everywhere would under-count it. Both are wrong in a way that moves the native/pooled split.
+ */
+export const serverKvShape = () => ({
+  slots: kvTierEnabled() ? 2 : 4,
+  regions: process.platform === "darwin" && process.arch === "arm64",
+});
+
+export function kvGB(model, ctx, kvBits, opts = {}) {
+  const { L, kvH, hd, swa, kvElems } = model.arch;
+  const shape = serverKvShape();
+  const { slots = shape.slots, regions = shape.regions, ubatch = 512 } = opts;
+  const bytesPer = kvBitsEffective(kvBits) / 8;
+  if (!kvElems) {
+    // fallback for any model without measured geometry: the old uniform approximation
+    const per = (layers, len) => (layers * kvH * hd * 2 * len * bytesPer) / 1e9;
+    if (!swa) return per(L, ctx);
+    const gL = Math.ceil(L / swa.every);
+    return per(gL, ctx) + per(L - gL, Math.min(ctx, swa.window));
+  }
+  // one window cache of size_swa upstream; one region of that size PER SLOT on the mac fork
+  const sized = swa && swa.window ? Math.min(ctx, swa.window * slots + ubatch) : 0;
+  const swaCells = regions ? slots * sized : sized;
+  return ((kvElems.full * ctx + kvElems.swa * swaCells) * bytesPer) / 1e9;
 }
 
 /**
@@ -520,10 +632,10 @@ export const MIN_CTX = 65536;
 
 // Automatic context tiering (largest to smallest): pick "the largest -c that fits" by device memory, capped at the model's native window (maxCtx).
 // The ladder bottoms out at MIN_CTX (64K): below that the system prompt alone eats the window, so those rungs are never offered.
-// 256K / 196K / 128K / 96K / 64K, descending - pickCtxKv walks it down and takes the first rung that fits.
+// 256K / 192K / 128K / 96K / 64K, descending - pickCtxKv walks it down and takes the first rung that fits.
 // Finer than powers of two on purpose: the gap between 128K and 256K is 2.15 GB of KV on a 26B-class model,
 // which is several native layers' worth, so a machine that just misses 256K should not fall all the way to 128K.
-export const CTX_LADDER = [262144, 200704, 131072, 98304, 65536];
+export const CTX_LADDER = [262144, 196608, 131072, 98304, 65536];
 
 /**
  * KV cache quantisations offered for catalog models, best first.
@@ -544,9 +656,10 @@ export const kvTypeName = (kvBits) => (kvBits === 8 ? "q8_0" : kvBits === 4 ? "q
 
 /**
  * Pick context length and KV quantization for a "model + quant": { ctx, kvBits }.
- * cap is the larger of the usable budget and deviceMem*0.78 (a compromise with the device-memory "fits" criterion used for tiered models).
- * 0.78 rather than 0.75: the KV estimate is already conservative (q4 is actually 4.5bpw, i.e. +12%; the SWA window uses the upper bound), so loosening it lets 26B-A4B reach
- * 128K on 24G (18.4GB ≈ 77%, close to the macOS Metal wired ceiling of ~75–80%; if an extreme combo fails on first launch, turn off vision / drop a tier).
+ * cap is the usable budget, and only that — see the note in the body on why the old deviceMem*0.78 loosening was dropped.
+ * Neither of the reasons that loosening cited still holds: q4_0's true 4.5 bits per KV element is now in kvBitsEffective(), and the SWA
+ * term is measured from the GGUF rather than taken as an upper bound, so the KV estimate is no longer "conservative" —
+ * it reproduces llama.cpp's allocation exactly (verified on 26B: 45.00 + 281.25 MiB base + window, to the decimal).
  * Context is traded before KV precision: the outer loop walks the ladder down, and each rung tries every offered quantisation.
  * When not even the 32K rung fits, fall back to 16K at the leanest offered quantisation. That is deliberately *below* MIN_CTX:
  * a last resort for low-memory devices that would otherwise be unable to launch anything at all, and never user-selectable —
@@ -708,7 +821,7 @@ export function recommend(hw, budgetGB, { ctx = MIN_CTX, kvBits = 8, vision = fa
  * Local first: given modelPath → `-m FILE` (+ explicit `--mmproj FILE` when vision), the weights already downloaded by us (with progress/resume);
  * if not auto-downloaded (fallback path) → `-hf repo:quant` is fetched by llama itself, and only then, when noMmproj=true, is --no-mmproj used to turn off the automatic vision projector.
  */
-export function buildServerArgs({ hf, modelPath = null, hw, ctx = MIN_CTX, port = 8080, kvBits = 8, mtpDraft = null, specMtp = false, mmproj = null, noMmproj = false, kvDiskDir = null, parallel = 0, ngl = null, chatTemplate = null, chatTemplateFile = null, extraArgs = [] }) {
+export function buildServerArgs({ hf, modelPath = null, hw, ctx = MIN_CTX, port = 8080, kvBits = 8, mtpDraft = null, specMtp = false, mmproj = null, noMmproj = false, kvDiskDir = null, parallel = 0, ngl = null, chatTemplate = null, chatTemplateFile = null, reasoningBudget = null, reasoningBudgetMessage = null, extraArgs = [] }) {
   const args = modelPath ? ["-m", modelPath] : ["-hf", hf];
   args.push(
     "--host", "127.0.0.1",
@@ -745,9 +858,16 @@ export function buildServerArgs({ hf, modelPath = null, hw, ctx = MIN_CTX, port 
   // becomes 0, which feeds derive_model_key (so every seed and pool unit is orphaned under a new
   // model_key) and switches context checkpoints from windowed to whole-state. Nothing clears the Qwen row.
   args.push("--cache-reuse", "32");
+  // Per-model, from the catalog - see MODELS[].reasoningBudget. Absent means unrestricted, which is llama's default.
+  if (reasoningBudget > 0) {
+    args.push("--reasoning-budget", String(reasoningBudget));
+    if (reasoningBudgetMessage) args.push("--reasoning-budget-message", String(reasoningBudgetMessage));
+  }
   // Two slots so a second conversation can stay warm alongside the active one, instead of evicting it. Naming the count is what
-  // keeps it CHEAPER than leaving it unset: unset means auto = 4 slots, and n_seq_max sizes the iSWA cache
-  // (min(size_base, n_swa + n_ubatch * n_seq_max)), so every extra slot costs SWA memory on a Gemma-class model.
+  // keeps it CHEAPER than leaving it unset: unset means auto = 4 slots, and n_seq_max drives the iSWA cache
+  // (min(size_base, n_swa * n_seq_max + n_ubatch) — the multiplier is on n_swa, not n_ubatch), and the mac fork
+  // then gives each slot its own region of that size. So SWA memory grows with the SQUARE of the slot count on a
+  // Gemma-class model: 4 slots costs 4x what this comment used to imply, not 2x. kvGB() models both factors.
   //
   // `--kv-unified` states the requirement in the argv rather than leaning on a default. Without a unified pool llama-context
   // derives `n_ctx_seq = n_ctx / n_seq_max` (src/llama-context.cpp) instead of `n_ctx_seq = n_ctx`, which would halve every
