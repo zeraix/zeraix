@@ -110,6 +110,14 @@ import {
 } from "./contextCompress";
 import { getContextBudgetK } from "@/lib/ai/contextBudget";
 import {
+  loadThinking,
+  saveThinking,
+  thinkingParams,
+  isThinkingParamError,
+  THINKING_CHANGE_EVENT,
+  type ThinkingConfig,
+} from "@/lib/ai/thinking";
+import {
   emptyTaskMemory,
   isTaskMemoryEmpty,
   normalizeTaskMemory,
@@ -305,6 +313,24 @@ function ChatAgent() {
   // The list of selectable models + the currently selected id (used by the model picker inside the input box).
   const [models, setModels] = useState<AgentModel[]>([]);
   const [selectedModelId, setSelectedModelIdState] = useState<string | null>(null);
+  // Thinking mode (master switch + gear), set from the composer toolbar and persisted globally like the
+  // selected model. Read synchronously on the client for the same reason the locale store does: the
+  // toolbar would otherwise flash the default before the stored choice lands.
+  const [thinking, setThinking] = useState<ThinkingConfig>(loadThinking);
+  const changeThinking = (next: ThinkingConfig) => {
+    setThinking(next);
+    saveThinking(next);
+  };
+  // This component is mounted once for the app's lifetime, so a setting changed anywhere else (the home
+  // page's own composer writes the same storage) would otherwise never reach the value used for sending.
+  useEffect(() => {
+    const sync = () => setThinking(loadThinking());
+    window.addEventListener(THINKING_CHANGE_EVENT, sync);
+    return () => window.removeEventListener(THINKING_CHANGE_EVENT, sync);
+  }, []);
+  // Models that rejected the thinking switch outright (see the 400 fallback in requestChat): once a model
+  // is in here the field is left off its requests for the rest of the session.
+  const thinkingUnsupportedRef = useRef<Set<string>>(new Set());
   const [input, setInput] = useState("");
   const taRef = useRef<HTMLTextAreaElement>(null); // For the input box's auto-fit height
   // Attachments pending send: images go multimodal, text files are inlined into the prompt, the rest attach only the file name.
@@ -1470,6 +1496,12 @@ function ChatAgent() {
       model: modelName,
       messages,
       ...(tools && tools.length ? { tools, tool_choice: "auto" } : {}),
+      // Thinking mode. The spelling is per-family, and switching it OFF is an argument in its own right on
+      // every family that reasons by default — see thinkingParams. Skipped for a model already known to
+      // reject it, so the fallback below costs one request per model rather than one per turn.
+      ...(thinkingUnsupportedRef.current.has(modelName)
+        ? {}
+        : thinkingParams(thinking, { local: isLocalModel, model: modelName })),
     };
     const wantStream = !!onDelta;
     const actor = log?.actor ?? "main";
@@ -1738,6 +1770,21 @@ function ChatAgent() {
     try {
       return await sendChatOnce(messages, tools, signal, onDelta, log);
     } catch (e) {
+      // The provider rejected the thinking switch itself (a 400 naming the field): retire it for this
+      // model and send the same request again. Checked first because it is the one failure that is
+      // certainly ours rather than the message's, and unlike the image path it is matched narrowly —
+      // wrongly retrying here would silently ignore the user's setting instead of merely resending.
+      if (!signal?.aborted && isThinkingParamError(e) && !thinkingUnsupportedRef.current.has(modelName)) {
+        logFailure(e);
+        console.warn(`[thinking] ${modelName} rejected the thinking parameter; sending without it`, e);
+        thinkingUnsupportedRef.current.add(modelName);
+        try {
+          return await sendChatOnce(messages, tools, signal, onDelta, log);
+        } catch (retryErr) {
+          logFailure(retryErr);
+          throw retryErr;
+        }
+      }
       // No images to blame, or the user cancelled: this failure is genuine, surface it unchanged.
       if (!hasImages || signal?.aborted) {
         logFailure(e);
@@ -4112,6 +4159,8 @@ function ChatAgent() {
         selectedModelId={selectedModelId}
         onSelectModel={selectModel}
         onGoSettings={() => router.push("/agent/settings")}
+        thinking={thinking}
+        onThinkingChange={changeThinking}
       />
     </div>
       <BrowserPanel

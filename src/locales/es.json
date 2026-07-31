@@ -1053,5 +1053,14 @@
   "help.imagesUploading": "Espera a que terminen de subirse las imágenes.",
   "help.imageRemove": "Quitar",
   "help.imageFailedBadge": "Error",
-  "help.tooLongCopied": "El informe es demasiado largo para un enlace, así que se copió al portapapeles: pégalo en la incidencia."
+  "help.tooLongCopied": "El informe es demasiado largo para un enlace, así que se copió al portapapeles: pégalo en la incidencia.",
+  "composer.thinking": "Razonamiento",
+  "composer.thinkingOn": "Razonamiento: {level}",
+  "composer.thinkingOff": "Razonamiento desactivado",
+  "composer.thinkingTitle": "Cuánto piensa el modelo antes de responder",
+  "composer.thinkingDepth": "Profundidad",
+  "composer.effort.low": "Bajo",
+  "composer.effort.medium": "Medio",
+  "composer.effort.high": "Alto",
+  "composer.thinkingLocalNote": "Los modelos locales solo admiten el interruptor; la profundidad se aplica a los modelos de razonamiento en la nube."
 }

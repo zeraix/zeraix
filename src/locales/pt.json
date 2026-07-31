@@ -1053,5 +1053,14 @@
   "help.imagesUploading": "Aguarde que as imagens terminem de carregar.",
   "help.imageRemove": "Remover",
   "help.imageFailedBadge": "Falhou",
-  "help.tooLongCopied": "O relatório é demasiado longo para um link, por isso foi copiado para a área de transferência — cole-o na issue."
+  "help.tooLongCopied": "O relatório é demasiado longo para um link, por isso foi copiado para a área de transferência — cole-o na issue.",
+  "composer.thinking": "Raciocínio",
+  "composer.thinkingOn": "Raciocínio: {level}",
+  "composer.thinkingOff": "Raciocínio desativado",
+  "composer.thinkingTitle": "Quanto o modelo pensa antes de responder",
+  "composer.thinkingDepth": "Profundidade",
+  "composer.effort.low": "Baixo",
+  "composer.effort.medium": "Médio",
+  "composer.effort.high": "Alto",
+  "composer.thinkingLocalNote": "Os modelos locais suportam apenas o interruptor; a profundidade aplica-se aos modelos de raciocínio na nuvem."
 }

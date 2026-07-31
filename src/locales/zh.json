@@ -1056,5 +1056,14 @@
   "help.imagesUploading": "请等待图片上传完成。",
   "help.imageRemove": "移除",
   "help.imageFailedBadge": "失败",
-  "help.tooLongCopied": "内容过长，无法通过链接预填，已复制到剪贴板 —— 请粘贴到 Issue 中。"
+  "help.tooLongCopied": "内容过长，无法通过链接预填，已复制到剪贴板 —— 请粘贴到 Issue 中。",
+  "composer.thinking": "思考",
+  "composer.thinkingOn": "思考：{level}",
+  "composer.thinkingOff": "思考已关闭",
+  "composer.thinkingTitle": "模型作答前的思考程度",
+  "composer.thinkingDepth": "思考深度",
+  "composer.effort.low": "低",
+  "composer.effort.medium": "中",
+  "composer.effort.high": "高",
+  "composer.thinkingLocalNote": "本地模型仅支持开关，思考深度对云端推理模型生效。"
 }

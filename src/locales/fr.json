@@ -1053,5 +1053,14 @@
   "help.imagesUploading": "Attendez la fin du téléversement des images.",
   "help.imageRemove": "Retirer",
   "help.imageFailedBadge": "Échec",
-  "help.tooLongCopied": "Le rapport est trop long pour un lien : il a été copié dans le presse-papiers — collez-le dans le ticket."
+  "help.tooLongCopied": "Le rapport est trop long pour un lien : il a été copié dans le presse-papiers — collez-le dans le ticket.",
+  "composer.thinking": "Réflexion",
+  "composer.thinkingOn": "Réflexion : {level}",
+  "composer.thinkingOff": "Réflexion désactivée",
+  "composer.thinkingTitle": "À quel point le modèle réfléchit avant de répondre",
+  "composer.thinkingDepth": "Profondeur",
+  "composer.effort.low": "Faible",
+  "composer.effort.medium": "Moyenne",
+  "composer.effort.high": "Élevée",
+  "composer.thinkingLocalNote": "Les modèles locaux ne prennent en charge que l'interrupteur ; la profondeur s'applique aux modèles de raisonnement dans le cloud."
 }

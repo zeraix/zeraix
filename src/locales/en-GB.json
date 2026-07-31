@@ -1053,5 +1053,14 @@
   "help.imagesUploading": "Wait for the images to finish uploading.",
   "help.imageRemove": "Remove",
   "help.imageFailedBadge": "Failed",
-  "help.tooLongCopied": "The report is too long for a link, so it was copied to the clipboard — paste it into the issue."
+  "help.tooLongCopied": "The report is too long for a link, so it was copied to the clipboard — paste it into the issue.",
+  "composer.thinking": "Thinking",
+  "composer.thinkingOn": "Thinking: {level}",
+  "composer.thinkingOff": "Thinking off",
+  "composer.thinkingTitle": "How hard the model thinks before answering",
+  "composer.thinkingDepth": "Depth",
+  "composer.effort.low": "Low",
+  "composer.effort.medium": "Medium",
+  "composer.effort.high": "High",
+  "composer.thinkingLocalNote": "Local models take the switch only — depth applies to cloud reasoning models."
 }

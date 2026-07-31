@@ -1053,5 +1053,14 @@
   "help.imagesUploading": "Bitte warten Sie, bis die Bilder hochgeladen sind.",
   "help.imageRemove": "Entfernen",
   "help.imageFailedBadge": "Fehlgeschlagen",
-  "help.tooLongCopied": "Der Bericht ist zu lang für einen Link und wurde deshalb in die Zwischenablage kopiert — fügen Sie ihn im Issue ein."
+  "help.tooLongCopied": "Der Bericht ist zu lang für einen Link und wurde deshalb in die Zwischenablage kopiert — fügen Sie ihn im Issue ein.",
+  "composer.thinking": "Denken",
+  "composer.thinkingOn": "Denken: {level}",
+  "composer.thinkingOff": "Denken aus",
+  "composer.thinkingTitle": "Wie gründlich das Modell vor der Antwort nachdenkt",
+  "composer.thinkingDepth": "Tiefe",
+  "composer.effort.low": "Niedrig",
+  "composer.effort.medium": "Mittel",
+  "composer.effort.high": "Hoch",
+  "composer.thinkingLocalNote": "Lokale Modelle unterstützen nur den Schalter; die Tiefe gilt für Cloud-Reasoning-Modelle."
 }

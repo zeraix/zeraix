@@ -1053,5 +1053,14 @@
   "help.imagesUploading": "이미지 업로드가 끝날 때까지 기다려 주세요.",
   "help.imageRemove": "제거",
   "help.imageFailedBadge": "실패",
-  "help.tooLongCopied": "보고 내용이 길어 링크에 담을 수 없으므로 클립보드에 복사했습니다. 이슈에 붙여 넣으세요."
+  "help.tooLongCopied": "보고 내용이 길어 링크에 담을 수 없으므로 클립보드에 복사했습니다. 이슈에 붙여 넣으세요.",
+  "composer.thinking": "생각",
+  "composer.thinkingOn": "생각: {level}",
+  "composer.thinkingOff": "생각 끔",
+  "composer.thinkingTitle": "답변하기 전에 모델이 얼마나 깊이 생각할지",
+  "composer.thinkingDepth": "깊이",
+  "composer.effort.low": "낮음",
+  "composer.effort.medium": "보통",
+  "composer.effort.high": "높음",
+  "composer.thinkingLocalNote": "로컬 모델은 켜기/끄기만 지원하며, 깊이는 클라우드 추론 모델에 적용됩니다."
 }

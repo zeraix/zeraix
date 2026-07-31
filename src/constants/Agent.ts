@@ -49,6 +49,10 @@ export const AGENT_LLM_CUSTOM_MODEL_KEY = "agent.llm.customModel";
 export const agentLlmKeyOf = (id: string) => `agent.llm.keys.${id}`;
 export const agentLlmModelOf = (id: string) => `agent.llm.models.${id}`;
 
+/** Dot path: thinking mode — the master on/off switch and the depth used while it is on (see src/lib/ai/thinking.ts). */
+export const AGENT_THINKING_ENABLED_KEY = "agent.thinking.enabled";
+export const AGENT_THINKING_EFFORT_KEY = "agent.thinking.effort";
+
 /** Dot path: runtime parameters (manually adjustable in settings).
  *  - maxToolRounds: the maximum number of consecutive tool-call rounds within a single conversation turn (round cap).
  *  - maxSameToolCalls: when the same "tool + params" is called repeatedly up to this count, it's judged as no progress and aborted (infinite-loop guard).

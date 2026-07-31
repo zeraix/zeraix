@@ -1053,5 +1053,14 @@
   "help.imagesUploading": "画像のアップロードが完了するまでお待ちください。",
   "help.imageRemove": "削除",
   "help.imageFailedBadge": "失敗",
-  "help.tooLongCopied": "レポートが長すぎてリンクに含められないため、クリップボードにコピーしました。イシューに貼り付けてください。"
+  "help.tooLongCopied": "レポートが長すぎてリンクに含められないため、クリップボードにコピーしました。イシューに貼り付けてください。",
+  "composer.thinking": "思考",
+  "composer.thinkingOn": "思考：{level}",
+  "composer.thinkingOff": "思考オフ",
+  "composer.thinkingTitle": "回答前にモデルがどれだけ考えるか",
+  "composer.thinkingDepth": "深さ",
+  "composer.effort.low": "低",
+  "composer.effort.medium": "中",
+  "composer.effort.high": "高",
+  "composer.thinkingLocalNote": "ローカルモデルはオン / オフのみ対応です。深さはクラウドの推論モデルに適用されます。"
 }

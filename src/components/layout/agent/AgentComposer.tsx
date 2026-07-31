@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
-import { Plus, Send, ChevronDown } from "lucide-react";
+import { Brain, Plus, Send, ChevronDown } from "lucide-react";
 import { Textarea } from "@/components/ui/textarea";
 import {
   DropdownMenu,
@@ -12,8 +12,18 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import { Switch } from "@/components/ui/switch";
 import { cn } from "@/lib/utils";
 import { addFilesTo, formatBytes, type Attachment } from "@/lib/ai/attachments";
+import {
+  THINKING_EFFORTS,
+  effortLabelKey,
+  loadThinking,
+  saveThinking,
+  THINKING_CHANGE_EVENT,
+  type ThinkingConfig,
+  type ThinkingEffort,
+} from "@/lib/ai/thinking";
 import {
   OFFICIAL_PROVIDER_ID,
   ensureModelListSeeded,
@@ -23,7 +33,7 @@ import {
   MODEL_LIST_CHANGE_EVENT,
   type AgentModel,
 } from "@/lib/ai/models";
-import { LOCAL_PROVIDER_ID } from "@/lib/ai/localModel";
+import { LOCAL_PROVIDER_ID, isLocalEndpoint } from "@/lib/ai/localModel";
 import { useT } from "@/lib/i18n";
 
 /** Brand pink from the design mockup (send button / accent). */
@@ -66,6 +76,19 @@ export default function AgentComposer({
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [attachments, setAttachments] = useState<Attachment[]>([]);
   const [error, setError] = useState<string | null>(null);
+  // Thinking mode: persisted globally (see src/lib/ai/thinking.ts), so whatever is chosen here is what the
+  // chat page sends. Read synchronously on the client to avoid flashing the default first.
+  const [thinking, setThinking] = useState<ThinkingConfig>(loadThinking);
+  const changeThinking = (next: ThinkingConfig) => {
+    setThinking(next);
+    saveThinking(next);
+  };
+  // The chat page's own toolbar writes the same global setting, so follow it rather than show a stale switch.
+  useEffect(() => {
+    const sync = () => setThinking(loadThinking());
+    window.addEventListener(THINKING_CHANGE_EVENT, sync);
+    return () => window.removeEventListener(THINKING_CHANGE_EVENT, sync);
+  }, []);
   const attachIdRef = useRef(0);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -91,7 +114,11 @@ export default function AgentComposer({
     setSelectedId(id);
     setSelectedModelId(id);
   };
-  const selectedLabel = models.find((m) => m.id === selectedId)?.label ?? null;
+  const selected = models.find((m) => m.id === selectedId);
+  const selectedLabel = selected?.label ?? null;
+  // Mirrors the send side's isLocalModel: provider id, or a custom entry pointed at a local endpoint.
+  const localSelected =
+    !!selected && (selected.providerId === LOCAL_PROVIDER_ID || isLocalEndpoint(selected.endpoint ?? ""));
 
   // Group by category: official / local models / third-party / custom.
   const modelGroups = [
@@ -275,6 +302,63 @@ export default function AgentComposer({
                   ))}
                 </div>
               ))
+            )}
+          </DropdownMenuContent>
+        </DropdownMenu>
+
+        {/* Thinking mode: master switch + three gears. Same global setting the chat composer edits — the
+            first message is sent from here, so the choice has to be reachable before the conversation exists. */}
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <button
+              type="button"
+              title={t("composer.thinkingTitle")}
+              className={cn(
+                "flex shrink-0 items-center gap-1 rounded-full border px-3 py-1.5 text-sm transition-colors hover:bg-accent",
+                thinking.enabled
+                  ? "border-primary/40 bg-primary/10 text-primary"
+                  : "border-line text-muted-foreground",
+              )}
+            >
+              <Brain className="size-3.5 shrink-0" />
+              <span className="truncate">
+                {thinking.enabled
+                  ? t("composer.thinkingOn", { level: t(effortLabelKey(thinking.effort)) })
+                  : t("composer.thinkingOff")}
+              </span>
+              <ChevronDown className="size-3.5 shrink-0 opacity-70" />
+            </button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="start" className="w-52">
+            {/* The switch is decoration — the row owns the click, so the two can't both fire.
+                preventDefault keeps the menu open, so a gear can be picked in the same visit. */}
+            <DropdownMenuItem
+              onSelect={(e) => e.preventDefault()}
+              onClick={() => changeThinking({ ...thinking, enabled: !thinking.enabled })}
+            >
+              <Brain className="size-4 text-muted-foreground" />
+              <span className="flex-1">{t("composer.thinking")}</span>
+              <Switch size="sm" checked={thinking.enabled} tabIndex={-1} className="pointer-events-none" />
+            </DropdownMenuItem>
+            <DropdownMenuSeparator />
+            <DropdownMenuLabel className="text-[11px] text-muted-foreground">
+              {t("composer.thinkingDepth")}
+            </DropdownMenuLabel>
+            {THINKING_EFFORTS.map((e: ThinkingEffort) => (
+              <DropdownMenuItem
+                key={e}
+                disabled={!thinking.enabled}
+                onClick={() => changeThinking({ enabled: true, effort: e })}
+              >
+                <span className="truncate">{t(effortLabelKey(e))}</span>
+                {thinking.effort === e && <span className="ml-auto text-primary">✓</span>}
+              </DropdownMenuItem>
+            ))}
+            {/* llama.cpp has no effort knob, so say so rather than let the gears look inert. */}
+            {localSelected && (
+              <p className="px-2 pb-1 pt-1.5 text-[11px] leading-snug text-muted-foreground">
+                {t("composer.thinkingLocalNote")}
+              </p>
             )}
           </DropdownMenuContent>
         </DropdownMenu>

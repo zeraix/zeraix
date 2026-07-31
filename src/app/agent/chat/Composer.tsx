@@ -1,6 +1,6 @@
 "use client";
 
-import { ChevronDown, Paperclip, Send } from "lucide-react";
+import { Brain, ChevronDown, Paperclip, Send } from "lucide-react";
 import { cn } from "@/lib/utils";
 import {
   DropdownMenu,
@@ -10,7 +10,15 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import { Switch } from "@/components/ui/switch";
 import type { AgentModel } from "@/lib/ai/models";
+import { LOCAL_PROVIDER_ID, isLocalEndpoint } from "@/lib/ai/localModel";
+import {
+  THINKING_EFFORTS,
+  effortLabelKey,
+  type ThinkingConfig,
+  type ThinkingEffort,
+} from "@/lib/ai/thinking";
 import type { Attachment } from "./types";
 import { formatBytes } from "./format";
 import { useT } from "@/lib/i18n";
@@ -39,6 +47,8 @@ export function Composer({
   selectedModelId,
   onSelectModel,
   onGoSettings,
+  thinking,
+  onThinkingChange,
 }: {
   input: string;
   onInputChange: (v: string) => void;
@@ -56,8 +66,15 @@ export function Composer({
   selectedModelId: string | null;
   onSelectModel: (id: string) => void;
   onGoSettings: () => void;
+  /** Thinking mode: the master switch plus the gear it uses while on. */
+  thinking: ThinkingConfig;
+  onThinkingChange: (next: ThinkingConfig) => void;
 }) {
   const t = useT();
+  // Mirrors the send side's isLocalModel: provider id, or a custom entry pointed at a local endpoint.
+  const selected = models.find((m) => m.id === selectedModelId);
+  const localSelected =
+    !!selected && (selected.providerId === LOCAL_PROVIDER_ID || isLocalEndpoint(selected.endpoint ?? ""));
   return (
     <div className="border-t border-line bg-surface px-4 py-3">
       <div className="mx-auto w-full max-w-4xl">
@@ -191,6 +208,63 @@ export function Composer({
                       ))}
                     </div>
                   ))
+                )}
+              </DropdownMenuContent>
+            </DropdownMenu>
+
+            {/* Thinking mode: master switch + three gears. The gears stay visible while off (greyed) so the
+                depth on offer is discoverable without having to flip the switch first. */}
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <button
+                  type="button"
+                  title={t("composer.thinkingTitle")}
+                  className={cn(
+                    "flex shrink-0 items-center gap-1 rounded-full border px-3 py-1.5 text-xs font-medium transition hover:bg-surface-muted",
+                    thinking.enabled
+                      ? "border-primary/40 bg-primary/10 text-primary"
+                      : "border-line-strong text-ink-muted",
+                  )}
+                >
+                  <Brain className="size-3.5 shrink-0" />
+                  <span className="truncate">
+                    {thinking.enabled
+                      ? t("composer.thinkingOn", { level: t(effortLabelKey(thinking.effort)) })
+                      : t("composer.thinkingOff")}
+                  </span>
+                  <ChevronDown className="size-3.5 shrink-0 opacity-70" />
+                </button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="start" className="w-52">
+                {/* The switch itself is decoration — the row owns the click, so the two can't both fire.
+                    preventDefault keeps the menu open, so a gear can be picked in the same visit. */}
+                <DropdownMenuItem
+                  onSelect={(e) => e.preventDefault()}
+                  onClick={() => onThinkingChange({ ...thinking, enabled: !thinking.enabled })}
+                >
+                  <Brain className="size-4 text-ink-muted" />
+                  <span className="flex-1">{t("composer.thinking")}</span>
+                  <Switch size="sm" checked={thinking.enabled} tabIndex={-1} className="pointer-events-none" />
+                </DropdownMenuItem>
+                <DropdownMenuSeparator />
+                <DropdownMenuLabel className="text-[11px] text-ink-subtle">
+                  {t("composer.thinkingDepth")}
+                </DropdownMenuLabel>
+                {THINKING_EFFORTS.map((e: ThinkingEffort) => (
+                  <DropdownMenuItem
+                    key={e}
+                    disabled={!thinking.enabled}
+                    onClick={() => onThinkingChange({ enabled: true, effort: e })}
+                  >
+                    <span className="truncate">{t(effortLabelKey(e))}</span>
+                    {thinking.effort === e && <span className="ml-auto text-primary">✓</span>}
+                  </DropdownMenuItem>
+                ))}
+                {/* llama.cpp has no effort knob, so say so rather than let the gears look inert. */}
+                {localSelected && (
+                  <p className="px-2 pb-1 pt-1.5 text-[11px] leading-snug text-ink-subtle">
+                    {t("composer.thinkingLocalNote")}
+                  </p>
                 )}
               </DropdownMenuContent>
             </DropdownMenu>
