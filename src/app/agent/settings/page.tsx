@@ -18,6 +18,7 @@ import { useLoginModalStore } from "@/store/loginModalStore";
 import { clearAuthCookie } from "@/lib/actions/auth.actions";
 import { useT } from "@/lib/i18n";
 import { cn } from "@/lib/utils";
+import CustomScrollbar, { PAGE_SCROLLBAR } from "@/components/CustomScrollbar";
 import { type SectionId, NAV, SECTION_KEYS, makeMatcher } from "./components/nav";
 import { AccountSection } from "./components/AccountSection";
 import { ModelsSection } from "./components/ModelsSection";
@@ -113,7 +114,7 @@ export default function AgentSettingsPage() {
       </aside>
 
       {/* Right-side content */}
-      <div className="min-w-0 flex-1 overflow-auto px-8 py-7">
+      <CustomScrollbar className="min-w-0 flex-1" viewportClassName="px-8 py-7" config={PAGE_SCROLLBAR}>
         {effectiveSection === "account" ? (
           <AccountSection
             t={t}
@@ -147,7 +148,7 @@ export default function AgentSettingsPage() {
         ) : (
           <p className="text-sm text-ink-subtle">{t("settings.noResults")}</p>
         )}
-      </div>
+      </CustomScrollbar>
     </div>
   );
 }

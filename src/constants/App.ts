@@ -12,3 +12,6 @@ export const APP_VERSION = process.env.NEXT_PUBLIC_APP_VERSION || "";
 
 /** Public repository — source, releases and issue tracker; also the auto-update feed (electron-builder.yml). */
 export const GITHUB_URL = "https://github.com/zeraix/Zeraix";
+
+/** Product website — the non-GitHub way to reach the team (see the feedback page). */
+export const WEBSITE_URL = "https://zeraix.com/feedback.html";

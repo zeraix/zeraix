@@ -4,6 +4,8 @@ import {
   Suspense,
   useCallback,
   useEffect,
+  useLayoutEffect,
+  useMemo,
   useRef,
   useState,
 } from "react";
@@ -201,6 +203,8 @@ import { formatBytes, uploadFileToOSS, abbreviateNumber } from "./format";
 import { MessageItem, ProcessGroup, type ProcessItem } from "./MessageItem";
 import { detectServices } from "@/store/servicesStore";
 import { TodoPanel } from "./TodoPanel";
+import { TranscriptSkeleton } from "./TranscriptSkeleton";
+import CustomScrollbar, { PAGE_SCROLLBAR } from "@/components/CustomScrollbar";
 import { Composer } from "./Composer";
 import { ProjectSkillsPrompt } from "./ProjectSkillsPrompt";
 import { ConsentPanel } from "./ConsentPanel";
@@ -215,6 +219,55 @@ import {
   applyReasoningPolicy,
   toInstalledProjectSkill,
 } from "./wireHelpers";
+
+/**
+ * Transcript windowing. A long conversation used to mount every message at once — hundreds of markdown /
+ * code-highlight subtrees in one commit, which stalls opening the conversation and makes every subsequent
+ * re-render (each streaming token flushes `display`) walk the whole list. Only the tail is mounted; earlier
+ * turns are added in batches as the user scrolls up. `display` itself still holds the full transcript — it is
+ * the display source of truth and message indices must stay absolute — this only bounds what reaches the DOM.
+ */
+const INITIAL_VISIBLE_TURNS = 5; // Turns mounted when a conversation is opened
+const LOAD_MORE_TURNS = 5; // Turns added per "load earlier" step
+
+/**
+ * Index in `display` where the last `turns` user messages begin (a "turn" = a user message plus everything the
+ * assistant produced in response). Returns 0 when the transcript holds fewer than `turns` of them, i.e. the
+ * whole thing is already visible. Because the result always lands on a user message (or 0), the window never
+ * splits a run of tool/reasoning entries that ProcessGroup collapses into one card.
+ */
+function startOfLastTurns(display: DisplayMsg[], turns: number): number {
+  let seen = 0;
+  for (let i = display.length - 1; i >= 0; i--) {
+    if (display[i].kind === "user" && ++seen >= turns) return i;
+  }
+  return 0;
+}
+
+/** Index where the `turns` user messages immediately preceding `before` begin (0 once the start is reached). */
+function startOfTurnsBefore(display: DisplayMsg[], before: number, turns: number): number {
+  let seen = 0;
+  for (let i = before - 1; i >= 0; i--) {
+    if (display[i].kind === "user" && ++seen >= turns) return i;
+  }
+  return 0;
+}
+
+/**
+ * Layout effect that is safe to prerender. This project builds with `output: "export"`, so client components are
+ * rendered on the server at build time, where useLayoutEffect does nothing and React says so on the console.
+ */
+const useIsomorphicLayoutEffect = typeof window !== "undefined" ? useLayoutEffect : useEffect;
+
+/** Resolve once the browser has painted, so a state change made just before is actually on screen. */
+const afterPaint = () =>
+  new Promise<void>((resolve) => {
+    // rAF runs *before* the paint, hence the nested timeout. The outer timeout is a ceiling, not a delay (the first
+    // resolve wins): rAF is paused while the window is minimised or occluded, and a conversation switch must not
+    // hang waiting for a frame that only arrives when the user comes back.
+    setTimeout(resolve, 100);
+    requestAnimationFrame(() => setTimeout(resolve, 0));
+  });
 
 /**
  * The run context for a single send (generation). send() and the tool executions / subagents it invokes share it, to support "background concurrent generation":
@@ -323,6 +376,29 @@ function ChatAgent() {
   // atBottomRef is for the synchronous read of "whether to follow when new content arrives" (avoiding reliance on async state); atBottom drives the button's visibility.
   const atBottomRef = useRef(true);
   const [atBottom, setAtBottom] = useState(true);
+  // Transcript window: how far back into `display` the DOM currently reaches. An absolute index rather than a
+  // "how many turns" count, so that appending to the tail (streaming, a new send) does not push already-revealed
+  // history back out of view — indices of earlier entries are stable, every write to `display` is tail-only.
+  // MAX_SAFE_INTEGER = "not expanded", meaning just the initial tail. Reset on conversation switch / clear.
+  const [historyAnchor, setHistoryAnchor] = useState(Number.MAX_SAFE_INTEGER);
+  const resetHistoryWindow = () => setHistoryAnchor(Number.MAX_SAFE_INTEGER);
+  // Conversation switch in progress: the message area shows a skeleton instead of the outgoing transcript.
+  const [switching, setSwitching] = useState(false);
+  // Serialises switches. Clicking through the sidebar starts overlapping loads (the archive read and the
+  // working-directory hand-off both await), and whichever finished last used to win regardless of which the user
+  // actually asked for. Each load carries a token; once a newer one starts, the older one stops before it commits.
+  const switchTokenRef = useRef(0);
+  /**
+   * Abandon an in-flight conversation switch. Used by the reset paths ("new conversation" / "clear chat"): bumping the
+   * token stops the load before it commits, which both keeps it from overwriting the freshly emptied view and — since a
+   * stale load deliberately leaves the skeleton alone — is why the flag has to be cleared here rather than by that load.
+   */
+  const cancelPendingSwitch = () => {
+    switchTokenRef.current++;
+    setSwitching(false);
+  };
+  // Distance from the bottom to preserve across a "load earlier" expansion, handed to the layout effect below.
+  const scrollAnchorRef = useRef<number | null>(null);
   // The API conversation retained across rounds (including system / tool messages), not involved in rendering. Fully faithful, it is the single source of truth for both the "display view" and
   // the "compressed wire view"; compaction only happens in the pre-send derivation step (buildWireContext) and never rewrites it.
   const convoRef = useRef<ApiMsg[]>([]);
@@ -796,6 +872,50 @@ function ChatAgent() {
     }
   }, [display, loading]);
 
+  // Where the mounted window starts. min(anchor, tail) does double duty: it keeps expanded history expanded, and it
+  // re-clamps after a truncation (edit / regenerate drops the tail, which can leave the anchor past the end) so the
+  // last turns are always mounted no matter what happened to `display`.
+  const visibleStart = useMemo(
+    () => Math.min(historyAnchor, startOfLastTurns(display, INITIAL_VISIBLE_TURNS)),
+    [display, historyAnchor],
+  );
+  const hasEarlier = visibleStart > 0;
+  // Reveal the previous batch of turns. The container grows above the viewport, so record the distance from the
+  // bottom first and restore it once the new nodes are laid out — otherwise the browser keeps scrollTop and the
+  // view jumps backwards by the height of everything just inserted.
+  const loadEarlier = useCallback(() => {
+    if (visibleStart <= 0) return;
+    const el = scrollRef.current;
+    scrollAnchorRef.current = el ? el.scrollHeight - el.scrollTop : null;
+    setHistoryAnchor(startOfTurnsBefore(displayRef.current, visibleStart, LOAD_MORE_TURNS));
+  }, [visibleStart]);
+  // Restore the scroll position against the taller content, before the browser paints the expanded list.
+  useIsomorphicLayoutEffect(() => {
+    const el = scrollRef.current;
+    const keep = scrollAnchorRef.current;
+    scrollAnchorRef.current = null;
+    if (el && keep != null) el.scrollTop = el.scrollHeight - keep;
+  }, [visibleStart]);
+  // Scrolling up to the sentinel pulls in the next batch. Guarded on the container actually being scrollable:
+  // a transcript shorter than the viewport has its sentinel permanently in view, and auto-expanding there would
+  // walk the whole history on open — exactly what the window exists to prevent. The button covers that case.
+  const earlierSentinelRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const node = earlierSentinelRef.current;
+    if (!node || !hasEarlier) return;
+    const io = new IntersectionObserver(
+      (entries) => {
+        if (!entries.some((e) => e.isIntersecting)) return;
+        const el = scrollRef.current;
+        if (!el || el.scrollHeight <= el.clientHeight) return;
+        loadEarlier();
+      },
+      { root: scrollRef.current, rootMargin: "200px 0px 0px 0px" },
+    );
+    io.observe(node);
+    return () => io.disconnect();
+  }, [hasEarlier, loadEarlier]);
+
   // After initialization is complete:
   //  - ?c= changes → load the corresponding historical conversation (supports switching conversations from the sidebar within the chat page);
   //  - first entry with no ?c= → consume the home page's pending send, or fall back to prefilling from ?q=.
@@ -917,6 +1037,8 @@ function ChatAgent() {
     interruptedRef.current = false; // New conversation: clear any residual "interrupt resume" flag
     displayRef.current = [];
     setDisplay([]);
+    resetHistoryWindow(); // New conversation: nothing to reveal, back to the tail-only window
+    cancelPendingSwitch(); // ...and drop any conversation still being switched in, so it cannot land on top of this
     atBottomRef.current = true; // New conversation: follow from the bottom
     setAtBottom(true);
     setQueued([]); // New conversation: clear the queue panel (the new conversation has no queue yet)
@@ -953,6 +1075,8 @@ function ChatAgent() {
     useAgentChatStore.getState().truncateMessages(id, 0); // empty the messages, keep the conversation entry
     displayRef.current = [];
     setDisplay([]);
+    resetHistoryWindow();
+    cancelPendingSwitch();
     atBottomRef.current = true;
     setAtBottom(true);
     setQueued([]);
@@ -1027,9 +1151,30 @@ function ChatAgent() {
     useAgentChatStore.getState().setConversationCompaction(convId, stored);
   };
 
+  /**
+   * Open a conversation, with a skeleton in the message area for as long as the swap takes. The paint yield is what
+   * makes the skeleton visible at all: without it the "show skeleton" state and the finished transcript land in the
+   * same frame, so the placeholder would never reach the screen even though the swap itself is slow.
+   */
   const loadConversation = async (id: string, projectId?: string) => {
+    const token = ++switchTokenRef.current;
+    const stale = () => switchTokenRef.current !== token;
+    setSwitching(true);
+    try {
+      await afterPaint();
+      if (stale()) return;
+      await swapInConversation(id, projectId, stale);
+    } finally {
+      // Only the newest switch may take the skeleton down — otherwise an overtaken load would clear it while the
+      // conversation the user actually clicked is still loading.
+      if (!stale()) setSwitching(false);
+    }
+  };
+
+  const swapInConversation = async (id: string, projectId?: string, stale: () => boolean = () => false) => {
     const store = useAgentChatStore.getState();
     if (projectId) await store.ensureProjectLoaded(projectId);
+    if (stale()) return; // Overtaken by a newer switch: stop before touching any shared state
     const conv = store.getConversation(id);
     if (!conv) return;
     snapshotCompaction(convIdRef.current); // Save the old conversation's compaction state before switching away
@@ -1065,6 +1210,7 @@ function ChatAgent() {
       setWorkdirChosen(true);
       putStorage(AGENT_WORKDIR_KEY, restoredDir); // Persist, reused across pages / reopens
       if (isToolkitAvailable()) await setWorkingDir(restoredDir).catch(() => {});
+      if (stale()) return; // A newer switch is already rebuilding the view — do not overwrite it with this one
     }
     // Rebuild the conversation sent to the model: faithfully restore the tool-call trace (the assistant's tool_calls + tool result messages),
     // so that when continuing the chat the model still "remembers" what it called and what results it got.
@@ -1183,6 +1329,9 @@ function ChatAgent() {
     });
     displayRef.current = disp;
     setDisplay(disp);
+    // Opening a conversation mounts only its last INITIAL_VISIBLE_TURNS turns; the rest is revealed on scroll-up.
+    // Reset per conversation, so a long history expanded earlier does not make the next one open fully mounted.
+    resetHistoryWindow();
     atBottomRef.current = true; // Switching conversations: display pinned to the bottom, resume auto-follow
     setAtBottom(true);
     // Restore the compaction state, to avoid "compaction lost, progress bar bouncing back to the uncompressed size" after switching back / reopening. Prefer the session-level cache
@@ -3609,9 +3758,19 @@ function ChatAgent() {
 
       {/* Messages */}
       <div className="relative flex min-h-0 flex-1 flex-col overflow-hidden">
-      <div ref={scrollRef} onScroll={onScroll} className="flex min-h-0 flex-1 flex-col overflow-auto bg-surface">
+      <CustomScrollbar
+        viewportRef={scrollRef}
+        onScroll={onScroll}
+        className="min-h-0 flex-1"
+        viewportClassName="flex flex-col bg-surface"
+        config={PAGE_SCROLLBAR}
+      >
         <div className="mx-auto flex w-full max-w-4xl flex-col gap-4 px-4 py-5">
-          {display.length === 0 && (
+          {/* Switching conversations: a skeleton stands in for the message area, so the previous conversation's
+              messages are not left on screen (or the "start a conversation" placeholder flashed) mid-swap. */}
+          {switching && <TranscriptSkeleton label={t("chat.loadingConversation")} />}
+
+          {!switching && display.length === 0 && (
             <div className="mt-16 text-center">
               <div className="mx-auto mb-3 flex h-12 w-12 items-center justify-center rounded-2xl bg-gradient-to-br from-primary to-primary/70 text-lg font-bold text-white shadow-lg shadow-primary/25">
                 AI
@@ -3624,11 +3783,27 @@ function ChatAgent() {
             </div>
           )}
 
-          {(() => {
+          {/* Earlier turns exist but are not mounted: the sentinel pulls in the next batch as it scrolls into view,
+              and the button does the same for a transcript too short to scroll (or with the observer unavailable). */}
+          {!switching && hasEarlier && (
+            <div ref={earlierSentinelRef} className="flex justify-center py-1">
+              <button
+                type="button"
+                onClick={loadEarlier}
+                className="rounded-full border border-line/60 px-3 py-1 text-xs text-ink-muted transition-colors hover:bg-surface-muted hover:text-ink"
+              >
+                {t("chat.loadEarlier")}
+              </button>
+            </div>
+          )}
+
+          {!switching && (() => {
             // Gather consecutive "deep thinking + tool calls" (the AI's thinking / operation trace) into a single collapsible
             // "thinking process" card, while the rest of the messages (user / reply / usage / todos / choice) are rendered one by one as usual.
             const nodes: React.ReactNode[] = [];
-            let i = 0;
+            // Mount only the current window; `i` stays an absolute index into `display` because MessageItem's index is
+            // what edit / regenerate / rating resolve against (and what the React keys are built from).
+            let i = visibleStart;
             // A tool call carrying an artifact (image_generation) is the deliverable, not a step in
             // the trace: it renders standalone rather than being swallowed into the collapsed
             // "Thinking process" card, where the user would never see the thing they asked for.
@@ -3670,7 +3845,8 @@ function ChatAgent() {
             return nodes;
           })()}
 
-          {loading && !display.some((m) => m.kind === "choice" && m.selected === null) && (
+          {/* The skeleton already reads as "loading"; the outgoing conversation's thinking dots would double up on it. */}
+          {!switching && loading && !display.some((m) => m.kind === "choice" && m.selected === null) && (
             <div className="flex items-center gap-2 px-1 py-0.5">
               <span className="flex shrink-0 items-center gap-1">
                 <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-primary [animation-delay:-0.3s]" />
@@ -3822,7 +3998,7 @@ function ChatAgent() {
               </div>
             );
           })()}
-      </div>
+      </CustomScrollbar>
       {/* Back to bottom: surfaces centered below the message area when the user scrolls up while generating; clicking smoothly returns to the bottom and resumes auto-follow. */}
       <button
         type="button"

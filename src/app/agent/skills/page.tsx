@@ -28,6 +28,7 @@ import type {
   SkillManifest,
   SkillScope,
 } from "@/lib/ai/skills/types";
+import CustomScrollbar, { PAGE_SCROLLBAR } from "@/components/CustomScrollbar";
 import { skillFromMarkdown } from "@/lib/ai/skills/parse";
 import { downloadSkill, fetchCatalog } from "@/lib/ai/skills/marketplace";
 import {
@@ -380,7 +381,7 @@ export default function AgentSkillsPage() {
       </div>
 
       {/* Content */}
-      <div className="min-h-0 flex-1 overflow-auto px-8 py-6">
+      <CustomScrollbar className="min-h-0 flex-1" viewportClassName="px-8 py-6" config={PAGE_SCROLLBAR}>
         <div className="mx-auto w-full max-w-6xl">
           {/* Tabs */}
           <div className="mb-5 flex items-center gap-6 border-b border-line">
@@ -547,7 +548,7 @@ export default function AgentSkillsPage() {
               </div>
             ))}
         </div>
-      </div>
+      </CustomScrollbar>
 
       {/* Skill details (read-only), opened by clicking a card in either tab. Marketplace entries load their body on open. */}
       <Dialog open={!!detail} onOpenChange={(open) => !open && setDetail(null)}>

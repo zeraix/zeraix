@@ -82,7 +82,7 @@ import {
   onWindowAlwaysOnTopChange,
 } from "@/lib/electron/windowControls";
 import STORAGE_KEY from "@/constants/Storage";
-
+import CustomScrollbar from "@/components/CustomScrollbar";
 /**
  * New Agent sidebar (independent of the legacy `sidebar.tsx`).
  * Fixed width 260px: window control dots + brand + main nav + project/conversation groups + bottom user.
@@ -217,6 +217,7 @@ function CollapsibleSection({
         />
       </button>
       {open && (
+        <CustomScrollbar>
         <div
           className={cn(
             "mt-2 space-y-0.5",
@@ -225,6 +226,7 @@ function CollapsibleSection({
         >
           {children}
         </div>
+        </CustomScrollbar>
       )}
     </div>
   );
@@ -629,6 +631,7 @@ export default function AgentSidebar({
         {projectConversations.length === 0 ? (
           <p className="px-2 py-1 text-xs text-muted-foreground">{t("sidebar.noConversations")}</p>
         ) : (
+
           projectConversations.map((c) => (
             <SidebarLeaf
               key={c.id}
@@ -705,7 +708,7 @@ export default function AgentSidebar({
             </DropdownMenuItem>
 
             {/* Help & feedback */}
-            <DropdownMenuItem onSelect={(e) => e.preventDefault()}>
+            <DropdownMenuItem onClick={() => router.push("/agent/help")}>
               <CircleHelp />
               {t("menu.help")}
             </DropdownMenuItem>

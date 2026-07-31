@@ -19,6 +19,7 @@ import { useT } from "@/lib/i18n";
 import { useRouter, useSearchParams } from "next/navigation";
 import { openPathInShell } from "@/lib/electron/shell";
 import RunInputsDialog, { askableVariables } from "./RunInputsDialog";
+import CustomScrollbar, { PAGE_SCROLLBAR } from "@/components/CustomScrollbar";
 import {
   isWorkflowsAvailable,
   listWorkflows,
@@ -654,6 +655,7 @@ function Shell({
   children: React.ReactNode;
 }) {
   return (
+    <CustomScrollbar className="h-full" config={PAGE_SCROLLBAR}>
     <div className="mx-auto max-w-5xl px-8 py-10">
       <div className="flex items-center gap-3">
         <span className="flex size-9 items-center justify-center rounded-lg bg-accent text-foreground">
@@ -678,6 +680,7 @@ function Shell({
       {notice}
       {children}
     </div>
+    </CustomScrollbar>
   );
 }
 
