@@ -612,6 +612,7 @@
   "ml.mtpOn": "An (spekulativ, schneller)",
   "ml.mtpOff": "Aus",
   "ml.estimate": "Geschätzte Nutzung {gb} GB · Kontext {ctx} · KV {kv}",
+  "ml.ctxTooBig": "Benötigt {gb} GB, mehr als das Budget dieses Geräts von {budget} GB",
   "ml.openFolder": "Ordner öffnen",
   "ml.openWeightsDir": "Gewichte-Ordner öffnen",
   "ml.deleteRunningTitle": "Löschen während der Ausführung nicht möglich — zuerst stoppen",

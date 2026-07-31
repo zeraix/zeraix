@@ -18,7 +18,7 @@ import { spawn, execSync } from "node:child_process";
 import { app } from "electron";
 import {
   detectHardware, usableModelMemoryGB, recommend as recommendModels, buildServerArgs,
-  MODELS, autoQuantId, quantBpw, gpuLayers, localSupported, MIN_LOCAL_MEM_GB, isSharedGpu, pickCtxKv, computeFit, descriptorFromGguf, MIN_CTX, kvTierEnabled, seedAvailable, moePoolEnabled, KV_BITS_OFFERED,
+  MODELS, autoQuantId, quantBpw, gpuLayers, localSupported, MIN_LOCAL_MEM_GB, isSharedGpu, pickCtxKv, computeFit, descriptorFromGguf, MIN_CTX, kvTierEnabled, seedAvailable, moePoolEnabled, KV_BITS_OFFERED, moeNativePlan, moeFloorPool, CTX_LADDER,
 } from "./localModels.mjs";
 import { ensureInstalled, installedBin, llamaVariant, fallbackVariant, detectCuda, llamaVersionDir, localFilesBase, installDir, llamaRootDir, installedLlamaVersions, migrateLegacyLayout } from "./llamaInstaller.mjs";
 import { downloadModel, searchModels, repoDetail, resolveRevision, TRUSTED_AUTHORS } from "./hfDownload.mjs";
@@ -54,6 +54,81 @@ const moeProfileDir = () =>
  */
 const MOE_RING_SLOTS = 4;
 
+/** Concurrent sequences (the --parallel passed to buildServerArgs) and experts routed per token. Both feed the
+ *  slot floor, so they are named here rather than repeated as literals at each call site. */
+const MOE_PARALLEL = 2;
+const MOE_EXPERT_USED = 8;
+
+/**
+ * Pass GGML_METAL_NO_RESIDENCY, disabling Metal residency sets. Flip this one constant to test it.
+ *
+ * OFF. Both directions are measured, and the choice is which memory gets compressed, not whether any does.
+ *
+ *                          residency ON (this)   residency OFF
+ *   system wired               15.31 GiB            2.65 GiB
+ *   llama phys_footprint        9.11 GiB            9.12 GiB     <- unchanged
+ *   llama dirty anon            8.86 GiB            8.86 GiB     <- unchanged
+ *
+ * Turning it off reclaims ~12.7 GiB of wired memory without changing a single one of llama's own allocations,
+ * which reads like a free win and is why it was briefly enabled. What it actually does is make those buffers
+ * evictable - and Metal buffers are DIRTY ANONYMOUS, so eviction means the compressor or swap, not a clean
+ * re-read. Pooled experts are file-backed and evict cheaply; native experts (slots == 0) sit in the Metal
+ * buffer and do not, so every layer moved to native raises the exposure. On this 24 GiB machine the
+ * compressor already holds 25 GiB of data with swap in use, so that exposure is not hypothetical.
+ *
+ * Left off because the risk is asymmetric: wiring costs page cache, which shows up as slower prefill and is
+ * visible in an average; unwiring risks a GPU touch stalling on decompression, which shows up as decode
+ * VARIANCE and hides in one. The measured decode gain seen while it was on (11.38 -> 15.33 t/s) arrived in
+ * the same restart as the 5 -> 10 native-layer change, so it cannot be attributed to this.
+ *
+ * To evaluate: set true, restart Electron (main-process module), then watch decode variance rather than the
+ * mean, and the Decompressions delta across a generation.
+ *
+ * ggml reads it by PRESENCE - `use_residency_sets = getenv(...) == nil` - so the value is irrelevant and the
+ * variable must be absent entirely, not set to "0".
+ */
+const MOE_NO_RESIDENCY = false;
+
+/**
+ * Stage every expert through one ring forward during warmup (LLAMA_MOE_WARMUP_RING). OFF.
+ *
+ * The pool picks its path per graph on n_tokens, and a {bos, eos} warmup is 2 tokens - so it takes the slot pool,
+ * filling only the few experts those two tokens route. The fork can widen the warmup past pool_ubatch to force
+ * the ring path instead, which stages every expert of every pooled layer.
+ *
+ * Measured on Qwen3.6-35B-A3B, 235-token opening turn: prefill 12126 -> 9441 ms, load 8.3 -> 17.6 s. It moves
+ * ~8.5 s onto the load to buy 2.7 s on the first message - a net loss in summed seconds, justified only by where
+ * the time lands.
+ *
+ * Off, and the fork now defaults it off too - this passes LLAMA_MOE_WARMUP_RING=1 to opt IN. Kept as a flag
+ * rather than deleted because a heavily pooled profile on a small machine is still the case it was written for.
+ *
+ * The split is derived per host now, and on a machine with room most layers are native (34 of 41 on a 36 GiB
+ * Mac). Native experts are copied into the Metal device buffer at load and are already resident, so there are
+ * few pooled layers left for the warmup to stage and the first prefill it protected is already fast. It also
+ * fires on every model start, including the ones where the user switches away without sending anything.
+ */
+const MOE_WARMUP_RING = false;
+
+/** Env the pool needs, or {} when it is not running. Built here rather than inline in spawn() so the set is
+ *  readable and a flag like MOE_NO_RESIDENCY is one line rather than an edit inside a 300-character literal. */
+function moeEnv(moeProfile) {
+  return {
+    LLAMA_MOE_POOL_PROFILE: moeProfile,
+    LLAMA_MOE_RING: "1",
+    GGML_METAL_SEG_ASYNC: "1",
+    // 0 = OFF. See the note at buildServerArgs below: the split can only route a prefill through the pool
+    // by cutting it into pool_ubatch-wide (6) graphs, and a different batch shape regroups the attention
+    // reduction, so the answer stops matching upstream's. That is not tunable - the pool cannot serve a
+    // wide graph by construction - so it is byte-identity OR the speed-up, and correctness wins.
+    LLAMA_MOE_SMALL_PREFILL: "0",
+    LLAMA_MOE_POOL_FILL_THREADS: "8",
+    LLAMA_MOE_RING_SLOTS: String(MOE_RING_SLOTS),
+    ...(MOE_NO_RESIDENCY ? { GGML_METAL_NO_RESIDENCY: "1" } : {}),
+    ...(MOE_WARMUP_RING ? { LLAMA_MOE_WARMUP_RING: "1" } : {}),
+  };
+}
+
 /**
  * The pool profile for a model, as the memory estimate needs it: { layers, n_expert, ringSlots }.
  *
@@ -63,18 +138,81 @@ const MOE_RING_SLOTS = 4;
  * wrong in, since the server also leaves the pool inert when the profile is absent.
  */
 const moeProfileCache = new Map();
+
+/** The shipped profile object for a model, or null. Parsed once - the file does not change within a run. */
+const moeRawCache = new Map();
+function moeShippedProfile(modelId) {
+  if (!moePoolEnabled(modelId)) return null;
+  if (moeRawCache.has(modelId)) return moeRawCache.get(modelId);
+  let prof = null;
+  try {
+    const p = JSON.parse(fs.readFileSync(path.join(moeProfileDir(), `${modelId}.json`), "utf8"));
+    if (Array.isArray(p.layers) && p.n_expert > 0) { prof = p; }
+  } catch { /* not shipped, or malformed */ }
+  moeRawCache.set(modelId, prof);
+  return prof;
+}
+
 function moePoolInfo(modelId) {
   if (!moePoolEnabled(modelId)) return null;
   if (moeProfileCache.has(modelId)) return moeProfileCache.get(modelId);
   let info = null;
   try {
     const p = JSON.parse(fs.readFileSync(path.join(moeProfileDir(), `${modelId}.json`), "utf8"));
-    if (Array.isArray(p.layers) && p.n_expert > 0) {
-      info = { layers: p.layers, n_expert: p.n_expert, ringSlots: MOE_RING_SLOTS };
-    }
+    // The FLOOR shape, not the file's own slots. Sizing decides the context rung and the quant, and the launch
+    // plan only ever spends MORE than the floor - so sizing against the floor is what makes "it fits" true. The
+    // file's slots were chosen for the profiling machine and are not this machine's answer to anything.
+    info = moeFloorPool(p, { parallel: MOE_PARALLEL, nExpertUsed: MOE_EXPERT_USED, ringSlots: MOE_RING_SLOTS });
   } catch { /* no profile shipped for this model, or it is malformed */ }
   moeProfileCache.set(modelId, info);
   return info;
+}
+
+/**
+ * The profile path to hand llama-server, with the native/pooled split derived for THIS machine.
+ *
+ * The shipped file is a measurement (per-layer miss rates from one reference machine) and its `slots` are that
+ * machine's answer. moeNativePlan re-decides the split against this host's memory budget, and the result is
+ * written beside the models as `<localFilesBase>/moe-derived/<modelId>.json`. Derived rather than edited in place
+ * so the shipped measurement stays pristine and a bad plan is one file deletion away from the original.
+ *
+ * Falls back to the shipped file whenever the plan cannot be formed (no expertFrac for the model, unreadable
+ * profile, write failure): the pool then runs the reference split, which is what shipped before this existed.
+ * Returns null when there is no profile at all - the fork leaves the pool inert rather than pinning blind
+ * index-order experts, so that degrades to stock speed, not to wrong output.
+ */
+function moeProfileFor(model, { hw, bpw, ctx, kvBits, vision = false, log = () => {} } = {}) {
+  if (!moePoolEnabled(model?.id) || !bpw) return null;
+  const shipped = path.join(moeProfileDir(), `${model.id}.json`);
+  if (!fs.existsSync(shipped)) { log(`[llama] MoE pool profile missing (${model.id}.json) — pool inert\n`); return null; }
+  try {
+    const prof = JSON.parse(fs.readFileSync(shipped, "utf8"));
+    const plan = moeNativePlan(model, prof, {
+      // bpw of the quant ACTUALLY being launched, not autoQuantId's re-derivation - those disagree (a 24 GB Mac
+      // auto-picks UD-Q3_K_XL while the installed weights are UD-Q4_K_XL), and sizing against the smaller one
+      // models the model as ~30% lighter and over-promotes layers to native.
+      bpw, budgetGB: usableModelMemoryGB(hw), ctx, kvBits, vision,
+      ringSlots: MOE_RING_SLOTS, parallel: MOE_PARALLEL, nExpertUsed: MOE_EXPERT_USED,
+    });
+    if (!plan) throw new Error("no plan");
+    // Not fatal: the floor is the minimum a pooled layer can run at, so there is nothing to trim. Ship it and say
+    // so - the alternative is no pool at all, which is strictly worse. Sizing normally prevents this by choosing
+    // the context rung against the same floor; reaching here means something overrode that.
+    if (!plan.fits) {
+      log(`[llama] MoE pool: plan needs ~${plan.totalGB} GB against a ${usableModelMemoryGB(hw)} GB budget `
+        + `— running at the routing floor anyway; expect memory pressure\n`);
+    }
+    const dir = path.join(localFilesBase(), "moe-derived");
+    fs.mkdirSync(dir, { recursive: true });
+    const out = path.join(dir, `${model.id}.json`);
+    fs.writeFileSync(out, JSON.stringify({ ...prof, layers: plan.layers }, null, 1));
+    log(`[llama] MoE pool: ${plan.native.length}/${plan.layers.length} layers native for ${hw.totalMemGB}GB `
+      + `(~${plan.residentGB.toFixed(1)} GB resident) — ${JSON.stringify(plan.native)}\n`);
+    return out;
+  } catch (e) {
+    log(`[llama] MoE pool: could not derive a split (${String(e?.message ?? e)}) — using the shipped profile\n`);
+    return shipped;
+  }
 }
 
 /** Pool info for every catalog model that has one, keyed by id - the shape localModels.recommend expects. */
@@ -375,10 +513,34 @@ export function estimate(opts = {}) {
   const ctx = Math.max(256, Number(opts.ctx || 16384));
   const kvBits = Number(opts.kvBits || 8);
   const vision = !!opts.vision && !!model.vision;
+  const hw = detectHardware();
   const fit = computeFit(model, { bpw }, ctx, kvBits, vision, moePoolInfo(model.id));
   // MTP standalone drafter (Gemma, ~hundred MB resident); Qwen's built-in MTP head is already counted in the weights, so extra overhead is ignored.
   const mtpGB = opts.mtp !== false && model.mtp && !model.mtpEmbedded ? 0.2 : 0;
-  return { totalGB: Math.round((fit.totalGB + mtpGB) * 10) / 10, weightGB: fit.weightGB, kvGB: fit.kvGB };
+  const round1 = (n) => Math.round(n * 10) / 10;
+  // Which context rungs this machine can actually hold, decided HERE rather than in the renderer. The UI used to
+  // filter on `ctx <= maxCtx` alone, which offers 256K on a model+machine where it overruns the memory budget -
+  // and picking it produced a launch that thrashed rather than an error. Sized against the pool FLOOR, the
+  // cheapest configuration moeNativePlan can emit, so a rung marked fits is one the planner can always deliver.
+  const budgetGB = usableModelMemoryGB(hw);
+  // Rung eligibility is decided at the pool FLOOR - the cheapest split moeNativePlan can emit - so a rung marked
+  // fits is one the planner can always deliver. totalGB on each rung is that same floor cost, which is the useful
+  // number for a DISABLED rung: "even at its minimum this needs X".
+  const rungs = CTX_LADDER.filter((c) => c <= (model.maxCtx || MIN_CTX)).sort((a, b) => a - b).map((c) => {
+    const t = computeFit(model, { bpw }, c, kvBits, vision, moePoolInfo(model.id)).totalGB + mtpGB;
+    return { ctx: c, totalGB: round1(t), fits: t <= budgetGB };
+  });
+  // The headline figure is what will ACTUALLY be allocated, not the floor. The planner spends its way up to the
+  // budget - promoting layers to native and then widening slots - so on a 36 GB host the floor reads 13.2 GB
+  // while the launch allocates 25.1 GB with 32 of 41 layers native. Reporting the floor here understated the
+  // real footprint by ~12 GB and made the pool look far cheaper than it is.
+  const prof = moeShippedProfile(model.id);
+  const plan = prof && moeNativePlan(model, prof, {
+    bpw, budgetGB, ctx, kvBits, vision,
+    ringSlots: MOE_RING_SLOTS, parallel: MOE_PARALLEL, nExpertUsed: MOE_EXPERT_USED,
+  });
+  const totalGB = round1((plan ? plan.totalGB : fit.totalGB) + mtpGB);
+  return { totalGB, floorGB: round1(fit.totalGB + mtpGB), weightGB: fit.weightGB, kvGB: fit.kvGB, budgetGB, rungs };
 }
 
 /** Auxiliary files (not counted as main weights): mmproj vision projector, MTP drafter (mtp-*.gguf or *-MTP.gguf). */
@@ -1097,11 +1259,9 @@ async function launch(variant, cfg) {
   // MoE expert pool: enabled by pointing LLAMA_MOE_POOL_PROFILE at a per-model routing profile. MoE models on mac only, and only
   // when the profile is actually present — without one the fork leaves the pool inert by design rather than pinning blind
   // index-order experts, so a missing file degrades to stock speed instead of degrading output.
-  const moeProfile = moePoolEnabled(r.model?.id) ? path.join(moeProfileDir(), `${r.model.id}.json`) : null;
-  const moeOn = !!moeProfile && fs.existsSync(moeProfile);
-  if (moeProfile && !moeOn) pushLog(`[llama] MoE pool profile missing (${path.basename(moeProfile)}) — pool inert\n`);
-  else if (moeOn) pushLog(`[llama] MoE pool profile: ${path.basename(moeProfile)}\n`);
-  const args = buildServerArgs({ modelPath, mmproj: visionOn ? mmprojPath : null, mtpDraft, specMtp: useMtp, hw, ctx, port: state.port, kvBits, kvDiskDir: kvTier ? kvDiskDir() : null, parallel: kvTier ? 2 : 0, ngl, chatTemplate: r.chatTemplate, chatTemplateFile: templatePath });
+  const moeProfile = moeProfileFor(r.model, { hw, bpw: r.bpw, ctx, kvBits, vision: visionOn, log: pushLog });
+  const moeOn = !!moeProfile;
+  const args = buildServerArgs({ modelPath, mmproj: visionOn ? mmprojPath : null, mtpDraft, specMtp: useMtp, hw, ctx, port: state.port, kvBits, kvDiskDir: kvTier ? kvDiskDir() : null, parallel: kvTier ? 2 : 0, ngl, chatTemplate: r.chatTemplate, chatTemplateFile: templatePath, reasoningBudget: r.model?.reasoningBudget ?? null, reasoningBudgetMessage: r.model?.reasoningBudgetMessage ?? null });
   if (templatePath) pushLog(`[llama] chat template file: ${path.basename(templatePath)}${r.chatTemplate ? ` (overrides the "${r.chatTemplate}" built-in)` : ""}\n`);
   else if (r.chatTemplate) pushLog(`[llama] chat template override: ${r.chatTemplate}\n`);
   pushLog(`[llama] argv: ${bin} ${args.join(" ")}\n`); // full startup command (for troubleshooting)
@@ -1128,18 +1288,7 @@ async function launch(variant, cfg) {
     //   SEG_ASYNC     encode+commit all segments up front, gated on an MTLSharedEvent, instead of commit+wait per
     //                 segment. Qwen3.6-35B-A3B is 41 segments per forward, so without it every token pays 41 GPU
     //                 round trips.
-    //   NO_RESIDENCY  stop Metal from wiring its buffers. Set because the machine wires far more than the process
-    //                 accounts for: measured on Qwen3.6-35B (24 GiB Mac), system wired went 2.64 -> 15.31 GiB while
-    //                 llama-server's own phys_footprint was 9.11 GiB and its dirty Metal/ggml buffers 8.86 GiB.
-    //                 That leaves ~3.6 GiB wired belonging to no process, and residency sets are the mechanism that
-    //                 would do it. Wiring is exactly what hurts here: the widened warmup stages EVERY expert of
-    //                 every pooled layer through one ring forward, so the whole expert set wants to sit in page
-    //                 cache, and wired pages are pages the cache cannot have.
-    //                 The earlier argument for leaving it off — "residency covers Metal buffers only, and the
-    //                 pooled experts are CPU_Mapped mmap, so it cannot protect the pages that thrash" — is right
-    //                 about what it protects and wrong about what it costs. UNVERIFIED that this reclaims the
-    //                 3.6 GiB; that is what setting it measures. (ggml reads it by PRESENCE:
-    //                 `use_residency_sets = getenv(...) == nil`.)
+    //   NO_RESIDENCY  see MOE_NO_RESIDENCY - a one-line toggle, currently off.
     // LLAMA_MOE_SMALL_PREFILL: feed a prefill of <= N tokens through the pool in decode-shaped graphs instead of
     // handing it to the ring. The ring stages EVERY expert of a layer per forward — a flat cost that a short
     // prefill cannot amortise — so a 30-token follow-up paid the same as a 500-token one. Measured in this app,
@@ -1158,6 +1307,31 @@ async function launch(variant, cfg) {
     // The pool's per-token cost RISES with N here (76 -> 112 ms), so break-even lands at ~98-143 tokens. 256 was
     // tried and made the 235-token first turn 2.2x slower. 96 sits below the bottom of that range: being under
     // break-even only forgoes a little, being over it costs double.
+    //
+    // SET TO 0 - OFF. The table above is kept because it was true when measured, and it is now OBSOLETE: it was
+    // taken on a profile with 1 native layer and 40 pooled. The ring's cost is flat PER POOLED LAYER, so once
+    // host-ptr aliasing (the model file is mapped, not copied) and the corrected kvGB freed memory for native
+    // layers, that cost collapsed. Re-measured on Qwen3.6-35B-A3B, 32-token turn, profiles derived by
+    // moeNativePlan for each machine, prefill t/s:
+    //
+    //   pooled layers    split OFF (ring)    split ON (pool)
+    //     40 (old)             6.9               17.7      <- the table above: pool wins 2.6x
+    //     27 (16 GB)          57.4               23.7      <- pool now LOSES 2.4x
+    //     23 (24 GB)          71.7               25.5      <- loses 2.8x
+    //      2 (39 GB)         121.2               30.9      <- loses 3.9x
+    //
+    // The ring tracks pooled-layer count (6.9 -> 121 t/s); the pool barely moves (17.7 -> 30.9). The crossover is
+    // above 27 pooled layers, which moeNativePlan no longer produces on any machine the app supports.
+    //
+    // So 0 is both the correct and the fast setting. Correctness matters independently, because the split cannot
+    // be byte-identical by construction: the pool only serves graphs up to pool_ubatch = (draft+1) x parallel = 6,
+    // so routing a prefill through it means cutting it into 6-token graphs, and a different batch shape regroups
+    // the attention reduction - on gemma-4-26B-A4B at q4_0 a 42-token prompt answers 816 bytes split against 790
+    // unsplit, where 790 is upstream's. Widening the pool is no escape: the slot floor is
+    // pool_ubatch x n_expert_used, so a pool wide enough for a 42-token graph needs 336 slots against n_expert
+    // 128 - every expert resident, which is the pool's purpose gone.
+    //
+    // Revisit only if pooled-layer counts rise again (a much larger model, or a much smaller machine).
     // LLAMA_MOE_RING_SLOTS: ring buffers, and therefore prefetch depth — the fork derives depth as slots - 2,
     // since layer il-1 may still be executing while the host stages il+depth. 4 slots stages two layers ahead
     // instead of one, at the cost of one more full-expert buffer.
@@ -1183,7 +1357,10 @@ async function launch(variant, cfg) {
     // Confounded, not proven: those runs also differ in cache warmth and other env, so the trend is suggestive
     // rather than isolated. Kept because it costs NO memory — slot count and pool footprint are untouched, so
     // the 24 GB target is unaffected — and the evidence points one way.
-    proc = spawn(bin, args, { stdio: ["ignore", "pipe", "pipe"], env: { ...process.env, HF_ENDPOINT: hfEnd, LLAMA_CACHE: modelsDir, ...(moeOn ? { LLAMA_MOE_POOL_PROFILE: moeProfile, LLAMA_MOE_RING: "1", GGML_METAL_SEG_ASYNC: "1", GGML_METAL_NO_RESIDENCY: "1", LLAMA_MOE_SMALL_PREFILL: "64", LLAMA_MOE_POOL_FILL_THREADS: "8", LLAMA_MOE_RING_SLOTS: String(MOE_RING_SLOTS) } : {}) } });
+    proc = spawn(bin, args, {
+      stdio: ["ignore", "pipe", "pipe"],
+      env: { ...process.env, HF_ENDPOINT: hfEnd, LLAMA_CACHE: modelsDir, ...(moeOn ? moeEnv(moeProfile) : {}) },
+    });
   } catch (e) {
     const fb = fallbackVariant(variant);
     if (fb) { pushLog(`[llama] start of ${variant} failed (${String(e?.message ?? e)}) -> falling back to ${fb}\n`); return launch(fb, cfg); }

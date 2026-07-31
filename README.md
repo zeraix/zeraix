@@ -75,8 +75,8 @@ No Zeraix account, subscription, or API key is required for the local core.
 
 | Platform | Requirements | Direct download |
 |---|---|---|
-| 🍎 macOS | macOS 13+ · Apple Silicon | [⬇️ **Download for macOS**](https://github.com/zeraix/zeraix/releases/latest/download/Zeraix-intl-1.6.0.dmg) |
-| 🪟 Windows | Windows 10/11 · x64 | [⬇️ **Download for Windows**](https://github.com/zeraix/zeraix/releases/latest/download/Zeraix-intl-1.6.0.exe) |
+| 🍎 macOS | macOS 13+ · Apple Silicon | [⬇️ **Download for macOS**](https://github.com/zeraix/zeraix/releases/latest/download/Zeraix-intl-1.7.0.dmg) |
+| 🪟 Windows | Windows 10/11 · x64 | [⬇️ **Download for Windows**](https://github.com/zeraix/zeraix/releases/latest/download/Zeraix-intl-1.7.0.exe) |
 
 You can also view the [latest release notes](https://github.com/zeraix/zeraix/releases/latest).
 
@@ -182,11 +182,40 @@ Our work is not limited to a single architecture or model family.
 
 _Last updated: July 2026_
 
-| Model track | Research focus | Current status | Public availability |
-|---|---|---|---|
-| Qwen3.6-35B-A3B | Low-memory MoE execution, MTP integration, sustained decoding, and output consistency | **Active research** — internal prototyping and validation in progress | Not publicly available yet |
-| Gemma 4 family | Working-set reduction, sustained generation, and tail-latency control | **Active research** — internal prototyping and validation in progress | Not publicly available yet |
-| Community GGUF ecosystem | Hardware detection, quantization selection, runtime configuration, and model lifecycle management | **Shipping** | Available in Zeraix Desktop |
+## What's new in v1.7.0
+
+Zeraix now ships public Apple Silicon optimization paths for **Qwen3.6-35B-A3B** and the **Gemma 4** family, while also allowing users to browse, download, configure, and run compatible external GGUF repositories from Hugging Face.
+
+### Shipped model paths
+
+| Model | Public configuration | Shipping optimization path |
+|---|---|---|
+| Qwen3.6-35B-A3B | MTP GGUF · vision · up to 256K context | Profile-guided MoE expert pooling, per-host resident/pooled layer planning, embedded MTP, persistent KV reuse, and published prefix seeds |
+| Gemma 4 26B-A4B | QAT GGUF · vision · up to 256K context | Profile-guided MoE expert pooling, per-host memory planning, MTP speculative decoding, persistent KV reuse, and published prefix seeds |
+| Gemma 4 12B | QAT GGUF · vision/audio · up to 256K context | Hardware-aware sizing, MTP speculative decoding, persistent KV reuse, and published prefix seeds |
+| Gemma 4 E4B | QAT GGUF · vision/audio · up to 128K context | Low-memory profile, MTP speculative decoding, persistent KV reuse, and published prefix seeds |
+| Community GGUF | Compatible external Hugging Face GGUF repositories | Repository search, architecture checks, quantization selection, memory estimation, context/KV controls, optional vision/MTP assets, and chat-template overrides |
+
+### Runtime improvements
+
+- **Measured memory planning** — Zeraix sizes supported pooled models by their real resident working set instead of treating the full GGUF file as permanently resident.
+- **Per-host MoE placement** — the resident/pooled layer split is derived at launch from the machine's available memory and the selected context.
+- **Hardware-aware context choices** — supported profiles offer only the 64K, 96K, 128K, 196K, or 256K windows that the current machine can hold.
+- **Faster repeated prompts** — short-prefill routing, persistent KV prefixes, and published prefix seeds reduce redundant prompt processing across turns and restarts.
+- **Correct local tool loops** — reasoning content is replayed in the form expected by supported local model chat templates.
+
+Example measurements from the v1.7.0 release validation:
+
+| Measurement | Before | v1.7.0 observation |
+|---|---:|---:|
+| Qwen3.6 pooled-model resident memory compared with its 22.8 GB GGUF file | Full-file sizing | 8.5 GB measured resident working set in the reported run |
+| Qwen3.6 decode on a 36 GiB Mac | 11.4 tok/s | 31.6 tok/s |
+| 30-token follow-up prefill | 23.8 s | 2.2 s |
+| Reusing a persisted system prefix after restart | 47.6 s cold | 182 ms |
+
+These measurements describe the specific release-validation runs documented in [v1.7.0](https://github.com/zeraix/zeraix/releases/tag/v1.7.0); they are not universal performance guarantees. Results vary with the model, quantization, context, enabled capabilities, hardware, thermals, and workload.
+
+> The optimizations above are shipping capabilities in Zeraix Desktop. **ExactFlux remains a broader active research runtime and is not yet included in this public source tree.**
 
 Research status definitions:
 

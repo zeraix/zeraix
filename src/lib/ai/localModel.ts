@@ -107,6 +107,14 @@ export interface LocalLlmEstimate {
   totalGB: number;
   weightGB: number;
   kvGB: number;
+  /** Memory the main process will let a model use on this machine (total minus an OS/app reserve). */
+  budgetGB: number;
+  /** What the pool would cost at its minimum split — every layer pooled at the routing floor. `totalGB` is
+   *  higher because the planner spends the remaining budget on native layers and wider slots. */
+  floorGB: number;
+  /** Every context rung this model could offer, with the verdict. `fits` is decided in the main process against
+   *  the same budget the launcher uses, so a rung the UI shows as selectable is one that will actually start. */
+  rungs: { ctx: number; totalGB: number; fits: boolean }[];
 }
 
 /** llama runtime info. */

@@ -612,6 +612,7 @@
   "ml.mtpOn": "開啟（投機解碼更快）",
   "ml.mtpOff": "關閉",
   "ml.estimate": "預計佔用 {gb} GB · 上下文 {ctx} · KV {kv}",
+  "ml.ctxTooBig": "需要 {gb} GB，超出本機 {budget} GB 預算",
   "ml.openFolder": "開啟資料夾",
   "ml.openWeightsDir": "開啟權重資料夾",
   "ml.deleteRunningTitle": "執行中無法刪除，請先停止",

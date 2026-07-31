@@ -612,6 +612,7 @@
   "ml.mtpOn": "オン（投機的デコード・高速）",
   "ml.mtpOff": "オフ",
   "ml.estimate": "推定使用量 {gb} GB · コンテキスト {ctx} · KV {kv}",
+  "ml.ctxTooBig": "{gb} GB 必要で、このマシンの {budget} GB の上限を超えます",
   "ml.openFolder": "フォルダを開く",
   "ml.openWeightsDir": "重みフォルダを開く",
   "ml.deleteRunningTitle": "実行中は削除できません — 先に停止してください",
