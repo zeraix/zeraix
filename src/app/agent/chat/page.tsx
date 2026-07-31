@@ -3298,9 +3298,19 @@ function ChatAgent() {
           continue;
         }
 
-        // Wrap-up guard: this round executed a tool (e.g. a subagent already returned a result), yet the model ends with empty content — the user saw nothing.
-        // Inject one FINALIZE_NUDGE to nudge it to answer formally based on the obtained information, then continue the loop. Only once, to avoid a deadlock.
-        if (didToolCall && !finalizeNudged && !(msg.content ?? "").trim()) {
+        // Wrap-up guard: the model demonstrably did work this round — ran a tool, or produced reasoning — yet ended with
+        // empty content, so the user saw nothing. Inject one FINALIZE_NUDGE to make it answer from what it already has,
+        // then continue the loop. Only once, to avoid a deadlock.
+        //
+        // `reasoningText` is in the condition because a tool call is not the only way to end up here. A reasoning model
+        // writing ABOUT its own control tokens emits one for real: Qwen's tokenizer has </think> as a special token, so
+        // a turn explaining thinking tags terminates itself at the backtick before the tag name. Observed twice in one
+        // conversation — once truncating the answer at 845 tokens, once ending the whole response at 0 — and the user
+        // had to type "continue" by hand, which is exactly what this nudge does.
+        //
+        // Requiring evidence of work (a tool ran, or tokens were reasoned) rather than firing on any empty reply keeps
+        // an aborted or genuinely empty stream from being nudged into a second request.
+        if ((didToolCall || reasoningText.trim()) && !finalizeNudged && !(msg.content ?? "").trim()) {
           finalizeNudged = true;
           nudgeIntoLastTool(FINALIZE_NUDGE);
           continue;

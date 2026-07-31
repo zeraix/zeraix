@@ -32,7 +32,7 @@ type Opt = LocalLlmRecommendation["options"][number];
  *  Mirrors MIN_CTX + CTX_LADDER in localModels.mjs - the fitting rungs now come from estimate(), and these are only
  *  the fallback shown before the first estimate lands and the bounds for the typed-value input. */
 const MIN_CTX = 65536;
-const CTX_LADDER = [65536, 98304, 131072, 200704, 262144];
+const CTX_LADDER = [65536, 98304, 131072, 196608, 262144];
 /** Context presets for a given native window: the standard rungs at or below it, always ending at the window itself
  *  (so a non-power-of-2 max like 40960 gets its exact value as the top button). Empty when the model can't reach MIN_CTX. */
 const ctxPresets = (maxCtx: number): number[] => {
