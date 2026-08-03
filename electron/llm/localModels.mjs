@@ -356,7 +356,28 @@ export function usableModelMemoryGB(hw, overrideGB) {
     //
     // NOT 0.8: a 24 GiB Mac would have ~0.1 GiB of page cache left after macOS (~2.65 GiB wired) and Electron
     // (~1.7 GiB), and the pool re-reads its file-backed experts on every ring forward without it.
-    return round(Math.max(2, hw.totalMemGB < 10 ? hw.totalMemGB - 3 : hw.totalMemGB * 0.68));
+    //
+    // 0.68 -> 0.75, because the argument above prices only one side of the trade. A big ring genuinely
+    // needs page cache - but how big the ring IS depends on how many pooled layers the budget leaves,
+    // and buying native layers shrinks both the ring and the cache it needs. The two move together.
+    //
+    // Measured on a simulated 24 GB Mac at the settings the app actually launches - ctx 262144,
+    // n_ubatch 512, n_batch 2048, corpus prompt, speculation on, ballast to 24 GB with 4 GB for the
+    // OS and the app stack:
+    //
+    //     natives  pooled  wired     cache-avail   prefill   decode
+    //        15      26    14.7 GB     3.9 GB       54.5      10.1     <- 0.68
+    //        19      22    15.8 GB     2.7 GB       63.6      11.7     <- 0.75
+    //
+    // +17% prefill and +16% decode for 1.1 GB of the reserve. Modest, and it is the whole of the win:
+    // it does not approach a usable target on this tier. Qwen3.6-35B at UD-Q4_K_XL is 22.8 GB of
+    // weights against ~18 GB of budget here, so ~5 GB streams from disk on every pass no matter how
+    // the layers are split. That gap caps the tier and no split closes it - the remedies are a leaner
+    // quant or a lower context rung, both product decisions.
+    //
+    // Not higher than 0.75: at 0.83 a 24 GB Mac has ~0.1 GB of page cache left and the pooled layers
+    // re-read their experts from disk on every ring forward.
+    return round(Math.max(2, hw.totalMemGB < 10 ? hw.totalMemGB - 3 : hw.totalMemGB * 0.75));
   }
   // Discrete GPU: partial offload can use "available VRAM + available system memory" (layers that don't fit stay on CPU); if VRAM is unreadable, use system memory only.
   const usableVram = hw.gpu && hw.gpu.vramGB ? Math.max(0, hw.gpu.vramGB - 1.2) : 0;
@@ -376,9 +397,11 @@ export function weightGB(model, quant) {
  *                           so the buffer is `slots` times it
  *
  * Both SWA factors used to be missing: the term was one window's worth, which at slots=2 was low by
- * 3x on E4B and 5x on 26B-A4B. n_ubatch is 512 because the server is launched without -ub (llama.cpp
- * default, common.h) and slots is 2 because that is what buildServerArgs passes whenever the KV disk
- * tier is on. The regions are vm_allocate with the boot clear skipped, so pages commit only as a
+ * 3x on E4B and 5x on 26B-A4B. The `ubatch = 512` default below is now only a FALLBACK for callers
+ * that pass nothing — buildServerArgs launches with `-ub 1024`, so a caller sizing an SWA model must
+ * pass the real value or this under-counts by one ubatch per slot. It does not bite the MoE models
+ * here, which have no SWA window and so never reach the term. slots is 2 because that is what
+ * buildServerArgs passes whenever the KV disk tier is on. The regions are vm_allocate with the boot clear skipped, so pages commit only as a
  * slot's window is touched — a fully warm server is the worst case this counts, not the steady state.
  *
  * `arch.kvElems` is KV elements per cell (K + V, summed over every layer in that group), read from
@@ -467,7 +490,11 @@ export function moeResidentGB(model, quant, pool) {
   const perLayer = expertsGB / layers.length;
   const nativeGB = layers.filter((l) => !(l.slots > 0)).length * perLayer;
   const poolGB = layers.reduce((a, l) => a + (l.slots > 0 ? perLayer * (l.slots / pool.n_expert) : 0), 0);
-  const ringGB = (pool.ringSlots || 0) * perLayer;
+  // The ring exists to stage POOLED layers. With none, there is no ring and charging for it hides
+  // most of what streaming gives back: on qwen3.6-35B that is ~1.9 GB, which is four more layers
+  // that could have been native instead.
+  const anyPooled = layers.some((l) => l.slots > 0);
+  const ringGB = anyPooled ? (pool.ringLayers || 0) * perLayer : 0;
   return total - expertsGB + nativeGB + Math.max(poolGB, ringGB);
 }
 
@@ -495,13 +522,13 @@ export function moeSlotFloor(profile, { parallel = 2, nExpertUsed = 8 } = {}) {
  * this, so anything the floor cannot afford is genuinely unaffordable. Reading the file's own `slots` instead
  * would size against whatever split the profiling machine happened to use.
  */
-export function moeFloorPool(profile, { parallel = 2, nExpertUsed = 8, ringSlots = 0 } = {}) {
+export function moeFloorPool(profile, { parallel = 2, nExpertUsed = 8, ringLayers = 0 } = {}) {
   if (!profile?.layers?.length || !profile?.n_expert) return null;
   const floor = moeSlotFloor(profile, { parallel, nExpertUsed });
   return {
     layers: profile.layers.map((l) => ({ ...l, slots: l.miss == null ? 0 : floor })),
     n_expert: profile.n_expert,
-    ringSlots,
+    ringLayers,
   };
 }
 
@@ -529,7 +556,7 @@ export function moeFloorPool(profile, { parallel = 2, nExpertUsed = 8, ringSlots
  * loop naturally because the fit is recomputed each step; it does not need special-casing.
  */
 export function moeNativePlan(model, profile, {
-  bpw, budgetGB, ctx, kvBits, vision = false, ringSlots = 0, parallel = 2, nExpertUsed = 8,
+  bpw, budgetGB, ctx, kvBits, vision = false, ringLayers = 0, parallel = 2, nExpertUsed = 8,
 } = {}) {
   const src = profile?.layers || [];
   if (!src.length || !profile?.n_expert) return null;
@@ -539,8 +566,9 @@ export function moeNativePlan(model, profile, {
   const ranked = src.filter((l) => l.miss != null).sort((a, b) => (b.miss ?? 0) - (a.miss ?? 0));
   const native = new Set(src.filter((l) => l.miss == null).map((l) => l.il));
   const extra = new Map();                       // il -> slots above the floor
+
   const build = () => src.map((l) => ({ ...l, slots: native.has(l.il) ? 0 : Math.min(NE, floor + (extra.get(l.il) || 0)) }));
-  const fitOf = (layers) => computeFit(model, quant, ctx, kvBits, vision, { layers, n_expert: NE, ringSlots }).totalGB;
+  const fitOf = (layers) => computeFit(model, quant, ctx, kvBits, vision, { layers, n_expert: NE, ringLayers }).totalGB;
   const fits = (layers) => fitOf(layers) <= budgetGB;
   // Pass 1 - promote to native by miss, highest first. A native layer does not make its misses cheaper, it
   // deletes them, so this is the best use of memory until the budget runs out.
@@ -554,9 +582,19 @@ export function moeNativePlan(model, profile, {
   // misses but do reduce them, which is the only lever left once no further layer can go native.
   const pooled = src.filter((l) => !native.has(l.il) && (l.miss ?? 0) > 0);
   const headroom = budgetGB - fitOf(build());
-  if (pooled.length && headroom > 0 && model.expertFrac) {
+  if (pooled.length && model.expertFrac) {
     const perSlotGB = (weightGB(model, quant) * model.expertFrac / src.length) / NE;
-    let budgetSlots = Math.floor(headroom / perSlotGB);
+    // Slots below the ring's size are FREE. moeResidentGB charges max(poolGB, ringGB) because the two share one
+    // buffer (llama-moe-pool.cpp: "Place the ring and the pool at the SAME offsets ... a graph uses one or the
+    // other, never both"), so while poolGB < ringGB the buffer is already paid for by the ring and every extra
+    // slot costs nothing. Charging perSlotGB for those was leaving the pool far smaller than the allocation it
+    // is living in: on qwen3.6-35B with 7 pooled layers the pool held 53 slots/layer (757 MB) inside a 2072 MB
+    // ring buffer, when 146/layer fits at zero cost. More slots is a strictly higher decode hit rate.
+    const ringGB  = ringLayers * (weightGB(model, quant) * model.expertFrac / src.length);
+    const poolGB0 = pooled.length ? build().reduce((a, l) => a + (l.slots > 0 ? perSlotGB * l.slots : 0), 0) : 0;
+    const freeSlots = Math.max(0, Math.floor((ringGB - poolGB0) / perSlotGB));
+    let budgetSlots = freeSlots + Math.max(0, Math.floor(headroom / perSlotGB));
+    if (budgetSlots <= 0) { budgetSlots = 0; }
     const totalMiss = pooled.reduce((a, l) => a + l.miss, 0);
     for (const l of pooled.sort((a, b) => b.miss - a.miss)) {
       if (budgetSlots <= 0) break;
@@ -570,7 +608,7 @@ export function moeNativePlan(model, profile, {
     }
   }
   const layers = build();
-  const pool = { layers, n_expert: NE, ringSlots };
+  const pool = { layers, n_expert: NE, ringLayers };
   return {
     layers,
     native: layers.filter((l) => !l.slots).map((l) => l.il).sort((a, b) => a - b),
@@ -838,26 +876,55 @@ export function buildServerArgs({ hf, modelPath = null, hw, ctx = MIN_CTX, port 
   else if (chatTemplate) args.push("--chat-template", String(chatTemplate)); // override a broken embedded template with a built-in
   const kvType = kvTypeName(kvBits);
   if (kvType !== "f16") args.push("-ctk", kvType, "-ctv", kvType);
-  // Salvage the one prefix break a reasoning model creates every turn. The model generates
-  // `assistant\n<think>…</think>VISIBLE`, the template strips the think block when replaying that turn,
-  // so the cached prefix dies at the first token of the reply and VISIBLE is recomputed. cache-reuse
-  // slides past the gap, finds VISIBLE still in the cache, and SHIFTS it into position instead.
-  //   measured spans that must qualify: 33 (a tool-call message), 185 (a short reply), 418 (parallel
-  //   tool calls) - so the old value of 256 caught only the largest of the three.
+  // NO --cache-reuse. What it would do: salvage the one prefix break a reasoning model creates every
+  // turn. The model generates `assistant\n<think>…</think>VISIBLE`, the template strips the think block
+  // when replaying that turn, so the cached prefix dies at the first token of the reply and VISIBLE is
+  // recomputed; cache-reuse slides past the gap, finds VISIBLE still in the cache, and SHIFTS it into
+  // position instead. (Not the old prompt cache, and not something the unified KV pool replaced - the
+  // pool decides where cells LIVE, this decides whether a diverged tail can be moved rather than redone.)
   //
-  // The server drops this to 0 at startup unless llama_memory_can_shift() is true, and every model we
-  // ship currently fails that test - Gemma on the iSWA branch, Qwen on M-RoPE:
+  // Not passed, because it cannot activate on anything we ship. The server drops it to 0 at startup
+  // unless llama_memory_can_shift() is true, and every catalog model fails that test:
   //
   //     llama_kv_cache::get_can_shift()       false when n_pos_per_embd() > 1   <- Qwen3.6 (IMROPE)
   //     llama_kv_cache_iswa::get_can_shift()  requires base size == SWA size    <- every Gemma
   //
+  // Confirmed live, not just read: a 24 GB simulation run logs "cache_reuse is not supported by this
+  // context, it will be disabled" at startup. Passing it only bought that warning line.
+  //
+  // What removing it gives up: it would have switched itself on the moment a model qualified. If a
+  // future model has n_pos_per_embd() == 1 and, for Gemma-likes, base size == SWA size, put it back -
+  // the measured spans it needs to catch are 33 (a tool-call message), 185 (a short reply) and 418
+  // (parallel tool calls), so the value is 32, not the 256 that caught only the largest of the three.
+  //
   // (It is NOT disabled by multimodal any more; the fork made that decision per request instead.)
   //
-  // Kept anyway: it costs nothing while inert, and it is correct the moment a model qualifies. --swa-full
-  // would clear the Gemma row, but it is NOT the cheap flag it looks like - the server's effective n_swa
-  // becomes 0, which feeds derive_model_key (so every seed and pool unit is orphaned under a new
-  // model_key) and switches context checkpoints from windowed to whole-state. Nothing clears the Qwen row.
-  args.push("--cache-reuse", "32");
+  // --swa-full would clear the Gemma row, but it is NOT the cheap flag it looks like - the server's
+  // effective n_swa becomes 0, which feeds derive_model_key (so every seed and pool unit is orphaned
+  // under a new model_key) and switches context checkpoints from windowed to whole-state. Nothing
+  // clears the Qwen row.
+  // -ub 1536: the MoE ring stages every expert of every pooled layer ONCE PER FORWARD, a cost that is
+  // flat in the ubatch, so halving the number of forwards halves that staging. n_batch is deliberately
+  // left at llama.cpp's 2048 default - it governs how a prompt splits across server batches, not how
+  // many forwards a batch becomes, and tying the two shrinks the server batch for no benefit.
+  //
+  // This buys prefill WITH decode - it is a trade, not a free win. Three consecutive runs on one host,
+  // simulated 24 GB Mac (qwen3.6-35B UD-Q4_K_XL, ctx 262144, corpus prompt, nat23/draft3):
+  //
+  //     ub    prefill   decode   wired      ring fill
+  //      512    112.9    24.08   +17.5 GB   61.1 GiB
+  //     1024    172.8    23.84   +17.9 GB   47.7 GiB
+  //     2048    266.3    21.63   +19.0 GB   39.7 GiB
+  //
+  // Prefill rises because the staged volume falls. Decode falls because the activation buffers grow
+  // ~1 GB per doubling (325 -> 1300 MiB of GPU compute across 512 -> 2048) and that GB comes out of
+  // the page cache the pooled experts are read from, so the decode-side miss traffic gets slower.
+  //
+  // 1536 is a chosen midpoint between the 1024 and 2048 rows, NOT a measured one - the table above has
+  // no entry for it. It is not a power of two, which nothing here requires: n_ubatch only has to divide
+  // the work, and a MoE forward's cost is set by the layers it stages, not by the batch being a power
+  // of two. Measure before quoting a number for it.
+  args.push("-ub", "1536");
   // Per-model, from the catalog - see MODELS[].reasoningBudget. Absent means unrestricted, which is llama's default.
   if (reasoningBudget > 0) {
     args.push("--reasoning-budget", String(reasoningBudget));

@@ -22,7 +22,7 @@ import {
 } from "./localModels.mjs";
 import { ensureInstalled, installedBin, llamaVariant, fallbackVariant, detectCuda, llamaVersionDir, localFilesBase, installDir, llamaRootDir, installedLlamaVersions, migrateLegacyLayout } from "./llamaInstaller.mjs";
 import { downloadModel, searchModels, repoDetail, resolveRevision, TRUSTED_AUTHORS } from "./hfDownload.mjs";
-import { SUPPORTED_ARCHS, SEED_PREFIX, SEED_KVD } from "../versions.mjs";
+import { SUPPORTED_ARCHS, SEED_PREFIX, SEED_KVD, MAC_LLAMA_TAG } from "../versions.mjs";
 import { getAppConfig, setAppConfig } from "../appConfig.mjs";
 import { ensureSeed, seedSize, seedInstalled, seedKey } from "./seeds.mjs";
 // The renderer mirrors daily/dev into the sandbox engine, which is the main process's only view of the current mode.
@@ -47,12 +47,12 @@ const moeProfileDir = () =>
     : path.join(app.getAppPath(), "resources", "moe-profiles");
 
 /**
- * Ring buffer count, passed to the server as LLAMA_MOE_RING_SLOTS and used by the memory estimate.
+ * Ring buffer count, passed to the server as LLAMA_MOE_RING_LAYERS and used by the memory estimate.
  *
  * Named rather than written twice: the estimate has to model the same buffer the server actually allocates, and a literal in
  * the spawn env with a second literal in the sizing code is how the two silently drift apart.
  */
-const MOE_RING_SLOTS = 4;
+const MOE_RING_LAYERS = 4;
 
 /** Concurrent sequences (the --parallel passed to buildServerArgs) and experts routed per token. Both feed the
  *  slot floor, so they are named here rather than repeated as literals at each call site. */
@@ -122,15 +122,30 @@ function moeEnv(moeProfile) {
     // reduction, so the answer stops matching upstream's. That is not tunable - the pool cannot serve a
     // wide graph by construction - so it is byte-identity OR the speed-up, and correctness wins.
     LLAMA_MOE_SMALL_PREFILL: "0",
-    LLAMA_MOE_POOL_FILL_THREADS: "8",
-    LLAMA_MOE_RING_SLOTS: String(MOE_RING_SLOTS),
+    LLAMA_MOE_POOL_FILL_THREADS: "16",
+    // LLAMA_MTP_HEAD_AUTO: let the MTP drafter read only the first N rows of the LM head, N sized from
+    // the token ids the drafter has actually seen. This model ships no nextn.shared_head_head, so the
+    // drafter falls back to model.output and re-reads the whole q8_0 [2048 x 248320] head — 515 MiB —
+    // once per drafted token, which a mat-vec must touch in full and no cache can hold. Three drafts
+    // per cycle plus the target's own read is 4 x 515 MiB, as many bytes as all 40 layers of experts.
+    //
+    // Safe in a way capping the TARGET's head would not be: the target verifies every drafted token,
+    // so a row the drafter cannot express costs one wasted draft position and never changes the
+    // output. Verified byte-identical on english/chinese/python output.
+    //
+    // Adaptive rather than a constant because no constant works on this vocabulary: 99.5% coverage
+    // needs ~131072 rows for english but ~196608 for chinese, so any fixed value is either unsafe for
+    // CJK or useless for latin text. Below 256 observed ids it leaves the head whole.
+    // Measured, 24 GB simulation: draft call -33%, decode 19.98 -> 20.10 on an adjacent-run pair.
+    LLAMA_MTP_HEAD_AUTO: "1",
+    LLAMA_MOE_RING_LAYERS: String(MOE_RING_LAYERS),
     ...(MOE_NO_RESIDENCY ? { GGML_METAL_NO_RESIDENCY: "1" } : {}),
     ...(MOE_WARMUP_RING ? { LLAMA_MOE_WARMUP_RING: "1" } : {}),
   };
 }
 
 /**
- * The pool profile for a model, as the memory estimate needs it: { layers, n_expert, ringSlots }.
+ * The pool profile for a model, as the memory estimate needs it: { layers, n_expert, ringLayers }.
  *
  * Read here rather than in localModels because that module is deliberately free of filesystem access. Cached per model - this
  * is called once per model per recommend(), and the file never changes within a run. A missing or unparseable profile returns
@@ -162,7 +177,7 @@ function moePoolInfo(modelId) {
     // The FLOOR shape, not the file's own slots. Sizing decides the context rung and the quant, and the launch
     // plan only ever spends MORE than the floor - so sizing against the floor is what makes "it fits" true. The
     // file's slots were chosen for the profiling machine and are not this machine's answer to anything.
-    info = moeFloorPool(p, { parallel: MOE_PARALLEL, nExpertUsed: MOE_EXPERT_USED, ringSlots: MOE_RING_SLOTS });
+    info = moeFloorPool(p, { parallel: MOE_PARALLEL, nExpertUsed: MOE_EXPERT_USED, ringLayers: MOE_RING_LAYERS });
   } catch { /* no profile shipped for this model, or it is malformed */ }
   moeProfileCache.set(modelId, info);
   return info;
@@ -192,7 +207,7 @@ function moeProfileFor(model, { hw, bpw, ctx, kvBits, vision = false, log = () =
       // auto-picks UD-Q3_K_XL while the installed weights are UD-Q4_K_XL), and sizing against the smaller one
       // models the model as ~30% lighter and over-promotes layers to native.
       bpw, budgetGB: usableModelMemoryGB(hw), ctx, kvBits, vision,
-      ringSlots: MOE_RING_SLOTS, parallel: MOE_PARALLEL, nExpertUsed: MOE_EXPERT_USED,
+      ringLayers: MOE_RING_LAYERS, parallel: MOE_PARALLEL, nExpertUsed: MOE_EXPERT_USED,
     });
     if (!plan) throw new Error("no plan");
     // Not fatal: the floor is the minimum a pooled layer can run at, so there is nothing to trim. Ship it and say
@@ -537,7 +552,7 @@ export function estimate(opts = {}) {
   const prof = moeShippedProfile(model.id);
   const plan = prof && moeNativePlan(model, prof, {
     bpw, budgetGB, ctx, kvBits, vision,
-    ringSlots: MOE_RING_SLOTS, parallel: MOE_PARALLEL, nExpertUsed: MOE_EXPERT_USED,
+    ringLayers: MOE_RING_LAYERS, parallel: MOE_PARALLEL, nExpertUsed: MOE_EXPERT_USED,
   });
   const totalGB = round1((plan ? plan.totalGB : fit.totalGB) + mtpGB);
   return { totalGB, floorGB: round1(fit.totalGB + mtpGB), weightGB: fit.weightGB, kvGB: fit.kvGB, budgetGB, rungs };
@@ -1073,12 +1088,32 @@ export function start(opts = {}) {
   }
 
   const visionOn = r.vision && opts.vision !== false; // true only when the model supports vision and the toggle is not off
+  // What the SIZING should charge for vision, which is no longer the same question as whether vision
+  // is on. The mac fork releases the projector at startup and reloads it only around an actual image
+  // (see MMPROJ-LAZY in tools/server/server-context.cpp), so its ~1.1 GB is not resident during the
+  // text turns that are almost all of them - charging VISION_OVERHEAD_GB permanently would reserve
+  // memory nothing is holding, and on a 24 GB Mac that reservation costs five native MoE layers.
+  //
+  // Measured on a simulated 24 GB Mac, qwen3.6-35B UD-Q4_K_XL, interleaved arms:
+  //     charged   (16 native, projector resident)   prefill 225.8   decode 14.75
+  //     released  (21 native, projector released)   prefill 260.9   decode 18.75
+  //
+  // The honest cost: an image request brings the projector back on top of a plan sized without it, so
+  // the peak while encoding is ~1.1 GB above the steady state - about 20.0 GB of 24, leaving ~4 GB for
+  // the OS and the app. That is the bottom of the 4-8 GB reserve, not a breach of it, and it lasts
+  // only for the encode. Set this to visionOn to go back to charging for it permanently.
+  //
+  // Gated on running the fork, using the same test llamaVersionDir does: every other platform is on
+  // the CDN's upstream build, which holds the projector for the whole session and must still be
+  // charged for it.
+  const forkLlama = process.platform === "darwin" && !!MAC_LLAMA_TAG;
+  const visionCharged = visionOn && !forkLlama;
   const mtpOn = !!r.mtp && opts.mtp !== false;  // MTP speculative decoding (model supports it and the toggle is not off, on by default)
   // Context / KV quantization auto-tiering: when not explicitly specified, pick the largest -c that fits per "model + quantization + device memory"
   // (capped at the native window), at one of the offered KV quantizations (see localModels.pickCtxKv).
   // The fallback for a custom -hf model with no catalog entry is 16K at the first offered quantization, NOT a hardcoded one — a
   // launch that quietly runs at a quantization we publish no seed for would take a cold prefill with nothing to explain it.
-  const pick = !opts.ctx && r.model ? pickCtxKv(r.model, r.bpw, hw, usableModelMemoryGB(hw), visionOn, moePoolInfo(r.model.id)) : null;
+  const pick = !opts.ctx && r.model ? pickCtxKv(r.model, r.bpw, hw, usableModelMemoryGB(hw), visionCharged, moePoolInfo(r.model.id)) : null;
   const ctx = Number(opts.ctx || (pick ? pick.ctx : 16384));
   const kvBits = Number(opts.kvBits || (pick ? pick.kvBits : KV_BITS_OFFERED[0]));
   state.port = Number(opts.port || 0); // 0 = request a random free port from the kernel inside launch
@@ -1098,14 +1133,17 @@ export function start(opts = {}) {
   // Prefer reusing the variant installed in wizard step 1; otherwise choose now per useCuda (launch will ensure it is installed).
   const variant = state.installedVariant || llamaVariant(hw, { preferCuda: !!opts.useCuda });
   const gen = ++launchGen; // this startup's generation id; checked after awaits inside launch, abandon spawn if stale
-  launch(variant, { r, hw, ctx, kvBits, visionOn, mtpOn, gen, modelDir, modelRevision });
+  launch(variant, { r, hw, ctx, kvBits, visionOn, visionCharged, mtpOn, gen, modelDir, modelRevision });
   emit();
   return status();
 }
 
 /** Install (download if needed) the given variant -> bring up llama-server; if a GPU build fails before ready, automatically fall back to the next level (the CPU variant has no fallback, so no infinite recursion). */
 async function launch(variant, cfg) {
-  const { r, hw, ctx, kvBits = KV_BITS_OFFERED[0], visionOn, mtpOn, gen } = cfg;
+  // visionOn decides what the SERVER does (whether --mmproj is passed at all); visionCharged decides
+  // what the memory plan RESERVES. They differ on the mac fork, which releases the projector between
+  // images - see where visionCharged is derived.
+  const { r, hw, ctx, kvBits = KV_BITS_OFFERED[0], visionOn, visionCharged = visionOn, mtpOn, gen } = cfg;
   // Computed in start() from the catalog pin, and carried in cfg — NOT closed over, because start() and launch() are separate
   // functions and a fallback retry re-enters launch() with the same cfg. `let`: a community model has no pin, so the branch
   // below resolves `main` and reassigns both. The reassignment does not need to travel back to start(); what the UI reads is
@@ -1259,7 +1297,7 @@ async function launch(variant, cfg) {
   // MoE expert pool: enabled by pointing LLAMA_MOE_POOL_PROFILE at a per-model routing profile. MoE models on mac only, and only
   // when the profile is actually present — without one the fork leaves the pool inert by design rather than pinning blind
   // index-order experts, so a missing file degrades to stock speed instead of degrading output.
-  const moeProfile = moeProfileFor(r.model, { hw, bpw: r.bpw, ctx, kvBits, vision: visionOn, log: pushLog });
+  const moeProfile = moeProfileFor(r.model, { hw, bpw: r.bpw, ctx, kvBits, vision: visionCharged, log: pushLog });
   const moeOn = !!moeProfile;
   const args = buildServerArgs({ modelPath, mmproj: visionOn ? mmprojPath : null, mtpDraft, specMtp: useMtp, hw, ctx, port: state.port, kvBits, kvDiskDir: kvTier ? kvDiskDir() : null, parallel: kvTier ? 2 : 0, ngl, chatTemplate: r.chatTemplate, chatTemplateFile: templatePath, reasoningBudget: r.model?.reasoningBudget ?? null, reasoningBudgetMessage: r.model?.reasoningBudgetMessage ?? null });
   if (templatePath) pushLog(`[llama] chat template file: ${path.basename(templatePath)}${r.chatTemplate ? ` (overrides the "${r.chatTemplate}" built-in)` : ""}\n`);
@@ -1332,7 +1370,7 @@ async function launch(variant, cfg) {
     // 128 - every expert resident, which is the pool's purpose gone.
     //
     // Revisit only if pooled-layer counts rise again (a much larger model, or a much smaller machine).
-    // LLAMA_MOE_RING_SLOTS: ring buffers, and therefore prefetch depth — the fork derives depth as slots - 2,
+    // LLAMA_MOE_RING_LAYERS: ring buffers, and therefore prefetch depth — the fork derives depth as slots - 2,
     // since layer il-1 may still be executing while the host stages il+depth. 4 slots stages two layers ahead
     // instead of one, at the cost of one more full-expert buffer.
     //
@@ -1345,8 +1383,21 @@ async function launch(variant, cfg) {
     // none of it separates the configurations - only the wired column is measured reliably, and slots 4 costs
     // ~1.5 GB over slots 3. Chosen deliberately rather than derived from those numbers.
     //
-    // LLAMA_MOE_POOL_FILL_THREADS: expert-fill misses issued concurrently (fork default 3). A miss is a page
-    // fault plus a memcpy through a file-backed mapping — latency, not bandwidth — so width hides it.
+    // LLAMA_MOE_POOL_FILL_THREADS: expert-fill misses issued concurrently (fork default is now 16). A miss is
+    // a page fault plus a memcpy through a file-backed mapping — latency, not bandwidth — so width hides it.
+    // These threads BLOCK on I/O rather than compute, so an idle one costs a stack and a condvar wait; there
+    // is no reason to be frugal with them.
+    //
+    // 8 -> 16. Swept on a simulated 24 GB Mac (19 native/22 pooled, 69 GiB of fill traffic per run):
+    //
+    //     threads     decode        fill time
+    //        3       13.5 / 13.7   34.8 / 35.7 s
+    //        4       16.7          29.3 s
+    //        8       17.1 / 16.9   27.8 / 28.0 s
+    //       16       17.7          29.5 s
+    //
+    // 16 is the ceiling the work can use: misses per dispatch top out at 16 (5% of dispatches have 0,
+    // 83% have 1-8, 13% have 9-16, none more), so no dispatch can occupy more threads than that.
     //
     // 8 helps DECODE, not prefill, and that is the half that governs how the app feels: a prefill misses once
     // in a burst, but every decoded token routes fresh experts, so misses are continuous. Mean decode across
