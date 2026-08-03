@@ -24,6 +24,12 @@ export const INTERACTIVE_TOOLS = Object.freeze([
   "browser",
   "image_generation",
   "run_subagent",
+  // Setting up an MCP server means granting trust: it writes a third-party command into the app's
+  // configuration, marks it approved, and runs it. That decision belongs to a human who was shown the
+  // command line, and an unattended run has nobody to show it to -- so an automation cannot install
+  // servers, only use the ones a user already approved (those still reach it through listTools).
+  "mcp_discover",
+  "mcp_connect",
 ]);
 
 /** Safety net so a looping model cannot spend a budget forever; also see limits.maxTokens (§4.1). */

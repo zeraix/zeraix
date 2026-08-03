@@ -23,6 +23,7 @@ import { type SectionId, NAV, SECTION_KEYS, makeMatcher } from "./components/nav
 import { AccountSection } from "./components/AccountSection";
 import { ModelsSection } from "./components/ModelsSection";
 import { KeysSection } from "./components/KeysSection";
+import { McpSection } from "./components/McpSection";
 import { ProjectMemorySection } from "./components/ProjectMemorySection";
 import { MemorySection } from "./components/MemorySection";
 import { GeneralSection } from "./components/GeneralSection";
@@ -132,6 +133,8 @@ export default function AgentSettingsPage() {
           <ModelsSection t={t} />
         ) : effectiveSection === "keys" ? (
           <KeysSection t={t} />
+        ) : effectiveSection === "mcp" ? (
+          <McpSection t={t} />
         ) : effectiveSection === "memory" ? (
           <div className="max-w-2xl">
             <MemorySection t={t} />

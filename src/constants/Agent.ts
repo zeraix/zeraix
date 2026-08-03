@@ -52,6 +52,8 @@ export const agentLlmModelOf = (id: string) => `agent.llm.models.${id}`;
 /** Dot path: thinking mode — the master on/off switch and the depth used while it is on (see src/lib/ai/thinking.ts). */
 export const AGENT_THINKING_ENABLED_KEY = "agent.thinking.enabled";
 export const AGENT_THINKING_EFFORT_KEY = "agent.thinking.effort";
+/** Dot path: replay past thinking blocks as context on later requests. Off by default — see ThinkingConfig.sendContext. */
+export const AGENT_THINKING_SEND_CONTEXT_KEY = "agent.thinking.sendContext";
 
 /** Dot path: runtime parameters (manually adjustable in settings).
  *  - maxToolRounds: the maximum number of consecutive tool-call rounds within a single conversation turn (round cap).

@@ -142,7 +142,19 @@ export const SENSITIVE_TOOLS = new Set([
  *     everyday file/command work stays friction-free.
  * A tool not in SENSITIVE_TOOLS never needs consent in any mode.
  */
-export const ALWAYS_CONFIRM_TOOLS = new Set<string>(); // gated in every mode; extend as needed (e.g. "delete_file")
+/**
+ * Gated in every mode, daily included.
+ *
+ * `mcp_connect` is here because it is the one tool that turns a chat message into a third-party
+ * process running as the user: it writes an MCP server into the app's configuration, marks it
+ * approved, and starts it. `approved` otherwise means "a human read this exact command line in
+ * settings and accepted it", and this panel is what preserves that meaning — the model proposing
+ * servers via `ask_user` is a convention it follows, whereas this is enforced by the run loop and
+ * still holds if the model was talked into calling the tool by a web page it read. Discovery
+ * (`mcp_discover`) is deliberately NOT gated: it only reads, and prompting for searches is how users
+ * learn to click through the prompt that matters.
+ */
+export const ALWAYS_CONFIRM_TOOLS = new Set<string>(["mcp_connect"]);
 
 export function toolNeedsConsent(name: string, mode: "daily" | "dev"): boolean {
   if (ALWAYS_CONFIRM_TOOLS.has(name)) return true;
@@ -170,13 +182,18 @@ const TOOL_LABELS: Record<string, string> = {
   update_todos: "Updating todos",
   web_search: "Searching the web",
   fetch_url: "Fetching page",
+  mcp_discover: "Finding MCP servers",
+  mcp_connect: "Connecting MCP server",
 };
 
 /** Builds status text from the tool name + args, e.g. "Editing file style.css…". */
 export function toolStatusText(name: string, args: unknown): string {
   const label = TOOL_LABELS[name] ?? name;
   const o = args && typeof args === "object" ? (args as Record<string, unknown>) : {};
-  const hint = o.path ?? o.command ?? o.pattern ?? o.query ?? o.url;
+  // The MCP tools are keyed on the server id ahead of the general chain: `command` would otherwise
+  // win and render every one of them as "Connecting MCP server npx…", which names the launcher
+  // rather than the server the user actually chose.
+  const hint = name.startsWith("mcp_") ? (o.id ?? o.query) : (o.path ?? o.command ?? o.pattern ?? o.query ?? o.url);
   const extra = hint ? ` ${String(hint).slice(0, 40)}` : "";
   return `${label}${extra}…`;
 }

@@ -24,7 +24,11 @@
  */
 import { getStorage } from "@zzcpt/zztool";
 import { putStorage } from "@/lib/ai/agentStorage";
-import { AGENT_THINKING_ENABLED_KEY, AGENT_THINKING_EFFORT_KEY } from "@/constants/Agent";
+import {
+  AGENT_THINKING_ENABLED_KEY,
+  AGENT_THINKING_EFFORT_KEY,
+  AGENT_THINKING_SEND_CONTEXT_KEY,
+} from "@/constants/Agent";
 
 /** The three gears, in display order. */
 export const THINKING_EFFORTS = ["low", "medium", "high"] as const;
@@ -34,10 +38,23 @@ export interface ThinkingConfig {
   enabled: boolean;
   /** Retained while the switch is off, so turning it back on restores the gear the user last chose. */
   effort: ThinkingEffort;
+  /**
+   * Replay the thinking blocks of PAST assistant turns as part of the context of later requests.
+   *
+   * Off by default, and deliberately separate from `enabled`: whether the model thinks on this turn and whether it is
+   * shown what it thought on earlier ones are different questions with different costs. Replaying reasoning is billed
+   * as input on every subsequent request and grows without bound, and a handful of providers reject an assistant
+   * message carrying the field at all (the caller retries without it — see isReasoningContentError).
+   *
+   * What it does NOT change: local models still receive the thinking of the turns inside the current tool loop even
+   * while this is off, because their chat template renders it back either way and withholding it breaks the cached
+   * prefix. See applyReasoningPolicy.
+   */
+  sendContext: boolean;
 }
 
 /** Off by default: today no reasoning parameter is sent at all, and that is what "off" reproduces. */
-export const DEFAULT_THINKING: ThinkingConfig = { enabled: true, effort: "medium" };
+export const DEFAULT_THINKING: ThinkingConfig = { enabled: true, effort: "medium", sendContext: false };
 
 /** i18n key for a gear's label. */
 export const effortLabelKey = (e: ThinkingEffort) => `composer.effort.${e}`;
@@ -47,7 +64,12 @@ export function loadThinking(): ThinkingConfig {
   const effort = (THINKING_EFFORTS as readonly string[]).includes(String(stored))
     ? (stored as ThinkingEffort)
     : DEFAULT_THINKING.effort;
-  return { enabled: getStorage(AGENT_THINKING_ENABLED_KEY) === "1", effort };
+  return {
+    enabled: getStorage(AGENT_THINKING_ENABLED_KEY) === "1",
+    effort,
+    // Opt-in: anything but an explicit "1" (never set, cleared, garbage) means off.
+    sendContext: getStorage(AGENT_THINKING_SEND_CONTEXT_KEY) === "1",
+  };
 }
 
 /**
@@ -63,6 +85,7 @@ export function saveThinking(cfg: ThinkingConfig): void {
   // Cleared with null rather than "0", matching the other boolean flags under agent.*.
   putStorage(AGENT_THINKING_ENABLED_KEY, cfg.enabled ? "1" : null);
   putStorage(AGENT_THINKING_EFFORT_KEY, cfg.effort);
+  putStorage(AGENT_THINKING_SEND_CONTEXT_KEY, cfg.sendContext ? "1" : null);
   try {
     if (typeof window !== "undefined") window.dispatchEvent(new Event(THINKING_CHANGE_EVENT));
   } catch { /* ignore */ }
@@ -145,4 +168,22 @@ export function isThinkingParamError(err: unknown): boolean {
   const msg = (err instanceof Error ? err.message : String(err ?? "")).toLowerCase();
   if (!msg.includes("400")) return false;
   return THINKING_PARAM_KEYS.some((k) => msg.includes(k));
+}
+
+/**
+ * Does this failure look like the provider rejecting a REPLAYED thinking block — i.e. `reasoning_content` on an
+ * assistant message of the request body, which is what `sendContext` puts there?
+ *
+ * `reasoning_content` is an output-side field in the OpenAI-compatible schema, and a strict provider answers an input
+ * carrying it with 400 "unknown field" / "extra inputs are not permitted". Matched the same narrow way as the switch
+ * above — a 400 naming one of the two spellings — because the fallback it guards silently drops the replay for the
+ * rest of the session. Providers that merely ignore the field never reach this.
+ */
+export function isReasoningContentError(err: unknown): boolean {
+  const msg = (err instanceof Error ? err.message : String(err ?? "")).toLowerCase();
+  if (!msg.includes("400")) return false;
+  if (msg.includes("reasoning_content")) return true;
+  // A bare "reasoning" counts, but not when the complaint is about the request-level `reasoning_effort` knob —
+  // that one is isThinkingParamError's, and answering it by dropping the replay would fix nothing.
+  return msg.includes("reasoning") && !msg.includes("reasoning_effort");
 }

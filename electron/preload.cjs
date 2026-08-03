@@ -342,6 +342,38 @@ contextBridge.exposeInMainWorld("usageLog", {
   openDir: () => ipcRenderer.invoke("usagelog:open-dir"),
 });
 
+// External MCP servers (electron/mcp/*). Configuration and trust only: the protocol itself never
+// crosses this boundary, and neither do secrets — env values and Authorization headers stay in the
+// main process, so a server object here reports only *which* keys are set. The tools an MCP server
+// exposes reach the model through the ordinary window.aiTools.list/call path, not through here.
+contextBridge.exposeInMainWorld("mcp", {
+  /** Full snapshot { servers, status } — configuration plus live connection state. */
+  list: () => ipcRenderer.invoke("mcp:list"),
+  /** Create or replace a server. Changing its command/URL clears approval. */
+  upsert: (id, config) => ipcRenderer.invoke("mcp:upsert", { id, config }),
+  /** Delete a server (disconnects it first). */
+  remove: (id) => ipcRenderer.invoke("mcp:remove", id),
+  /** Record that the user has seen and accepted this server's exact command line / URL. */
+  approve: (id, approved) => ipcRenderer.invoke("mcp:approve", { id, approved }),
+  /** Enable/disable without forgetting the configuration. */
+  setEnabled: (id, enabled) => ipcRenderer.invoke("mcp:set-enabled", { id, enabled }),
+  /** Connect now (fails with "not-approved" until the user has approved it). */
+  connect: (id) => ipcRenderer.invoke("mcp:connect", id),
+  disconnect: (id) => ipcRenderer.invoke("mcp:disconnect", id),
+  /** Import a Claude-Desktop style { mcpServers: {...} } blob; imported servers start unapproved. */
+  import: (blob) => ipcRenderer.invoke("mcp:import", blob),
+  /** Absolute path of servers.json. */
+  configPath: () => ipcRenderer.invoke("mcp:config-path"),
+  /** Open servers.json in the system default editor. */
+  openConfig: () => ipcRenderer.invoke("mcp:open-config"),
+  /** Subscribe to connection-state changes; returns an unsubscribe function. */
+  onStatus: (cb) => {
+    const handler = (_e, status) => cb(status);
+    ipcRenderer.on("mcp:status", handler);
+    return () => ipcRenderer.removeListener("mcp:status", handler);
+  },
+});
+
 // Automation workflows (electron/automation/*). Named `workflows`, NOT `automation` — that global is
 // already the <webview> CDP browser panel above, and its `automation:event` channel is broadcast to
 // every window, so sharing the namespace would cross-wire the two features.

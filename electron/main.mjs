@@ -50,6 +50,7 @@ import { registerUsageLog } from "./ipc/usageLogIpc.mjs";
 import { flushUsageLog, pruneUsageLog } from "./store/usageLogStore.mjs";
 import { registerGoogleAuth } from "./ipc/googleAuthIpc.mjs";
 import { registerUpdater } from "./ipc/updaterIpc.mjs";
+import { registerMcp, disposeMcp } from "./ipc/mcpIpc.mjs";
 import { loadEnvFiles } from "./loadEnv.mjs";
 import { registerProtocolClient, findDeepLink } from "./services/deepLink.mjs";
 import { initAutomation, shutdownAutomation, setAutomationNotifier } from "./automation/paths.mjs";
@@ -914,6 +915,9 @@ app.whenReady().then(() => {
   // user turned on once and forgot should not still be on disk a year later.
   registerUsageLog();
   void pruneUsageLog();
+  // External MCP servers: configuration + trust live in the renderer's settings panel, the protocol
+  // itself entirely here. Approved servers are connected in the background, never blocking startup.
+  registerMcp();
   registerWebviewWindowOpen();
   registerBackground();
   // Automation subsystem: fix the storage root and open/migrate the run-state database.
@@ -986,6 +990,13 @@ app.on("before-quit", () => {
   // to avoid leftover orphan processes holding ports after quit.
   try {
     disposeEngines();
+  } catch {
+    /* ignore */
+  }
+  // Close MCP connections: a stdio server is a child process we spawned, so quitting without this
+  // leaves an orphan holding whatever it had open.
+  try {
+    void disposeMcp();
   } catch {
     /* ignore */
   }

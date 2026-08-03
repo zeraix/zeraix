@@ -45,6 +45,7 @@
   },
   "dependencies": {
     "@hookform/resolvers": "^5.2.2",
+    "@modelcontextprotocol/sdk": "1.29.0",
     "@monaco-editor/react": "4.7.0",
     "@radix-ui/react-visually-hidden": "^1.2.6",
     "@react-three/drei": "10.7.7",

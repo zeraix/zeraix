@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
-import { Brain, Plus, Send, ChevronDown } from "lucide-react";
+import { Brain, History, Plus, Send, ChevronDown } from "lucide-react";
 import { Textarea } from "@/components/ui/textarea";
 import {
   DropdownMenu,
@@ -329,7 +329,7 @@ export default function AgentComposer({
               <ChevronDown className="size-3.5 shrink-0 opacity-70" />
             </button>
           </DropdownMenuTrigger>
-          <DropdownMenuContent align="start" className="w-52">
+          <DropdownMenuContent align="start" className="w-60">
             {/* The switch is decoration — the row owns the click, so the two can't both fire.
                 preventDefault keeps the menu open, so a gear can be picked in the same visit. */}
             <DropdownMenuItem
@@ -348,7 +348,7 @@ export default function AgentComposer({
               <DropdownMenuItem
                 key={e}
                 disabled={!thinking.enabled}
-                onClick={() => changeThinking({ enabled: true, effort: e })}
+                onClick={() => changeThinking({ ...thinking, enabled: true, effort: e })}
               >
                 <span className="truncate">{t(effortLabelKey(e))}</span>
                 {thinking.effort === e && <span className="ml-auto text-primary">✓</span>}
@@ -360,6 +360,19 @@ export default function AgentComposer({
                 {t("composer.thinkingLocalNote")}
               </p>
             )}
+            <DropdownMenuSeparator />
+            {/* Replay past thinking as context — the same global setting the chat composer edits. */}
+            <DropdownMenuItem
+              onSelect={(e) => e.preventDefault()}
+              onClick={() => changeThinking({ ...thinking, sendContext: !thinking.sendContext })}
+            >
+              <History className="size-4 text-muted-foreground" />
+              <span className="flex-1">{t("composer.thinkingContext")}</span>
+              <Switch size="sm" checked={thinking.sendContext} tabIndex={-1} className="pointer-events-none" />
+            </DropdownMenuItem>
+            <p className="px-2 pb-1 pt-1.5 text-[11px] leading-snug text-muted-foreground">
+              {t("composer.thinkingContextNote")}
+            </p>
           </DropdownMenuContent>
         </DropdownMenu>
 

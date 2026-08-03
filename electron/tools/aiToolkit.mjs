@@ -30,6 +30,14 @@ import { ensureProjectMemory, summarise as summariseMemory } from "./projectMemo
 import { rememberProject } from "./projectMemory/remember.mjs";
 import { noteFileRead, resetObservations } from "./projectMemory/observations.mjs";
 import { noteUserMessage, resetConversationCapture } from "./projectMemory/conversation.mjs";
+// MCP tools join the registry here rather than at each call site: the chat IPC (main.mjs), the agent
+// loop (agent/turn.mjs) and the automation dispatcher (automation/paths.mjs) all already go through
+// listTools/runTool, so one merge lights MCP up in all three. See docs/mcp-integration.md.
+import { callMcpTool, isMcpTool, listMcpTools } from "../mcp/client.mjs";
+// The other direction: tools for MANAGING MCP servers, so a user can connect one by asking in chat
+// instead of filling in the settings form. Kept in its own module because it is the only part of the
+// toolkit that writes app configuration and grants trust -- see its header for the two-gate model.
+import { mcpAdminHandlers } from "./mcpAdmin.mjs";
 
 // Command execution is abstracted into a pluggable engine (native = run directly on the host
 // (legacy behavior); qemu = hardware-isolated VM, see the probing/selection in
@@ -1399,6 +1407,10 @@ const handlers = {
       (truncated ? `\n\n… (content truncated at ${WEB_FETCH_MAX_CHARS} characters)` : "")
     );
   },
+
+  // mcp_discover / mcp_connect. Spread rather than written inline: they operate on app configuration
+  // and the MCP connection pool, not on the working directory like everything above them.
+  ...mcpAdminHandlers,
 };
 
 /**
@@ -1419,6 +1431,10 @@ const FILE_LIST_MUTATORS = new Set([
 ]);
 
 export async function runTool(name, args = {}) {
+  // Before the native lookup: an MCP tool is namespaced (`mcp__<server>__<tool>`) so it can never
+  // collide with a handler, and callMcpTool honours runTool's { ok, content } contract for every
+  // failure mode -- an external server must not be able to abort a turn by throwing.
+  if (isMcpTool(name)) return callMcpTool(name, args ?? {});
   const handler = handlers[name];
   if (!handler) return { ok: false, content: `Unknown tool: ${name}` };
   try {
@@ -1454,11 +1470,15 @@ import { TOOLS } from "./toolSchemas.mjs";
  *  - "anthropic" : { name, description, input_schema }
  */
 export function listTools(format = "raw") {
+  // Native tools first, then whatever the connected MCP servers currently expose. listMcpTools() is
+  // synchronous and cache-backed: this runs once per turn, and a server that is still connecting
+  // simply contributes nothing this time round rather than delaying the request.
+  const all = [...TOOLS, ...listMcpTools()];
   if (format === "openai") {
-    return TOOLS.map((t) => ({ type: "function", function: t }));
+    return all.map((t) => ({ type: "function", function: t }));
   }
   if (format === "anthropic") {
-    return TOOLS.map((t) => ({ name: t.name, description: t.description, input_schema: t.parameters }));
+    return all.map((t) => ({ name: t.name, description: t.description, input_schema: t.parameters }));
   }
-  return TOOLS;
+  return all;
 }

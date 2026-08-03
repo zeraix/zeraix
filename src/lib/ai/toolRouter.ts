@@ -66,6 +66,8 @@ export const ROUTED_TOOLS: Record<"daily" | "dev", ReadonlySet<string>> = {
     "search_in_files",
     "check_project",
     "init_command",
+    "mcp_discover",
+    "mcp_connect",
   ]),
   daily: new Set([
     "browser",
@@ -92,6 +94,8 @@ export const ROUTED_TOOLS: Record<"daily" | "dev", ReadonlySet<string>> = {
     "search_in_files",
     "check_project",
     "init_command",
+    "mcp_discover",
+    "mcp_connect",
   ]),
 };
 

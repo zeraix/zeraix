@@ -114,6 +114,7 @@ import {
   saveThinking,
   thinkingParams,
   isThinkingParamError,
+  isReasoningContentError,
   THINKING_CHANGE_EVENT,
   type ThinkingConfig,
 } from "@/lib/ai/thinking";
@@ -225,6 +226,7 @@ import {
   phaseSummaryText,
   stripWireMetadata,
   applyReasoningPolicy,
+  stripReasoningContent,
   toInstalledProjectSkill,
 } from "./wireHelpers";
 
@@ -331,6 +333,10 @@ function ChatAgent() {
   // Models that rejected the thinking switch outright (see the 400 fallback in requestChat): once a model
   // is in here the field is left off its requests for the rest of the session.
   const thinkingUnsupportedRef = useRef<Set<string>>(new Set());
+  // Same idea for the other direction: models that rejected a REPLAYED thinking block (`reasoning_content` on an
+  // assistant message of the request). While the model is in here, the "send thinking as context" setting is
+  // suspended for it — the wire is built without the replay instead of paying a failed request per turn.
+  const reasoningContextUnsupportedRef = useRef<Set<string>>(new Set());
   const [input, setInput] = useState("");
   const taRef = useRef<HTMLTextAreaElement>(null); // For the input box's auto-fit height
   // Attachments pending send: images go multimodal, text files are inlined into the prompt, the rest attach only the file name.
@@ -635,6 +641,9 @@ function ChatAgent() {
   // The actual running status of the local model (llama.cpp): after an app restart, llama-server is not started automatically (no auto-start),
   // so a selected local model may be "in the list but not running". Subscribe to the main-process status to drive the top dot and the send guidance (go to settings to start it).
   const isLocalModel = !!activeModel && (activeModel.providerId === LOCAL_PROVIDER_ID || isLocalEndpoint(endpoint));
+  // "Replay past thinking blocks on this request": the user setting, minus the models that proved they reject the field.
+  // Read as a function rather than captured once, because both refs and the setting can change mid conversation.
+  const sendReasoningContext = () => thinking.sendContext && !reasoningContextUnsupportedRef.current.has(modelName);
   const [localLlmReady, setLocalLlmReady] = useState<boolean | null>(null);
   // The "local model not started" dialog (pops when a send is blocked, guiding the user to Settings → Local model to start it).
   const [localStartDialog, setLocalStartDialog] = useState(false);
@@ -1785,6 +1794,25 @@ function ChatAgent() {
           throw retryErr;
         }
       }
+      // The provider rejected a REPLAYED thinking block — only reachable with the "send thinking as context" setting on,
+      // since nothing else puts reasoning_content in a remote request. Retire the replay for this model and resend the
+      // same messages without it, so one strict provider costs a retry rather than making the setting unusable.
+      if (
+        !signal?.aborted &&
+        isReasoningContentError(e) &&
+        messages.some((m) => m.role === "assistant" && m.reasoning_content) &&
+        !reasoningContextUnsupportedRef.current.has(modelName)
+      ) {
+        logFailure(e);
+        console.warn(`[thinking] ${modelName} rejected replayed thinking blocks; sending without them`, e);
+        reasoningContextUnsupportedRef.current.add(modelName);
+        try {
+          return await sendChatOnce(stripReasoningContent(messages), tools, signal, onDelta, log);
+        } catch (retryErr) {
+          logFailure(retryErr);
+          throw retryErr;
+        }
+      }
       // No images to blame, or the user cancelled: this failure is genuine, surface it unchanged.
       if (!hasImages || signal?.aborted) {
         logFailure(e);
@@ -2317,7 +2345,13 @@ function ChatAgent() {
       ctx.status(t("chat.subagentThinking", { agent: agentId }));
       // The subagent bypasses the main wire pipeline, so the policy is applied here too — without it the thinking text carried
       // on `convo` below would reach every provider, including the ones that reject the field.
-      const data = await requestChat(applyReasoningPolicy(convo, isLocalModel), subTools, ctx.signal, undefined, subLog);
+      const data = await requestChat(
+        applyReasoningPolicy(convo, isLocalModel, sendReasoningContext()),
+        subTools,
+        ctx.signal,
+        undefined,
+        subLog,
+      );
       rounds++;
       const u = data.usage;
       if (u) {
@@ -3154,8 +3188,9 @@ function ChatAgent() {
         wire = materializeReminders(wire);
         // Remove the app's own bookkeeping keys (rating, reminder) — this is the only place either is stripped before the body is built.
         wire = stripWireMetadata(wire);
-        // Replay thinking text to local models on exactly the turns their chat template renders it back on, and to nobody else.
-        wire = applyReasoningPolicy(wire, isLocalModel);
+        // Replay thinking text: every turn to every model when the user turned "send thinking as context" on, otherwise only
+        // to local models and only on the turns their chat template renders it back on.
+        wire = applyReasoningPolicy(wire, isLocalModel, sendReasoningContext());
         // The runtime context (time zone, date, current model) used to be concatenated into messages[0] here on every request,
         // which re-prefilled the entire conversation from token 0 at every midnight and every model switch — on cloud models too,
         // since this path was never gated on isLocalModel. It is now announced once, when it changes, as a change event above.
@@ -3243,7 +3278,7 @@ function ChatAgent() {
         if (!msg) throw new Error(t("chat.emptyResponse"));
         // Context usage: this request's input tokens (refresh the progress bar only while active; a background conversation does not touch the current view).
         if (active()) setCtxTokens(data.usage?.prompt_tokens ?? countMessagesTokens(wire));
-        // Deep thinking (a reasoning model's reasoning_content): not fed back to the model (only content/tool_calls enter convo).
+        // Deep thinking (a reasoning model's reasoning_content): kept on the buffer; whether it is fed back is applyReasoningPolicy's call.
         const reasoningText = (msg.reasoning_content ?? msg.reasoning ?? "").trim();
         // Finalize this round's display: the deep-thinking block + body. A final reply with no tool calls always shows the body; the body of a tool-call round —
         // shown as a "phase summary" in dev mode (after cleanup), discarded in daily mode (consistent with non-streaming).
@@ -3255,8 +3290,8 @@ function ChatAgent() {
         // The phase summary of a tool-call round enters the "thinking process" timeline (asPhase); a final reply with no tool calls becomes a standalone bubble.
         renderTurn(reasoningText, finalContent, !!msg.tool_calls?.length);
         // reasoning_content rides the buffer so it is available to replay, but applyReasoningPolicy decides whether it reaches
-        // the wire: local models only, and only for turns after the last user query, which is exactly what their chat template
-        // renders back. Remote providers never see it — some reject the field outright.
+        // the wire: by default local models only, and only for turns after the last user query, which is exactly what their
+        // chat template renders back; with "send thinking as context" on, every model gets every turn's thinking.
         convo = [
           ...convo,
           msg.tool_calls?.length

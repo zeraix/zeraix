@@ -707,9 +707,10 @@ export function buildWireContext(
  * before sending, keeping the wire view always valid (it's an identity transform for already-consistent history, not perturbing the prefix cache).
  *
  * Also drops any assistant message with neither content nor tool_calls: a reasoning model can return a turn whose only
- * output was reasoning_content (which is stripped from the wire) and no tool call, leaving an empty assistant message
- * that the provider rejects with 400 "content or tool_calls must be set". Dropping it here fixes both the live buffer
- * and already-persisted conversations that carry one.
+ * output was reasoning_content and no tool call, leaving an empty assistant message that the provider rejects with 400
+ * "content or tool_calls must be set". Dropping it here fixes both the live buffer and already-persisted conversations
+ * that carry one. The turn goes even when "send thinking as context" is on — an assistant message carrying nothing but
+ * a thinking block is the shape providers reject, so there is no version of it that could be sent.
  */
 function isEmptyAssistantContent(content: ApiMsg["content"]): boolean {
   if (content == null) return true;

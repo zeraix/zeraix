@@ -1,6 +1,6 @@
 "use client";
 
-import { Brain, ChevronDown, Paperclip, Send } from "lucide-react";
+import { Brain, ChevronDown, History, Paperclip, Send } from "lucide-react";
 import { cn } from "@/lib/utils";
 import {
   DropdownMenu,
@@ -235,7 +235,7 @@ export function Composer({
                   <ChevronDown className="size-3.5 shrink-0 opacity-70" />
                 </button>
               </DropdownMenuTrigger>
-              <DropdownMenuContent align="start" className="w-52">
+              <DropdownMenuContent align="start" className="w-60">
                 {/* The switch itself is decoration — the row owns the click, so the two can't both fire.
                     preventDefault keeps the menu open, so a gear can be picked in the same visit. */}
                 <DropdownMenuItem
@@ -254,7 +254,7 @@ export function Composer({
                   <DropdownMenuItem
                     key={e}
                     disabled={!thinking.enabled}
-                    onClick={() => onThinkingChange({ enabled: true, effort: e })}
+                    onClick={() => onThinkingChange({ ...thinking, enabled: true, effort: e })}
                   >
                     <span className="truncate">{t(effortLabelKey(e))}</span>
                     {thinking.effort === e && <span className="ml-auto text-primary">✓</span>}
@@ -266,6 +266,20 @@ export function Composer({
                     {t("composer.thinkingLocalNote")}
                   </p>
                 )}
+                <DropdownMenuSeparator />
+                {/* Replay past thinking as context. Independent of the master switch above — a conversation can hold
+                    thinking from earlier turns that is still worth sending after the switch has been turned off. */}
+                <DropdownMenuItem
+                  onSelect={(ev) => ev.preventDefault()}
+                  onClick={() => onThinkingChange({ ...thinking, sendContext: !thinking.sendContext })}
+                >
+                  <History className="size-4 text-ink-muted" />
+                  <span className="flex-1">{t("composer.thinkingContext")}</span>
+                  <Switch size="sm" checked={thinking.sendContext} tabIndex={-1} className="pointer-events-none" />
+                </DropdownMenuItem>
+                <p className="px-2 pb-1 pt-1.5 text-[11px] leading-snug text-ink-subtle">
+                  {t("composer.thinkingContextNote")}
+                </p>
               </DropdownMenuContent>
             </DropdownMenu>
 

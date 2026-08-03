@@ -1,12 +1,13 @@
-import { Boxes, Brain, Info, KeyRound, ScrollText, SlidersHorizontal, User, Volume2 } from "lucide-react";
+import { Boxes, Brain, Info, KeyRound, Plug, ScrollText, SlidersHorizontal, User, Volume2 } from "lucide-react";
 
 
-export type SectionId = "account" | "models" | "keys" | "memory" | "notify" | "logs" | "general" | "about";
+export type SectionId = "account" | "models" | "keys" | "mcp" | "memory" | "notify" | "logs" | "general" | "about";
 
 export const NAV: { id: SectionId; labelKey: string; icon: typeof User }[] = [
   { id: "account", labelKey: "settings.account", icon: User },
   { id: "models", labelKey: "settings.models", icon: Boxes },
   { id: "keys", labelKey: "settings.keys", icon: KeyRound },
+  { id: "mcp", labelKey: "settings.mcp", icon: Plug },
   { id: "memory", labelKey: "settings.memory", icon: Brain },
   { id: "notify", labelKey: "settings.notify", icon: Volume2 },
   { id: "logs", labelKey: "settings.logs", icon: ScrollText },
@@ -59,6 +60,21 @@ export const SECTION_KEYS: Record<SectionId, string[]> = {
     "keys.localTitle",
     "keys.generate",
     "keys.regenerate",
+  ],
+  mcp: [
+    "settings.mcp",
+    "mcp.desc",
+    "mcp.add",
+    "mcp.import",
+    "mcp.openConfig",
+    "mcp.typeStdio",
+    "mcp.typeHttp",
+    "mcp.command",
+    "mcp.url",
+    "mcp.env",
+    "mcp.headers",
+    "mcp.tools",
+    "mcp.approveTitle",
   ],
   memory: [
     "settings.memory",

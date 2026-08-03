@@ -170,6 +170,13 @@ export function stripWireMetadata(wire: ApiMsg[]): ApiMsg[] {
 /**
  * Decide which assistant turns replay their thinking text, and to whom.
  *
+ * `sendContext` (the user setting, off by default — see ThinkingConfig.sendContext) is the wide door: with it on, every
+ * assistant turn keeps its thinking text for every model, so the model is shown what it reasoned earlier in the
+ * conversation and not just its conclusions. It is opt-in because the replay is billed as input on every later request,
+ * grows with the conversation, and a strict provider rejects the field outright (the caller retries without it).
+ *
+ * The rest of this function is the floor that applies while that setting is off, and it is not merely "send nothing":
+ *
  * A local chat template renders `reasoning_content` back into the prompt, but only for assistant turns AFTER the last user
  * query — both families compute the same guard by different means:
  *
@@ -188,13 +195,33 @@ export function stripWireMetadata(wire: ApiMsg[]): ApiMsg[] {
  * Tool results travel as role:"tool" in this app (never a <tool_response>-wrapped user turn), so "the last user query" is
  * simply the last role:"user" message — the tool_response special case in Qwen's template cannot arise here.
  */
-export function applyReasoningPolicy(wire: ApiMsg[], isLocal: boolean): ApiMsg[] {
+export function applyReasoningPolicy(wire: ApiMsg[], isLocal: boolean, sendContext = false): ApiMsg[] {
   if (!wire.some((m) => m.role === "assistant" && m.reasoning_content)) return wire;
+  // Setting on: keep every turn's thinking text as-is, for local and remote alike. Nothing to strip, so the input array
+  // is returned untouched (no new objects, no cache churn).
+  if (sendContext) return wire;
   let lastUser = -1;
   for (let i = 0; i < wire.length; i++) if (wire[i].role === "user") lastUser = i;
   return wire.map((m, i) => {
     if (m.role !== "assistant" || !m.reasoning_content) return m;
     if (isLocal && i > lastUser) return m;
+    const { reasoning_content: _r, ...clean } = m;
+    return clean;
+  });
+}
+
+/**
+ * Drop `reasoning_content` from every assistant turn, unconditionally.
+ *
+ * The escape hatch for a provider that answers a replayed thinking block with a 400 (see isReasoningContentError): the
+ * request is resent through this, so one rejection costs a retry rather than the turn. Separate from
+ * applyReasoningPolicy because it runs on a request that has ALREADY been built and failed, where "what a local template
+ * would render" no longer matters — the only thing that can be true is that the field must go.
+ */
+export function stripReasoningContent(wire: ApiMsg[]): ApiMsg[] {
+  if (!wire.some((m) => m.role === "assistant" && m.reasoning_content)) return wire;
+  return wire.map((m) => {
+    if (m.role !== "assistant" || !m.reasoning_content) return m;
     const { reasoning_content: _r, ...clean } = m;
     return clean;
   });
