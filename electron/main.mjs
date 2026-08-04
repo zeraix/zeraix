@@ -54,6 +54,8 @@ import { registerMcp, disposeMcp } from "./ipc/mcpIpc.mjs";
 import { loadEnvFiles } from "./loadEnv.mjs";
 import { registerProtocolClient, findDeepLink } from "./services/deepLink.mjs";
 import { initAutomation, shutdownAutomation, setAutomationNotifier } from "./automation/paths.mjs";
+import { initPlugins, shutdownPlugins } from "./plugins/paths.mjs";
+import { registerPlugins } from "./ipc/pluginsIpc.mjs";
 import { closeDb } from "./automation/db.mjs";
 import {
   initBackground,
@@ -911,6 +913,11 @@ app.whenReady().then(() => {
   // Auto-update (GitHub Releases feed; renderer drives check/download/install via window.updater)
   registerUpdater();
   registerAutomation();
+  // Plugin marketplace. initPlugins() enforces the cached kill-list synchronously, before any
+  // capability can be offered — a revoked plugin must not be live for the seconds a network refresh
+  // would take. The renderer supplies the registry origin afterwards via plugins:configure.
+  initPlugins();
+  registerPlugins();
   // Token-usage log (off by default). Pruning old day files runs regardless of the switch: a log the
   // user turned on once and forgot should not still be on disk a year later.
   registerUsageLog();
@@ -1004,6 +1011,12 @@ app.on("before-quit", () => {
   // so a quit does not leave orphaned processes behind.
   try {
     shutdownAutomation();
+  } catch {
+    /* ignore */
+  }
+  // Stop the registry refresh timers; nothing to flush, the lockfile is written on every change.
+  try {
+    shutdownPlugins();
   } catch {
     /* ignore */
   }

@@ -104,6 +104,7 @@ const NAV_ITEMS: NavItem[] = [
   { id: "skills", labelKey: "nav.skills", icon: "/image/agent/sidebar/sidebar2.svg", activeIcon: "/image/agent/sidebar/sidebar21.svg", href: "/agent/skills" },
   { id: "automation", labelKey: "nav.automation", icon: "/image/agent/sidebar/sidebar3.svg", activeIcon: "/image/agent/sidebar/sidebar31.svg", href: "/agent/automation" },
   { id: "models", labelKey: "nav.models", icon: "/image/agent/sidebar/sidebar4.svg", activeIcon: "/image/agent/sidebar/sidebar41.svg", href: "/agent/models" },
+  { id: "plugins", labelKey: "nav.plugins", icon: "/image/agent/sidebar/sidebar5.svg", activeIcon: "/image/agent/sidebar/sidebar51.svg", href: "/agent/plugins" },
 ];
 
 /** Theme modes (consistent with src/components/theme: light / dark / follow system). */

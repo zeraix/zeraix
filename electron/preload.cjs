@@ -374,6 +374,44 @@ contextBridge.exposeInMainWorld("mcp", {
   },
 });
 
+// Plugin marketplace (electron/plugins/*). See docs/plugin-marketplace-design.md.
+//
+// The renderer drives intent only. Signature verification, rollback refusal, hash checking and
+// revocation all happen on the other side of this boundary, so the worst a compromised renderer can
+// do is ask for something — never install unverified bytes. `install` deliberately takes only an id
+// that must already be in the verified catalogue, not a manifest: accepting a manifest from here
+// would let the caller choose its own hashes, which is the same as having none.
+//
+// There is no agent-callable install (design doc §2.3): browsing is safe for the model to reach,
+// installing is a click.
+contextBridge.exposeInMainWorld("plugins", {
+  /** Point the client at the registry, using the API origin this build was compiled against. */
+  configure: (origin) => ipcRenderer.invoke("plugins:configure", origin),
+  /** Installed plugins, with their enabled/revoked state. */
+  installed: () => ipcRenderer.invoke("plugins:installed"),
+  /** Capabilities that should be offered right now: installed, enabled, not revoked. */
+  active: () => ipcRenderer.invoke("plugins:active"),
+  /** The last verified catalogue. No network, so opening the page is instant. */
+  catalogue: () => ipcRenderer.invoke("plugins:catalogue"),
+  /** Fetch and verify the feeds now; applies any new revocations. Never rejects. */
+  refresh: () => ipcRenderer.invoke("plugins:refresh"),
+  /** Catalogue entry plus installed record for one plugin. */
+  detail: (id) => ipcRenderer.invoke("plugins:detail", id),
+  /** Install from the verified catalogue. Returns { ok, error }. */
+  install: (id) => ipcRenderer.invoke("plugins:install", id),
+  uninstall: (id) => ipcRenderer.invoke("plugins:uninstall", id),
+  /** Enable/disable without uninstalling. Refused for a revoked plugin. */
+  setEnabled: (id, enabled) => ipcRenderer.invoke("plugins:set-enabled", { id, enabled }),
+  /** Read an installed capability's content, re-verified against its pinned hash. */
+  read: (id, capabilityId) => ipcRenderer.invoke("plugins:read", { id, capabilityId }),
+  /** Subscribe to installed-state changes; returns an unsubscribe function. */
+  onChanged: (cb) => {
+    const handler = (_e, payload) => cb(payload);
+    ipcRenderer.on("plugins:changed", handler);
+    return () => ipcRenderer.removeListener("plugins:changed", handler);
+  },
+});
+
 // Automation workflows (electron/automation/*). Named `workflows`, NOT `automation` — that global is
 // already the <webview> CDP browser panel above, and its `automation:event` channel is broadcast to
 // every window, so sharing the namespace would cross-wire the two features.

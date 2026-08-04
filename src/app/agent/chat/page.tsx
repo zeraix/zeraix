@@ -84,6 +84,8 @@ import { isWindowAlwaysOnTop } from "@/lib/electron/windowControls";
 import { useAgentChatStore } from "@/store/agentChatStore";
 import { enabledSkills, loadInstalled } from "@/lib/ai/skills/store";
 import { getSkillInstructions, loadSkillTool, skillSystemHint } from "@/lib/ai/skills/runtime";
+import { loadPluginSkills } from "@/lib/plugins/skills";
+import { pluginBridge } from "@/lib/plugins/bridge";
 import { SANDBOX_TOOLBOX_SKILL } from "@/lib/ai/skills/builtin";
 import { buildSystemPrompt, buildToolSet as buildToolSet_ } from "@/lib/ai/promptPrefix";
 import { ROUTED_TOOLS, resolveToolCall, routedFailureHint, unknownToolResult } from "@/lib/ai/toolRouter";
@@ -395,6 +397,14 @@ function ChatAgent() {
   const projectSkillsRef = useRef<InstalledSkill[]>([]);
   const reloadProjectSkills = async () => {
     projectSkillsRef.current = (await loadEnabledProjectSkills()).map(toInstalledProjectSkill);
+  };
+  // Skills provided by installed plugins (the marketplace, /agent/plugins). Same treatment as project
+  // skills: mapped to InstalledSkill and merged into the runtime set, so load_skill discloses them
+  // progressively like any other. Enablement and revocation are decided by the plugin store, so
+  // there is no separate toggle here.
+  const pluginSkillsRef = useRef<InstalledSkill[]>([]);
+  const reloadPluginSkills = async () => {
+    pluginSkillsRef.current = await loadPluginSkills();
   };
   const setInstalledSkillsBoth = (list: InstalledSkill[]) => {
     installedSkillsRef.current = list;
@@ -2425,8 +2435,8 @@ function ChatAgent() {
   // the "document / media processing toolbox" is automatically attached (so the model directly uses the tools preinstalled in the image, rather than suggesting a pip/apt install).
   // Built-in skills are not persisted to storage and do not appear in the skills panel; they are rebuilt on every send based on the sandbox status, taking effect immediately on ready/downgrade.
   const runtimeSkills = () => {
-    // The installed skills the user enabled + the enabled project skills (.claude/.cursor/.zeraix) + conditionally-equipped built-in skills.
-    const list = [...enabledSkills(installedSkillsRef.current), ...projectSkillsRef.current];
+    // The installed skills the user enabled + the enabled project skills (.claude/.cursor/.zeraix) + skills from installed plugins + conditionally-equipped built-in skills.
+    const list = [...enabledSkills(installedSkillsRef.current), ...projectSkillsRef.current, ...pluginSkillsRef.current];
     // The built-in toolbox is NOT added here. messages[0] lists it unconditionally, so including it would list it twice — and
     // worse, the list would change whenever the VM came up or fell back, which is exactly the churn the skills change event
     // exists to avoid. Whether it is usable right now is carried by the environment event instead.
@@ -2450,6 +2460,23 @@ function ChatAgent() {
       active = false;
     };
   }, [workdir, toolsReady]);
+
+  // Load / refresh skills from installed plugins, and follow the plugin store's own changes. The
+  // subscription matters as much as the initial load: a plugin withdrawn by the registry is disabled
+  // in the main process, and without this the conversation would keep offering its skill until the
+  // next reload — which is precisely the window revocation exists to close.
+  useEffect(() => {
+    let active = true;
+    const refresh = () => void loadPluginSkills().then((list) => {
+      if (active) pluginSkillsRef.current = list;
+    });
+    refresh();
+    const off = pluginBridge()?.onChanged(refresh);
+    return () => {
+      active = false;
+      off?.();
+    };
+  }, []);
 
   // load_skill: return the full instructions of an enabled skill (progressive disclosure), fed back to the model; also show a bubble.
   const loadSkill = (ctx: RunCtx, rawArgs: Record<string, unknown>): string => {
