@@ -904,7 +904,7 @@
   "update.error.generic": "업데이트를 확인할 수 없습니다.",
   "update.error.network": "연결이 없습니다. 네트워크를 확인한 후 다시 시도하세요.",
   "update.error.noRelease": "아직 게시된 업데이트가 없습니다.",
-  "update.error.unsigned": "이 빌드는 서명되지 않아 자동 업데이트할 수 없습니다. 최신 버전을 직접 다운로드하세요.",
+  "update.error.unsigned": "이 빌드의 서명을 확인할 수 없어 자동 업데이트할 수 없습니다. 최신 버전을 직접 다운로드하세요.",
   "image.generating": "이미지 생성 중…",
   "image.alt": "생성된 이미지",
   "image.servedBy": "{engine}(으)로 생성됨",

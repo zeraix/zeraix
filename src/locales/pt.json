@@ -904,7 +904,7 @@
   "update.error.generic": "Não foi possível verificar atualizações.",
   "update.error.network": "Sem conexão. Verifique sua rede e tente novamente.",
   "update.error.noRelease": "Nenhuma atualização publicada ainda.",
-  "update.error.unsigned": "Esta versão não é assinada e não pode se atualizar. Baixe a versão mais recente manualmente.",
+  "update.error.unsigned": "Não é possível verificar a assinatura desta versão, por isso ela não pode se atualizar. Baixe a versão mais recente manualmente.",
   "image.generating": "Gerando imagem…",
   "image.alt": "Imagem gerada",
   "image.servedBy": "Gerada por {engine}",

@@ -140,8 +140,20 @@ win:
     - target: nsis
       arch: [x64]
   # Code signing (prevents SmartScreen "Unknown Publisher" warnings when distributing to other Windows systems). As with macOS, certificate credentials are not stored in the repository:
-  # Injected via environment variables — CSC_LINK (path to .pfx certificate file or its base64 content) and CSC_KEY_PASSWORD (certificate password).
-  # (Automatically read by electron-builder; works for both macOS and Windows). If credentials are missing (e.g., local builds or CI runs without secrets), signing is gracefully skipped, and an unsigned installer is still generated. 
+  # Injected via environment variables — WIN_CSC_LINK (path to .pfx certificate file or its base64 content) and WIN_CSC_KEY_PASSWORD (certificate password).
+  # If credentials are missing (e.g., local builds or CI runs without secrets), signing is gracefully skipped, and an unsigned installer is still generated.
+  #
+  # Use WIN_CSC_*, never the bare CSC_* here: electron-builder resolves the Windows certificate as
+  # `WIN_CSC_LINK ?? CSC_LINK`, so a mac-only CSC_LINK in the environment gets used to sign the .exe.
+  # That shipped in v1.7.0/v1.8.0 — the NSIS installer was signed with the Apple Developer ID .p12,
+  # whose leaf carries the critical Apple extension 1.2.840.113635.100.6.1.13. Windows rejects any
+  # certificate with an unknown critical extension, so Get-AuthenticodeSignature never returns Valid,
+  # and electron-updater — which runs that check after every download and compares the signer CN
+  # against the publisherName it baked into app-update.yml — failed every Windows update with
+  # ERR_UPDATER_INVALID_SIGNATURE. Unsigned is strictly better than wrongly signed here: with no
+  # certificate there is no publisherName, and electron-updater skips verification altogether.
+  # .github/workflows/release.yml now scopes each certificate to its own runner and gates the build
+  # on Get-AuthenticodeSignature.
   # Starting with electron-builder 26, Windows signing options have been consolidated under signtoolOptions (fields previously located directly under win.* have been migrated here).
   signtoolOptions:
   # Certificate source: By default, it uses the CSC_LINK / CSC_KEY_PASSWORD environment variables mentioned above; if you need to specify them explicitly here, you can use

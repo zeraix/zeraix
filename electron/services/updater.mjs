@@ -11,6 +11,12 @@
  *
  * Platform reality:
  *   - Windows (nsis): works on unsigned builds. Users still see SmartScreen on first install.
+ *     A *signed* build is verified: electron-builder bakes the certificate's CN into app-update.yml as
+ *     publisherName, and after every download electron-updater runs Get-AuthenticodeSignature and
+ *     requires Status == Valid plus a matching CN. A certificate Windows will not validate is therefore
+ *     worse than none at all — see the WIN_CSC_LINK note in electron-builder.yml. Note the check reads
+ *     the app-update.yml of the *installed* build, so a bad publisherName cannot be fixed by a later
+ *     release: those installs must be replaced by hand.
  *   - macOS: Squirrel.Mac verifies that the update's code signature matches the running app and
  *     refuses otherwise. Without a Developer ID certificate (CSC_LINK) mac updates CANNOT apply —
  *     checking fails with "Could not get code signature for running application". That is reported
@@ -179,6 +185,25 @@ export async function checkForUpdates() {
 }
 
 /**
+ * Whether a failed downloadUpdate() is worth retrying after a fresh check.
+ *
+ * ONLY the stale-cache case is. downloadUpdate() can act only on the update info cached by the LAST
+ * checkForUpdates(). Since a found update now survives later checks (see erasesPendingUpdate), the UI
+ * can legitimately offer Download after an intervening check replaced that cache — electron-updater
+ * then refuses with "Please check update first" without ever hitting the network. Re-checking and
+ * retrying makes the button do what it says.
+ *
+ * Everything else must NOT be retried. The retry used to be unconditional, which turned a permanent
+ * post-download failure into two permanent failures: a rejected signature (ERR_UPDATER_INVALID_SIGNATURE)
+ * or a bad checksum surfaces only after the whole installer is on disk, so the blind retry silently
+ * re-downloaded ~150 MB to arrive at the identical error. That is what "it downloads, fails, downloads
+ * again, fails again" looked like on Windows.
+ */
+function worthRetrying(err) {
+  return /please check update first/i.test(String(err?.message ?? err));
+}
+
+/**
  * Download the pending update. Progress arrives via the "updater:state" broadcast.
  *
  * Resolves only when the download finishes, so a second call while one is in flight would start a
@@ -192,14 +217,9 @@ export async function downloadUpdate() {
     try {
       await autoUpdater.downloadUpdate();
     } catch (first) {
-      // downloadUpdate() can only act on the update info cached by the LAST checkForUpdates(). Since a
-      // found update now survives later checks (see erasesPendingUpdate), the UI can legitimately offer
-      // Download after an intervening check replaced that cache — electron-updater then refuses with
-      // "please check for updates first". Re-check once and retry, so the button does what it says
-      // instead of reporting a failure the user can do nothing about.
+      if (!worthRetrying(first)) throw first;
       await autoUpdater.checkForUpdates();
       await autoUpdater.downloadUpdate(); // still failing here is a real error; fall through to the catch below
-      void first;
     }
     // Belt and braces: if the run emitted no "update-downloaded" (seen on some Windows paths), the
     // download is still finished here — report it rather than leaving the UI spinning forever.

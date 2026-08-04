@@ -904,7 +904,7 @@
   "update.error.generic": "Impossible de rechercher des mises à jour.",
   "update.error.network": "Aucune connexion. Vérifiez votre réseau et réessayez.",
   "update.error.noRelease": "Aucune mise à jour publiée pour le moment.",
-  "update.error.unsigned": "Cette version n'est pas signée et ne peut pas se mettre à jour. Veuillez télécharger la dernière version manuellement.",
+  "update.error.unsigned": "La signature de cette version ne peut pas être vérifiée, elle ne peut donc pas se mettre à jour. Veuillez télécharger la dernière version manuellement.",
   "image.generating": "Génération de l'image…",
   "image.alt": "Image générée",
   "image.servedBy": "Généré par {engine}",

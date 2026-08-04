@@ -907,7 +907,7 @@
   "update.error.generic": "无法检查更新。",
   "update.error.network": "无网络连接，请检查后重试。",
   "update.error.noRelease": "尚未发布更新。",
-  "update.error.unsigned": "此版本未签名，无法自动更新，请手动下载最新版本。",
+  "update.error.unsigned": "无法验证此版本的签名，因此无法自动更新，请手动下载最新版本。",
   "image.generating": "正在生成图片…",
   "image.alt": "生成的图片",
   "image.servedBy": "由 {engine} 生成",

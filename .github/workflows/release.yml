@@ -136,6 +136,17 @@ jobs:
       # the variable is absent entirely. A YAML `env:` block cannot express "absent" — an
       # unset secret renders as "" — so the values are funnelled through $GITHUB_ENV instead.
       # Add the secrets later and signing turns on with no workflow change.
+      #
+      # Each platform gets ONLY its own certificate, because electron-builder silently falls
+      # back across them: getCscLink("WIN_CSC_LINK") resolves to `WIN_CSC_LINK ?? CSC_LINK`
+      # (app-builder-lib/out/platformPackager.js). Exporting CSC_LINK on the Windows runner
+      # while WIN_CSC_LINK is unset therefore signs the NSIS installer with the *Apple*
+      # Developer ID .p12 — which is what shipped in v1.7.0/v1.8.0 and broke Windows
+      # auto-update: an Apple Developer ID leaf carries the critical Apple extension
+      # 1.2.840.113635.100.6.1.13, so Windows chain-building rejects it (CERT_E_CRITICAL) and
+      # Get-AuthenticodeSignature never returns Valid. electron-updater runs exactly that
+      # check after downloading, so every update failed post-download with
+      # ERR_UPDATER_INVALID_SIGNATURE. See the "Verify Windows signature" gate below.
       - name: Export signing credentials (if configured)
         shell: bash
         env:
@@ -143,6 +154,7 @@ jobs:
           IN_WIN_CSC_KEY_PASSWORD: ${{ secrets.WIN_CSC_KEY_PASSWORD }}
           IN_CSC_LINK: ${{ secrets.CSC_LINK }}
           IN_CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
+          MATRIX_NAME: ${{ matrix.name }}
         run: |
           exported=0
           export_if_set() {
@@ -156,12 +168,17 @@ jobs:
             echo "exported ${target}"
             exported=1
           }
-          export_if_set IN_WIN_CSC_LINK WIN_CSC_LINK
-          export_if_set IN_WIN_CSC_KEY_PASSWORD WIN_CSC_KEY_PASSWORD
-          export_if_set IN_CSC_LINK CSC_LINK
-          export_if_set IN_CSC_KEY_PASSWORD CSC_KEY_PASSWORD
+          if [ "$MATRIX_NAME" = "windows" ]; then
+            # Authenticode .pfx only. CSC_* is deliberately not exported here — see above.
+            export_if_set IN_WIN_CSC_LINK WIN_CSC_LINK
+            export_if_set IN_WIN_CSC_KEY_PASSWORD WIN_CSC_KEY_PASSWORD
+          else
+            # Apple Developer ID .p12 only.
+            export_if_set IN_CSC_LINK CSC_LINK
+            export_if_set IN_CSC_KEY_PASSWORD CSC_KEY_PASSWORD
+          fi
           if [ "$exported" = "0" ]; then
-            echo "no signing certificate configured — an unsigned installer will be produced"
+            echo "no signing certificate configured for ${MATRIX_NAME} — an unsigned installer will be produced"
           fi
 
       # scripts/afterAllArtifactBuild.cjs signs the DMG by looking up the Developer ID with a
@@ -278,6 +295,43 @@ jobs:
             spctl -a -t open --context context:primary-signature -v "$dmg" || {
               echo "::error::$dmg fails Gatekeeper assessment"; fail=1; }
           done
+          exit $fail
+
+      # Run the exact check electron-updater runs on the user's machine after it finishes
+      # downloading (electron-updater/out/windowsExecutableCodeSignatureVerifier.js calls
+      # Get-AuthenticodeSignature and requires Status == Valid). If the installer does not pass
+      # here, no Windows client can ever apply the update — and the failure is invisible until
+      # after publishing, because the .exe installs fine by hand either way.
+      #
+      # NotSigned is allowed and only warned about: with no Authenticode certificate configured,
+      # electron-builder writes no publisherName into app-update.yml and electron-updater skips
+      # verification entirely, so auto-update still works (users just see SmartScreen on first
+      # install). Anything signed-but-not-Valid is a hard failure: publisherName IS written in
+      # that case, so the client verifies and refuses.
+      - name: Verify Windows signature
+        if: matrix.name == 'windows'
+        shell: pwsh
+        run: |
+          $exes = @(Get-ChildItem -Path dist-electron -Filter *.exe -File)
+          if ($exes.Count -eq 0) {
+            Write-Output "::error::no .exe was produced"
+            exit 1
+          }
+          $fail = 0
+          foreach ($exe in $exes) {
+            $sig = Get-AuthenticodeSignature -LiteralPath $exe.FullName
+            Write-Output "--- $($exe.Name): $($sig.Status)"
+            if ($sig.Status -eq 'NotSigned') {
+              Write-Output "::warning::$($exe.Name) is unsigned (no WIN_CSC_LINK configured). Auto-update still works; first install shows SmartScreen."
+              continue
+            }
+            if ($sig.Status -ne 'Valid') {
+              Write-Output "::error::$($exe.Name) is signed but Windows rejects the signature ($($sig.Status): $($sig.StatusMessage)). electron-updater will refuse this update with ERR_UPDATER_INVALID_SIGNATURE. Is WIN_CSC_LINK an Authenticode certificate from a CA in the Windows root store (not an Apple Developer ID .p12)?"
+              $fail = 1
+              continue
+            }
+            Write-Output "    signer: $($sig.SignerCertificate.Subject)"
+          }
           exit $fail
 
       - name: Upload build artifacts

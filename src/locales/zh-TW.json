@@ -904,7 +904,7 @@
   "update.error.generic": "無法檢查更新。",
   "update.error.network": "無網路連線，請檢查後重試。",
   "update.error.noRelease": "尚未發布更新。",
-  "update.error.unsigned": "此版本未簽署，無法自動更新，請手動下載最新版本。",
+  "update.error.unsigned": "無法驗證此版本的簽署，因此無法自動更新，請手動下載最新版本。",
   "image.generating": "正在生成圖片…",
   "image.alt": "生成的圖片",
   "image.servedBy": "由 {engine} 生成",

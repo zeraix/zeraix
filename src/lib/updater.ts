@@ -95,14 +95,25 @@ export function isUpdaterAvailable(): boolean {
 /**
  * Map a raw electron-updater error onto a locale key.
  *
- * macOS refuses to apply updates whose code signature does not match the running app
- * (Squirrel.Mac), so an unsigned build always fails here — it is a build/config fact, not a
- * transient failure, and is worth telling the user apart from "you are offline".
+ * Both platforms have a signature failure mode that no amount of retrying fixes, and both are a
+ * build/config fact rather than a transient failure — worth telling the user apart from "you are
+ * offline", because the only way out is a manual download:
+ *   - macOS refuses to apply updates whose code signature does not match the running app
+ *     (Squirrel.Mac), so an unsigned build always fails.
+ *   - Windows verifies the downloaded installer against the publisherName baked into the *installed*
+ *     app's app-update.yml and throws "New version X is not signed by the application owner"
+ *     (ERR_UPDATER_INVALID_SIGNATURE) on a mismatch — which is what every v1.7.0/v1.8.0 Windows
+ *     install hits, since those were signed with an Apple certificate Windows will not validate.
  */
 export function errorKey(error: string | null): string {
   if (!error) return "update.error.generic";
   const e = error.toLowerCase();
-  if (e.includes("code signature") || e.includes("could not get code signature")) {
+  if (
+    e.includes("code signature") ||
+    e.includes("could not get code signature") ||
+    e.includes("not signed by the application owner") ||
+    e.includes("err_updater_invalid_signature")
+  ) {
     return "update.error.unsigned";
   }
   if (e.includes("net::") || e.includes("enotfound") || e.includes("econnrefused") || e.includes("etimedout")) {
