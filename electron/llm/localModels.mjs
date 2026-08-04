@@ -136,10 +136,15 @@ export const MODELS = [
     // nextn/MTP layer (index 40) is dense attention too. swa: 0 - the 30 GDN-recurrent layers hold no
     // growing KV; their fixed state is recurrentGB's job.
     arch: { L: 41, kvH: 2, hd: 256, swa: { every: 4, window: 0 }, kvElems: { full: 11264, swa: 0 } }, maxCtx: 262144,
-    // The 30 GDN-recurrent layers the window-0 above excludes from KV. Their state is NOT per-token: a fixed
-    // [state, state, heads] blob per layer per sequence, from the GGUF's ssm.state_size 128 and
-    // ssm.inner_size 4096 (=> 4096/128 = 32 value heads), plus a conv_kernel 4 x 8192 window. F32.
-    recurrent: { layers: 30, state: 128, heads: 32, conv: 4 * 8192 },
+    // The 30 GDN-recurrent layers the window-0 above excludes from KV. Their state is NOT per-token: a
+    // fixed blob per layer per SEQUENCE, so it does not grow with ctx.
+    //
+    // perSeqMiB is MEASURED, from the server's own startup line at --parallel 2:
+    //   llama_memory_recurrent: size = 376.88 MiB (2 cells, 40 layers, 2 seqs 2 rs_seq)
+    // 376.88 / 2 = 188.44. The GGUF fields (ssm.state_size 128, ssm.inner_size 4096, conv_kernel 4,
+    // group_count 16) are kept for reference but are NOT what this is computed from - see recurrentGB
+    // for why deriving it produced a 3x error.
+    recurrent: { perSeqMiB: 188.44, layers: 30, state: 128, inner: 4096, conv: 4, groups: 16 },
     // Pinned commit. Required for any model on SEED_MODELS: a resident seed is only valid for the exact GGUF it was built
     // against, because the chat template ships inside the file and model_key does not cover it. Leaving this on "main" means a
     // repo re-upload silently changes the rendered prefix and every published seed stops matching, with no error. Bump it and
@@ -437,15 +442,29 @@ export const kvBitsEffective = (kvBits) => (kvBits === 4 || kvBits === 8 ? kvBit
  * Assuming regions everywhere would over-count Windows by ~0.8 GB on 26B-A4B at 4 slots; assuming 2
  * slots everywhere would under-count it. Both are wrong in a way that moves the native/pooled split.
  */
+// The physical ubatch buildServerArgs launches with. It is HERE and not a literal at the push site
+// because kvGB needs the same number: an SWA cache is sized
+// slots * min(ctx, window*slots + n_ubatch), so a wrong ubatch under-counts the window cache by one
+// ubatch per slot. That is exactly what happened - kvGB defaulted to 512 while the launcher passed
+// 1536, and no caller ever passed the real value, so every SWA fit was low. Measured on gemma-4-26B
+// at ctx 262144, --parallel 2:
+//
+//     ubatch 512  -> kvGB 1.805 GB     ubatch 2048 -> kvGB 1.982 GB
+//     actual: 1440.00 MiB (262144 cells, 5 layers) + 450.00 MiB (8192 cells, 25 layers) = 1.982 GB
+//
+// One constant, two readers, so they cannot disagree again.
+export const SERVER_UBATCH = 2048;
+
 export const serverKvShape = () => ({
   slots: kvTierEnabled() ? 2 : 4,
   regions: process.platform === "darwin" && process.arch === "arm64",
+  ubatch: SERVER_UBATCH,
 });
 
 export function kvGB(model, ctx, kvBits, opts = {}) {
   const { L, kvH, hd, swa, kvElems } = model.arch;
   const shape = serverKvShape();
-  const { slots = shape.slots, regions = shape.regions, ubatch = 512 } = opts;
+  const { slots = shape.slots, regions = shape.regions, ubatch = shape.ubatch } = opts;
   const bytesPer = kvBitsEffective(kvBits) / 8;
   if (!kvElems) {
     // fallback for any model without measured geometry: the old uniform approximation
@@ -639,12 +658,35 @@ export function moeNativePlan(model, profile, {
  * Both terms are therefore FIXED - no ctx anywhere. On Qwen3.6-35B: 0.80 GB live + 0.40 GB checkpoint = 1.20 GB
  * flat, at any context length.
  */
-export function recurrentGB(model, { seqs = 4, rsGroups = 3, slots = 2 } = {}) {
+/**
+ * Recurrent (GDN/SSM) state size. NOT per-token: a fixed blob per layer per SEQUENCE, so it does not
+ * scale with ctx - only with how many sequences the server reserves.
+ *
+ * MEASURED per sequence, not derived, for the same reason kvElems is read from the GGUF rather than
+ * computed from L/kvH/hd. The previous version derived it as
+ *
+ *     (state^2 * heads + conv) * 4 * layers * rsGroups * (seqs + slots)
+ *
+ * with rsGroups = 3 and seqs = 4 - two multipliers that appeared nowhere else in the codebase, had no
+ * comment, and were never passed by a caller. It returned 1.203 GB against an actual 0.395 GB, 3.0x
+ * over, by over-counting the multipliers ~9x and under-counting the per-layer term ~3x. Compensating
+ * errors in an expression nobody could check.
+ *
+ * llama.cpp's own n_embd_s() (llama-hparams.cpp:207) is ssm_d_state * ssm_d_inner = 128 * 4096 for
+ * this model, which predicts 160 MiB where 360 MiB is allocated - the remaining 2.25x is
+ * architecture-specific head geometry. Rather than re-derive that and risk a third wrong guess, take
+ * the number the server prints at startup:
+ *
+ *     llama_memory_recurrent: size = 376.88 MiB (2 cells, 40 layers, 2 seqs 2 rs_seq)
+ *                             R (f32) 16.88 MiB, S (f32) 360.00 MiB
+ *
+ * qwen3.6-35b-a3b, --parallel 2. 376.88 MiB / 2 seqs = 188.44 MiB per sequence. To re-derive for
+ * another model: launch it and read that line.
+ */
+export function recurrentGB(model, { seqs = 2 } = {}) {
   const r = model.recurrent;
-  if (!r) return 0;
-  const perLayerSeq = (r.state * r.state * r.heads + r.conv) * 4; // F32
-  const stateBytes = perLayerSeq * r.layers * rsGroups;
-  return (stateBytes * (seqs + slots)) / 1e9;
+  if (!r || !r.perSeqMiB) return 0;
+  return (r.perSeqMiB * 1048576 * seqs) / 1e9;
 }
 
 export function computeFit(model, quant, ctx, kvBits, vision = false, pool = null) {
@@ -903,28 +945,37 @@ export function buildServerArgs({ hf, modelPath = null, hw, ctx = MIN_CTX, port 
   // effective n_swa becomes 0, which feeds derive_model_key (so every seed and pool unit is orphaned
   // under a new model_key) and switches context checkpoints from windowed to whole-state. Nothing
   // clears the Qwen row.
-  // -ub 1536: the MoE ring stages every expert of every pooled layer ONCE PER FORWARD, a cost that is
+  // -ub 2048: the MoE ring stages every expert of every pooled layer ONCE PER FORWARD, a cost that is
   // flat in the ubatch, so halving the number of forwards halves that staging. n_batch is deliberately
   // left at llama.cpp's 2048 default - it governs how a prompt splits across server batches, not how
   // many forwards a batch becomes, and tying the two shrinks the server batch for no benefit.
   //
-  // This buys prefill WITH decode - it is a trade, not a free win. Three consecutive runs on one host,
-  // simulated 24 GB Mac (qwen3.6-35B UD-Q4_K_XL, ctx 262144, corpus prompt, nat23/draft3):
+  // This USED to be a trade. The original table, on a build where the compute buffers were reserved
+  // for n_ubatch and held for the context's life:
   //
   //     ub    prefill   decode   wired      ring fill
   //      512    112.9    24.08   +17.5 GB   61.1 GiB
   //     1024    172.8    23.84   +17.9 GB   47.7 GiB
   //     2048    266.3    21.63   +19.0 GB   39.7 GiB
   //
-  // Prefill rises because the staged volume falls. Decode falls because the activation buffers grow
-  // ~1 GB per doubling (325 -> 1300 MiB of GPU compute across 512 -> 2048) and that GB comes out of
-  // the page cache the pooled experts are read from, so the decode-side miss traffic gets slower.
+  // Prefill rose because staged volume fell; decode fell because the activation buffers grew ~1 GB per
+  // doubling and that GB came out of the page cache the pooled experts are read from. 1536 was picked
+  // as a midpoint to split that difference - it was never measured, only interpolated.
   //
-  // 1536 is a chosen midpoint between the 1024 and 2048 rows, NOT a measured one - the table above has
-  // no entry for it. It is not a power of two, which nothing here requires: n_ubatch only has to divide
-  // the work, and a MoE forward's cost is set by the layers it stages, not by the batch being a power
-  // of two. Measure before quoting a number for it.
-  args.push("-ub", "1536");
+  // The decode half of the trade is GONE. The fork now sizes those buffers for the batch actually
+  // running and releases them between turns, so a wide ubatch no longer costs standing memory:
+  // measured at 15.85 GB wired for ub 2048 against 15.80 GB for ub 1536, i.e. nothing. What is left is
+  // the prefill half, and at 1536 the ring stages 22% MORE bytes for the same prompt (49.25 GiB against
+  // 40.33 GiB) - which is why 1536 now loses on both axes. Same host, same profile, same binary:
+  //
+  //     ub    prefill   decode   ring fill
+  //     1536    186.2    22.61   49.25 GiB
+  //     2048    332.1    20.92   40.33 GiB
+  //
+  // Decode at 1536 still reads higher in that pair, but those runs predate the MoE warm-path and pool
+  // layout fixes; at 2048 on the current build decode is 20.9-21.2 and prefill is 332, so 2048 is ahead
+  // on prefill by 78% and within noise on decode. 1536 also failed the 200 tok/s prefill floor outright.
+  args.push("-ub", String(SERVER_UBATCH));
   // Per-model, from the catalog - see MODELS[].reasoningBudget. Absent means unrestricted, which is llama's default.
   if (reasoningBudget > 0) {
     args.push("--reasoning-budget", String(reasoningBudget));
@@ -957,7 +1008,18 @@ export function buildServerArgs({ hf, modelPath = null, hw, ctx = MIN_CTX, port 
   if (mtpDraft) args.push("-md", mtpDraft); // Gemma: separate MTP drafter file
   // MTP speculative-decoding flag (b9936): Gemma needs an -md drafter; Qwen weights embed the MTP head → the flag alone enables self-speculation.
   // Omitted when there's no separate drafter and it's not embedded (specMtp=false), to avoid draft-mtp erroring out when it can't find an MTP head.
-  if (specMtp) args.push("--spec-type", "draft-mtp");
+  if (specMtp) {
+    args.push("--spec-type", "draft-mtp");
+    // Quantize the DRAFTER's KV cache too. It defaults to f16 independently of -ctk/-ctv (common.h:
+    // speculative.draft.cache_type_k = GGML_TYPE_F16), so the drafter was running an f16 cache beside
+    // a q4_0 target. On qwen3.6 that one nextn layer at ctx 262144 is 512 MiB; at q4_0 it is 144 MiB.
+    //
+    // Output-safe for the same reason the draft-head row cap is: the target verifies every drafted
+    // token, so a coarser draft cache can cost acceptance rate but never correctness. Verified rather
+    // than assumed - identical output hash (135fde6b6aa2d51e) and decode 34.17 vs 34.04 tok/s, f16
+    // against q4_0, same prompt.
+    args.push("-ctkd", "q4_0", "-ctvd", "q4_0");
+  }
   if (mmproj) args.push("--mmproj", mmproj); // explicit file override (usually unused)
   else if (noMmproj) args.push("--no-mmproj"); // vision off: don't load the vision projector that -hf brings in automatically
   return args.concat(extraArgs);
