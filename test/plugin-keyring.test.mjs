@@ -14,7 +14,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-import { signEnvelope, verifyEnvelope } from "../electron/plugins/signature.mjs";
+import { TRUSTED_ROOT_KEYS, signEnvelope, verifyEnvelope } from "../electron/plugins/signature.mjs";
 import {
   activeReleaseKeys,
   cachedDelegationSequence,
@@ -35,8 +35,10 @@ function makeKey(keyId) {
   };
 }
 
-const ROOT = makeKey("root-2026");
-const ROOT_NEXT = makeKey("root-2027");
+// Deliberately NOT the real embedded key ids: a fixture sharing an id with a shipped trust anchor
+// makes "unknown key" and "wrong signature" indistinguishable in a test.
+const ROOT = makeKey("root-test");
+const ROOT_NEXT = makeKey("root-test-next");
 const REL = makeKey("rel-2026-08");
 const REL_NEXT = makeKey("rel-2027-02");
 const ROOT_KEYS = [{ keyId: ROOT.keyId, publicKey: ROOT.pub }];
@@ -68,12 +70,49 @@ function freshRoot() {
   return dir;
 }
 
+/* ------------------------------------------------------- the embedded trust anchors */
+
+test("every embedded root key is a usable ed25519 public key", () => {
+  // A typo here ships a client that can verify nothing, and the only fix is another release —
+  // the same "cannot be repaired remotely" shape as the Windows publisherName incident. Cheap to
+  // check, so check it rather than finding out from users.
+  assert.ok(
+    TRUSTED_ROOT_KEYS.length > 0,
+    "no root key is embedded — the marketplace cannot verify anything. Removing the last one should be deliberate.",
+  );
+
+  const ids = new Set();
+  for (const key of TRUSTED_ROOT_KEYS) {
+    assert.match(key.keyId, /^[a-z0-9][a-z0-9-]{0,38}[a-z0-9]$/, `bad keyId: ${key.keyId}`);
+    assert.equal(ids.has(key.keyId), false, `duplicate keyId: ${key.keyId}`);
+    ids.add(key.keyId);
+
+    const raw = Buffer.from(key.publicKey, "base64");
+    // Buffer.from ignores junk instead of throwing, so a mangled paste only shows up as a wrong
+    // length or a failed round trip.
+    assert.equal(raw.toString("base64"), key.publicKey, `${key.keyId}: publicKey is not clean base64`);
+    assert.equal(raw.length, 32, `${key.keyId}: ed25519 keys are 32 bytes, got ${raw.length}`);
+
+    const spki = Buffer.concat([Buffer.from("302a300506032b6570032100", "hex"), raw]);
+    const parsed = crypto.createPublicKey({ key: spki, format: "der", type: "spki" });
+    assert.equal(parsed.asymmetricKeyType, "ed25519", `${key.keyId}: not an ed25519 key`);
+  }
+});
+
+test("the shipped key set refuses a delegation from a root it does not embed", () => {
+  // Exercises the real TRUSTED_ROOT_KEYS default rather than a fixture: proves the wiring from the
+  // embedded set through verifyDelegation is intact, without needing anyone's private half.
+  const foreign = verifyDelegation(signedBy(ROOT, delegation()));
+  assert.equal(foreign.ok, false, "a delegation from a key we do not embed must be refused");
+  assert.match(foreign.error, /not authorized for this document/);
+});
+
 /* ------------------------------------------------------------------ delegation */
 
 test("a root-signed delegation verifies and names its release keys", () => {
   const r = verifyDelegation(signedBy(ROOT, delegation()), { rootKeys: ROOT_KEYS });
   assert.equal(r.ok, true, r.error);
-  assert.equal(r.keyId, "root-2026");
+  assert.equal(r.keyId, "root-test");
   assert.deepEqual(activeReleaseKeys(r.payload, NOW).map((k) => k.keyId), ["rel-2026-08"]);
 });
 

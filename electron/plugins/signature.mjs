@@ -34,12 +34,14 @@ const ED25519_SPKI_PREFIX = Buffer.from("302a300506032b6570032100", "hex");
  * rotating a *root* key requires shipping a new client, which is why there is a set here and not a
  * single value: ship the successor alongside the incumbent, then drop the incumbent a release later.
  *
- * Empty until the root key is generated (scripts/gen-registry-key.mjs --role root). An empty set
- * means nothing verifies, which is the correct failure direction: no marketplace rather than an
- * unverified one.
+ * An empty set means nothing verifies, which is the correct failure direction: no marketplace rather
+ * than an unverified one. Add a key with scripts/gen-registry-key.mjs --role root.
+ *
+ * These are PUBLIC keys and belong in the repo. The private halves live on the offline machine and
+ * must never appear here, in CI, or in any build.
  */
 export const TRUSTED_ROOT_KEYS = [
-  // { keyId: "root-2026", publicKey: "<base64 raw ed25519 public key>" },
+  { keyId: "root-2026", publicKey: "Guuz1J7VSj7oHCLLD5bV0QWQW8dw7RoG30wgTOpmmIE=" },
 ];
 
 /** Wrap a raw 32-byte ed25519 public key into something node:crypto will accept. */

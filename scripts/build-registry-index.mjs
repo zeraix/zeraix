@@ -266,9 +266,43 @@ export function nextSequence(root, name, explicit = null) {
 
 /* ------------------------------------------------------------------ cli */
 
-function loadPrivateKey({ keyPath, keyBase64 }) {
-  const pem = keyPath ? fs.readFileSync(keyPath, "utf8") : Buffer.from(keyBase64, "base64").toString("utf8");
+/**
+ * Accepts a PEM path, a raw PEM, or base64 of one. GitHub secrets hold multiline values fine, so
+ * requiring base64 was a step that only ever produced confusing errors.
+ */
+function loadPrivateKey({ keyPath, keyEnv }) {
+  const raw = keyPath ? fs.readFileSync(keyPath, "utf8") : keyEnv;
+  const pem = raw.includes("-----BEGIN") ? raw : Buffer.from(raw, "base64").toString("utf8");
+  if (!pem.includes("-----BEGIN")) {
+    throw new Error("the signing key is neither a PEM nor base64 of one");
+  }
   return crypto.createPrivateKey(pem);
+}
+
+/**
+ * The release key id, read out of the delegation rather than configured separately.
+ *
+ * keys.json already states which keys may sign; a second copy of that in a CI variable is one more
+ * thing to keep in step, and getting it wrong produces feeds signed under a key id nothing
+ * authorizes — valid signature, rejected by every client, no error anywhere until a user notices.
+ */
+export function releaseKeyIdFromDelegation(root) {
+  const file = path.join(root, "keys.json");
+  if (!fs.existsSync(file)) throw new Error("keys.json is missing, so there is no authorized key to sign with");
+
+  let payload;
+  try {
+    payload = JSON.parse(Buffer.from(JSON.parse(fs.readFileSync(file, "utf8")).payload, "base64").toString("utf8"));
+  } catch (e) {
+    throw new Error(`keys.json is unreadable: ${e.message}`);
+  }
+  const ids = (payload.keys ?? []).filter((k) => k?.role === "release").map((k) => k.keyId);
+  if (ids.length === 0) throw new Error("keys.json authorizes no release key");
+  if (ids.length > 1) {
+    // Mid-rotation, both are valid and only the operator knows which CI holds.
+    throw new Error(`keys.json authorizes ${ids.length} release keys (${ids.join(", ")}) — pass --key-id to choose`);
+  }
+  return ids[0];
 }
 
 function arg(name, fallback = null) {
@@ -302,15 +336,16 @@ function main() {
     return;
   }
 
-  const keyId = arg("key-id");
-  const keyBase64 = process.env.REGISTRY_SIGNING_KEY;
+  const keyEnv = process.env.REGISTRY_SIGNING_KEY;
   const keyPath = arg("key");
-  if (!keyId || (!keyPath && !keyBase64)) {
-    console.error("signing needs --key-id and either --key <pem> or REGISTRY_SIGNING_KEY (base64 PEM)");
+  if (!keyPath && !keyEnv) {
+    console.error("signing needs --key <pem> or REGISTRY_SIGNING_KEY (a PEM, or base64 of one)");
     console.error("(use --check to validate without signing, e.g. on pull requests)");
     process.exit(1);
   }
-  const privateKey = loadPrivateKey({ keyPath, keyBase64 });
+  // --key-id only has to be given mid-rotation, when keys.json authorizes more than one.
+  const keyId = arg("key-id") ?? releaseKeyIdFromDelegation(root);
+  const privateKey = loadPrivateKey({ keyPath, keyEnv });
 
   const outDir = path.join(root, "dist");
   fs.mkdirSync(outDir, { recursive: true });

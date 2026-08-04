@@ -2,29 +2,35 @@
 /**
  * Sign the release-key delegation with the OFFLINE root key. See docs/plugin-marketplace-design.md §5.1.
  *
- * This is the only thing the root key ever signs. Run it on the offline machine that holds the root
- * private key; nothing secret needs to leave that machine -- release keys arrive as `.pub` files
- * (public halves only), and what comes back out is a signed `keys.json` that is safe to publish.
+ * This is the only thing the root key ever signs.
  *
- *   # authorize one release key for six months
- *   node scripts/sign-delegation.mjs --root-key ~/keys/root-2026.pem --root-key-id root-2026 \
- *     --key rel-2026-08.pub --months 6 --out keys.json
+ * SELF-CONTAINED ON PURPOSE. It imports nothing from this repo, so the offline machine needs Node
+ * and this one file — not a checkout, not an install. Copy it next to the root key and forget about
+ * it. (The envelope format it writes is pinned to electron/plugins/signature.mjs by a test, so the
+ * two cannot drift silently.)
  *
- *   # rotate: authorize the new key alongside the old one, so publishing never has a gap
- *   node scripts/sign-delegation.mjs ... --key rel-2026-08.pub --key rel-2027-02.pub --months 6 --out keys.json
+ *   # authorize a release key
+ *   node sign-delegation.mjs --root-key root-2026.pem --root-key-id root-2026 \
+ *     --key rel-2026-08.pub --out keys.json
+ *
+ *   # rotate: authorize the new key alongside the old, so publishing never has a gap
+ *   node sign-delegation.mjs ... --key rel-2026-08.pub --key rel-2027-02.pub --out keys.json
  *
  *   # revoke: re-issue WITHOUT the compromised key. Clients refuse a lower sequence, so the old
  *   # delegation cannot be replayed to hand it back.
- *   node scripts/sign-delegation.mjs ... --key rel-2027-02.pub --sequence 4 --out keys.json
+ *   node sign-delegation.mjs ... --key rel-2027-02.pub --out keys.json
  *
- * The sequence must increase on every issuance. It is read from the previous keys.json when --out
- * already exists; pass --sequence to set it explicitly (it is refused if it would go backwards).
+ * Keys do not expire by default. Revocation is the mechanism: if a key leaks, issue a delegation
+ * without it and every install that fetches one stops accepting its signatures. An expiry window
+ * would add a backstop against a leak nobody ever notices, at the cost of a recurring offline
+ * ceremony that takes the whole marketplace down if it is ever missed — a worse expected outcome for
+ * a small team. Pass --months N if you want one anyway.
  */
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 
-import { signEnvelope } from "../electron/plugins/signature.mjs";
+const SIGNATURE_ALG = "ed25519";
 
 function arg(name, fallback = null) {
   const i = process.argv.indexOf(`--${name}`);
@@ -39,21 +45,33 @@ function args(name) {
   return out;
 }
 
+/**
+ * Build a signed envelope. Mirrors signEnvelope() in electron/plugins/signature.mjs, inlined so this
+ * script stands alone; test/plugin-sign-delegation.test.mjs verifies the output still verifies under
+ * the real client code.
+ */
+function signEnvelope(payload, { keyId, privateKey }) {
+  const message = Buffer.from(JSON.stringify(payload), "utf8");
+  return {
+    payload: message.toString("base64"),
+    signatures: [{ keyId, alg: SIGNATURE_ALG, sig: crypto.sign(null, message, privateKey).toString("base64") }],
+  };
+}
+
 const rootKeyPath = arg("root-key");
 const rootKeyId = arg("root-key-id");
 const keyFiles = args("key");
 const outPath = path.resolve(arg("out", "keys.json"));
-const months = Number(arg("months", "6"));
+const months = arg("months") === null ? null : Number(arg("months"));
 
 if (!rootKeyPath || !rootKeyId || keyFiles.length === 0) {
-  console.error("usage: node scripts/sign-delegation.mjs --root-key <pem> --root-key-id <id> \\");
-  console.error("         --key <release.pub> [--key <another.pub>] [--months 6] [--sequence N] [--out keys.json]");
+  console.error("usage: node sign-delegation.mjs --root-key <pem> --root-key-id <id> \\");
+  console.error("         --key <release.pub> [--key <another.pub>] [--months N] [--sequence N] [--out keys.json]");
+  console.error("\nKeys do not expire unless --months is given; use a new delegation to revoke one.");
   process.exit(1);
 }
-if (!Number.isFinite(months) || months <= 0 || months > 24) {
-  // An unbounded delegation defeats the point: a stolen release key would be good forever. Two
-  // years is already generous for something an offline ceremony has to renew.
-  console.error("--months must be between 1 and 24");
+if (months !== null && (!Number.isFinite(months) || months <= 0 || months > 120)) {
+  console.error("--months must be between 1 and 120");
   process.exit(1);
 }
 
@@ -89,8 +107,11 @@ function nextSequence() {
 try {
   const privateKey = crypto.createPrivateKey(fs.readFileSync(rootKeyPath, "utf8"));
   const now = new Date();
-  const notAfter = new Date(now);
-  notAfter.setMonth(notAfter.getMonth() + months);
+  let notAfter = null;
+  if (months !== null) {
+    notAfter = new Date(now);
+    notAfter.setMonth(notAfter.getMonth() + months);
+  }
 
   const payload = {
     type: "keys",
@@ -100,17 +121,21 @@ try {
       ...k,
       role: "release",
       notBefore: now.toISOString(),
-      notAfter: notAfter.toISOString(),
+      // null, not absent: the client reads null as "no limit" and an unparseable value as an error,
+      // so being explicit costs nothing and documents the intent in the published file.
+      notAfter: notAfter === null ? null : notAfter.toISOString(),
     })),
   };
 
   fs.writeFileSync(outPath, `${JSON.stringify(signEnvelope(payload, { keyId: rootKeyId, privateKey }), null, 2)}\n`);
 
   console.log(`wrote ${outPath} (sequence ${payload.sequence}), signed by ${rootKeyId}`);
-  console.log(`authorizes until ${notAfter.toISOString()}:`);
+  console.log(notAfter === null ? "authorizes (no expiry):" : `authorizes until ${notAfter.toISOString()}:`);
   for (const k of payload.keys) console.log(`  ${k.keyId}`);
-  console.log("\nPublish this next to index.json. Re-issue before the expiry above, or clients will");
-  console.log("stop accepting anything the registry signs.");
+  console.log("\nCommit this to the registry repo. To revoke a key later, re-run without it.");
+  if (notAfter !== null) {
+    console.log("Re-issue before the expiry above, or clients will stop accepting anything the registry signs.");
+  }
 } catch (e) {
   console.error(`error: ${e.message}`);
   process.exit(1);
