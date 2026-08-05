@@ -40,7 +40,7 @@ export function registerPlugins() {
   ipcMain.handle("plugins:installed", () => listInstalled());
   ipcMain.handle("plugins:active", () => activeCapabilities());
 
-  /** The catalogue as of the last verified feed -- no network, so opening the page is instant. */
+  /** The catalogue as of the last accepted feed -- no network, so opening the page is instant. */
   ipcMain.handle("plugins:catalogue", () => {
     const { entries, dropped } = cachedCatalogue();
     return { entries: entries.map(summarize), dropped };
@@ -55,9 +55,9 @@ export function registerPlugins() {
 
   ipcMain.handle("plugins:install", async (_e, id) => {
     const entry = cachedCatalogue().entries.find((x) => x.manifest.id === id);
-    // Only ever install from the verified catalogue: taking a manifest from the renderer would let
-    // it choose its own hashes, which is the same as having none.
-    if (!entry) return { ok: false, error: `${id} is not in the verified catalogue` };
+    // Only ever install from the main process's own catalogue: taking a manifest from the renderer
+    // would let it choose its own hashes, which is the same as having none.
+    if (!entry) return { ok: false, error: `${id} is not in the registry catalogue` };
 
     const r = await installPlugin(entry, { fetchFile: fetchPluginFile });
     if (r.ok) broadcast();

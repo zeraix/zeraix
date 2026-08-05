@@ -4,8 +4,8 @@
  *
  * The round trip is the point of this file: a registry source tree goes in, and a plugin comes out
  * installed and active on the client side, having passed every gate on the way -- strict validation,
- * signing, signature verification, rollback refusal, hash verification. Each piece is unit-tested
- * elsewhere; nothing but an end-to-end run proves they agree on the same format.
+ * feed acceptance, rollback refusal, hash verification. Each piece is unit-tested elsewhere; nothing
+ * but an end-to-end run proves the builder and the client agree on the same format.
  */
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -21,24 +21,12 @@ import {
   nextSequence,
   resolveArtifacts,
 } from "../scripts/build-registry-index.mjs";
-import { signEnvelope } from "../electron/plugins/signature.mjs";
 import { openFeed, parseIndex, parseKillList } from "../electron/plugins/feed.mjs";
 import { setPluginRoot } from "../electron/plugins/storage.mjs";
 import { activeCapabilities, applyKillList, getInstalled, installPlugin, resetCache } from "../electron/plugins/store.mjs";
 
 const BASE_URL = "https://cdn.example.com/plugins";
 const SKILL = "# Postgres\n\nBe careful with DELETE.\n";
-
-function makeKey(keyId) {
-  const { publicKey, privateKey } = crypto.generateKeyPairSync("ed25519");
-  return {
-    keyId,
-    privateKey,
-    trusted: { keyId, publicKey: publicKey.export({ format: "der", type: "spki" }).subarray(-32).toString("base64") },
-  };
-}
-const KEY = makeKey("reg-test");
-const KEYS = [KEY.trusted];
 
 /** A registry repo on disk: plugins/<publisher>/<name>/<version>/{plugin.json,files/}. */
 function registry({ manifest = {}, files = { "skill.md": SKILL }, publisher = "alice", name = "postgres", version = "1.2.3" } = {}) {
@@ -166,6 +154,24 @@ test("two versions of one plugin in the index is an error", () => {
   assert.match(r.problems.join("\n"), /published twice/);
 });
 
+test("a submission may not claim a reserved publisher unless the build allows it", () => {
+  // RESERVED_PUBLISHERS means "official", and the consent sheet presents it that way. The constant
+  // existed with nothing reading it, so a pull request adding plugins/zeraix/* published as ours —
+  // which, with feeds no longer signed, human review was the only thing standing in front of.
+  const root = registry({ publisher: "zeraix", name: "office-suite", manifest: { id: "zeraix/office-suite" } });
+
+  const submitted = build(root);
+  assert.equal(submitted.payload, null);
+  assert.match(submitted.problems.join("\n"), /"zeraix" is a reserved publisher/);
+
+  const official = build(root, { allowReserved: true });
+  assert.deepEqual(official.problems, []);
+  assert.equal(official.payload.plugins[0].manifest.publisher, "zeraix");
+
+  // An ordinary publisher is unaffected in either mode.
+  assert.deepEqual(build(registry()).problems, []);
+});
+
 test("a plaintext base url is refused before anything is read", () => {
   const r = build(registry(), { baseUrl: "http://cdn.example.com" });
   assert.equal(r.payload, null);
@@ -186,7 +192,7 @@ test("nextSequence increments from the last published feed", () => {
   fs.mkdirSync(path.join(root, "dist"), { recursive: true });
   fs.writeFileSync(
     path.join(root, "dist", "index.json"),
-    JSON.stringify(signEnvelope({ type: "index", sequence: 12, issuedAt: "x", plugins: [] }, KEY)),
+    JSON.stringify({ type: "index", sequence: 12, issuedAt: "x", plugins: [] }),
   );
   assert.equal(nextSequence(root, "index"), 13);
   assert.equal(nextSequence(root, "index", 20), 20);
@@ -194,6 +200,15 @@ test("nextSequence increments from the last published feed", () => {
   // past where it was — a self-inflicted outage with no client-side fix.
   assert.throws(() => nextSequence(root, "index", 5), /would roll back index from 12/);
   assert.throws(() => nextSequence(root, "index", 12), /would roll back/);
+});
+
+test("with no previous build there is nothing to count from, so CI must supply the sequence", () => {
+  // dist/ is gitignored, so this is the state of EVERY CI run: derived numbering would hand out 1
+  // forever and the client's rollback check would never fire. The explicit value is what advances.
+  const root = registry();
+  assert.equal(nextSequence(root, "index"), 1);
+  assert.equal(nextSequence(root, "index"), 1, "still 1 — nothing was written in between");
+  assert.equal(nextSequence(root, "index", 274), 274);
 });
 
 /* ------------------------------------------------------------------ kill-list */
@@ -215,19 +230,18 @@ test("buildKillList passes entries through, and an absent file means none", () =
 
 /* ------------------------------------------------------------------ round trip */
 
-test("round trip: registry source tree -> signed feed -> verified -> installed -> revoked", async () => {
+test("round trip: registry source tree -> feed -> accepted -> installed -> revoked", async () => {
   const root = registry();
   const clientRoot = fs.mkdtempSync(path.join(os.tmpdir(), "zeraix-client-"));
   resetCache();
   setPluginRoot(clientRoot);
 
-  // 1. Registry CI builds and signs.
+  // 1. Registry CI builds. What it writes is what the mirror serves, byte for byte.
   const built = build(root);
   assert.deepEqual(built.problems, []);
-  const envelope = signEnvelope(built.payload, KEY);
 
-  // 2. The client verifies the envelope and opens the feed.
-  const opened = openFeed(envelope, { type: "index", cachedSequence: -1, keys: KEYS });
+  // 2. The client accepts the feed: right type, not a rollback.
+  const opened = openFeed(built.payload, { type: "index", cachedSequence: -1 });
   assert.equal(opened.ok, true, opened.error);
 
   // 3. Parsing yields a catalogue entry whose manifest survived a second, independent validation.
@@ -253,8 +267,8 @@ test("round trip: registry source tree -> signed feed -> verified -> installed -
     path.join(root, "killlist.json"),
     JSON.stringify({ entries: [{ id: "alice/postgres", version: "*", reason: "exfiltrates credentials" }] }),
   );
-  const killEnvelope = signEnvelope(buildKillList(root, { sequence: 1, issuedAt: "x" }).payload, KEY);
-  const killOpened = openFeed(killEnvelope, { type: "killlist", cachedSequence: -1, keys: KEYS });
+  const killFeed = buildKillList(root, { sequence: 1, issuedAt: "x" }).payload;
+  const killOpened = openFeed(killFeed, { type: "killlist", cachedSequence: -1 });
   assert.equal(killOpened.ok, true, killOpened.error);
 
   applyKillList(parseKillList(killOpened.payload).entries);
@@ -262,12 +276,31 @@ test("round trip: registry source tree -> signed feed -> verified -> installed -
   assert.equal(getInstalled("alice/postgres").revoked.reason, "exfiltrates credentials");
 });
 
-test("round trip: a feed signed by an unauthorized key installs nothing", async () => {
+test("round trip: replaying the pre-revocation kill-list does not un-revoke", async () => {
+  // The one attack the client can still refuse on its own now that feeds are unsigned: a cache or
+  // proxy serving the last kill-list from before a plugin was pulled. The bytes are genuine; only
+  // the sequence says they are stale.
   const root = registry();
-  const built = build(root);
-  const envelope = signEnvelope(built.payload, makeKey("attacker"));
+  const clientRoot = fs.mkdtempSync(path.join(os.tmpdir(), "zeraix-client-"));
+  resetCache();
+  setPluginRoot(clientRoot);
 
-  const opened = openFeed(envelope, { type: "index", keys: KEYS });
-  assert.equal(opened.ok, false);
-  assert.match(opened.error, /not authorized for this document/);
+  const built = build(root);
+  const entries = parseIndex(built.payload).entries;
+  await installPlugin(entries[0], { fetchFile: async () => Buffer.from(SKILL, "utf8") });
+
+  fs.writeFileSync(
+    path.join(root, "killlist.json"),
+    JSON.stringify({ entries: [{ id: "alice/postgres", version: "*", reason: "exfiltrates credentials" }] }),
+  );
+  const current = buildKillList(root, { sequence: 8, issuedAt: "x" }).payload;
+  applyKillList(parseKillList(openFeed(current, { type: "killlist", cachedSequence: -1 }).payload).entries);
+  assert.deepEqual(activeCapabilities(), []);
+
+  // Now the stale one comes back. Refused before it can reach applyKillList.
+  const stale = { type: "killlist", sequence: 7, issuedAt: "x", entries: [] };
+  const replayed = openFeed(stale, { type: "killlist", cachedSequence: 8 });
+  assert.equal(replayed.ok, false);
+  assert.match(replayed.error, /rollback refused/);
+  assert.deepEqual(activeCapabilities(), [], "the revocation still stands");
 });

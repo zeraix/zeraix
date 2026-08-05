@@ -1,40 +1,41 @@
 #!/usr/bin/env node
 /**
- * Build (and sign) the registry feeds. See docs/plugin-marketplace-design.md §5.1, §5.4.
+ * Build the registry feeds. See docs/plugin-marketplace-design.md §5.1, §5.4.
  *
  * Runs in the `zeraix/registry` repo's CI: it walks the submitted manifests, hashes their artifacts,
- * validates every one in STRICT mode, and emits the two signed envelopes the app fetches.
+ * validates every one in STRICT mode, and emits the two JSON documents the app fetches. There is no
+ * signing step and no key of any kind -- the repo's review history is the provenance, and the
+ * mirror serves the result over https (§5.1).
  *
  * Expected layout of the registry repo:
  *
  *   plugins/<publisher>/<name>/<version>/plugin.json   manifest source (sha512 may be omitted)
  *   plugins/<publisher>/<name>/<version>/files/…       the artifacts themselves
  *   killlist.json                                      { "entries": [ … ] }, hand-maintained
- *   dist/index.json, dist/killlist.json                output (signed envelopes)
+ *   dist/index.json, dist/killlist.json                output
  *
  * Publishers do not hand-compute digests. They ship files; this computes `sha512` from the bytes and
  * injects it before validating -- a hand-written base64 sha512 is a transcription error waiting to
  * break an install for everyone, and the whole point of content addressing is that the tooling owns it.
  *
  *   node scripts/build-registry-index.mjs --root . --check
- *       Validate only. No key needed, so it runs on pull requests from forks -- which is where a bad
+ *       Validate only, write nothing. Runs on pull requests from forks -- which is where a bad
  *       manifest is supposed to be caught (§5.4).
  *
- *   node scripts/build-registry-index.mjs --root . --base-url https://cdn.example.com/plugins \
- *       --key-id rel-2026-08 --key ~/.zeraix-registry-keys/rel-2026-08.pem
- *       Build and sign with the RELEASE key. In CI pass it as base64 PEM in REGISTRY_SIGNING_KEY.
+ *   node scripts/build-registry-index.mjs --root . --base-url https://cdn.example.com/plugins
+ *       Build dist/index.json and dist/killlist.json.
  *
- * The root key never comes near this script or the machine it runs on. What authorizes the release
- * key used here is dist/keys.json, produced offline by scripts/sign-delegation.mjs and published
- * alongside the output -- without it, clients reject everything built here.
+ *   --allow-reserved
+ *       Permit plugins under a reserved publisher (manifest.mjs RESERVED_PUBLISHERS -- "zeraix" and
+ *       friends). Off by default, so a submission cannot claim to be official. The publish workflow
+ *       sets it; a fork's pull request cannot.
  */
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { validateManifest } from "../electron/plugins/manifest.mjs";
-import { signEnvelope } from "../electron/plugins/signature.mjs";
+import { validateManifest, RESERVED_PUBLISHERS } from "../electron/plugins/manifest.mjs";
 
 const sha512 = (buf) => crypto.createHash("sha512").update(buf).digest("base64");
 
@@ -151,7 +152,7 @@ function unreferencedFiles(filesDir, referenced) {
  *
  * @returns {{payload: object|null, problems: string[], warnings: string[]}}
  */
-export function buildIndex(root, { baseUrl, sequence, issuedAt }) {
+export function buildIndex(root, { baseUrl, sequence, issuedAt, allowReserved = false }) {
   const problems = [];
   const warnings = [];
   const plugins = [];
@@ -163,6 +164,23 @@ export function buildIndex(root, { baseUrl, sequence, issuedAt }) {
 
   for (const entry of collectPluginDirs(root)) {
     const at = `plugins/${entry.publisher}/${entry.name}/${entry.version}`;
+
+    // Reserved namespaces (manifest.mjs RESERVED_PUBLISHERS) mean "official", and the consent sheet
+    // says so. Nothing enforced that until this check: the constant was exported and never read,
+    // its comment claimed registry CI checked ownership, and CI did not -- so a pull request adding
+    // plugins/zeraix/<anything> validated and published as ours. That mattered more once feeds
+    // stopped being signed (design doc §5.1), because human review became the only gate and this is
+    // exactly the submission a reviewer skims past.
+    //
+    // Only builds that are ALLOWED to speak for us pass --allow-reserved: the publish workflow, and
+    // pull requests raised from the registry repo itself. A fork cannot set it.
+    if (!allowReserved && RESERVED_PUBLISHERS.includes(entry.publisher)) {
+      problems.push(
+        `${at}: "${entry.publisher}" is a reserved publisher — a submission may not claim it. ` +
+          `(Maintainers publishing an official plugin: pass --allow-reserved.)`,
+      );
+      continue;
+    }
     let source;
     try {
       source = JSON.parse(fs.readFileSync(path.join(entry.dir, "plugin.json"), "utf8"));
@@ -250,8 +268,7 @@ export function nextSequence(root, name, explicit = null) {
   let last = 0;
   if (fs.existsSync(previous)) {
     try {
-      const envelope = JSON.parse(fs.readFileSync(previous, "utf8"));
-      const payload = JSON.parse(Buffer.from(envelope.payload, "base64").toString("utf8"));
+      const payload = JSON.parse(fs.readFileSync(previous, "utf8"));
       if (Number.isInteger(payload.sequence)) last = payload.sequence;
     } catch {
       /* unreadable previous output: fall through to last = 0 */
@@ -266,45 +283,6 @@ export function nextSequence(root, name, explicit = null) {
 
 /* ------------------------------------------------------------------ cli */
 
-/**
- * Accepts a PEM path, a raw PEM, or base64 of one. GitHub secrets hold multiline values fine, so
- * requiring base64 was a step that only ever produced confusing errors.
- */
-function loadPrivateKey({ keyPath, keyEnv }) {
-  const raw = keyPath ? fs.readFileSync(keyPath, "utf8") : keyEnv;
-  const pem = raw.includes("-----BEGIN") ? raw : Buffer.from(raw, "base64").toString("utf8");
-  if (!pem.includes("-----BEGIN")) {
-    throw new Error("the signing key is neither a PEM nor base64 of one");
-  }
-  return crypto.createPrivateKey(pem);
-}
-
-/**
- * The release key id, read out of the delegation rather than configured separately.
- *
- * keys.json already states which keys may sign; a second copy of that in a CI variable is one more
- * thing to keep in step, and getting it wrong produces feeds signed under a key id nothing
- * authorizes — valid signature, rejected by every client, no error anywhere until a user notices.
- */
-export function releaseKeyIdFromDelegation(root) {
-  const file = path.join(root, "keys.json");
-  if (!fs.existsSync(file)) throw new Error("keys.json is missing, so there is no authorized key to sign with");
-
-  let payload;
-  try {
-    payload = JSON.parse(Buffer.from(JSON.parse(fs.readFileSync(file, "utf8")).payload, "base64").toString("utf8"));
-  } catch (e) {
-    throw new Error(`keys.json is unreadable: ${e.message}`);
-  }
-  const ids = (payload.keys ?? []).filter((k) => k?.role === "release").map((k) => k.keyId);
-  if (ids.length === 0) throw new Error("keys.json authorizes no release key");
-  if (ids.length > 1) {
-    // Mid-rotation, both are valid and only the operator knows which CI holds.
-    throw new Error(`keys.json authorizes ${ids.length} release keys (${ids.join(", ")}) — pass --key-id to choose`);
-  }
-  return ids[0];
-}
-
 function arg(name, fallback = null) {
   const i = process.argv.indexOf(`--${name}`);
   return i !== -1 && process.argv[i + 1] ? process.argv[i + 1] : fallback;
@@ -316,10 +294,26 @@ function main() {
   const check = flag("check");
   const issuedAt = new Date().toISOString();
 
-  const indexSeq = check ? 0 : nextSequence(root, "index", arg("sequence") ? Number(arg("sequence")) : null);
-  const killSeq = check ? 0 : nextSequence(root, "killlist");
+  // `dist/` is gitignored, so in CI there is never a previous build to count from and nextSequence
+  // would hand out 1 on every publish — a sequence that never advances is a rollback check that
+  // never fires. CI passes --sequence from a counter that does survive a fresh checkout
+  // (github.run_number); nextSequence still refuses a value that would go backwards, which is what
+  // catches a counter that was reset or a hand-typed mistake. Both feeds take the same number:
+  // sequences only have to be monotonic per feed, and one publish is one number.
+  const explicit = arg("sequence") ? Number(arg("sequence")) : null;
+  if (explicit !== null && !Number.isInteger(explicit)) {
+    console.error(`--sequence must be an integer, got "${arg("sequence")}"`);
+    process.exit(1);
+  }
+  const indexSeq = check ? 0 : nextSequence(root, "index", explicit);
+  const killSeq = check ? 0 : nextSequence(root, "killlist", explicit);
 
-  const index = buildIndex(root, { baseUrl: arg("base-url", "https://example.invalid"), sequence: indexSeq, issuedAt });
+  const index = buildIndex(root, {
+    baseUrl: arg("base-url", "https://example.invalid"),
+    sequence: indexSeq,
+    issuedAt,
+    allowReserved: flag("allow-reserved"),
+  });
   const kill = buildKillList(root, { sequence: killSeq, issuedAt });
 
   for (const w of index.warnings) console.warn(`warning: ${w}`);
@@ -336,36 +330,13 @@ function main() {
     return;
   }
 
-  const keyEnv = process.env.REGISTRY_SIGNING_KEY;
-  const keyPath = arg("key");
-  if (!keyPath && !keyEnv) {
-    console.error("signing needs --key <pem> or REGISTRY_SIGNING_KEY (a PEM, or base64 of one)");
-    console.error("(use --check to validate without signing, e.g. on pull requests)");
-    process.exit(1);
-  }
-  // --key-id only has to be given mid-rotation, when keys.json authorizes more than one.
-  const keyId = arg("key-id") ?? releaseKeyIdFromDelegation(root);
-  const privateKey = loadPrivateKey({ keyPath, keyEnv });
-
   const outDir = path.join(root, "dist");
   fs.mkdirSync(outDir, { recursive: true });
   for (const [name, payload] of [["index", index.payload], ["killlist", kill.payload]]) {
-    fs.writeFileSync(path.join(outDir, `${name}.json`), `${JSON.stringify(signEnvelope(payload, { keyId, privateKey }), null, 2)}\n`);
+    fs.writeFileSync(path.join(outDir, `${name}.json`), `${JSON.stringify(payload, null, 2)}\n`);
   }
 
-  console.log(`wrote dist/index.json (seq ${indexSeq}, ${count} plugin(s)) and dist/killlist.json (seq ${killSeq}), signed by ${keyId}`);
-
-  // The delegation is the only reason a client will accept the signatures just written. It is
-  // produced offline and committed to the registry repo; publishing without it is a silent no-op
-  // for every install.
-  const delegation = path.join(root, "keys.json");
-  if (fs.existsSync(delegation)) {
-    fs.copyFileSync(delegation, path.join(outDir, "keys.json"));
-    console.log("copied keys.json (root-signed release-key delegation) into dist/");
-  } else {
-    console.warn("warning: no keys.json at the registry root — clients will reject these feeds.");
-    console.warn("         Produce one offline: node scripts/sign-delegation.mjs --root-key … --key <release>.pub");
-  }
+  console.log(`wrote dist/index.json (seq ${indexSeq}, ${count} plugin(s)) and dist/killlist.json (seq ${killSeq})`);
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) main();

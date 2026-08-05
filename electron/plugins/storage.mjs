@@ -8,7 +8,7 @@
  *
  * Layout under the root:
  *   installed.json                       the lockfile -- what is installed, enabled, revoked
- *   feeds/index.json, feeds/killlist.json  last verified feeds, so an outage is not an outage
+ *   feeds/index.json, feeds/killlist.json  last accepted feeds, so an outage is not an outage
  *   files/<publisher>/<name>/<version>/  content-addressed plugin files, one dir per version
  */
 import fs from "node:fs";

@@ -1,19 +1,21 @@
 /**
  * Registry feeds: the index and the kill-list. See docs/plugin-marketplace-design.md §5.1, §5.3.
  *
- * Both are signed envelopes (signature.mjs) wrapping a payload that carries a monotonic `sequence`.
- * The sequence is not decoration -- it is rollback protection, and it is the reason the kill-list
- * works at all. A signature proves a document is genuine; it says nothing about whether it is
- * *current*. Without a sequence check, anyone able to serve stale bytes -- a cache, a proxy, a
- * hostile network -- can replay yesterday's kill-list and silently un-revoke a plugin we pulled.
+ * Both are plain JSON documents carrying a monotonic `sequence`. There is no signature: the registry
+ * is a public git repo (github.com/zeraix/registry), CI builds these two files from it, and the
+ * bytes are served over https from an origin we control. Authenticity rests on that transport and on
+ * the repo's review history, not on a key -- see §5.1 for what that does and does not bound.
+ *
+ * The sequence survives the signing removal because it protects against something transport security
+ * does not: STALENESS. TLS proves who served the bytes, never that they are current, so any cache or
+ * proxy in the path can replay yesterday's kill-list and silently un-revoke a plugin we pulled.
  * Refusing any feed whose sequence is below the one already stored closes that, and it has to exist
  * from the first release because a client that does not check cannot be taught to later.
  *
- * The index embeds full manifests rather than links to them, so one fetch is one signature is one
- * verified view of the catalogue -- there is no window where the list and its entries disagree.
+ * The index embeds full manifests rather than links to them, so one fetch is one coherent view of
+ * the catalogue -- there is no window where the list and its entries disagree.
  */
 import { validateManifest } from "./manifest.mjs";
-import { verifyEnvelope } from "./signature.mjs";
 
 export const FEED_TYPES = ["index", "killlist"];
 
@@ -23,21 +25,21 @@ const isNonEmptyString = (v) => typeof v === "string" && v.trim().length > 0;
 const isVersionSpec = (v) => v === "*" || isNonEmptyString(v);
 
 /**
- * Verify an envelope, check it is the feed we asked for, and reject a rollback.
+ * Check a fetched document is the feed we asked for, and reject a rollback.
  *
- * @param {any} envelope
- * @param {{ type: string, cachedSequence?: number, keys: any[] }} options `keys` are the RELEASE
- *   keys the current delegation authorizes (keyring.mjs). A root key is never among them: the trust
- *   anchor signs the delegation and nothing else.
- * @returns {{ ok: boolean, payload: any, keyId: string|null, error: string|null }}
+ * Still called `openFeed` although there is nothing to open any more: it remains the ONE place a
+ * feed becomes trusted enough to act on, and every caller goes through it. Collapsing it into the
+ * fetch would put the type and sequence checks on the caller, which is how one of the two callers
+ * eventually skips them.
+ *
+ * @param {any} payload the parsed feed document
+ * @param {{ type: string, cachedSequence?: number }} options
+ * @returns {{ ok: boolean, payload: any, error: string|null }}
  */
-export function openFeed(envelope, { type, cachedSequence = -1, keys } = {}) {
-  const fail = (error) => ({ ok: false, payload: null, keyId: null, error });
+export function openFeed(payload, { type, cachedSequence = -1 } = {}) {
+  const fail = (error) => ({ ok: false, payload: null, error });
 
-  const verified = verifyEnvelope(envelope, { keys });
-  if (!verified.ok) return fail(verified.error);
-
-  const p = verified.payload;
+  const p = payload;
   if (!isPlainObject(p)) return fail("payload must be an object");
   if (p.type !== type) {
     // A kill-list served where the index was expected would otherwise parse as an empty catalogue,
@@ -50,11 +52,11 @@ export function openFeed(envelope, { type, cachedSequence = -1, keys } = {}) {
     return fail(`rollback refused: feed sequence ${p.sequence} is older than the stored ${cachedSequence}`);
   }
 
-  return { ok: true, payload: p, keyId: verified.keyId, error: null };
+  return { ok: true, payload: p, error: null };
 }
 
 /**
- * Parse a verified index payload into catalogue entries.
+ * Parse an accepted index payload into catalogue entries.
  *
  * Entry-level problems never sink the whole feed: one publisher's bad manifest must not empty the
  * marketplace for everyone. Bad entries are dropped and reported, matching the client-mode posture
@@ -111,7 +113,7 @@ function parseDist(dist) {
 }
 
 /**
- * Parse a verified kill-list payload.
+ * Parse an accepted kill-list payload.
  *
  * Malformed entries are FATAL here, unlike the index. A kill-list is a safety mechanism: silently
  * dropping an entry we failed to parse means failing to revoke something, which is the exact

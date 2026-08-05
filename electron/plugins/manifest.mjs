@@ -79,7 +79,7 @@ export const HIGH_BAR_CAPABILITY_TYPES = ["ui", "model"];
 export const PROVIDER_KINDS = ["builtin", "mcp-stdio", "mcp-http", "http", "process", "text"];
 export const IMPLEMENTED_PROVIDER_KINDS = ["text"];
 
-/** Trust tiers (design doc §4.1). Declared per provider, covered by the registry signature. */
+/** Trust tiers (design doc §4.1). Declared per provider in the reviewed manifest, enforced here. */
 export const TIERS = ["text", "sandboxed", "host"];
 
 /** Provider kinds that execute nothing. A `text` tier is only honest for these. */
@@ -542,7 +542,31 @@ function resolveBinding(at, c, providers, { strict, err, drop }) {
   const hasProvider = has(c, "provider");
   const hasBind = has(c, "bind");
 
-  const ways = [hasContent, hasProvider, hasBind].filter(Boolean).length;
+  /**
+   * A `bind` capability normalizes to BOTH `bind` (the resolved candidates) and `provider` (the
+   * effective first one), so our own output re-enters this function with two of the three set.
+   *
+   * That is not an author declaring two ways. It is the normalized manifest coming back for the
+   * re-validation parseIndex performs on every index entry, and counting it as ambiguity made
+   * validate(normalize(x)) fail for every `bind` capability ever written -- see the note on `has`,
+   * which is precisely the property this broke. The registry published such a plugin happily and
+   * every client then dropped the entry, so the plugin vanished from the catalogue with the reason
+   * recorded somewhere nobody reads.
+   *
+   * Accepted only when the two AGREE. A hand-written manifest that sets `provider` to something
+   * other than its first bind candidate is still the genuine ambiguity this check exists to catch.
+   */
+  const isNormalizedBind =
+    hasBind && hasProvider && Array.isArray(c.bind) && c.bind[0]?.provider === c.provider;
+  /**
+   * When both are present and agree, `bind` is the real declaration and `provider` is the summary
+   * of it. This flag has to gate the DISPATCH below as well as the count: resolving such a
+   * capability down the single-provider branch would return `bind: null` and a one-entry
+   * `providers`, quietly deleting every fallback candidate on the client's re-validation pass.
+   */
+  const useProvider = hasProvider && !isNormalizedBind;
+
+  const ways = [hasContent, useProvider, hasBind].filter(Boolean).length;
   if (ways === 0) {
     err(`${at}: must declare one of path+sha512, provider, or bind`);
     return null;
@@ -568,7 +592,7 @@ function resolveBinding(at, c, providers, { strict, err, drop }) {
     return { provider: null, bind: null, providers: [] };
   }
 
-  if (hasProvider) {
+  if (useProvider) {
     if (!isNonEmptyString(c.provider)) {
       err(`${at}.provider must be a non-empty string`);
       return null;

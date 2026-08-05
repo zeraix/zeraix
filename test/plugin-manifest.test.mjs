@@ -421,6 +421,23 @@ test("bind is accepted and reduced to its first available candidate", () => {
   assert.equal(cap.provider, "socket");
   assert.equal(cap.bind.length, 2);
   assert.deepEqual(cap.providers, ["socket", "cli"]);
+
+  // validate(normalize(x)) must hold, or the registry publishes an entry every client then drops.
+  // Normalizing a `bind` capability emits BOTH `bind` and `provider`, which the "exactly one of"
+  // check used to count as two declarations -- so no plugin using bind could ever reach a user,
+  // and the only trace was a `dropped` reason in parseIndex that nothing surfaces.
+  const again = validateManifest(r.manifest, { mode: "client" });
+  assert.equal(again.ok, true, `re-validating normalized output failed: ${again.errors.join("; ")}`);
+  assert.deepEqual(again.manifest.capabilities[0].providers, ["socket", "cli"]);
+
+  // The ambiguity the check exists for still fails: a provider that is NOT the first bind candidate.
+  const disagreeing = structuredClone(r.manifest);
+  disagreeing.capabilities[0].provider = "cli";
+  assert.match(
+    validateManifest(disagreeing).errors.join("\n"),
+    /declare exactly one of/,
+    "a provider disagreeing with bind[0] is an author error, not our normalized shape",
+  );
 });
 
 test("bind referencing a missing provider: narrows in client mode, fatal in registry mode", () => {

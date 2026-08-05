@@ -1,9 +1,9 @@
 /**
  * Renderer bridge to the plugin marketplace (main-process side: electron/ipc/pluginsIpc.mjs).
  *
- * The renderer drives intent only. Signature verification, rollback refusal, hash checking and
- * revocation all happen on the far side of this boundary, so nothing here can be tricked into
- * installing unverified bytes -- the worst it can do is ask.
+ * The renderer drives intent only. Rollback refusal, hash checking and revocation all happen on the
+ * far side of this boundary, so nothing here can be tricked into installing unverified bytes -- the
+ * worst it can do is ask.
  *
  * Availability: Electron only. In `next dev` or a browser there is no window.plugins, and every
  * surface must degrade to "not supported here" rather than erroring, the same way the MCP and
@@ -24,9 +24,9 @@ export function isPluginsAvailable(): boolean {
  * Point the main process at the registry.
  *
  * The origin comes from here because NEXT_PUBLIC_API_BASE_URL is baked into the renderer bundle at
- * build time -- the same arrangement the LLM proxy uses for its endpoint. It is safe because the
- * signature, not the origin, is the trust anchor: a wrong origin can deny service, never forge a
- * feed. Idempotent, so calling it from a component that remounts costs nothing.
+ * build time -- the same arrangement the LLM proxy uses for its endpoint. It is the mirror of the
+ * registry repo, and since the feeds carry no signature it is also what the catalogue is trusted
+ * against. Idempotent, so calling it from a component that remounts costs nothing.
  */
 export async function configurePlugins(): Promise<boolean> {
   const bridge = pluginBridge();

@@ -1,32 +1,19 @@
 /**
- * Registry feed tests: signed envelopes, rollback refusal, index and kill-list parsing.
+ * Registry feed tests: feed-type and rollback refusal, index and kill-list parsing.
  * See docs/plugin-marketplace-design.md §5.1, §5.3.
  *
- * The properties that matter here are the ones a signature alone does not give you:
- *   - a valid signature over the WRONG feed type must not be accepted
- *   - a valid signature over an OLD document must not be accepted (kill-list rollback)
+ * The feeds carry no signature (§5.1), which makes the checks that remain the whole of the client's
+ * defence rather than a second layer behind one:
+ *   - a document of the WRONG feed type must not be accepted as an empty catalogue
+ *   - an OLD document must not be accepted (kill-list rollback)
  *   - a bad entry in the index costs that entry; a bad entry in the kill-list costs the document
  */
 import test from "node:test";
 import assert from "node:assert/strict";
-import crypto from "node:crypto";
 
-import { signEnvelope, verifyEnvelope } from "../electron/plugins/signature.mjs";
 import { openFeed, parseIndex, parseKillList, killListMatches } from "../electron/plugins/feed.mjs";
 
 const HASH = `${"a".repeat(86)}==`;
-
-/** A registry keypair, in the shape signature.mjs expects (raw 32-byte public key, base64). */
-function makeKey(keyId) {
-  const { publicKey, privateKey } = crypto.generateKeyPairSync("ed25519");
-  const raw = publicKey.export({ format: "der", type: "spki" }).subarray(-32);
-  return { keyId, privateKey, trusted: { keyId, publicKey: raw.toString("base64") } };
-}
-
-/** A RELEASE key: what a delegation authorizes to sign feeds. Roots never sign these documents. */
-const KEY = makeKey("rel-test");
-const OTHER = makeKey("rel-other");
-const KEYS = [KEY.trusted];
 
 const manifest = (over = {}) => ({
   schemaVersion: 1,
@@ -52,100 +39,32 @@ const entry = (over = {}) => ({
   ...over,
 });
 
-/* ------------------------------------------------------------------ envelope */
-
-test("a signature from a trusted key verifies and yields the payload", () => {
-  const env = signEnvelope({ hello: "world" }, KEY);
-  const r = verifyEnvelope(env, { keys: KEYS });
-  assert.equal(r.ok, true, r.error);
-  assert.deepEqual(r.payload, { hello: "world" });
-  assert.equal(r.keyId, "rel-test");
-});
-
-test("a signature from an untrusted key is refused", () => {
-  const env = signEnvelope({ hello: "world" }, OTHER);
-  const r = verifyEnvelope(env, { keys: KEYS });
-  assert.equal(r.ok, false);
-  assert.match(r.error, /not authorized for this document/);
-});
-
-test("tampering with the payload invalidates the signature", () => {
-  const env = signEnvelope({ amount: 1 }, KEY);
-  env.payload = Buffer.from(JSON.stringify({ amount: 1000 }), "utf8").toString("base64");
-  const r = verifyEnvelope(env, { keys: KEYS });
-  assert.equal(r.ok, false);
-  assert.match(r.error, /signature does not match/);
-});
-
-test("co-signing lets an unknown key id ride along during a rotation", () => {
-  // The feed is signed by the new key we have not shipped yet AND the current one. A build that
-  // trusts only the current key must still accept it — that is what makes rotation non-breaking.
-  const env = signEnvelope({ hello: "world" }, KEY);
-  env.signatures.unshift({ keyId: "rel-next", alg: "ed25519", sig: "AAAA" });
-  const r = verifyEnvelope(env, { keys: KEYS });
-  assert.equal(r.ok, true, r.error);
-  assert.equal(r.keyId, "rel-test");
-});
-
-test("an unsupported algorithm is refused rather than assumed", () => {
-  const env = signEnvelope({ a: 1 }, KEY);
-  env.signatures[0].alg = "hmac-sha256";
-  assert.match(verifyEnvelope(env, { keys: KEYS }).error, /unsupported alg/);
-});
-
-test("with no authorized keys, nothing verifies", () => {
-  // The correct failure direction for a client that has never fetched a delegation: no marketplace,
-  // not an unverified one.
-  const env = signEnvelope({ a: 1 }, KEY);
-  assert.match(verifyEnvelope(env, { keys: [] }).error, /no keys are authorized/);
-  assert.match(verifyEnvelope(env, {}).error, /no keys are authorized/);
-});
-
-test("malformed envelopes fail without throwing", () => {
-  for (const bad of [null, 42, {}, { payload: "" }, { payload: "abc" }, { payload: "abc", signatures: [] }]) {
-    const r = verifyEnvelope(bad, { keys: KEYS });
-    assert.equal(r.ok, false);
-    assert.equal(r.payload, null);
-  }
-});
-
-test("a signature over non-JSON is reported, never handed on", () => {
-  const message = Buffer.from("not json", "utf8");
-  const env = {
-    payload: message.toString("base64"),
-    signatures: [{ keyId: KEY.keyId, alg: "ed25519", sig: crypto.sign(null, message, KEY.privateKey).toString("base64") }],
-  };
-  assert.match(verifyEnvelope(env, { keys: KEYS }).error, /not valid JSON/);
-});
-
 /* ------------------------------------------------------------------ openFeed */
 
 test("openFeed accepts a current feed of the expected type", () => {
-  const env = signEnvelope(indexPayload([]), KEY);
-  const r = openFeed(env, { type: "index", cachedSequence: 7, keys: KEYS });
+  const r = openFeed(indexPayload([]), { type: "index", cachedSequence: 7 });
   assert.equal(r.ok, true, r.error);
   assert.equal(r.payload.sequence, 7);
 });
 
-test("a validly signed feed of the wrong type is refused", () => {
+test("a feed of the wrong type is refused", () => {
   // A kill-list served where the index was expected would parse as an empty catalogue — a denial
   // of service that looks exactly like a normal empty state.
-  const env = signEnvelope({ type: "killlist", sequence: 1, issuedAt: "x", entries: [] }, KEY);
-  const r = openFeed(env, { type: "index", keys: KEYS });
+  const r = openFeed({ type: "killlist", sequence: 1, issuedAt: "x", entries: [] }, { type: "index" });
   assert.equal(r.ok, false);
   assert.match(r.error, /expected a "index" feed, got "killlist"/);
 });
 
-test("a validly signed OLDER feed is refused as a rollback", () => {
+test("an OLDER feed is refused as a rollback", () => {
   // The kill-list attack this exists to stop: replay yesterday's document to un-revoke a plugin.
-  const env = signEnvelope({ type: "killlist", sequence: 4, issuedAt: "x", entries: [] }, KEY);
-  const r = openFeed(env, { type: "killlist", cachedSequence: 9, keys: KEYS });
+  // Nothing upstream can catch this — a stale copy served by a cache is byte-for-byte genuine.
+  const r = openFeed({ type: "killlist", sequence: 4, issuedAt: "x", entries: [] }, { type: "killlist", cachedSequence: 9 });
   assert.equal(r.ok, false);
   assert.match(r.error, /rollback refused/);
 
   // Re-serving the SAME sequence is fine — that is just a cache, not a rollback.
-  const same = signEnvelope({ type: "killlist", sequence: 9, issuedAt: "x", entries: [] }, KEY);
-  assert.equal(openFeed(same, { type: "killlist", cachedSequence: 9, keys: KEYS }).ok, true);
+  const same = { type: "killlist", sequence: 9, issuedAt: "x", entries: [] };
+  assert.equal(openFeed(same, { type: "killlist", cachedSequence: 9 }).ok, true);
 });
 
 test("openFeed requires a sequence and an issuedAt", () => {
@@ -154,8 +73,15 @@ test("openFeed requires a sequence and an issuedAt", () => {
     { type: "index", sequence: -1, issuedAt: "x" },
     { type: "index", sequence: 1 },
   ]) {
-    const r = openFeed(signEnvelope(payload, KEY), { type: "index", keys: KEYS });
+    assert.equal(openFeed(payload, { type: "index" }).ok, false);
+  }
+});
+
+test("a malformed document fails without throwing", () => {
+  for (const bad of [null, 42, "{}", [], {}]) {
+    const r = openFeed(bad, { type: "index" });
     assert.equal(r.ok, false);
+    assert.equal(r.payload, null);
   }
 });
 

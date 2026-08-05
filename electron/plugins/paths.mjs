@@ -57,9 +57,10 @@ export function initPlugins() {
  * Point the client at the registry and start refreshing.
  *
  * The origin comes from the renderer, which is where NEXT_PUBLIC_API_BASE_URL is baked at build
- * time -- the same arrangement the LLM proxy uses for its endpoint. That is safe because the
- * signature, not the origin, is the trust anchor: a wrong origin can deny service, never forge a
- * feed, and feed.mjs refuses a rollback even from a correctly signed one.
+ * time -- the same arrangement the LLM proxy uses for its endpoint. Since the feeds are no longer
+ * signed (§5.1), that origin IS the trust anchor: whatever it serves over https is what the
+ * catalogue says. Two things still hold independently of it -- feed.mjs refuses a rolled-back
+ * sequence, and store.mjs verifies every artifact against the hash the index pins.
  */
 export function configurePluginRegistry(origin) {
   const configured = configureRegistry({ origin });
