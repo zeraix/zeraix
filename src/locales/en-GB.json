@@ -499,6 +499,8 @@
   "service.open": "Open in built-in browser",
   "service.hide": "Hide",
   "service.stop": "Stop",
+  "service.collapse": "Collapse",
+  "service.expand": "Expand running services",
   "window.pin": "Pin on top",
   "window.unpin": "Unpin",
   "menu.help": "Help & feedback",

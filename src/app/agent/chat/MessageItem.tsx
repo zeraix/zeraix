@@ -549,15 +549,50 @@ export type ProcessItem = Extract<DisplayMsg, { kind: "tool" | "reasoning" | "ph
  * keeping the final reply the main focus and avoiding breaking up the conversation with one card per item. It reconstructs items in order of appearance: consecutive tools merge into one
  * "Executing" subgroup, while deep reasoning each forms its own segment. Auto-expands while this turn is in progress (live) and auto-collapses when it ends.
  */
-export function ProcessGroup({ items, live = false }: { items: ProcessItem[]; live?: boolean }) {
+export function ProcessGroup({
+  items,
+  live = false,
+  turnActive = false,
+}: {
+  items: ProcessItem[];
+  live?: boolean;
+  turnActive?: boolean;
+}) {
   const t = useT();
   const [open, setOpen] = useState(live);
+  /**
+   * Whether the user has taken a position on this card. Once they have, it is theirs: neither
+   * auto-expand nor auto-collapse fires again for its lifetime.
+   *
+   * A ref rather than state because nothing renders from it — flipping it must not re-render, or
+   * the click that sets it would also run the effect it is meant to suppress.
+   */
+  const decided = useRef(false);
   const wasLive = useRef(live);
+  const wasTurnActive = useRef(turnActive);
   useEffect(() => {
+    const seen = () => {
+      wasLive.current = live;
+      wasTurnActive.current = turnActive;
+    };
+    // The user's choice outranks every heuristic below. Edges are still recorded, so if they never
+    // touch it again a later transition is measured from the right place.
+    if (decided.current) return seen();
+
     if (live && !wasLive.current) setOpen(true);
-    else if (!live && wasLive.current) setOpen(false);
-    wasLive.current = live;
-  }, [live]);
+    // Collapse on the TURN ending, not on this group losing last-item status. The latter happens
+    // several times a turn in dev mode — a phase summary streams in as a trailing assistant bubble
+    // and is folded back into this group on finalization — and reading it as "the work finished" is
+    // what made the card collapse and re-expand under the user. Keying off the turn also still
+    // collapses a group whose turn ended with a final reply after it, which `live` alone would miss.
+    else if (!turnActive && wasTurnActive.current) setOpen(false);
+    seen();
+  }, [live, turnActive]);
+
+  const toggle = () => {
+    decided.current = true;
+    setOpen((o) => !o);
+  };
 
   // Split into segments in order of appearance: consecutive tools go into one "Executing" subgroup, while reasoning / phase each form their own segment.
   const segments: Array<
@@ -605,7 +640,7 @@ export function ProcessGroup({ items, live = false }: { items: ProcessItem[]; li
           {/* Header: icon + "Thinking process" + overview + collapse arrow */}
           <button
             type="button"
-            onClick={() => setOpen((o) => !o)}
+            onClick={toggle}
             className="group flex w-full items-center gap-2 px-2.5 py-1.5 text-left transition hover:bg-surface-hover/50"
             aria-expanded={open}
           >

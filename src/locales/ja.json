@@ -499,6 +499,8 @@
   "service.open": "内蔵ブラウザで開く",
   "service.hide": "非表示",
   "service.stop": "停止",
+  "service.collapse": "折りたたむ",
+  "service.expand": "実行中のサービスを展開",
   "window.pin": "最前面に固定",
   "window.unpin": "固定を解除",
   "menu.help": "ヘルプとフィードバック",

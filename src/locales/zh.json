@@ -502,6 +502,8 @@
   "service.open": "在内置浏览器打开",
   "service.hide": "隐藏",
   "service.stop": "停止",
+  "service.collapse": "收起",
+  "service.expand": "展开运行中的服务",
   "window.pin": "窗口置顶",
   "window.unpin": "取消置顶",
   "menu.help": "帮助与反馈",

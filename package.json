@@ -1,6 +1,6 @@
 {
   "name": "Zeraix",
-  "version": "1.8.1",
+  "version": "1.9.0",
   "private": true,
   "main": "electron/main.mjs",
   "type": "module",
@@ -40,7 +40,6 @@
     "dist:mac:cn": "npm run seed:check && npm run download:bin:mac && cross-env NEXT_PUBLIC_APP_EDITION=cn next build && npm run gen:google && cross-env NEXT_PUBLIC_APP_EDITION=cn electron-builder --mac -p never",
     "dist:dir": "npm run seed:check && npm run download:bin:mac && cross-env NEXT_PUBLIC_APP_EDITION=intl next build && npm run gen:google && cross-env NEXT_PUBLIC_APP_EDITION=intl electron-builder --dir",
     "registry:export": "node scripts/export-builtin-skills.mjs --out registry",
-    "registry:check": "node scripts/build-registry-index.mjs --root registry --check",
     "seed:gen": "node scripts/gen-seed.mjs",
     "seed:capture": "tsx --import ./scripts/md-loader.mjs scripts/capture-prefix.mjs",
     "seed:check": "tsx --import ./scripts/md-loader.mjs scripts/capture-prefix.mjs --check"

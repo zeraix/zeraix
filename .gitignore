@@ -19,7 +19,6 @@
 /docs
 /.vscode
 /.agents
-/registry
 
 # electron-builder output
 /dist-electron

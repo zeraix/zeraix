@@ -108,7 +108,7 @@ const NAV_ITEMS: NavItem[] = [
   { id: "plugins", labelKey: "nav.plugins", icon: "/image/agent/sidebar/sidebar5.svg", activeIcon: "/image/agent/sidebar/sidebar51.svg", href: "/agent/plugins" },
   // Filtered rather than deleted: the page and its route stay built and reachable by URL for
   // testing, and switching PLUGINS_UI_ENABLED on is the whole launch.
-].filter((item) => item.id !== "plugins" || PLUGINS_UI_ENABLED);
+]
 
 /** Theme modes (consistent with src/components/theme: light / dark / follow system). */
 const THEME_MODES = [

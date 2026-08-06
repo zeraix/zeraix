@@ -36,7 +36,7 @@ export const REGISTRY_URL = "https://github.com/zeraix/registry";
  * from that page, so nothing configures the registry client, no refresh timers start, and the app
  * makes no plugin-related network requests. Flip to true once the publish endpoint is live.
  */
-export const PLUGINS_UI_ENABLED = false;
+export const PLUGINS_UI_ENABLED = true; // LOCAL ONLY — revert to false before committing
 
 /** Product website — the non-GitHub way to reach the team (see the feedback page). */
 export const WEBSITE_URL = "https://zeraix.com/feedback.html";

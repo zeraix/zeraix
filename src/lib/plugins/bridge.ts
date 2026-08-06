@@ -31,7 +31,13 @@ export function isPluginsAvailable(): boolean {
 export async function configurePlugins(): Promise<boolean> {
   const bridge = pluginBridge();
   if (!bridge) return false;
-  const result = await bridge.configure(clientEnv.NEXT_PUBLIC_API_BASE_URL);
+  // NEXT_PUBLIC_PLUGIN_ORIGIN points the marketplace at a different host from the rest of the API.
+  // It exists for local work against a stand-in registry: the plugin feeds and auth/wallet/LLM share
+  // one origin in production, so overriding NEXT_PUBLIC_API_BASE_URL to reach a local registry would
+  // take sign-in and the model proxy down with it. Unset — which is every shipped build — this is
+  // exactly the previous behaviour.
+  const origin = process.env.NEXT_PUBLIC_PLUGIN_ORIGIN || clientEnv.NEXT_PUBLIC_API_BASE_URL;
+  const result = await bridge.configure(origin);
   return result.ok;
 }
 

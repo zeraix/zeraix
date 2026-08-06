@@ -46,9 +46,29 @@ export function isRegistryConfigured() {
 
 const doFetch = (...args) => (fetchImpl ?? globalThis.fetch)(...args);
 
+/**
+ * Statuses that mean "this origin serves no plugin registry", as opposed to one that is down.
+ *
+ * The origin defaults to NEXT_PUBLIC_API_BASE_URL -- the same live host serving auth, wallet and
+ * Stripe (§5.2) -- so a build whose publish endpoint does not exist yet never sees a connection
+ * error. It gets that API's own rejection of an unknown route, which in practice is 401, 403 or 404.
+ *
+ * Reporting that as "could not reach the registry" is wrong twice: the origin was reached and
+ * answered, and a 401 sends the reader off checking credentials for a subsystem that has none. The
+ * feeds are public by design -- plain JSON, unsigned, no token (§5.1) -- so an auth status on a feed
+ * path can never be legitimate, which is what makes it safe to read as "no registry here".
+ */
+const NO_REGISTRY_STATUSES = new Set([401, 403, 404]);
+
 async function getJson(url, timeoutMs) {
   const res = await doFetch(url, { signal: AbortSignal.timeout(timeoutMs), headers: { accept: "application/json" } });
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  if (!res.ok) {
+    // The status travels on the error so refreshFeed can tell the two situations apart; the message
+    // stays as-is so every other caller reads the same as before.
+    const failure = new Error(`HTTP ${res.status}`);
+    failure.status = res.status;
+    throw failure;
+  }
   return res.json();
 }
 
@@ -74,7 +94,12 @@ async function refreshFeed(name, type) {
   try {
     document = await getJson(`${origin}/plugins/${name}.json`, FEED_TIMEOUT_MS);
   } catch (e) {
-    return { payload: previous, fromCache: true, error: `could not reach the registry: ${e.message}` };
+    // Reached and answered "no such thing" is a configuration fact, not an outage. Same fallback to
+    // cache either way -- only what we tell the user about it differs.
+    const error = NO_REGISTRY_STATUSES.has(e?.status)
+      ? `this origin serves no plugin registry (HTTP ${e.status} for /plugins/${name}.json) — check NEXT_PUBLIC_PLUGIN_ORIGIN`
+      : `could not reach the registry: ${e.message}`;
+    return { payload: previous, fromCache: true, error };
   }
 
   const opened = openFeed(document, { type, cachedSequence: cachedSequence(name) });

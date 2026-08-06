@@ -499,6 +499,8 @@
   "service.open": "在內建瀏覽器開啟",
   "service.hide": "隱藏",
   "service.stop": "停止",
+  "service.collapse": "收合",
+  "service.expand": "展開執行中的服務",
   "window.pin": "視窗置頂",
   "window.unpin": "取消置頂",
   "menu.help": "幫助與回饋",

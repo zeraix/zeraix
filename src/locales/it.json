@@ -499,6 +499,8 @@
   "service.open": "Apri nel browser integrato",
   "service.hide": "Nascondi",
   "service.stop": "Ferma",
+  "service.collapse": "Comprimi",
+  "service.expand": "Mostra i servizi in esecuzione",
   "window.pin": "Blocca in primo piano",
   "window.unpin": "Sblocca",
   "menu.help": "Aiuto e feedback",

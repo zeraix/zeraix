@@ -3943,7 +3943,9 @@ function ChatAgent() {
                 }
                 // This group is at the end of the message list and still generating → treated as "in progress", auto-expanded.
                 const live = loading && i === display.length;
-                nodes.push(<ProcessGroup key={`pg-${start}`} items={group} live={live} />);
+                // `turnActive` distinguishes "this group is no longer last" from "the turn ended".
+                // Only the second should auto-collapse the card — see ProcessGroup.
+                nodes.push(<ProcessGroup key={`pg-${start}`} items={group} live={live} turnActive={loading} />);
               } else {
                 nodes.push(
                   <MessageItem

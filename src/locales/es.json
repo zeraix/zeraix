@@ -499,6 +499,8 @@
   "service.open": "Abrir en el navegador integrado",
   "service.hide": "Ocultar",
   "service.stop": "Detener",
+  "service.collapse": "Contraer",
+  "service.expand": "Mostrar los servicios en ejecución",
   "window.pin": "Fijar encima",
   "window.unpin": "Desfijar",
   "menu.help": "Ayuda y comentarios",

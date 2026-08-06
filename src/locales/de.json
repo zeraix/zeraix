@@ -499,6 +499,8 @@
   "service.open": "Im integrierten Browser öffnen",
   "service.hide": "Ausblenden",
   "service.stop": "Stoppen",
+  "service.collapse": "Einklappen",
+  "service.expand": "Laufende Dienste ausklappen",
   "window.pin": "Immer im Vordergrund",
   "window.unpin": "Lösen",
   "menu.help": "Hilfe & Feedback",

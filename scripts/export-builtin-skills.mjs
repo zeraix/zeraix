@@ -13,8 +13,8 @@
  *   node scripts/export-builtin-skills.mjs --out registry
  *
  * Idempotent. Re-running overwrites the generated directories, so bumping a skill's `version:` in
- * src/skills/ and re-running is how a new version reaches the registry. Existing published versions
- * are immutable (§5.3), so never edit a version already in dist — bump instead.
+ * src/skills/ and re-running is how a new version reaches the registry. Published versions
+ * are immutable (§5.3), so never edit one that has shipped — bump the skill's version instead.
  */
 import fs from "node:fs";
 import path from "node:path";
@@ -85,7 +85,7 @@ for (const file of fs.readdirSync(skillsDir).filter((f) => f.endsWith(".md")).so
     capabilities: [{ type: "skill", id: name.replace(/-/g, "_"), path: "skill.md" }],
   };
 
-  // Validate before writing. The registry builder will check this again in strict mode, but failing
+  // Validate before writing. The registry's validate workflow checks this again in strict mode, but failing
   // here points at the source file rather than at generated output nobody edited.
   const check = validateManifest({ ...manifest, capabilities: manifest.capabilities.map((c) => ({ ...c, sha512: `${"a".repeat(86)}==` })) }, { mode: "registry" });
   if (!check.ok) {
@@ -132,4 +132,4 @@ fs.writeFileSync(path.join(outRoot, "plugins", PUBLISHER, ".gitignore"), ignore.
 
 console.log(`wrote ${written} plugin(s) under ${path.join(outRoot, "plugins", PUBLISHER)}`);
 console.log(`ignored as generated: ${generated.join(", ")}`);
-console.log(`next: node scripts/build-registry-index.mjs --root ${outRoot} --check`);
+console.log("next: commit these to the registry repo, or let the publish workflow regenerate them");

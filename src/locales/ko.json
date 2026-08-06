@@ -499,6 +499,8 @@
   "service.open": "내장 브라우저로 열기",
   "service.hide": "숨기기",
   "service.stop": "중지",
+  "service.collapse": "접기",
+  "service.expand": "실행 중인 서비스 펼치기",
   "window.pin": "항상 위에 고정",
   "window.unpin": "고정 해제",
   "menu.help": "도움말 및 피드백",
