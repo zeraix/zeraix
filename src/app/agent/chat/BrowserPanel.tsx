@@ -37,6 +37,7 @@ import {
   type BrowserActionResult,
 } from "@/lib/automation";
 import { isCnEdition } from "@/lib/edition";
+import { useImeGuard } from "@/lib/ime";
 
 /** The panel's default search engine switches by build edition: the international edition uses Google, the China edition uses Baidu (Baidu's search-term parameter is wd). */
 const PANEL_CONFIG: AutomationConfig = isCnEdition
@@ -147,6 +148,7 @@ export default function BrowserPanel({
 }: {
   onAddToConversation?: (info: { url: string; title: string }) => void;
 }) {
+  const ime = useImeGuard();
   const [available] = useState(() => isAutomationAvailable());
   const [open, setOpen] = useState(false);
   const [maximized, setMaximized] = useState(false);
@@ -442,7 +444,11 @@ export default function BrowserPanel({
             <input
               value={addr}
               onChange={(e) => setAddr(e.target.value)}
-              onKeyDown={(e) => e.key === "Enter" && addr.trim() && navigateActive(addr.trim())}
+              {...ime.bind}
+              // A search term typed on an IME lands here as often as a URL does — see lib/ime.ts.
+              onKeyDown={(e) =>
+                !ime.isImeKey(e) && e.key === "Enter" && addr.trim() && navigateActive(addr.trim())
+              }
               placeholder="Enter a URL and press Enter to go"
               className="min-w-0 flex-1 rounded-lg border border-line bg-background px-3 py-1 text-xs outline-none focus:border-line-strong"
             />

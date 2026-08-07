@@ -56,6 +56,7 @@ import { clearAuthCookie } from "@/lib/actions/auth.actions";
 import { useAgentChatStore } from "@/store/agentChatStore";
 import { clearAgentWorkdir, putStorage } from "@/lib/ai/agentStorage";
 import { useLocaleStore, useT, LOCALES } from "@/lib/i18n";
+import { useImeGuard } from "@/lib/ime";
 import {
   AGENT_MODE_KEY,
   AGENT_MODE_SELECTION_KEY,
@@ -249,6 +250,7 @@ export default function AgentSidebar({
   const { userInfo, isLoggedIn, logOut } = useAuthStore();
   const requireLogin = useLoginModalStore((s) => s.requireLogin);
   const t = useT();
+  const ime = useImeGuard();
 
   // Guests can use the whole app; the account row falls back to a "sign in" label.
   const name = isLoggedIn ? userInfo?.username || userInfo?.name || "Username" : t("auth.signIn");
@@ -807,7 +809,9 @@ export default function AgentSidebar({
             onChange={(e) =>
               setRenameState((s) => (s ? { ...s, value: e.target.value } : s))
             }
+            {...ime.bind}
             onKeyDown={(e) => {
+              if (ime.isImeKey(e)) return; // the Enter that commits an IME composition is not a confirm — see lib/ime.ts
               if (e.key === "Enter") {
                 e.preventDefault();
                 submitRename();

@@ -89,20 +89,47 @@ export function askUserTool() {
     function: {
       name: "ask_user",
       description:
-        "Call this when the user needs to choose among multiple plans / options: pass a question and the options you recommend, " +
-        "and the UI renders them as clickable buttons, automatically appending a 'Discuss this' item; it returns the user's choice. " +
-        "Prefer this tool when seeking a decision from the user (e.g. picking a color scheme, choosing a plan, confirming a direction), rather than merely listing options in the body text.",
+        "Call this when the user needs to decide something: pass one or more questions with the options you " +
+        "recommend, and the UI renders them as a card of clickable options, automatically appending a " +
+        "'Discuss this' item to each. It returns what the user picked. " +
+        "Prefer this over merely listing options in your reply when you are seeking a decision (a colour " +
+        "scheme, a plan, a direction to take). " +
+        "Ask several questions in ONE call when they are all part of the same decision — they become tabs on a " +
+        "single card and the user answers them together, which is far less disruptive than being asked, " +
+        "answering, and then immediately being asked again. Do not use it to ask the same thing twice, and do " +
+        "not split one decision across consecutive calls. " +
+        // The screenshot case: the model wrote options like "My first name (type it)" because it had no way
+        // to ask for text, turning an option into an instruction the card could not carry out.
+        "Every question also gets a free-text box automatically, so the user can always answer in their own " +
+        "words. Options should therefore be real choices — never write an option that tells the user to type " +
+        "something, and do not add an 'Other' option.",
       parameters: {
         type: "object",
         properties: {
-          question: { type: "string", description: "The question to ask the user." },
-          options: {
+          questions: {
             type: "array",
-            items: { type: "string" },
-            description: "The options you recommend (2-4 suggested, short). Do not include 'Discuss this'; the system appends it automatically.",
+            minItems: 1,
+            maxItems: 4,
+            description:
+              "The questions to put to the user, all at once. Only genuinely related questions belong in one " +
+              "call — the user answers every one of them before anything comes back to you.",
+            items: {
+              type: "object",
+              properties: {
+                question: { type: "string", description: "The question to ask." },
+                options: {
+                  type: "array",
+                  items: { type: "string" },
+                  description:
+                    "The options you recommend (2-4, short). Do not include 'Discuss this'; the system " +
+                    "appends it automatically.",
+                },
+              },
+              required: ["question", "options"],
+            },
           },
         },
-        required: ["question", "options"],
+        required: ["questions"],
       },
     },
   };

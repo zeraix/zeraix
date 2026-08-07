@@ -52,8 +52,15 @@ export function findUnverifiedFacts(summary: string, sourceText: string): string
   return [...out];
 }
 
-/** The tool name a sub-agent delegation is issued under (its tool results are attributed separately). */
-const SUBAGENT_TOOL = "run_subagent";
+/**
+ * The tool names a sub-agent delegation is issued under (their tool results are attributed separately).
+ *
+ * All three count, because all three carry delegation output back into the context: run_subagent returns
+ * a conclusion, join_subagents returns several at once, and spawn_subagents carries any that were
+ * auto-delivered onto it. Attributing only the first would have understated delegation spend by exactly
+ * the amount the concurrent path introduced.
+ */
+const SUBAGENT_TOOLS = new Set(["run_subagent", "spawn_subagents", "join_subagents"]);
 /** Read tool whose repeated calls on the same path are the "redundant re-read" signal (attention proxy). */
 const READ_TOOL = "read_file";
 
@@ -134,7 +141,7 @@ export function describeContext(messages: ApiMsg[], tools?: unknown[]): ContextB
       system += tk;
     } else if (m.role === "tool") {
       const info = calls.get(m.tool_call_id);
-      if (info?.name === SUBAGENT_TOOL) subagentOutputs += tk;
+      if (info?.name && SUBAGENT_TOOLS.has(info.name)) subagentOutputs += tk;
       else toolOutputs += tk;
     } else {
       history += tk; // user + assistant

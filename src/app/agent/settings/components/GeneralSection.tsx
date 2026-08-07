@@ -21,9 +21,11 @@ import { useAgentChatStore } from "@/store/agentChatStore";
 import { type TFunc } from "@/lib/i18n";
 import { cn } from "@/lib/utils";
 import { ToggleSwitch } from "./ToggleSwitch";
+import { useImeGuard } from "@/lib/ime";
 
 /** General section: data storage path. */
 export function GeneralSection({ t }: { t: TFunc }) {
+  const ime = useImeGuard();
   const reload = useAgentChatStore((s) => s.reload);
   const [path, setPath] = useState("");
   const [input, setInput] = useState("");
@@ -108,7 +110,9 @@ export function GeneralSection({ t }: { t: TFunc }) {
             <input
               value={input}
               onChange={(e) => setInput(e.target.value)}
+              {...ime.bind}
               onKeyDown={(e) => {
+                if (ime.isImeKey(e)) return; // a path can be typed on an IME — see lib/ime.ts
                 if (e.key === "Enter") {
                   e.preventDefault();
                   void apply();

@@ -11,6 +11,7 @@
 import { useRef, useState, useEffect } from "react";
 import { Sparkles, Send, Loader2, X } from "lucide-react";
 import { useT } from "@/lib/i18n";
+import { useImeGuard } from "@/lib/ime";
 import type { WorkflowDefinition } from "@/lib/workflows";
 import { runAssistant, type AssistantMessage } from "./generate";
 
@@ -26,6 +27,7 @@ export default function WorkflowAssistant({
   onClose: () => void;
 }) {
   const t = useT();
+  const ime = useImeGuard();
   const [messages, setMessages] = useState<Msg[]>([{ role: "assistant", text: t("auto.ai.intro"), ui: true }]);
   const [input, setInput] = useState("");
   const [busy, setBusy] = useState(false);
@@ -122,7 +124,9 @@ export default function WorkflowAssistant({
           <textarea
             value={input}
             onChange={(e) => setInput(e.target.value)}
+            {...ime.bind}
             onKeyDown={(e) => {
+              if (ime.isImeKey(e)) return; // Enter committing an IME composition is not a send — see lib/ime.ts
               if (e.key === "Enter" && !e.shiftKey) {
                 e.preventDefault();
                 void send(input);

@@ -45,6 +45,7 @@ import {
 import "@xyflow/react/dist/style.css";
 import { Plus, Trash2, Bot, Terminal, AlertTriangle, Check, X } from "lucide-react";
 import { useT } from "@/lib/i18n";
+import { useImeGuard } from "@/lib/ime";
 import type { WorkflowDefinition, WorkflowNode, WorkflowVariable } from "@/lib/workflows";
 
 type FlowNode = Node<{ wf: WorkflowNode }>;
@@ -154,6 +155,7 @@ export default function WorkflowCanvas({
   onChange: (next: WorkflowDefinition) => void;
 }) {
   const t = useT();
+  const ime = useImeGuard();
   const { resolvedTheme } = useTheme();
   const initial = useMemo(() => toFlow(definition), [definition]);
   const [nodes, setNodes] = useState<FlowNode[]>(initial.nodes);
@@ -560,7 +562,11 @@ export default function WorkflowCanvas({
                             autoFocus
                             value={newVarKey}
                             onChange={(e) => setNewVarKey(e.target.value.replace(/[^a-zA-Z0-9_]/g, ""))}
+                            {...ime.bind}
                             onKeyDown={(e) => {
+                              // An ASCII-only field, which is precisely where the reported case bites:
+                              // Latin letters typed on a Chinese IME are committed with Enter. See lib/ime.ts.
+                              if (ime.isImeKey(e)) return;
                               if (e.key === "Enter") createVarAndBind(i, newVarKey);
                               if (e.key === "Escape") setNewVarIdx(null);
                             }}

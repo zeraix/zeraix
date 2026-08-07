@@ -65,9 +65,12 @@ export interface StoredMessage {
    *  conversations. Display-only, not fed to the model, not part of the integrity hash (same as name / steps). */
   image?: string;
   servedBy?: string;
-  /** The tool calls a sub-agent made inside its own loop (only on a run_subagent tool result). The sub-agent
-   *  conversation itself is never persisted — only its conclusion goes into content — so without this the
-   *  steps the user watched in real time would disappear the moment the conversation is reopened.
+  /** The tool calls a sub-agent made inside its own loop (on a run_subagent or spawn_subagents tool result;
+   *  a spawned batch collects every delegation's calls onto the one message, each prefixed with its job id).
+   *  The sub-agent conversation itself is never persisted — only its conclusion goes into content — so
+   *  without this the steps the user watched in real time would disappear the moment the conversation is
+   *  reopened. A spawned delegation settles after its message is written, so these arrive by patch
+   *  (setMessageSteps) rather than with the append.
    *  Display-only, never fed to the model, not part of the integrity hash (same as name / image). */
   steps?: { name: string; args: unknown; ok: boolean; result: string }[];
   /** The reasoning model's "deep thinking" body (only when role==="assistant"): rebuilds the UI thinking block, and — for LOCAL

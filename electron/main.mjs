@@ -78,7 +78,7 @@ import {
 const REMOTE_DEBUG_PORT = 9222;
 app.commandLine.appendSwitch("remote-debugging-port", String(REMOTE_DEBUG_PORT));
 app.commandLine.appendSwitch("remote-allow-origins", "*");
-
+// app.disableHardwareAcceleration(); /**  */
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 const isDev = !app.isPackaged;

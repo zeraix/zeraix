@@ -35,6 +35,7 @@ import {
 } from "@/lib/ai/models";
 import { LOCAL_PROVIDER_ID, isLocalEndpoint } from "@/lib/ai/localModel";
 import { useT } from "@/lib/i18n";
+import { useImeGuard } from "@/lib/ime";
 
 /** Brand pink from the design mockup (send button / accent). */
 const ACCENT = "#f5327d";
@@ -69,6 +70,7 @@ export default function AgentComposer({
   onSubmit?: (text: string, attachments: Attachment[]) => void;
 }) {
   const t = useT();
+  const ime = useImeGuard();
   const router = useRouter();
   const [value, setValue] = useState("");
   // Selectable model list (maintained in settings) + current selection; persisted on selection, read by the chat page when sending.
@@ -169,6 +171,8 @@ export default function AgentComposer({
   };
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    // Enter committing an IME composition is not a submit — see lib/ime.ts.
+    if (ime.isImeKey(e)) return;
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
       submit();
@@ -236,6 +240,7 @@ export default function AgentComposer({
         value={value}
         autoFocus={autoFocus}
         onChange={(e) => setValue(e.target.value)}
+        {...ime.bind}
         onKeyDown={handleKeyDown}
         onPaste={(e) => {
           if (e.clipboardData.files.length > 0) addFiles(e.clipboardData.files);

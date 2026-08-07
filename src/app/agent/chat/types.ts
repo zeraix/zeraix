@@ -75,12 +75,35 @@ export type ChatResponse = {
 export type SubAgentStep = { name: string; args: unknown; ok: boolean; result: string };
 
 /** Display message (includes tool-call bubbles / choice cards). */
+/** One question on a choice card. A card carries at least one; several are shown as tabs. */
+export type ChoiceQuestion = {
+  question: string;
+  options: string[];
+};
+
+/** What the user picked for one question. `discuss` is the auto-appended "talk it through" escape. */
+export type ChoiceAnswer = {
+  value: string;
+  discuss: boolean;
+  /** True when the user typed the answer rather than picking one of the offered options. */
+  custom?: boolean;
+};
+
+/**
+ * An ask_user card.
+ *
+ * Answers are held per question and are NOT final until the card is submitted: with several questions the
+ * user moves between tabs and revises, and resolving the tool call on the first click would end the
+ * interaction before they had answered the rest.
+ */
 export type ChoiceMsg = {
   kind: "choice";
   id: number;
-  question: string;
-  options: string[];
-  selected: string | null; // the selected option; null means not yet selected
+  questions: ChoiceQuestion[];
+  /** Parallel to `questions`; null where that question has not been answered yet. */
+  answers: (ChoiceAnswer | null)[];
+  /** True once the user has submitted. The card is read-only from then on. */
+  submitted: boolean;
 };
 export type DisplayMsg =
   | {

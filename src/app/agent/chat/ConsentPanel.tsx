@@ -1,9 +1,19 @@
 "use client";
 
 import type { KeyboardEvent as ReactKeyboardEvent } from "react";
+import { motion } from "framer-motion";
+import { useT } from "@/lib/i18n";
 import { useAgentChatStore } from "@/store/agentChatStore";
 import { DiffView } from "./DiffView";
 import { CONSENT_OPTIONS, type ConsentDecision } from "./constants";
+
+/** Who asked for the operation, when it was not the agent the user is talking to. */
+export type ConsentRequester = {
+  /** `anon-<uuid>` — a sub-agent has no identity beyond its grant. */
+  agentId: string;
+  /** The subtask it was spawned for. Shown truncated; it is what makes the request legible. */
+  task: string;
+};
 
 /** A pending sensitive operation (front of the queue) — same shape as the pending state in page.tsx. */
 export type PendingConsent = {
@@ -13,11 +23,45 @@ export type PendingConsent = {
   warning?: string | null; // Provenance warning (§A1): the target's state is only known from compressed history
   convId: string | null; // The conversation that issued this request (used to indicate which conversation is asking)
   queued: number; // Number of requests still queued behind this one (excluding the current one)
+  /**
+   * Set when a sub-agent is asking rather than the main agent.
+   *
+   * Worth surfacing prominently: the user did not ask for this call, an autonomous delegation did, and
+   * "which of my agents wants to run this" is the first question anyone confronted with the panel has.
+   */
+  requester?: ConsentRequester | null;
 };
 
+/** The single argument most worth showing in the header line, if there is one. */
+function primaryArg(args: unknown): string | null {
+  if (!args || typeof args !== "object") return null;
+  const a = args as Record<string, unknown>;
+  for (const key of ["path", "destination", "command", "url"]) {
+    const v = a[key];
+    if (typeof v === "string" && v) return v;
+  }
+  return null;
+}
+
 /**
- * Sensitive-operation confirmation panel: pops up when the model requests operations such as writing files, deleting, or running commands, and requires user approval.
- * Purely presentational — auto-focuses on appearance (controlled by the panelRef held by the parent), ↑/↓ to select, Enter to confirm, Esc to reject.
+ * Sensitive-operation confirmation panel: shown when an agent requests a write, a delete, a command, or
+ * anything else in SENSITIVE_TOOLS, and blocks that call until the user answers.
+ *
+ * ## Why it covers the composer
+ *
+ * The parent positions this as an overlay across the bottom of the chat column, deliberately hiding the
+ * input box and the context-usage bar while it is up. Those two are what a user reaches for on reflex, and a
+ * blocked tool call is not a moment for reflexes: something is waiting on an answer, and leaving somewhere
+ * else to type invites the panel to be scrolled past and left sitting. Taking the input away for the second
+ * it takes to answer is the honest representation of the state the app is actually in.
+ *
+ * Purely presentational. Auto-focused on appearance via the ref the parent holds; ↑/↓ move the selection,
+ * Enter confirms, Esc rejects.
+ *
+ * The styling is deliberately quiet. An earlier version tinted the whole card amber, which made the one
+ * genuinely alarming case — an autonomous sub-agent asking to run a command — look exactly like the routine
+ * case of the main agent saving a file the user just asked it to save. Colour is spent on the single dot and
+ * on the warning row, so that when something *is* unusual it still has somewhere to escalate to.
  */
 export function ConsentPanel({
   pending,
@@ -37,98 +81,120 @@ export function ConsentPanel({
   onKey: (e: ReactKeyboardEvent) => void;
   panelRef: React.RefObject<HTMLDivElement | null>;
 }) {
+  const t = useT();
+  const arg = primaryArg(pending.args);
+  const fromTitle =
+    pending.convId && pending.convId !== currentConvId
+      ? useAgentChatStore.getState().getConversation(pending.convId)?.title?.trim()
+      : "";
+
   return (
-    <div
+    <motion.div
       ref={panelRef}
       tabIndex={0}
       onKeyDown={onKey}
-      className="px-4 pt-2 outline-none"
+      className="border-t border-line bg-surface/95 px-4 pb-4 pt-3 shadow-[0_-8px_24px_-12px_rgba(0,0,0,0.25)] outline-none backdrop-blur-md"
       role="dialog"
-      aria-label="Sensitive operation confirmation"
+      aria-label={t("chat.consent.aria")}
+      // Rises from where the composer was rather than fading in place: the movement is what says "this
+      // replaced the input box", which a cross-fade would leave the user to work out.
+      initial={{ y: 16, opacity: 0 }}
+      animate={{ y: 0, opacity: 1 }}
+      exit={{ y: 16, opacity: 0 }}
+      transition={{ duration: 0.18, ease: [0.22, 1, 0.36, 1] }}
     >
-      <div className="mx-auto w-full max-w-3xl overflow-hidden rounded-xl border border-amber-500/40 bg-amber-500/[0.06] shadow-sm transition focus-within:ring-2 focus-within:ring-amber-500/50">
-        <div className="flex items-start gap-2.5 px-3.5 pt-3 pb-2.5">
-          <span className="mt-px flex h-6 w-6 shrink-0 items-center justify-center rounded-lg bg-amber-500/20 text-[13px]">⚠️</span>
-          <div className="min-w-0 flex-1">
-            <p className="flex flex-wrap items-center gap-x-1.5 gap-y-1 text-sm font-semibold text-amber-800 dark:text-amber-200">
-              AI is requesting a sensitive operation
-              <span className="rounded-md bg-amber-500/15 px-1.5 py-0.5 font-mono text-xs font-medium text-amber-700 dark:text-amber-300">
-                {pending.name}
+      <div className="mx-auto w-full max-w-3xl overflow-hidden rounded-xl border border-line-strong bg-surface shadow-sm transition focus-within:ring-2 focus-within:ring-brand/40">
+        <div className="px-4 pt-3.5 pb-3">
+          {/* Header: the one spot of colour, and the queue depth pushed to the far side. */}
+          <div className="flex items-center gap-2">
+            <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-amber-500" aria-hidden />
+            <span className="text-[13px] font-semibold text-ink">{t("chat.consent.title")}</span>
+            {pending.queued > 0 ? (
+              <span className="ml-auto rounded-md bg-surface-muted px-1.5 py-0.5 text-[11px] font-medium text-ink-subtle">
+                {t("chat.consent.queued", { count: String(pending.queued) })}
               </span>
-              {(() => {
-                const p =
-                  pending.args && typeof pending.args === "object"
-                    ? (pending.args as Record<string, unknown>).path
-                    : undefined;
-                return p ? (
-                  <span className="font-mono text-xs font-normal text-amber-700/90 dark:text-amber-300/90">· {String(p)}</span>
-                ) : null;
-              })()}
-            </p>
-            {/* Owning conversation (if from a background conversation) + how many are still pending in the queue, so the user knows which conversation is asking and how many are queued */}
-            {(() => {
-              const title =
-                pending.convId && pending.convId !== currentConvId
-                  ? useAgentChatStore.getState().getConversation(pending.convId)?.title?.trim()
-                  : "";
-              const parts: string[] = [];
-              if (title) parts.push(`From conversation "${title}"`);
-              if (pending.queued > 0) parts.push(`${pending.queued} more pending`);
-              return parts.length ? (
-                <p className="mt-1 text-[11px] text-amber-700/80 dark:text-amber-300/80">
-                  {parts.join(" · ")}
-                </p>
-              ) : null;
-            })()}
-            {/* Provenance warning (§A1): this operation relies on file state known only from compressed history. */}
-            {pending.warning ? (
-              <p className="mt-2 rounded-lg border border-amber-500/40 bg-amber-500/10 px-2.5 py-1.5 text-[11px] font-medium text-amber-700 dark:text-amber-300">
-                {pending.warning}
-              </p>
             ) : null}
-            {/* Show the diff if there's a change preview (with line numbers); otherwise fall back to showing the raw arguments */}
-            {pending.diff ? (
-              <div className="mt-2 max-h-56 overflow-auto rounded-lg border border-amber-500/25">
-                <DiffView diff={pending.diff} />
-              </div>
-            ) : (
-              <pre className="mt-2 max-h-32 overflow-auto whitespace-pre-wrap break-all rounded-lg border border-amber-500/25 bg-surface px-2.5 py-2 font-mono text-[11px] text-ink-muted">
-                {(() => {
-                  try {
-                    return JSON.stringify(pending.args, null, 2);
-                  } catch {
-                    return "{}";
-                  }
-                })()}
-              </pre>
-            )}
           </div>
-        </div>
-        {/* Three options: the currently highlighted item moves with the up/down keys */}
-        <div className="flex flex-col gap-1.5 border-t border-amber-500/20 bg-amber-500/[0.04] px-3.5 py-2.5">
-          {CONSENT_OPTIONS.map((opt, idx) => {
-            const active = idx === consentSel;
-            return (
-              <button
-                key={opt.key}
-                onClick={() => onAnswer(opt.key)}
-                onMouseEnter={() => onHover(idx)}
-                className={`flex items-center gap-2 rounded-lg border px-3 py-2 text-left text-xs font-medium transition ${
-                  active
-                    ? "border-amber-500 bg-amber-500 text-white shadow-sm shadow-amber-500/25"
-                    : "border-line-strong bg-surface text-ink hover:border-amber-500/50 hover:bg-amber-500/10"
-                }`}
-              >
-                <span className={`transition-opacity ${active ? "opacity-100" : "opacity-0"}`}>▸</span>
-                {opt.label}
-              </button>
-            );
-          })}
-          <p className="mt-0.5 text-[11px] text-amber-700/70 dark:text-amber-300/70">
-            ↑/↓ to select · Enter to confirm · Esc to reject
+
+          {/* What is being asked for. The tool name carries the weight; the argument sits beside it. */}
+          <p className="mt-2.5 flex flex-wrap items-baseline gap-x-2 gap-y-1">
+            <span className="font-mono text-sm font-medium text-ink">{pending.name}</span>
+            {arg ? (
+              <span className="truncate font-mono text-xs text-ink-muted">{arg}</span>
+            ) : null}
           </p>
+
+          {/* Attribution. A sub-agent request leads with the agent, because the user did not ask for it. */}
+          {pending.requester || fromTitle ? (
+            <p className="mt-1 truncate text-[11px] text-ink-subtle">
+              {pending.requester ? (
+                <>
+                  <span className="font-mono">{pending.requester.agentId}</span>
+                  <span> · {t("chat.consent.subAgent")}</span>
+                  {pending.requester.task ? <span> · “{pending.requester.task}”</span> : null}
+                </>
+              ) : null}
+              {pending.requester && fromTitle ? <span> · </span> : null}
+              {fromTitle ? <span>{t("chat.consent.from", { title: fromTitle })}</span> : null}
+            </p>
+          ) : null}
+
+          {/* Provenance warning (§A1): this operation relies on file state known only from compressed history. */}
+          {pending.warning ? (
+            <p className="mt-2.5 rounded-lg border border-amber-500/30 bg-amber-500/[0.07] px-2.5 py-1.5 text-[11px] font-medium text-amber-700 dark:text-amber-300">
+              {pending.warning}
+            </p>
+          ) : null}
+
+          {/* The change itself: a diff where we could build one, the raw arguments otherwise. */}
+          {pending.diff ? (
+            <div className="mt-2.5 max-h-56 overflow-auto rounded-lg border border-line">
+              <DiffView diff={pending.diff} />
+            </div>
+          ) : (
+            <pre className="mt-2.5 max-h-32 overflow-auto whitespace-pre-wrap break-all rounded-lg border border-line bg-surface-muted px-2.5 py-2 font-mono text-[11px] text-ink-muted">
+              {(() => {
+                try {
+                  return JSON.stringify(pending.args, null, 2);
+                } catch {
+                  return "{}";
+                }
+              })()}
+            </pre>
+          )}
+        </div>
+
+        {/*
+          Actions, right-aligned with the affirmative last. Rendered in reverse of CONSENT_OPTIONS so the
+          destructive choice sits furthest from the primary one, while the index passed back still refers to
+          the canonical order the keyboard navigation counts in.
+        */}
+        <div
+          className="flex flex-wrap items-center justify-end gap-2 border-t border-line bg-surface-muted/60 px-4 py-2.5"
+          title={t("chat.consent.hint")}
+        >
+          {CONSENT_OPTIONS.map((opt, idx) => ({ opt, idx }))
+            .reverse()
+            .map(({ opt, idx }) => {
+              const active = idx === consentSel;
+              const primary = opt.key === "yes";
+              return (
+                <button
+                  key={opt.key}
+                  onClick={() => onAnswer(opt.key)}
+                  onMouseEnter={() => onHover(idx)}
+                  className={`rounded-lg px-3 py-1.5 text-xs font-medium transition ${
+                    primary
+                      ? "bg-brand text-white shadow-sm hover:brightness-110"
+                      : "text-ink-muted hover:bg-surface-hover hover:text-ink"
+                  } ${active ? "ring-2 ring-brand/50 ring-offset-1 ring-offset-surface" : ""}`}
+                >
+                  {t(opt.labelKey)}
+                </button>
+              );
+            })}
         </div>
       </div>
-    </div>
+    </motion.div>
   );
 }

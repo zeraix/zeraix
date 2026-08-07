@@ -27,7 +27,7 @@
  * 3am unattended run has nobody to ask and must not be able to install a server.
  */
 import { getServer, isValidServerId, listServers, publicServer, removeServer, setServerFlag, upsertServer } from "../mcp/config.mjs";
-import { connectServer, disconnectServer, mcpStatus } from "../mcp/client.mjs";
+import { connectServer, disconnectServer, listMcpTools, mcpStatus } from "../mcp/client.mjs";
 import { listPinned, searchServers } from "../mcp/registry.mjs";
 
 /** Shell-ish rendering of a stdio config, purely so the user can read what will run. Never executed. */
@@ -128,7 +128,124 @@ function configFromArgs({ command, args, env, cwd, url, headers, timeoutMs } = {
   return { cfg, error: "" };
 }
 
+/**
+ * Group the live MCP tools by the server that exposes them.
+ *
+ * Matched by longest `mcp__<id>__` prefix against the ids that actually exist, rather than by splitting
+ * the name on `__`: a server id may itself contain an underscore, so splitting would assign
+ * `mcp__my_db__query` correctly but `mcp__my__db__query` to a server called "my".
+ */
+function toolsByServer() {
+  const ids = mcpStatus()
+    .map((s) => s.id)
+    .sort((a, b) => b.length - a.length);
+  const groups = new Map();
+  const orphans = [];
+  for (const t of listMcpTools()) {
+    const id = ids.find((i) => t.name.startsWith(`mcp__${i}__`));
+    if (!id) {
+      orphans.push(t);
+      continue;
+    }
+    if (!groups.has(id)) groups.set(id, []);
+    groups.get(id).push(t);
+  }
+  return { groups, orphans };
+}
+
+/** How to actually invoke an MCP tool, phrased to hold on both surfaces that can reach this. */
+const INVOKE_HINT =
+  "These are NOT in your tool list. Call one with `call_tool`, passing its exact `name` and an `arguments` " +
+  "object built from the parameters shown. (If `call_tool` is not available to you, call the tool by its own name directly.)";
+
 export const mcpAdminHandlers = {
+  /**
+   * The inventory of what connected MCP servers expose — the entry point that replaces declaring them.
+   *
+   * MCP tool schemas used to travel in the `tools` field of every request. They are per-install and
+   * change at runtime (a server can be connected mid-conversation, and servers may add or remove tools),
+   * so they were both the largest variable block in the prefix and a source of cache invalidation from
+   * token 0 — tools sit ahead of `messages`, so any change re-prefills everything. Moving them behind
+   * this call keeps the declared set constant, at the cost of one round trip when they are actually
+   * wanted. See docs/tool-lazy-loading-design.md and toolRouter.ts.
+   *
+   * Two levels on purpose: a bare call lists names and descriptions (enough to decide whether anything
+   * here is relevant), and `server` / `name` returns full parameter schemas (enough to build the call).
+   * Returning every schema by default would put the whole cost back, just one message later.
+   */
+  async mcp_tools({ server, name } = {}) {
+    const status = mcpStatus();
+    const { groups, orphans } = toolsByServer();
+    const wantName = String(name ?? "").trim();
+    const wantServer = String(server ?? "").trim();
+
+    const describe = (t) =>
+      `- ${t.name} — ${t.description || "(no description)"}\n  parameters: ${JSON.stringify(t.parameters ?? { type: "object", properties: {} })}`;
+    const summarise = (t) => `- ${t.name} — ${t.description || "(no description)"}`;
+
+    // One tool, with its full schema.
+    if (wantName) {
+      const hit = [...groups.values()].flat().concat(orphans).find((t) => t.name === wantName);
+      if (!hit) {
+        return (
+          `No connected MCP server exposes a tool named "${wantName}".\n` +
+          `Call mcp_tools with no arguments to see what is actually available.`
+        );
+      }
+      return [describe(hit), "", INVOKE_HINT].join("\n");
+    }
+
+    // One server, with full schemas for everything it exposes.
+    if (wantServer) {
+      const entry = status.find((s) => s.id === wantServer);
+      if (!entry) return `No MCP server is configured with id "${wantServer}". Call mcp_tools with no arguments to list the ones that are.`;
+      const tools = groups.get(wantServer) ?? [];
+      if (entry.status !== "ready") {
+        return `MCP server "${wantServer}" is ${entry.status}${entry.error ? ` — ${entry.error}` : ""}, so it is exposing no tools right now.`;
+      }
+      if (!tools.length) return `MCP server "${wantServer}" is connected but exposes no tools.`;
+      return [`[${wantServer}] ${tools.length} tool(s):`, tools.map(describe).join("\n"), "", INVOKE_HINT].join("\n");
+    }
+
+    // The inventory: names and descriptions only.
+    const ready = status.filter((s) => s.status === "ready");
+    const notReady = status.filter((s) => s.status !== "ready");
+    if (!ready.length) {
+      const lines = ["No MCP servers are currently connected, so there are no MCP tools available."];
+      if (notReady.length) {
+        lines.push(
+          "Configured but not connected:",
+          notReady.map((s) => `- ${s.id}: ${s.status}${s.error ? ` — ${s.error}` : ""}`).join("\n"),
+        );
+      }
+      lines.push("Use mcp_discover if the user wants to add an integration.");
+      return lines.join("\n");
+    }
+
+    const total = [...groups.values()].reduce((n, list) => n + list.length, 0) + orphans.length;
+    const blocks = ready.map((s) => {
+      const tools = groups.get(s.id) ?? [];
+      return `[${s.id}] ${tools.length} tool(s)\n${tools.map(summarise).join("\n") || "  (none)"}`;
+    });
+    if (orphans.length) blocks.push(`[unattributed]\n${orphans.map(summarise).join("\n")}`);
+    if (notReady.length) {
+      blocks.push(
+        `Configured but not connected (no tools from these):\n${notReady
+          .map((s) => `- ${s.id}: ${s.status}${s.error ? ` — ${s.error}` : ""}`)
+          .join("\n")}`,
+      );
+    }
+    return [
+      `${ready.length} MCP server(s) connected, exposing ${total} tool(s).`,
+      INVOKE_HINT,
+      "",
+      blocks.join("\n\n"),
+      "",
+      "Parameters are not shown above. Before calling one, get its schema with mcp_tools again, passing " +
+        "`name` for a single tool or `server` for all of that server's tools.",
+    ].join("\n");
+  },
+
   /**
    * Propose servers for a plain-language need, and report what is already configured.
    *

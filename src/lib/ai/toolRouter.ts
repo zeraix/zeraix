@@ -99,7 +99,26 @@ export const ROUTED_TOOLS: Record<"daily" | "dev", ReadonlySet<string>> = {
   ]),
 };
 
-export const isRouted = (mode: "daily" | "dev", name: string): boolean => ROUTED_TOOLS[mode].has(name);
+/**
+ * Tools exposed by connected MCP servers, which are always routed and never declared.
+ *
+ * A separate predicate rather than entries in the sets above, because these names are not knowable in
+ * advance: they are `mcp__<serverId>__<tool>`, invented by whatever the user connected. That is also
+ * exactly why declaring them was worse than the token count suggests. The sets above are constant, so
+ * the declared block is byte-identical on every install and every turn; MCP schemas made it neither.
+ * They differ per user, and they CHANGE MID-CONVERSATION — `mcp_connect` is a tool the model itself can
+ * call, and a server may add or remove tools at runtime — so every such change re-prefilled the whole
+ * request from token 0, tools being ahead of `messages`. The saving on schemas is real (a single server
+ * can declare dozens); avoiding that invalidation is the larger half.
+ *
+ * Discovery moves to the `mcp_tools` call, which stays declared: nothing else in a cache-stable prompt
+ * can tell the model that this user has integrations at all.
+ */
+export const MCP_TOOL_PREFIX = "mcp__";
+export const isMcpToolName = (name: string): boolean => name.startsWith(MCP_TOOL_PREFIX);
+
+export const isRouted = (mode: "daily" | "dev", name: string): boolean =>
+  ROUTED_TOOLS[mode].has(name) || isMcpToolName(name);
 
 /**
  * Resolve what the model emitted into the call to actually run.

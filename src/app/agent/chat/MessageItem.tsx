@@ -18,7 +18,8 @@ import { DiffView, extractDiff } from "./DiffView";
 import { Markdown } from "./Markdown";
 import { formatBytes, abbreviateNumber, formatDuration } from "./format";
 import { useT } from "@/lib/i18n";
-import type { ChoiceMsg, DisplayMsg, SubAgentStep, Todo } from "./types";
+import { useImeGuard } from "@/lib/ime";
+import type { ChoiceAnswer, ChoiceMsg, DisplayMsg, SubAgentStep, Todo } from "./types";
 
 /** A single tool-call message (the tool branch extracted from the DisplayMsg union). */
 export type ToolMsg = Extract<DisplayMsg, { kind: "tool" }>;
@@ -274,81 +275,208 @@ function TodoRecord({ todos }: { todos: Todo[] }) {
 }
 
 /** Choice card: renders the AI-recommended options plus an auto-appended "Discuss this question", fed back to the model on click. */
+/**
+ * The ask_user card.
+ *
+ * One card can carry several questions, shown as tabs. Nothing is sent until the user presses submit, which
+ * is the whole point of the tabbed form: with a click resolving the tool call immediately, a second question
+ * could only ever be asked in a second round trip — the model asks, the user answers, the model asks again —
+ * and a decision made of three related choices became three interruptions. Deferring lets the user answer in
+ * any order, go back and change their mind, and hand the whole thing over once.
+ *
+ * A question answered with "Discuss this" is still an answer for submission purposes; it just tells the model
+ * to open the topic up rather than treat the matter as settled.
+ */
 function ChoiceCard({
   msg,
-  onPick,
+  onSubmit,
 }: {
   msg: ChoiceMsg;
-  onPick: (id: number, value: string, discuss: boolean) => void;
+  onSubmit: (id: number, answers: ChoiceAnswer[]) => void;
 }) {
   const t = useT();
-  const answered = msg.selected !== null;
+  const [tab, setTab] = useState(0);
+  // Draft answers live here, not in the message, so revising a choice does not rewrite the transcript on
+  // every click. They are lifted into the message only on submit.
+  const [draft, setDraft] = useState<(ChoiceAnswer | null)[]>(() => msg.questions.map(() => null));
+  // Typed answers are kept per question so switching tabs does not lose what someone half-wrote.
+  const [typed, setTyped] = useState<string[]>(() => msg.questions.map(() => ""));
+
+  const multi = msg.questions.length > 1;
+  const answers = msg.submitted ? msg.answers : draft;
+  const current = msg.questions[Math.min(tab, msg.questions.length - 1)];
+  const chosen = answers[tab] ?? null;
+  const answeredCount = answers.filter(Boolean).length;
+  const complete = answeredCount === msg.questions.length;
+  const discussLabel = t("chat.discuss");
+
+  const pick = (value: string, discuss: boolean) => {
+    if (msg.submitted) return;
+    // Choosing an offered option abandons anything typed for this question — two answers to one question
+    // is not a state the card should be able to reach.
+    setTyped((v) => v.map((x, i) => (i === tab ? "" : x)));
+    setDraft((d) => d.map((a, i) => (i === tab ? { value, discuss } : a)));
+    // Advance to the next still-unanswered question, so answering several in a row needs no tab clicks.
+    // Stays put once everything else is answered — at that point the user is revising, and moving them
+    // away from the choice they just changed would fight them.
+    const next = msg.questions.findIndex((_, i) => i !== tab && !draft[i]);
+    if (multi && next !== -1) setTab(next);
+  };
+
+  /** Typing is answering: the text becomes this question's answer, and clearing it un-answers the question. */
+  const type = (text: string) => {
+    if (msg.submitted) return;
+    setTyped((v) => v.map((x, i) => (i === tab ? text : x)));
+    setDraft((d) =>
+      d.map((a, i) => (i === tab ? (text.trim() ? { value: text.trim(), discuss: false, custom: true } : null) : a)),
+    );
+    // Deliberately no auto-advance here: moving the tab out from under someone mid-sentence is worse than
+    // making them click.
+  };
+
   return (
     <div className="flex">
-      {/* The AI avatar and outer bubble are both removed: the question and options are shown as plain text + standalone option buttons */}
       <div className="w-full min-w-0 px-1 py-0.5">
-        {msg.question && (
-          <p className="mb-2.5 text-sm font-medium leading-relaxed text-ink">{msg.question}</p>
-        )}
-        <div className="flex max-w-md flex-col gap-2">
-          {msg.options.map((opt, idx) => {
-            const chosen = msg.selected === opt;
-            return (
-              <button
-                key={idx}
-                disabled={answered}
-                onClick={() => onPick(msg.id, opt, false)}
-                className={`group flex items-center gap-2.5 rounded-xl border px-3.5 py-2.5 text-left text-sm transition-all disabled:cursor-default ${
-                  chosen
-                    ? "border-primary bg-primary font-medium text-white shadow-sm shadow-primary/25"
-                    : answered
-                      ? "border-line bg-surface-muted text-ink-subtle"
-                      : "border-line bg-surface text-ink hover:-translate-y-px hover:border-primary hover:bg-primary/[0.06] hover:shadow-sm"
-                }`}
-              >
-                <span
-                  className={`flex h-5 w-5 shrink-0 items-center justify-center rounded-full text-[11px] font-semibold transition-colors ${
-                    chosen
-                      ? "bg-white/25 text-white"
-                      : answered
-                        ? "bg-surface text-ink-subtle"
-                        : "bg-surface-muted text-ink-muted group-hover:bg-primary/15 group-hover:text-primary"
+        {/* Wider with tabs than without: four tab labels do not fit a single-question card, and the
+            overflow has nowhere to go inside a bubble. */}
+        <div className={`rounded-2xl border border-line bg-surface/60 p-3 ${multi ? "max-w-xl" : "max-w-md"}`}>
+          {/* Tabs, only when there is more than one question — a single question needs no chrome. */}
+          {multi && (
+            <div className="mb-3 flex flex-wrap items-center gap-1 border-b border-line pb-2">
+              {msg.questions.map((q, i) => {
+                const active = i === tab;
+                const done = Boolean(answers[i]);
+                return (
+                  <button
+                    key={i}
+                    onClick={() => setTab(i)}
+                    title={q.question}
+                    className={`flex shrink-0 items-center gap-1.5 rounded-lg px-2 py-1 text-xs font-medium transition ${
+                      active ? "bg-surface text-ink shadow-sm" : "text-ink-subtle hover:bg-surface-hover hover:text-ink-muted"
+                    }`}
+                  >
+                    <span
+                      className={`flex h-4 w-4 items-center justify-center rounded-full text-[10px] font-semibold ${
+                        done ? "bg-primary text-white" : active ? "bg-surface-muted text-ink-muted" : "bg-surface-muted text-ink-subtle"
+                      }`}
+                    >
+                      {done ? "✓" : i + 1}
+                    </span>
+                    <span className="max-w-[8rem] truncate">{q.question}</span>
+                  </button>
+                );
+              })}
+            </div>
+          )}
+
+          {current.question && (
+            <p className="mb-2.5 text-sm font-medium leading-relaxed text-ink">{current.question}</p>
+          )}
+
+          <div className="flex flex-col gap-2">
+            {current.options.map((opt, idx) => {
+              const isChosen = chosen !== null && !chosen.discuss && chosen.value === opt;
+              return (
+                <button
+                  key={idx}
+                  disabled={msg.submitted}
+                  onClick={() => pick(opt, false)}
+                  className={`group flex items-center gap-2.5 rounded-xl border px-3.5 py-2.5 text-left text-sm transition-all disabled:cursor-default ${
+                    isChosen
+                      ? "border-primary bg-primary font-medium text-white shadow-sm shadow-primary/25"
+                      : msg.submitted
+                        ? "border-line bg-surface-muted text-ink-subtle"
+                        : "border-line bg-surface text-ink hover:-translate-y-px hover:border-primary hover:bg-primary/[0.06] hover:shadow-sm"
                   }`}
                 >
-                  {chosen ? "✓" : String.fromCharCode(65 + idx)}
-                </span>
-                <span className="min-w-0 flex-1">{opt}</span>
-              </button>
-            );
-          })}
-          {/* Auto-appended: Discuss this question */}
-          {(() => {
-            const discussLabel = t("chat.discuss");
-            const chosen = msg.selected === discussLabel;
-            return (
+                  <span
+                    className={`flex h-5 w-5 shrink-0 items-center justify-center rounded-full text-[11px] font-semibold transition-colors ${
+                      isChosen
+                        ? "bg-white/25 text-white"
+                        : msg.submitted
+                          ? "bg-surface text-ink-subtle"
+                          : "bg-surface-muted text-ink-muted group-hover:bg-primary/15 group-hover:text-primary"
+                    }`}
+                  >
+                    {isChosen ? "✓" : String.fromCharCode(65 + idx)}
+                  </span>
+                  <span className="min-w-0 flex-1">{opt}</span>
+                </button>
+              );
+            })}
+
+            {/* Free text. The offered options are the model's guesses at what the user wants; a card that
+                only accepts them turns "pick one of my ideas" into the only possible answer, and options
+                like "my first name (type it)" become unanswerable. */}
+            <input
+              type="text"
+              value={typed[tab] ?? ""}
+              disabled={msg.submitted}
+              onChange={(e) => type(e.target.value)}
+              placeholder={t("chat.choice.customPlaceholder")}
+              className={`w-full rounded-xl border px-3.5 py-2.5 text-sm outline-none transition placeholder:text-ink-subtle disabled:cursor-default ${
+                chosen?.custom
+                  ? "border-primary bg-primary/[0.06] text-ink ring-2 ring-primary/25"
+                  : msg.submitted
+                    ? "border-line bg-surface-muted text-ink-subtle"
+                    : "border-line bg-surface text-ink hover:border-primary/50 focus:border-primary"
+              }`}
+            />
+
+            {/* Auto-appended: discuss this question rather than settle it. */}
+            <button
+              disabled={msg.submitted}
+              onClick={() => pick(discussLabel, true)}
+              className={`flex items-center gap-2 rounded-xl border border-dashed px-3.5 py-2.5 text-left text-sm transition-all disabled:cursor-default ${
+                chosen?.discuss
+                  ? "border-neutral-500 bg-neutral-700 font-medium text-white"
+                  : msg.submitted
+                    ? "border-line bg-surface-muted text-ink-subtle"
+                    : "border-line-strong bg-surface/60 text-ink-muted hover:border-neutral-400 hover:bg-surface-muted hover:text-ink"
+              }`}
+            >
+              <span className="shrink-0 text-[13px]">💬</span>
+              <span className="min-w-0 flex-1">{discussLabel}</span>
+            </button>
+          </div>
+
+          {/* Submit. Present even for a single question, so the interaction is the same shape either way and
+              a misclick is always recoverable before anything reaches the model. */}
+          {!msg.submitted && (
+            <div className="mt-3 flex items-center gap-2">
               <button
-                disabled={answered}
-                onClick={() => onPick(msg.id, discussLabel, true)}
-                className={`flex items-center gap-2 rounded-xl border border-dashed px-3.5 py-2.5 text-left text-sm transition-all disabled:cursor-default ${
-                  chosen
-                    ? "border-neutral-500 bg-neutral-700 font-medium text-white"
-                    : answered
-                      ? "border-line bg-surface-muted text-ink-subtle"
-                      : "border-line-strong bg-surface/60 text-ink-muted hover:border-neutral-400 hover:bg-surface-muted hover:text-ink"
-                }`}
+                disabled={!complete}
+                onClick={() => onSubmit(msg.id, draft as ChoiceAnswer[])}
+                className="rounded-lg bg-primary px-3 py-1.5 text-xs font-medium text-white shadow-sm transition hover:brightness-110 disabled:cursor-not-allowed disabled:bg-surface-muted disabled:text-ink-subtle disabled:shadow-none"
               >
-                <span className="shrink-0 text-[13px]">💬</span>
-                <span className="min-w-0 flex-1">{discussLabel}</span>
+                {t("chat.choice.submit")}
               </button>
-            );
-          })()}
+              <span className="text-[11px] text-ink-subtle">
+                {complete
+                  ? t("chat.choice.readyHint")
+                  : t("chat.choice.progress", {
+                      answered: String(answeredCount),
+                      total: String(msg.questions.length),
+                    })}
+              </span>
+            </div>
+          )}
+
+          {msg.submitted && (
+            <div className="mt-2.5 flex flex-col gap-1">
+              {msg.questions.map((q, i) => {
+                const a = msg.answers[i];
+                return (
+                  <p key={i} className="flex items-start gap-1 text-xs text-ink-subtle">
+                    <span className="text-primary">✓</span>
+                    {multi ? <span className="truncate text-ink-subtle">{q.question}</span> : null}
+                    <span className="font-medium text-ink-muted">{a?.value ?? "—"}</span>
+                  </p>
+                );
+              })}
+            </div>
+          )}
         </div>
-        {answered && (
-          <p className="mt-2.5 flex items-center gap-1 text-xs text-ink-subtle">
-            <span className="text-primary">✓</span>
-            {t("chat.selectedLabel")}<span className="font-medium text-ink-muted">{msg.selected}</span>
-          </p>
-        )}
       </div>
     </div>
   );
@@ -897,7 +1025,7 @@ const UsageTag = ({
 export const MessageItem = memo(function MessageItem({
   m,
   index,
-  onPick,
+  onSubmitChoice,
   onEditUser,
   onRegenerate,
   onRateMessage,
@@ -906,7 +1034,7 @@ export const MessageItem = memo(function MessageItem({
 }: {
   m: DisplayMsg;
   index?: number;
-  onPick: (id: number, value: string, discuss: boolean) => void;
+  onSubmitChoice: (id: number, answers: ChoiceAnswer[]) => void;
   onEditUser?: (index: number, newText: string) => void;
   onRegenerate?: (index: number, rating: "up" | "down" | null) => void;
   onRateMessage?: (displayIndex: number, storedIndex: number | undefined, rating: "up" | "down" | null) => void;
@@ -914,6 +1042,7 @@ export const MessageItem = memo(function MessageItem({
   busy?: boolean;
 }) {
   const t = useT();
+  const ime = useImeGuard();
   // Inline-edit state for user messages (no effect on non-user messages, but hooks must be called unconditionally, so it's placed before all branches).
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState("");
@@ -938,7 +1067,7 @@ export const MessageItem = memo(function MessageItem({
     );
   }
   if (m.kind === "choice") {
-    return <ChoiceCard msg={m} onPick={onPick} />;
+    return <ChoiceCard msg={m} onSubmit={onSubmitChoice} />;
   }
   if (m.kind === "todos") {
     return <TodoRecord todos={m.todos} />;
@@ -1010,7 +1139,11 @@ export const MessageItem = memo(function MessageItem({
             autoFocus
             value={draft}
             onChange={(e) => setDraft(e.target.value)}
+            {...ime.bind}
             onKeyDown={(e) => {
+              // Enter committing an IME composition must not save the edit — see lib/ime.ts. Escape is
+              // guarded by the same return: it cancels an IME candidate list before it cancels the edit.
+              if (ime.isImeKey(e)) return;
               if (e.key === "Enter" && !e.shiftKey) {
                 e.preventDefault();
                 saveEdit();

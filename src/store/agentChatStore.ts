@@ -71,6 +71,8 @@ type AgentChatState = {
     reminderText: string,
     reminder?: StoredMessage["reminder"],
   ) => void;
+  /** Attach a sub-agent's tool trace to a tool message already on disk. Never touches `content`. */
+  setMessageSteps: (convId: string, index: number, steps: NonNullable<StoredMessage["steps"]>) => void;
   setActiveProject: (id: string) => void;
   setActiveConversation: (id: string | null) => void;
   /** Flags or clears a conversation as "generating" (drives the sidebar loading spinner). Keyed by conversation ID, independent of the active conversation. */
@@ -288,6 +290,28 @@ export const useAgentChatStore = create<AgentChatState>((set, get) => {
           const messages = c.messages.map((m, i) =>
             i === index ? { ...m, reminderText, ...(reminder ? { reminder } : {}) } : m,
           );
+          return { ...c, messages, updatedAt: Date.now() };
+        }),
+      }));
+      if (pid) markProjectDirty(pid);
+    },
+
+    /**
+     * Attach a sub-agent's tool trace to a tool message already on disk.
+     *
+     * Concurrent delegations settle *after* the tool result that started them was persisted, so their
+     * steps cannot be written by appendMessage the way a blocking run_subagent's are. Without this the
+     * trace would exist only in memory: visible while the user watched it happen, gone on reload — the
+     * exact live/reloaded divergence the nesting design exists to prevent.
+     */
+    setMessageSteps: (convId, index, steps) => {
+      const conv = get().getConversation(convId);
+      if (!conv || index < 0 || index >= conv.messages.length) return;
+      const pid = conv.projectId;
+      set((s) => ({
+        conversations: s.conversations.map((c) => {
+          if (c.id !== convId) return c;
+          const messages = c.messages.map((m, i) => (i === index ? { ...m, steps } : m));
           return { ...c, messages, updatedAt: Date.now() };
         }),
       }));

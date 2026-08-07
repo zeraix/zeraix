@@ -98,6 +98,21 @@ export const FORCE_REVIEW_NUDGE =
   "the conversation.";
 
 /**
+ * Outstanding-delegation reminder (model-facing only, never displayed; persisted into the last tool result's wireText — see reminders.ts).
+ *
+ * Written when the model tries to end a turn while delegations it spawned are still running. Those
+ * delegations are cancelled the moment the turn ends, so concluding here throws away work that is already
+ * paid for — and the model has no way to notice, because a spawn handle looks the same whether or not it
+ * was ever collected. Injected at most once per turn: if the model reads this and still concludes, the
+ * work genuinely was not needed and it should not be trapped in the turn.
+ */
+export const PENDING_DELEGATION_NUDGE =
+  "You spawned sub-agent delegations that are still running, and you are about to end the turn without collecting them — " +
+  "they will be cancelled and their work discarded. If you still need them, call join_subagents now (it blocks until they " +
+  "finish, so this costs you one request, not a wait loop) and use the results in your answer. If you have genuinely " +
+  "decided you do not need them, say so briefly in your reply and finish.";
+
+/**
  * Record-to-project-memory reminder (model-facing only, never displayed; persisted into the last tool result's wireText — see reminders.ts).
  *
  * Written when a turn modified source files but never called `remember_project`, which was the norm:
@@ -184,6 +199,9 @@ const TOOL_LABELS: Record<string, string> = {
   fetch_url: "Fetching page",
   mcp_discover: "Finding MCP servers",
   mcp_connect: "Connecting MCP server",
+  mcp_tools: "Checking connected integrations",
+  spawn_subagents: "Starting sub-agents",
+  join_subagents: "Waiting for sub-agents",
 };
 
 /** Builds status text from the tool name + args, e.g. "Editing file style.css…". */
@@ -201,10 +219,17 @@ export function toolStatusText(name: string, args: unknown): string {
 /** The three options on the confirmation panel (order is the up/down navigation order):
  *  yes = allow this time / always = don't ask again (auto-approve this tool for the rest of the session) / no = reject. */
 export type ConsentDecision = "yes" | "always" | "no";
-export const CONSENT_OPTIONS: { key: ConsentDecision; label: string }[] = [
-  { key: "yes", label: "Allow" },
-  { key: "always", label: "Don't ask again" },
-  { key: "no", label: "Reject" },
+/**
+ * The three answers, in keyboard-navigation order — `consentSel` indexes into this array, so the order is
+ * load-bearing and independent of the order they are painted in.
+ *
+ * Labels are translation keys rather than text: this list is shared between the panel and the queue hook,
+ * and only the panel has a `t`.
+ */
+export const CONSENT_OPTIONS: { key: ConsentDecision; labelKey: string }[] = [
+  { key: "yes", labelKey: "chat.consent.allow" },
+  { key: "always", labelKey: "chat.consent.always" },
+  { key: "no", labelKey: "chat.consent.reject" },
 ];
 
 /**

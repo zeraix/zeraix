@@ -1,5 +1,24 @@
 "use client";
 
+import { InMemoryAuditLog } from "@/lib/ai/orchestration/audit-log";
+import { isKnownTool, type ToolDeclaration } from "@/lib/ai/orchestration/capabilities";
+import type { CapabilityBroker } from "@/lib/ai/orchestration/capability-broker";
+import { createConfiguredBroker, MAX_TURNS_PER_SUBAGENT } from "@/lib/ai/orchestration/config";
+import {
+  toChatMessages,
+  toChatTools,
+  toModelTurn,
+} from "@/lib/ai/orchestration/openai-adapter";
+import {
+  createSpawnSubAgentHandler,
+  // Aliased: `formatSpawnResult` is already taken by the fixed-role spawn_subagents path in subagents.ts,
+  // and the two format different things.
+  formatSpawnResult as formatBrokeredSpawn,
+} from "@/lib/ai/orchestration/orchestrator-tool";
+import type { ModelClient } from "@/lib/ai/orchestration/sub-agent-runner";
+import type { ConsentRequester } from "./ConsentPanel";
+import type { ChoiceAnswer, ChoiceQuestion } from "./types";
+import type { ToolSchema } from "@/lib/ai/toolkit";
 import {
   Suspense,
   useCallback,
@@ -63,8 +82,13 @@ import { useT } from "@/lib/i18n";
 import { toast } from "sonner";
 import {
   SUBAGENTS, SUBAGENT_TOOL_DISCIPLINE, subAgentTool,
-  delegationSubject, findRepeatDelegation, repeatDelegationResult, type PriorDelegation,
+  delegationSubject, findRepeatDelegation, isSameDelegation, repeatDelegationResult,
+  formatAutoDelivery, formatJoinResult, formatSpawnResult,
+  MAX_PARALLEL_SUBAGENTS, MAX_SUBAGENTS_PER_TURN, JOIN_DEFAULT_TIMEOUT_MS, JOIN_MAX_TIMEOUT_MS,
+  type DelegationMeta, type PriorDelegation, type SubAgentDef,
 } from "@/lib/ai/subagents";
+import { SubAgentScheduler } from "@/lib/ai/subagentScheduler";
+import { useImeGuard } from "@/lib/ime";
 import { SkillSelectPanel } from "./SkillSelectPanel";
 import BrowserPanel from "./BrowserPanel";
 import { getStorage } from "@zzcpt/zztool";
@@ -157,6 +181,7 @@ import {
   FINALIZE_NUDGE,
   RECORD_MEMORY_NUDGE,
   FORCE_REVIEW_NUDGE,
+  PENDING_DELEGATION_NUDGE,
   MUTATING_FILE_TOOLS,
   PARALLEL_SAFE_TOOLS,
   RENDERER_HANDLED_TOOLS,
@@ -218,6 +243,7 @@ import { TranscriptSkeleton } from "./TranscriptSkeleton";
 import CustomScrollbar, { PAGE_SCROLLBAR } from "@/components/CustomScrollbar";
 import { Composer } from "./Composer";
 import { ProjectSkillsPrompt } from "./ProjectSkillsPrompt";
+import { AnimatePresence, motion } from "framer-motion";
 import { ConsentPanel } from "./ConsentPanel";
 import { useConsentQueue } from "./useConsentQueue";
 import {
@@ -303,6 +329,7 @@ type RunCtx = {
 
 function ChatAgent() {
   const t = useT();
+  const ime = useImeGuard();
   const params = useSearchParams();
   const router = useRouter();
   const pathname = usePathname();
@@ -363,13 +390,44 @@ function ChatAgent() {
   // the persist step needs the image URL to store it for display rebuild. generateImageAction sets this right before
   // returning; the persist step consumes it. Safe because image_generation runs serially (its own tool group).
   const lastImageArtifactRef = useRef<{ image: string; servedBy?: string } | null>(null);
-  // Same side-channel shape for run_subagent: the tool returns only the sub-agent's conclusion text, but the
-  // persist step needs its inner steps so the reopened conversation shows what it actually did. Points at the
-  // live array (mutated in place as steps land), so it is current by the time the persist step reads it.
-  // Safe for the same reason as above: run_subagent is not parallel-safe, so it runs in its own serial group.
-  const lastSubagentStepsRef = useRef<SubAgentStep[] | null>(null);
+  /**
+   * Where a delegation tool call parks its sub-agent's inner tool trace, so the persist step can store it
+   * beside the conclusion and a reopened conversation shows the same operations the user watched.
+   *
+   * Keyed by the parsed-args object, which is unique per tool call — a single "last one wins" ref was
+   * enough while run_subagent was the only delegation and ran strictly serially, but spawn_subagents
+   * starts delegations that outlive their own tool call and settle alongside each other, so the trace has
+   * to be addressed rather than assumed. `storedIndex` is filled in by the persist step once the message
+   * exists on disk; until then steps accumulate and are flushed on the first patch.
+   */
+  const subagentSinksRef = useRef(
+    new WeakMap<
+      object,
+      { convId: string; steps: SubAgentStep[]; storedIndex: number | null }
+    >(),
+  );
   /** Delegations completed in the current turn, for the repeat guard in runSubAgent (keyed by turn, never cleared — see there). */
   const delegationsRef = useRef<{ turnId: string; done: PriorDelegation[] }>({ turnId: "", done: [] });
+  /**
+   * The turn's concurrent-delegation scheduler (spawn_subagents / join_subagents).
+   *
+   * Keyed by turnId for the same reason as delegationsRef: there is no single point where a turn is known
+   * to have ended, so rebuilding on a new id is the only reset that cannot leak one turn's jobs into the
+   * next. The outgoing scheduler is cancelled on the way out — a delegation whose turn is over has nowhere
+   * to deliver a conclusion, so letting it keep running would just burn tokens into a dead display.
+   */
+  const schedulerRef = useRef<{
+    turnId: string;
+    sched: SubAgentScheduler<DelegationMeta>;
+    /**
+     * Stops the delegation loops themselves, which cancelling the scheduler alone cannot do: the scheduler
+     * settles a job's *outcome* (so a waiting join unblocks), while the loop producing it keeps requesting
+     * until something tells it to stop. The turn's own signal covers a user interrupt; this covers the
+     * other exit, a turn that simply ended, where nothing is aborted and a running sub-agent would
+     * otherwise carry on billing requests into a conversation that has moved on.
+     */
+    stop: AbortController;
+  } | null>(null);
   const [status, setStatus] = useState(""); // While generating, show the user "what it is doing"
   const [error, setError] = useState<string | null>(null);
   const [toolsReady, setToolsReady] = useState(false);
@@ -2171,6 +2229,13 @@ function ChatAgent() {
     // Usage-log attribution: "main" for the primary agent, "sub:<id>" when a sub-agent is acting.
     // Every tool call funnels through here, so this is the one place a delegation's actions are recorded.
     actor = "main",
+    // Set when a brokered anonymous sub-agent is the caller. Two effects, both deliberate: the consent
+    // panel names the agent and its task, and the "don't ask again" shortcut is bypassed (see below).
+    requester: ConsentRequester | null = null,
+    // Lets a caller learn whether the call succeeded. execToolCall folds failures into the returned text
+    // for the model's benefit, which loses the distinction everywhere else — the orchestration audit log
+    // needs it back.
+    onResult?: (ok: boolean) => void,
   ): Promise<string> => {
     ctx.status(toolStatusText(name, args));
     const startedAt = Date.now();
@@ -2193,7 +2258,11 @@ function ChatAgent() {
       });
     // Consent policy lives in toolNeedsConsent (constants.ts) so mode rules can grow in one place. Currently: dev mode
     // confirms sensitive tools, daily mode runs them directly. The "always" allowance still short-circuits repeat prompts.
-    if (toolNeedsConsent(name, mode) && !allowedToolsRef.current.has(name)) {
+    // A sub-agent's call always asks, even for a tool the user allowed with "don't ask again": that answer
+    // was given about work the user had themselves requested and was watching. An autonomous delegation
+    // deciding to write a file is a different question, and inheriting the earlier yes would silently make
+    // sub-agents more powerful than the agent the user is actually looking at.
+    if (toolNeedsConsent(name, mode) && (requester !== null || !allowedToolsRef.current.has(name))) {
       const previewDiff = await buildPreviewDiff(name, args);
       // §A1: warn when this mutation targets a file the model only "knows" from compressed history — its
       // latest read/write was folded into the summary and never re-verified at the tail. Pure lookup, no cost.
@@ -2203,7 +2272,7 @@ function ChatAgent() {
         targetPath && pathProvenance(convoRef.current, compactionRef.current, targetPath) === "digest-only"
           ? t("chat.provenanceWarning")
           : null;
-      const decision = await requestConsent(ctx.convId, name, args, previewDiff, warning);
+      const decision = await requestConsent(ctx.convId, name, args, previewDiff, warning, requester);
       if (decision === "always") allowedToolsRef.current.add(name);
       if (decision === "no") {
         const denied = "The user rejected this operation.";
@@ -2211,92 +2280,135 @@ function ChatAgent() {
         // A refused call is logged too: "what did the agent try to do" is exactly the question the log
         // exists to answer, and a silent gap there reads as if it never asked.
         log(false, denied, true);
+        onResult?.(false);
         return denied;
       }
     }
     const result = await callTool(name, args);
     ctx.push({ kind: "tool", name: displayName, args, ok: result.ok, result: result.content });
     log(result.ok, result.content);
+    onResult?.(result.ok);
     // The schema hint is model-facing only: the bubble above and the log entry keep the tool's own error, because a parameter
     // dump is what the model needs to retry and noise to everyone reading the timeline.
     return result.ok ? result.content : await explainToolFailure(name, result.content);
   };
 
-  // Run a subagent: run an independent small loop with its dedicated system prompt + restricted tool set, and return the final conclusion text.
-  const runSubAgent = async (ctx: RunCtx, rawArgs: Record<string, unknown>): Promise<string> => {
-    const agentId = String(rawArgs.agent ?? "");
-    const task = String(rawArgs.task ?? "").trim();
-    const def = SUBAGENTS.find((a) => a.id === agentId);
-    if (!def) return `Unknown subagent: ${agentId}`;
-    if (!task) return "task must not be empty.";
+  // ── Delegation plumbing ─────────────────────────────────────────────────────────────────────────
+  //
+  // Three call paths share one delegation loop: run_subagent (one delegation, blocking), and
+  // spawn_subagents / join_subagents (many, concurrent, collected later). Only the loop is shared —
+  // each path owns its own display bubble, because what the user should see differs: a lone delegation
+  // settles its own bubble on its conclusion, whereas a fan-out keeps one bubble for the whole batch.
 
-    // Repeat-delegation guard. Scoped to this turn, and reset by turnId rather than cleared anywhere:
-    // there is no single point where a turn is known to have ended (it can abort, be cancelled, or run in
-    // the background while another conversation is active), so keying the bucket is the only way that
-    // cannot leak one turn's delegations into the next.
-    const bucket = delegationsRef.current;
-    if (bucket.turnId !== ctx.turnId) {
-      bucket.turnId = ctx.turnId;
-      bucket.done = [];
+  /** Get (or create) the place a delegation tool call parks its sub-agent trace for persistence. */
+  const delegationSink = (argsKey: object, convId: string) => {
+    const existing = subagentSinksRef.current.get(argsKey);
+    if (existing) return existing;
+    const fresh = { convId, steps: [] as SubAgentStep[], storedIndex: null as number | null };
+    subagentSinksRef.current.set(argsKey, fresh);
+    return fresh;
+  };
+
+  /**
+   * Record one sub-agent tool call against a sink, patching the stored message when it already exists.
+   *
+   * A blocking delegation finishes before its tool result is written, so its steps ride along with
+   * appendMessage. A spawned one does not: it settles after that message is on disk, so its trace has to
+   * be patched in — otherwise the operations the user watched happen would vanish on reload.
+   */
+  const recordStep = (
+    sink: { convId: string; steps: SubAgentStep[]; storedIndex: number | null },
+    step: SubAgentStep,
+  ) => {
+    sink.steps.push(step);
+    if (sink.storedIndex != null) {
+      useAgentChatStore.getState().setMessageSteps(sink.convId, sink.storedIndex, [...sink.steps]);
     }
-    const repeat = findRepeatDelegation(agentId, task, bucket.done);
-    if (repeat) {
-      const answer = repeatDelegationResult(repeat);
-      // Shown and logged like any other delegation, or the saving would be invisible: a delegation that
-      // silently never happened looks in the timeline exactly like one that was never requested.
-      ctx.push({ kind: "tool", name: `run_subagent → ${agentId}`, args: { agent: agentId, task }, ok: true, result: answer });
-      logSubagentRun({
-        agent: agentId, task, rounds: 0, steps: 0,
-        promptTokens: 0, completionTokens: 0, totalTokens: 0,
-        ms: 0, ok: true, error: "repeat: answered from an earlier delegation this turn",
-        convId: ctx.convId, turnId: ctx.turnId,
-      });
-      return answer;
-    }
-    ctx.status(t("chat.subagentProcessing", { agent: agentId }));
+  };
+
+  /** Settle every outstanding job AND stop the loops still producing them. Both, always — see `stop` above. */
+  const shutdownScheduler = (held: NonNullable<typeof schedulerRef.current>) => {
+    held.sched.cancelAll();
+    held.stop.abort();
+  };
+
+  /** The scheduler for the current turn, rebuilt (and the previous one shut down) when the turn changes. */
+  const schedulerFor = (ctx: RunCtx): SubAgentScheduler<DelegationMeta> => {
+    const held = schedulerRef.current;
+    if (held && held.turnId === ctx.turnId) return held.sched;
+    if (held) shutdownScheduler(held);
+    const stop = new AbortController();
+    const sched = new SubAgentScheduler<DelegationMeta>({
+      limit: MAX_PARALLEL_SUBAGENTS,
+      maxJobs: MAX_SUBAGENTS_PER_TURN,
+      // The in-flight half of the repeat-delegation guard. The completed half (delegationsRef) can only
+      // see delegations that already returned, so before this a model that spawned the same question
+      // twice in one batch paid for both — the case fan-out makes easy and serial delegation never could.
+      isDuplicate: (a, b) => isSameDelegation(a, b),
+      onChange: () => {
+        const c = sched.counts();
+        if (c.running + c.queued > 0) {
+          ctx.status(t("chat.subagentsWorking", { running: c.running, queued: c.queued }));
+        }
+      },
+    });
+    const held2 = { turnId: ctx.turnId, sched, stop };
+    // Cancelling the turn has to reach the scheduler directly, not via the run loop's `finally`: when the
+    // user hits stop the loop is typically parked inside join_subagents, so waiting for the loop to unwind
+    // would deadlock the cancel behind the very wait it is meant to interrupt.
+    if (ctx.signal.aborted) shutdownScheduler(held2);
+    else ctx.signal.addEventListener("abort", () => shutdownScheduler(held2), { once: true });
+    schedulerRef.current = held2;
+    return sched;
+  };
+
+  /**
+   * Run one sub-agent to its conclusion: an independent small loop with its own system prompt and
+   * restricted tool set. Owns the model loop, the usage bookkeeping and the repeat-guard record; the
+   * caller owns the display.
+   */
+  const runDelegation = async (
+    ctx: RunCtx,
+    opts: {
+      agentId: string;
+      task: string;
+      def: SubAgentDef;
+      /** Distinguishes concurrent delegations in the trace and the usage log ("s2 explore"). */
+      label: string;
+      onStep: (s: SubAgentStep) => void;
+      status: (s: string) => void;
+    },
+  ): Promise<{ conclusion: string; error?: string }> => {
+    const { agentId, task, def, label } = opts;
+    opts.status(t("chat.subagentProcessing", { agent: agentId }));
 
     // Usage-log bookkeeping for this delegation. The sub-agent's own rounds are counted here rather
     // than read back off turnUsageRef: that ref accumulates every conversation generating at the same
     // time, so a background turn running in parallel would be billed to whichever delegation was open.
     const startedAt = Date.now();
-    const actor = `sub:${agentId}`;
+    // `label`, not `agentId`: three concurrent `explore` delegations would otherwise share one actor and
+    // the usage log could no longer say which of them spent what.
+    const actor = `sub:${label}`;
     const subLog = { actor, convId: ctx.convId, turnId: ctx.turnId };
     const subUsage = { prompt: 0, completion: 0, total: 0 };
     let rounds = 0;
+    let stepCount = 0;
 
-    // Show a "delegate" bubble, so the user can see what task the main model handed to which subagent.
-    // Its `steps` grow in place as the subagent works, so the delegation is not an opaque wait.
-    const steps: SubAgentStep[] = [];
-    // Typed as the tool variant, not the DisplayMsg union: `...bubble` below must keep the tool shape.
-    let bubble: Extract<DisplayMsg, { kind: "tool" }> = {
-      kind: "tool",
-      name: `run_subagent → ${agentId}`,
-      args: { agent: agentId, task },
-      ok: true,
-      result: task,
-      steps,
-    };
-    ctx.push(bubble);
-    lastSubagentStepsRef.current = steps; // consumed by the persist step once this delegation returns
-
-    // The subagent's internal tool calls are nested INTO the delegate bubble above rather than pushed as
-    // sibling bubbles. Siblings were the obvious approach and are wrong: the whole delegation persists as
-    // a single run_subagent tool message, so N sibling bubbles seen live would collapse to one on reload.
-    // Nesting keeps live and reloaded identical, because `steps` is persisted with that one message
-    // (StoredMessage.steps) — and the user still sees every operation.
+    // The sub-agent's internal tool calls are reported through onStep rather than pushed as sibling
+    // bubbles. Siblings were the obvious approach and are wrong: a delegation persists as a single tool
+    // message, so N sibling bubbles seen live would collapse to one on reload. Nesting keeps live and
+    // reloaded identical (StoredMessage.steps) — and the user still sees every operation.
     const collectCtx: RunCtx = {
       ...ctx,
       push: (m) => {
         if (m.kind !== "tool") return; // the subagent has no path to choice cards / usage rows
-        steps.push({ name: m.name, args: m.args, ok: m.ok, result: m.result });
-        // New object identity so memoized message components re-render; the array is copied for the same reason.
-        const next = { ...bubble, steps: [...steps] };
-        replaceDisplay(bubble, next);
-        bubble = next;
+        stepCount++;
+        opts.onStep({ name: m.name, args: m.args, ok: m.ok, result: m.result });
       },
     };
 
-    // Subagent tool set: reuse the same tool set, filtered by def.tools (the subagent does not include run_subagent, so there is no nesting).
+    // Subagent tool set: reuse the same tool set, filtered by def.tools (a sub-agent gets neither
+    // run_subagent nor spawn_subagents, so delegation cannot nest).
     let subTools: unknown[] | undefined;
     if (toolsReady) {
       const all = (await listTools("openai")) as Array<{ function?: { name?: string } }>;
@@ -2318,20 +2430,14 @@ function ChatAgent() {
       { role: "user", content: task },
     ];
 
-    // Settle the bubble on the conclusion the sub-agent reported. Live and reloaded views must agree, and the
-    // reload path rebuilds `result` from the persisted tool content — which is the conclusion, not the task.
-    // Without this the bubble showed the task while running and the conclusion after reopening.
-    const finish = (conclusion: string, error?: string): string => {
-      const next = { ...bubble, result: conclusion, steps: [...steps] };
-      replaceDisplay(bubble, next);
-      bubble = next;
+    const finish = (conclusion: string, error?: string) => {
       // One line per delegation, beside the per-round model entries and the per-call tool entries it
       // produced: the summary answers "what did handing this off cost", the others show how it got there.
       logSubagentRun({
         agent: agentId,
         task,
         rounds,
-        steps: steps.length,
+        steps: stepCount,
         promptTokens: subUsage.prompt,
         completionTokens: subUsage.completion,
         totalTokens: subUsage.total,
@@ -2344,15 +2450,20 @@ function ChatAgent() {
       // Recorded only on success: a delegation that was cancelled or errored has no answer to reuse, and
       // re-running it is exactly the right thing for the model to do.
       if (!error) {
-        bucket.done.push({ agent: agentId, task, subject: delegationSubject(task), conclusion });
+        delegationsRef.current.done.push({
+          agent: agentId,
+          task,
+          subject: delegationSubject(task),
+          conclusion,
+        });
       }
-      return conclusion;
+      return { conclusion, error };
     };
 
     // No upper limit on subagent rounds: loop until the subagent produces final text, or the user interrupts (using this run's own signal).
     while (true) {
       if (ctx.signal.aborted) return finish("(canceled)", "cancelled");
-      ctx.status(t("chat.subagentThinking", { agent: agentId }));
+      opts.status(t("chat.subagentThinking", { agent: agentId }));
       // The subagent bypasses the main wire pipeline, so the policy is applied here too — without it the thinking text carried
       // on `convo` below would reach every provider, including the ones that reject the field.
       const data = await requestChat(
@@ -2394,7 +2505,7 @@ function ChatAgent() {
           } catch {
             /* Invalid JSON arguments, call with an empty object */
           }
-          const content = await execToolCall(collectCtx, tc.function.name, a, `${agentId}→${tc.function.name}`, actor);
+          const content = await execToolCall(collectCtx, tc.function.name, a, `${label}→${tc.function.name}`, actor);
           return { tc, content };
         };
 
@@ -2429,6 +2540,360 @@ function ChatAgent() {
       }
       return finish(msg.content || "(no output from subagent)");
     }
+  };
+
+  /**
+   * Reset the completed-delegation record when the turn changes.
+   *
+   * Keyed by turnId rather than cleared at some end-of-turn point, because there is no single place a turn
+   * is known to have ended (it can abort, be cancelled, or run in the background while another
+   * conversation is active) — keying is the only reset that cannot leak one turn's delegations into the next.
+   */
+  const ensureTurnBucket = (ctx: RunCtx) => {
+    const bucket = delegationsRef.current;
+    if (bucket.turnId !== ctx.turnId) {
+      bucket.turnId = ctx.turnId;
+      bucket.done = [];
+    }
+    return bucket;
+  };
+
+  /** The repeat-guard reply, shown and logged like a real delegation so the saving is visible in the timeline. */
+  const answerFromPriorDelegation = (ctx: RunCtx, agentId: string, task: string, prior: PriorDelegation) => {
+    const answer = repeatDelegationResult(prior);
+    logSubagentRun({
+      agent: agentId, task, rounds: 0, steps: 0,
+      promptTokens: 0, completionTokens: 0, totalTokens: 0,
+      ms: 0, ok: true, error: "repeat: answered from an earlier delegation this turn",
+      convId: ctx.convId, turnId: ctx.turnId,
+    });
+    return answer;
+  };
+
+  // run_subagent: one delegation, awaited in place. The simple path, unchanged in behaviour.
+  const runSubAgent = async (ctx: RunCtx, rawArgs: Record<string, unknown>): Promise<string> => {
+    const agentId = String(rawArgs.agent ?? "");
+    const task = String(rawArgs.task ?? "").trim();
+    const def = SUBAGENTS.find((a) => a.id === agentId);
+    if (!def) return `Unknown subagent: ${agentId}`;
+    if (!task) return "task must not be empty.";
+
+    const bucket = ensureTurnBucket(ctx);
+    const repeat = findRepeatDelegation(agentId, task, bucket.done);
+    if (repeat) {
+      const answer = answerFromPriorDelegation(ctx, agentId, task, repeat);
+      ctx.push({ kind: "tool", name: `run_subagent → ${agentId}`, args: { agent: agentId, task }, ok: true, result: answer });
+      return answer;
+    }
+
+    // A "delegate" bubble, so the user can see what task the main model handed to which sub-agent. Its
+    // `steps` grow in place as the sub-agent works, so the delegation is not an opaque wait.
+    const sink = delegationSink(rawArgs, ctx.convId);
+    // Typed as the tool variant, not the DisplayMsg union: `...bubble` below must keep the tool shape.
+    let bubble: Extract<DisplayMsg, { kind: "tool" }> = {
+      kind: "tool",
+      name: `run_subagent → ${agentId}`,
+      args: { agent: agentId, task },
+      ok: true,
+      result: task,
+      steps: sink.steps,
+    };
+    ctx.push(bubble);
+    // New object identity so memoized message components re-render; the array is copied for the same reason.
+    const refresh = (result?: string) => {
+      const next = { ...bubble, steps: [...sink.steps], ...(result != null ? { result } : {}) };
+      replaceDisplay(bubble, next);
+      bubble = next;
+    };
+
+    const { conclusion } = await runDelegation(ctx, {
+      agentId,
+      task,
+      def,
+      label: agentId,
+      onStep: (s) => {
+        recordStep(sink, s);
+        refresh();
+      },
+      status: ctx.status,
+    });
+    // Settle the bubble on the conclusion. Live and reloaded views must agree, and the reload path rebuilds
+    // `result` from the persisted tool content — which is the conclusion, not the task. Without this the
+    // bubble showed the task while running and the conclusion after reopening.
+    refresh(conclusion);
+    return conclusion;
+  };
+
+  /**
+   * spawn_subagents: start delegations concurrently and hand back their ids at once.
+   *
+   * Returns as soon as the jobs are registered — it never awaits them. That is the whole point: the model
+   * gets its handles in the same round it asked, so it can keep working and then block exactly once in
+   * join_subagents, instead of asking "are they done yet" every round.
+   */
+  const spawnSubagents = async (ctx: RunCtx, rawArgs: Record<string, unknown>): Promise<string> => {
+    const entries = Array.isArray(rawArgs.tasks) ? rawArgs.tasks : [];
+    if (entries.length === 0) return "tasks must be a non-empty array of { agent, task } objects.";
+
+    const bucket = ensureTurnBucket(ctx);
+    const sched = schedulerFor(ctx);
+    const sink = delegationSink(rawArgs, ctx.convId);
+    // The delegations run on the scheduler's stop signal rather than the turn's. It fires on BOTH exits —
+    // the user interrupting (ctx.signal is wired to shut the scheduler down) and the turn simply ending
+    // with work in flight — whereas ctx.signal covers only the first, which is the exit a spawned
+    // delegation is least likely to take.
+    const jobCtx: RunCtx = { ...ctx, signal: schedulerRef.current!.stop.signal };
+
+    // ONE bubble for the whole batch, whose trace collects every delegation's tool calls (each already
+    // prefixed with its job id by runDelegation's label). Per-delegation bubbles would look right live and
+    // then collapse on reload, because the batch persists as this single tool message.
+    let bubble: Extract<DisplayMsg, { kind: "tool" }> = {
+      kind: "tool",
+      name: "spawn_subagents",
+      args: rawArgs,
+      ok: true,
+      result: "",
+      steps: sink.steps,
+    };
+    ctx.push(bubble);
+    const refresh = (result?: string) => {
+      const next = { ...bubble, steps: [...sink.steps], ...(result != null ? { result } : {}) };
+      replaceDisplay(bubble, next);
+      bubble = next;
+    };
+
+    const spawned: Array<{ id: string; agent: string; coalesced: boolean; refused?: string }> = [];
+    const answered: string[] = [];
+    for (const raw of entries) {
+      const entry = (raw ?? {}) as Record<string, unknown>;
+      const agentId = String(entry.agent ?? "");
+      const task = String(entry.task ?? "").trim();
+      const def = SUBAGENTS.find((a) => a.id === agentId);
+      if (!def) {
+        spawned.push({ id: "", agent: agentId || "(missing)", coalesced: false, refused: `unknown sub-agent "${agentId}"` });
+        continue;
+      }
+      if (!task) {
+        spawned.push({ id: "", agent: agentId, coalesced: false, refused: "task must not be empty" });
+        continue;
+      }
+      // Completed-delegation guard: answer from the earlier conclusion instead of spawning a second copy.
+      // Its in-flight counterpart lives in the scheduler's isDuplicate — together they cover both the
+      // "asked again later" and the "asked twice in one batch" cases.
+      const repeat = findRepeatDelegation(agentId, task, bucket.done);
+      if (repeat) {
+        answered.push(answerFromPriorDelegation(ctx, agentId, task, repeat));
+        continue;
+      }
+      const meta: DelegationMeta = { agent: agentId, task, subject: delegationSubject(task) };
+      const res = sched.spawn(meta, async (job) => {
+        const { conclusion } = await runDelegation(jobCtx, {
+          agentId,
+          task,
+          def,
+          label: `${job.id} ${agentId}`,
+          onStep: (s) => {
+            recordStep(sink, s);
+            refresh();
+          },
+          // Per-delegation progress text is dropped on this path: concurrent delegations would fight over
+          // the single status line. The scheduler's onChange publishes the aggregate instead.
+          status: () => {},
+        });
+        return conclusion;
+      });
+      spawned.push({ id: res.id, agent: agentId, coalesced: res.coalesced, refused: res.refused });
+    }
+
+    const summary =
+      formatSpawnResult(spawned) + (answered.length > 0 ? `\n\n${answered.join("\n\n")}` : "");
+    refresh(summary);
+    return summary;
+  };
+
+  /**
+   * join_subagents: block until the named delegations finish, then return their conclusions.
+   *
+   * This is the call that replaces polling. It awaits the jobs' own promises, so the tool call is
+   * suspended for exactly as long as the work takes and wakes the moment it is done — one model
+   * round-trip for the whole wait, however long that is.
+   */
+  const joinSubagents = async (ctx: RunCtx, rawArgs: Record<string, unknown>): Promise<string> => {
+    const held = schedulerRef.current;
+    const sched = held && held.turnId === ctx.turnId ? held.sched : null;
+    if (!sched) return "No delegations have been spawned in this turn — call spawn_subagents first.";
+
+    const ids = Array.isArray(rawArgs.ids)
+      ? rawArgs.ids.map((v) => String(v)).filter((v) => v.length > 0)
+      : null;
+    const mode = rawArgs.mode === "any" ? "any" : "all";
+    // Non-blocking collect: the model still has work in hand and wants what has already finished. The main
+    // agent has exactly one thread of control, so a blocking join costs it every other action until the
+    // delegations land — this is the escape hatch that lets it keep that time when it can still use it.
+    const block = rawArgs.block !== false;
+    const secs = typeof rawArgs.timeout_seconds === "number" ? rawArgs.timeout_seconds : null;
+    const timeoutMs =
+      secs != null && secs > 0 ? Math.min(secs * 1000, JOIN_MAX_TIMEOUT_MS) : JOIN_DEFAULT_TIMEOUT_MS;
+
+    const before = sched.counts();
+    if (block) ctx.status(t("chat.subagentsJoin", { done: before.settled, total: before.total }));
+    let bubble: Extract<DisplayMsg, { kind: "tool" }> = {
+      kind: "tool",
+      name: "join_subagents",
+      args: rawArgs,
+      ok: true,
+      result: t("chat.subagentsJoin", { done: before.settled, total: before.total }),
+    };
+    ctx.push(bubble);
+
+    const r = await sched.join(ids && ids.length > 0 ? ids : null, { mode, timeoutMs, block });
+    const text = formatJoinResult(
+      r.ready.map((x) => ({
+        meta: x.job.meta,
+        id: x.outcome.id,
+        state: x.outcome.state,
+        result: x.outcome.result,
+      })),
+      r.pending,
+      r.unknown,
+      r.timedOut,
+      block,
+    );
+    const next = { ...bubble, result: text };
+    replaceDisplay(bubble, next);
+    bubble = next;
+    return text;
+  };
+
+  /**
+   * Conclusions that landed while the model was doing something else, appended to whatever tool result
+   * comes next.
+   *
+   * The safety net under spawn/join: a delegation the model forgets to collect is work already paid for,
+   * and without this it would be silently discarded when the turn ends. Empty string when there is
+   * nothing to deliver, so the common case adds no bytes to the wire.
+   */
+  // ── Brokered anonymous sub-agents (spawn_sub_agent) ─────────────────────────────────────────────
+  //
+  // The fixed roles above (run_subagent / spawn_subagents) keep their static tool lists and do not touch
+  // any of this. What follows is the other path: the model names the tools a subtask needs, a broker in
+  // src/lib/ai/orchestration decides what it actually gets, and the sub-agent is re-checked before every
+  // single tool call. See capability-broker.ts for why that decision is pure code and never the model's.
+  //
+  // Tool execution routes back through execToolCall rather than calling the toolkit directly, so a brokered
+  // sub-agent's actions land in the same timeline, the same usage log, and the same consent panel as
+  // everything else. Two consent systems for one app would be a way to have neither.
+
+  /** One broker per mounted chat, so grants, concurrency and the audit trail span a session rather than a turn. */
+  const brokerRef = useRef<{ broker: CapabilityBroker; audit: InMemoryAuditLog } | null>(null);
+  const getBroker = () => {
+    if (!brokerRef.current) {
+      const audit = new InMemoryAuditLog();
+      brokerRef.current = {
+        audit,
+        broker: createConfiguredBroker({
+          audit,
+          // High-risk tools are approved per call by the consent panel below, which is a strictly finer
+          // gate than one yes at grant time — so the grant-time path must not ALSO prompt, or the user
+          // answers twice for the same action. Denying here and confirming there would refuse the grant
+          // outright; approving here and confirming there is the behaviour we want.
+          approver: { id: "renderer:per-call-consent", approve: async () => true },
+        }),
+      };
+    }
+    return brokerRef.current;
+  };
+
+  /** Declarations for the brokered path, in the orchestration shape. Read once per turn. */
+  const orchestrationDeclsRef = useRef<Map<string, ToolDeclaration> | null>(null);
+  const getOrchestrationDecls = async () => {
+    if (!orchestrationDeclsRef.current) {
+      const map = new Map<string, ToolDeclaration>();
+      if (toolsReady) {
+        for (const t of (await listTools("raw")) as ToolSchema[]) {
+          // Unclassified names — MCP tools above all — can never be granted, so they are not offered.
+          if (!isKnownTool(t.name)) continue;
+          map.set(t.name, { name: t.name, description: t.description, input_schema: t.parameters as never });
+        }
+      }
+      orchestrationDeclsRef.current = map;
+    }
+    return orchestrationDeclsRef.current;
+  };
+
+  const spawnSubAgent = async (ctx: RunCtx, rawArgs: Record<string, unknown>): Promise<string> => {
+    if (!toolsReady) return "spawn_sub_agent needs local tools, which are unavailable in this environment.";
+    const task = String(rawArgs.task ?? "");
+    const decls = await getOrchestrationDecls();
+    const { broker } = getBroker();
+    const sink = delegationSink(rawArgs, ctx.convId);
+
+    const client: ModelClient = {
+      async send(req) {
+        // Reuses the conversation's own request path — same provider, key, proxy and usage logging as
+        // every other call. Only the message and tool translation is ours.
+        const data = await requestChat(
+          applyReasoningPolicy(
+            toChatMessages(req.system, req.messages) as unknown as ApiMsg[],
+            isLocalModel,
+            sendReasoningContext(),
+          ),
+          req.tools.length ? toChatTools(req.tools) : undefined,
+          ctx.signal,
+        );
+        return toModelTurn(data);
+      },
+    };
+
+    const result = await createSpawnSubAgentHandler({
+      broker,
+      client,
+      requesterId: `conv:${ctx.convId}`,
+      maxTurns: MAX_TURNS_PER_SUBAGENT,
+      tools: {
+        declarationFor: (name) => decls.get(name),
+        execute: async (name, input, context) => {
+          let ok = true;
+          const content = await execToolCall(
+            ctx,
+            name,
+            input,
+            `${context.agentId}→${name}`,
+            `sub:${context.agentId}`,
+            { agentId: context.agentId, task },
+            (v) => {
+              ok = v;
+            },
+          );
+          recordStep(sink, { name, args: input, ok, result: content });
+          return { content, isError: !ok };
+        },
+      },
+    })(rawArgs);
+
+    ctx.push({
+      kind: "tool",
+      name: `spawn_sub_agent → ${result.agentId ?? "(not created)"}`,
+      args: rawArgs,
+      ok: result.status === "completed",
+      result: formatBrokeredSpawn(result),
+    });
+    return formatBrokeredSpawn(result);
+  };
+
+  const drainDelegations = (ctx: RunCtx): string => {
+    const held = schedulerRef.current;
+    if (!held || held.turnId !== ctx.turnId) return "";
+    const ready = held.sched.drain();
+    if (ready.length === 0) return "";
+    return formatAutoDelivery(
+      ready.map((x) => ({
+        meta: x.job.meta,
+        id: x.outcome.id,
+        state: x.outcome.state,
+        result: x.outcome.result,
+      })),
+    );
   };
 
   // Runtime skills = the installed skills the user enabled + conditionally-equipped built-in skills: when commands actually run in the sandbox,
@@ -2659,35 +3124,66 @@ function ChatAgent() {
 
   // ask_user: render a choice card and wait for the user to click; return the text fed back to the model.
   const askUserChoice = async (ctx: RunCtx, rawArgs: Record<string, unknown>): Promise<string> => {
-    const question = String(rawArgs.question ?? "").trim();
-    const options = Array.isArray(rawArgs.options)
-      ? rawArgs.options.map((o) => String(o)).filter(Boolean)
-      : [];
-    if (!question && options.length === 0) return "(ask_user is missing question / options)";
+    // Accepts both shapes. `questions` is what the tool now declares; the flat `question` + `options` pair
+    // is the older one, still honoured because a model mid-conversation may have the previous declaration
+    // in its cached prefix and would otherwise get an unusable error for a well-formed call.
+    const asQuestion = (v: unknown): ChoiceQuestion | null => {
+      if (!v || typeof v !== "object") return null;
+      const o = v as Record<string, unknown>;
+      const question = String(o.question ?? "").trim();
+      const options = Array.isArray(o.options) ? o.options.map((x) => String(x)).filter(Boolean) : [];
+      return question || options.length ? { question, options } : null;
+    };
+    const questions = Array.isArray(rawArgs.questions)
+      ? (rawArgs.questions.map(asQuestion).filter(Boolean) as ChoiceQuestion[])
+      : ([asQuestion(rawArgs)].filter(Boolean) as ChoiceQuestion[]);
+    if (questions.length === 0) return "(ask_user is missing question / options)";
+
     const id = ++choiceIdRef.current;
     // The choice card stays globally displayed (interactive prompts must be answerable, otherwise a background conversation would be stuck forever).
-    pushDisplay({ kind: "choice", id, question, options, selected: null });
+    pushDisplay({ kind: "choice", id, questions, answers: questions.map(() => null), submitted: false });
     // Trigger condition 4: question notification — the AI needs user input to continue (only pops when the app is unfocused).
-    notifyQuestion(ctx.convId, question);
+    notifyQuestion(ctx.convId, questions[0].question);
     // Store the resolver keyed by card id (concurrent questions do not overwrite each other and are answered independently).
     return new Promise<string>((resolve) => {
       choiceResolversRef.current.set(id, { convId: ctx.convId, resolve });
     });
   };
 
-  // The user clicks an option on a card: fetch the corresponding resolver by id, mark the card as selected, and wake its waiting Promise.
-  // useCallback keeps the reference stable, to avoid invalidating the memoized MessageItem on every render.
-  const answerChoice = useCallback((id: number, value: string, discuss: boolean) => {
+  /**
+   * The user submits a card: mark it answered, and wake the waiting tool call with every answer at once.
+   *
+   * useCallback keeps the reference stable, to avoid invalidating the memoized MessageItem on every render.
+   */
+  const submitChoice = useCallback((id: number, answers: ChoiceAnswer[]) => {
     const entry = choiceResolversRef.current.get(id);
     if (!entry) return; // Already handled / no such card, ignore
     choiceResolversRef.current.delete(id);
+    let questions: ChoiceQuestion[] = [];
     setDisplay((d) =>
-      d.map((m) => (m.kind === "choice" && m.id === id ? { ...m, selected: value } : m)),
+      d.map((m) => {
+        if (m.kind !== "choice" || m.id !== id) return m;
+        questions = m.questions;
+        return { ...m, answers, submitted: true };
+      }),
     );
+    // One line per question, so a multi-question card comes back as one legible block rather than something
+    // the model has to re-associate with what it asked. Single-question cards keep the original wording, to
+    // avoid changing what every existing prompt has been tuned against.
+    const lines = answers.map((a, i) => {
+      const q = questions[i]?.question ?? "";
+      return a.discuss
+        ? `- ${q} → the user wants to discuss this rather than settle it`
+        : `- ${q} → ${a.value}`;
+    });
+    const anyDiscuss = answers.some((a) => a.discuss);
+    const discussNote = anyDiscuss
+      ? "\nFor the question(s) marked for discussion, do not draw a conclusion directly; ask the user about it or offer deeper analysis first, and continue only after discussing it with them."
+      : "";
     entry.resolve(
-      discuss
-        ? "The user chose \"discuss this question\" and wants to talk it through further. Do not draw a conclusion directly; first ask the user about this question or provide deeper analysis, and continue only after discussing it with them."
-        : `The user chose: ${value}`,
+      answers.length === 1 && !anyDiscuss
+        ? `The user chose: ${answers[0].value}`
+        : `The user answered:\n${lines.join("\n")}${discussNote}`,
     );
   }, []);
 
@@ -2720,11 +3216,21 @@ function ChatAgent() {
 
   // Discard all pending-answer ask_user prompts of a conversation (unblocking them with the given text as the result). Used to release by conversation on cancel / clear.
   const dropChoicesFor = (convId: string | null, message: string) => {
+    const dropped: number[] = [];
     for (const [id, e] of choiceResolversRef.current) {
       if (e.convId === convId) {
         choiceResolversRef.current.delete(id);
+        dropped.push(id);
         e.resolve(message);
       }
+    }
+    // Close the cards too, not just their promises. The card owns a submit button now, and one whose
+    // resolver has been thrown away would sit there looking answerable and silently do nothing when
+    // clicked — worse than the old card, which at least showed no affordance once it was moot.
+    if (dropped.length > 0) {
+      setDisplay((d) =>
+        d.map((m) => (m.kind === "choice" && dropped.includes(m.id) ? { ...m, submitted: true } : m)),
+      );
     }
   };
 
@@ -3089,6 +3595,9 @@ function ChatAgent() {
       // inject one FINALIZE_NUDGE to nudge it to answer formally. finalizeNudged ensures at most once per round, to avoid an infinite loop.
       let didToolCall = false;
       let finalizeNudged = false;
+      // Wrap-up guard: whether the model has already been told once that it is ending the turn with
+      // delegations still running. See PENDING_DELEGATION_NUDGE.
+      let delegationNudged = false;
       // Carrier for the mid-loop nudges: the last tool result, in the buffer and on disk. Those nudges fire AFTER the assistant
       // turn has been appended and persisted, so there is no new turn to ride and no reliable way to find the carrier by scanning
       // (the compaction plan may already have rewritten the wire view). Tracked at each append instead. See reminders.ts.
@@ -3402,11 +3911,20 @@ function ChatAgent() {
               delete_memory: deleteMemory,
               search_memory: searchMemory,
               run_subagent: runSubAgent,
+              spawn_subagents: spawnSubagents,
+              join_subagents: joinSubagents,
+              spawn_sub_agent: spawnSubAgent,
             };
             const handler = rendererTool[name];
-            const content = handler
+            const base = handler
               ? await handler(ctx, args)
               : await execToolCall(ctx, name, args, name);
+            // Auto-delivery: a delegation that finished while this tool was running rides back on its
+            // result. Appended here, at the one point every tool result passes through, so the model
+            // cannot lose a conclusion by never calling join_subagents — and so it has no reason to poll
+            // for one. Deliberately skipped on join_subagents itself, which already reported everything
+            // it was owed and would otherwise print the same conclusions twice in one result.
+            const content = name === "join_subagents" ? base : base + drainDelegations(ctx);
             // Usage log: the branches above are the tools the renderer handles itself (a choice card,
             // the todo list, a skill's instructions, memory, the browser panel). They never reach
             // execToolCall, which is where every other tool is logged, so without this they would be
@@ -3456,8 +3974,17 @@ function ChatAgent() {
                 : [await runToolCall(group[0])];
 
             for (const { tc, name, args, content } of settled) {
-              // Delegating to a reviewer is treated as reviewed, clearing the pending-risky-change flag.
+              // Delegating to a reviewer is treated as reviewed, clearing the pending-risky-change flag —
+              // by either route, since a review spawned alongside other delegations is still a review.
               if (name === "run_subagent" && String(args.agent ?? "") === "reviewer") {
+                riskyChangePending = false;
+              }
+              if (
+                name === "spawn_subagents" &&
+                (Array.isArray(args.tasks) ? args.tasks : []).some(
+                  (x) => String(((x ?? {}) as Record<string, unknown>).agent ?? "") === "reviewer",
+                )
+              ) {
                 riskyChangePending = false;
               }
               // Recording anything at all satisfies the memory guard — the reminder exists to make the model
@@ -3486,10 +4013,11 @@ function ChatAgent() {
                 name === "image_generation" ? lastImageArtifactRef.current : null;
               lastImageArtifactRef.current = null;
               // Likewise for a sub-agent's inner steps: display-only, stored beside the conclusion so reopening
-              // the conversation shows the same operations the user watched happen.
-              const subSteps =
-                name === "run_subagent" ? lastSubagentStepsRef.current : null;
-              lastSubagentStepsRef.current = null;
+              // the conversation shows the same operations the user watched happen. Addressed by the tool
+              // call's own args object, because a spawned delegation settles after this point and has to be
+              // able to find its message again (see the storedIndex hand-off below).
+              const sink = subagentSinksRef.current.get(args as object) ?? null;
+              const subSteps = sink ? sink.steps : null;
               // Persist the tool result to this conversation (store the compressed version, to avoid bloating storage / the integrity hash).
               store.appendMessage(genConvId, {
                 role: "tool",
@@ -3503,9 +4031,17 @@ function ChatAgent() {
                 ...(imageArtifact
                   ? { image: imageArtifact.image, servedBy: imageArtifact.servedBy }
                   : {}),
-                ...(subSteps?.length ? { steps: subSteps } : {}),
+                // Copied, not the live array: a spawned delegation keeps appending to it after this write.
+                ...(subSteps?.length ? { steps: [...subSteps] } : {}),
               });
               lastToolStoredIdx = (store.getConversation(genConvId)?.messages.length ?? 0) - 1;
+              // Tell the sink where its message landed. Until this point a still-running delegation has
+              // nowhere to write its trace; from here every step it takes is patched straight onto that
+              // message, so the reopened conversation matches what the user watched.
+              if (sink) {
+                sink.storedIndex = lastToolStoredIdx;
+                if (sink.steps.length > 0) store.setMessageSteps(genConvId, lastToolStoredIdx, [...sink.steps]);
+              }
 
               // Detect local service addresses in the tool output (e.g. an http://localhost:5173 printed by a dev server),
               // using the full output (the elided middle section may also contain a URL). Once registered, the bottom-left floating indicator displays it and polls its health.
@@ -3554,6 +4090,21 @@ function ChatAgent() {
             nudgeIntoLastTool(RECORD_MEMORY_NUDGE);
           }
           continue;
+        }
+
+        // Outstanding-delegation guard: the model is about to end the turn (no tool calls this round) while
+        // delegations it spawned are still running. They are cancelled the instant the turn ends, so this is
+        // the last moment the work can still be used. Placed before the finalize guard because it is the more
+        // specific diagnosis of an empty ending — a model that spawned and then stalled has something to wait
+        // for, not something to summarise. Fires once per turn, so declining to join is respected.
+        {
+          const held = schedulerRef.current;
+          const outstanding = held && held.turnId === turnId ? held.sched.outstanding() : [];
+          if (outstanding.length > 0 && !delegationNudged) {
+            delegationNudged = true;
+            nudgeIntoLastTool(PENDING_DELEGATION_NUDGE);
+            continue;
+          }
         }
 
         // Wrap-up guard: the model demonstrably did work this round — ran a tool, or produced reasoning — yet ended with
@@ -3606,6 +4157,14 @@ function ChatAgent() {
       }
     } finally {
       if (runsRef.current.get(genConvId) === ctrl) runsRef.current.delete(genConvId);
+      // Stop any delegation still running for this turn. Nothing can consume a conclusion once the turn is
+      // over — the wire is closed and the display is done — so letting one finish would only spend tokens
+      // writing into a conversation that has moved on. The model was warned by PENDING_DELEGATION_NUDGE
+      // before it got here.
+      if (schedulerRef.current?.turnId === turnId) {
+        shutdownScheduler(schedulerRef.current);
+        schedulerRef.current = null;
+      }
       // Interrupted by the user (rather than a normal end / error): mark "interrupted", so the next send prompts the model to reuse the retained analysis and resume.
       if (ctrl.signal.aborted) interruptedRef.current = true;
       store.setConversationGenerating(genConvId, false); // End generation: remove the spinner from that conversation's sidebar row
@@ -3718,7 +4277,7 @@ function ChatAgent() {
 
   return (
     <div className="relative flex h-full">
-    <div className="flex h-full min-w-0 flex-1 flex-col overflow-hidden bg-surface-muted text-ink">
+    <div className="relative flex h-full min-w-0 flex-1 flex-col overflow-hidden bg-surface-muted text-ink">
       {/* Header */}
       <div className="border-b border-line bg-surface/90 backdrop-blur">
         <div className="mx-auto w-full px-4 py-3">
@@ -3952,7 +4511,7 @@ function ChatAgent() {
                     key={i}
                     index={i}
                     m={display[i]}
-                    onPick={answerChoice}
+                    onSubmitChoice={submitChoice}
                     onEditUser={editUser}
                     onRegenerate={regenerate}
                     onRateMessage={rateMessage}
@@ -3967,7 +4526,7 @@ function ChatAgent() {
           })()}
 
           {/* The skeleton already reads as "loading"; the outgoing conversation's thinking dots would double up on it. */}
-          {!switching && loading && !display.some((m) => m.kind === "choice" && m.selected === null) && (
+          {!switching && loading && !display.some((m) => m.kind === "choice" && !m.submitted) && (
             <div className="flex items-center gap-2 px-1 py-0.5">
               <span className="flex shrink-0 items-center gap-1">
                 <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-primary [animation-delay:-0.3s]" />
@@ -4026,7 +4585,11 @@ function ChatAgent() {
                 autoFocus
                 value={renameDraft ?? ""}
                 onChange={(e) => setRenameDraft(e.target.value)}
+                {...ime.bind}
                 onKeyDown={(e) => {
+                  // A conversation title is exactly the kind of field typed on an IME; the Enter that
+                  // commits the composition must not also confirm the rename. See lib/ime.ts.
+                  if (ime.isImeKey(e)) return;
                   if (e.key === "Enter" && renameDraft?.trim() && activeConvId) {
                     renameConversation(activeConvId, renameDraft.trim());
                     setRenameDraft(null);
@@ -4149,17 +4712,24 @@ function ChatAgent() {
           Auto-focused on appearance; use ↑/↓ to select, Enter to confirm, Esc to reject.
           Gated to the conversation that issued it: a request made in another chat stays queued and shows as a sidebar badge
           on that chat instead of following the user into the conversation they are currently viewing. */}
-      {pending && pending.convId === convIdRef.current && (
-        <ConsentPanel
-          pending={pending}
-          currentConvId={convIdRef.current}
-          consentSel={consentSel}
-          onHover={setConsentSel}
-          onAnswer={answerConsent}
-          onKey={onConsentKey}
-          panelRef={consentPanelRef}
-        />
-      )}
+      {/* Anchored over the bottom of the column rather than stacked above the composer: while an agent is
+          blocked waiting for an answer, the input box and the context-usage bar are covered on purpose. See
+          the note in ConsentPanel. AnimatePresence keeps it mounted long enough to animate back out. */}
+      <AnimatePresence>
+        {pending && pending.convId === convIdRef.current && (
+          <motion.div key="consent" className="absolute inset-x-0 bottom-0 z-30">
+            <ConsentPanel
+              pending={pending}
+              currentConvId={convIdRef.current}
+              consentSel={consentSel}
+              onHover={setConsentSel}
+              onAnswer={answerConsent}
+              onKey={onConsentKey}
+              panelRef={consentPanelRef}
+            />
+          </motion.div>
+        )}
+      </AnimatePresence>
 
       {/* Task list: fixed above the input box, showing progress.
           Lowest priority — it yields and hides when the sensitive-operation confirmation panel is present, to avoid competing for space with it. */}

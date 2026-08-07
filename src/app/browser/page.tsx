@@ -15,6 +15,7 @@ import {
   startAutomation,
   type AutomationConfig,
 } from "@/lib/automation";
+import { useImeGuard } from "@/lib/ime";
 
 interface TriggerInfo {
   query: string;
@@ -24,6 +25,7 @@ interface TriggerInfo {
 }
 
 export default function BrowserPage() {
+  const ime = useImeGuard();
   const webviewRef = useRef<HTMLElement>(null);
   const [available] = useState(() => isAutomationAvailable());
   const [cfg, setCfg] = useState<AutomationConfig>(DEFAULT_AUTOMATION_CONFIG);
@@ -87,7 +89,8 @@ export default function BrowserPage() {
           <input
             value={cfg.startUrl}
             onChange={(e) => setCfg((c) => ({ ...c, startUrl: e.target.value }))}
-            onKeyDown={(e) => e.key === "Enter" && applyAndWatch()}
+            {...ime.bind}
+            onKeyDown={(e) => !ime.isImeKey(e) && e.key === "Enter" && applyAndWatch()}
             placeholder="https://…"
             className="min-w-0 flex-1 rounded-lg border border-line bg-background px-3 py-1.5 text-sm outline-none focus:border-line-strong"
           />

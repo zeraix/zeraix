@@ -16,8 +16,9 @@ import {
   askUserTool, updateTodosTool, setTaskStateTool, openBrowserTool, browserTool, imageGenerationTool,
   saveMemoryTool, deleteMemoryTool, searchMemoryTool, callToolTool,
 } from "@/app/agent/chat/agentTools";
-import { subAgentTool } from "@/lib/ai/subagents";
-import { ROUTED_TOOLS } from "@/lib/ai/toolRouter";
+import { joinSubagentsTool, spawnSubagentsTool, subAgentTool } from "@/lib/ai/subagents";
+import { isMcpToolName, isRouted, ROUTED_TOOLS } from "@/lib/ai/toolRouter";
+import { spawnSubAgentTool } from "@/lib/ai/orchestration/orchestrator-tool";
 
 export type PrefixMode = "daily" | "dev";
 
@@ -93,6 +94,14 @@ export function buildSystemPrompt(mode: PrefixMode, { toolsReady = true, memory 
  * the renderer gets it over IPC, a build script reads electron/tools/toolSchemas.mjs directly.
  */
 export function buildToolSet(mode: PrefixMode, native: unknown[], { memory = true } = {}): unknown[] {
+  const nameOf = (t: unknown): string =>
+    (t as { function?: { name?: string } })?.function?.name ?? "";
+  // MCP tools are removed from `native` here, before composition, not just by the routing filter at the
+  // end. They must not count toward `native.length` either: that length gates the delegation block, so
+  // leaving them in would make those declarations depend on whether this user happens to have a server
+  // connected — the per-install prefix difference this function exists to avoid. Today the toolkit always
+  // ships built-ins alongside, so the gate is safe by accident; this makes it safe by construction.
+  const nativeCore = native.filter((t) => !isMcpToolName(nameOf(t)));
   const declared = [
     askUserTool(),
     updateTodosTool(),
@@ -105,7 +114,17 @@ export function buildToolSet(mode: PrefixMode, native: unknown[], { memory = tru
     ...(memory
       ? [saveMemoryTool(), deleteMemoryTool(), searchMemoryTool()]
       : []),
-    ...(native.length ? [...native, subAgentTool()] : []),
+    // The delegation trio travels together and only when local tools exist (a sub-agent with no tools has
+    // nothing to delegate to). run_subagent stays the single blocking delegation; spawn/join is the
+    // concurrent path, and both are declared unconditionally beside it so the model never has to work out
+    // which one is available in this install.
+    // spawn_sub_agent rides with the trio for the same reason they ride together — it is a delegation tool
+    // and needs local tools to delegate to — but it is deliberately declared LAST of the four. It is the
+    // exception, not the default: the three above cover the roles, and its own description says to prefer
+    // them. Ordering is prefix bytes, so this position is fixed like every other.
+    ...(nativeCore.length
+      ? [...nativeCore, subAgentTool(), spawnSubagentsTool(), joinSubagentsTool(), spawnSubAgentTool()]
+      : []),
     loadSkillTool(),
   ];
   // Tool lazy loading: drop this mode's cold declarations and leave them reachable through the catalog + call_tool (see
@@ -116,8 +135,10 @@ export function buildToolSet(mode: PrefixMode, native: unknown[], { memory = tru
   // call_tool goes at the END, at a fixed position, and unconditionally. Position and presence are prefix bytes: a dispatcher
   // that moved with the memory flag, or appeared only under Electron, would be exactly the kind of per-install difference the
   // rest of this function exists to avoid.
-  const routed = ROUTED_TOOLS[mode];
-  const nameOf = (t: unknown): string =>
-    (t as { function?: { name?: string } })?.function?.name ?? "";
-  return [...declared.filter((t) => !routed.has(nameOf(t))), callToolTool()];
+  //
+  // isRouted, not ROUTED_TOOLS directly: it also carries the `mcp__` prefix rule, so any MCP tool that
+  // reached this point despite nativeCore above is still dropped. Belt and braces on purpose — a declared
+  // set that varies per install is the one failure here that is invisible locally and expensive in
+  // production. MCP tools are reached through `mcp_tools` (inventory + schemas) and then `call_tool`.
+  return [...declared.filter((t) => !isRouted(mode, nameOf(t))), callToolTool()];
 }

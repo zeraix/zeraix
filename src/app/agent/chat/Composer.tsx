@@ -22,6 +22,7 @@ import {
 import type { Attachment } from "./types";
 import { formatBytes } from "./format";
 import { useT } from "@/lib/i18n";
+import { useImeGuard } from "@/lib/ime";
 
 /** Groups for the model selector inside the input box (official / local / third-party / custom). */
 export type ModelGroup = { key: string; labelKey: string; items: AgentModel[] };
@@ -71,6 +72,7 @@ export function Composer({
   onThinkingChange: (next: ThinkingConfig) => void;
 }) {
   const t = useT();
+  const ime = useImeGuard();
   // Mirrors the send side's isLocalModel: provider id, or a custom entry pointed at a local endpoint.
   const selected = models.find((m) => m.id === selectedModelId);
   const localSelected =
@@ -144,7 +146,11 @@ export function Composer({
             ref={taRef}
             value={input}
             onChange={(e) => onInputChange(e.target.value)}
+            {...ime.bind}
             onKeyDown={(e) => {
+              // The Enter that commits an IME composition is not a send. Returning before
+              // preventDefault leaves the keypress to the IME, which still needs it. See lib/ime.ts.
+              if (ime.isImeKey(e)) return;
               if (e.key === "Enter" && !e.shiftKey) {
                 e.preventDefault();
                 onSend();

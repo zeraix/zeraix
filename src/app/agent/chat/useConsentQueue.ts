@@ -13,7 +13,7 @@ import { useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent }
 import { notifyPermissionRequest } from "@/lib/ai/agentNotify";
 import { useAgentChatStore } from "@/store/agentChatStore";
 import { CONSENT_OPTIONS, type ConsentDecision } from "./constants";
-import type { PendingConsent } from "./ConsentPanel";
+import type { ConsentRequester, PendingConsent } from "./ConsentPanel";
 
 /** A queued request = the panel's display info plus the promise resolver that unblocks the waiting tool call. */
 type ConsentQueueItem = {
@@ -22,6 +22,8 @@ type ConsentQueueItem = {
   args: unknown;
   diff: string | null;
   warning: string | null;
+  /** Set when a sub-agent is asking rather than the main agent — see ConsentPanel. */
+  requester: ConsentRequester | null;
   resolve: (d: ConsentDecision) => void;
 };
 
@@ -51,6 +53,7 @@ export function useConsentQueue() {
         args: front.args,
         diff: front.diff,
         warning: front.warning,
+        requester: front.requester,
         convId: front.convId,
         queued: consentQueueRef.current.length - 1,
       });
@@ -68,10 +71,11 @@ export function useConsentQueue() {
     args: unknown,
     diff: string | null,
     warning: string | null = null,
+    requester: ConsentRequester | null = null,
   ) =>
     new Promise<ConsentDecision>((resolve) => {
       const wasEmpty = consentQueueRef.current.length === 0;
-      consentQueueRef.current.push({ convId, name, args, diff, warning, resolve });
+      consentQueueRef.current.push({ convId, name, args, diff, warning, requester, resolve });
       syncConsentBadges();
       if (wasEmpty) showFrontConsent(); // queue was empty → show immediately; otherwise wait behind the others
       else setPending((p) => (p ? { ...p, queued: consentQueueRef.current.length - 1 } : p)); // just refresh "N more pending"
@@ -85,9 +89,13 @@ export function useConsentQueue() {
     req?.resolve(d);
     // "don't ask again" allows this tool conversation-wide (allowedToolsRef) and clears the queue's remaining
     // requests for the same tool with "allow", to avoid re-prompting right after authorizing it.
+    // "don't ask again" clears queued requests for the same tool so the user is not re-prompted straight
+    // after authorising it — but only ones from the same requester. A yes given to the main agent must not
+    // silently authorise an autonomous sub-agent's queued call for the same tool: the user answered a
+    // question about work they asked for, not about work a delegation decided to do.
     if (d === "always" && req) {
       consentQueueRef.current = consentQueueRef.current.filter((r) => {
-        if (r.name === req.name) {
+        if (r.name === req.name && r.requester?.agentId === req.requester?.agentId) {
           r.resolve("yes");
           return false;
         }

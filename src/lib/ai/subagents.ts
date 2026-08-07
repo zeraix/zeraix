@@ -159,7 +159,246 @@ export function subAgentTool() {
   };
 }
 
+// ── Parallel delegation: spawn / join ─────────────────────────────────────────────────────
+
+/**
+ * Delegations allowed to run at once. Each one is a full independent model loop against the same
+ * provider, so this is a spend and rate-limit control rather than a CPU one: three concurrent sub-agents
+ * are three concurrent streams of billed tokens.
+ */
+export const MAX_PARALLEL_SUBAGENTS = 3;
+
+/** Hard cap on delegations per turn — a backstop against a model that keeps fanning out instead of concluding. */
+export const MAX_SUBAGENTS_PER_TURN = 12;
+
+/** How long a single `join_subagents` may suspend before returning what it has. Long enough for a real
+ *  delegation (they routinely run minutes), short enough that one wedged sub-agent cannot eat the turn. */
+export const JOIN_DEFAULT_TIMEOUT_MS = 10 * 60 * 1000;
+export const JOIN_MAX_TIMEOUT_MS = 30 * 60 * 1000;
+
+/** What the scheduler carries per job: enough to render it, report it, and match a duplicate against it.
+ *  Identical to the shape the completed-delegation guard matches on, deliberately — an in-flight twin and
+ *  a finished twin are the same question asked twice, and must be recognised the same way. */
+export type DelegationMeta = DelegationRef;
+
+/**
+ * Build the `spawn_subagents` declaration: start delegations and get their handles back immediately.
+ *
+ * The description works hard on one point, because it is the failure mode this whole mechanism exists to
+ * prevent: the model must not treat a handle as something to check on. A model that has been handed an id
+ * and no instructions will reach for the nearest status-shaped tool every round, turning a wait into a
+ * poll loop that bills a full prompt per check. `join_subagents` blocks, so waiting is free — but only if
+ * the model believes that, which is why it is stated here rather than left to be inferred.
+ */
+export function spawnSubagentsTool() {
+  const menu = SUBAGENTS.map((a) => `- ${a.id}：${a.description}`).join("\n");
+  return {
+    type: "function" as const,
+    function: {
+      name: "spawn_subagents",
+      description:
+        "Start one or more sub-agent delegations that run CONCURRENTLY in the background, and return their ids straight away " +
+        `(up to ${MAX_PARALLEL_SUBAGENTS} run at a time; the rest queue automatically). Use this instead of run_subagent when you have ` +
+        "several independent subtasks, or when you want to keep working while a delegation runs. Available sub-agents: \n" +
+        menu +
+        "\nWhat to do next: KEEP WORKING. The delegations run while you do, and anything that finishes is appended to your " +
+        "next tool result automatically — you do not have to ask for it, and nothing can be lost by not asking. This gap is " +
+        "the entire benefit of spawning: go do the reads, edits and commands you were going to do anyway, and the results " +
+        "will meet you there. " +
+        "Only when you have genuinely run out of work that does not depend on these delegations should you call " +
+        "join_subagents, which then SUSPENDS until they finish. Blocking is the last step, not the next one — while you are " +
+        "suspended in it you cannot do anything else, so joining immediately after spawning throws away the concurrency you " +
+        "just asked for. (If you want the finished ones without waiting, join_subagents with block=false returns instantly.) " +
+        "IMPORTANT: never poll. There is no status tool and you must not invent one; repeating a call to 'check progress' " +
+        "wastes a full request and tells you nothing that waiting once, or simply continuing, would not. " +
+        "Each delegation starts from an empty context and cannot see this conversation, ask the user anything, or be steered " +
+        "once started, so every task must be self-contained: all necessary context plus what the output should be. " +
+        "Do not split one investigation into several narrow ones — a delegation that re-discovers the project from scratch " +
+        "costs more than it saves. Spawn separate delegations only for genuinely independent subtasks.",
+      parameters: {
+        type: "object",
+        properties: {
+          tasks: {
+            type: "array",
+            minItems: 1,
+            description:
+              "The delegations to start, all at once. Independent subtasks only — if two entries would " +
+              "investigate the same thing, make them one entry.",
+            items: {
+              type: "object",
+              properties: {
+                agent: {
+                  type: "string",
+                  enum: SUBAGENTS.map((a) => a.id),
+                  description: "The sub-agent role to use.",
+                },
+                task: {
+                  type: "string",
+                  description:
+                    "The complete, self-contained task description (necessary context included, and what the output should be).",
+                },
+              },
+              required: ["agent", "task"],
+            },
+          },
+        },
+        required: ["tasks"],
+      },
+    },
+  };
+}
+
+/** Build the `join_subagents` declaration: the blocking collect. */
+export function joinSubagentsTool() {
+  return {
+    type: "function" as const,
+    function: {
+      name: "join_subagents",
+      description:
+        "Collect delegations started by spawn_subagents. By default this SUSPENDS until the work is actually finished, so " +
+        "use it only once you have nothing left to do that does not depend on the results — while suspended you cannot run " +
+        "any other tool, so a join issued while you still had work to do wastes the concurrency you spawned for. " +
+        "With block=false it returns instantly with whatever has finished so far, which is what to use when you do still " +
+        "have work: take what is ready and carry on. Either way it is not a status check and must not be repeated to watch " +
+        "progress — unfinished delegations are appended to your next tool result on their own. Each conclusion is returned " +
+        "exactly once; results already delivered to you automatically are not repeated.",
+      parameters: {
+        type: "object",
+        properties: {
+          block: {
+            type: "boolean",
+            description:
+              "true (default) = suspend until the delegations finish; use when you have nothing else to do. " +
+              "false = return immediately with whatever has already finished; use when you still have work in hand.",
+          },
+          ids: {
+            type: "array",
+            items: { type: "string" },
+            description:
+              "Delegation ids to wait for (as returned by spawn_subagents). Omit to wait for every delegation still outstanding.",
+          },
+          mode: {
+            type: "string",
+            enum: ["all", "any"],
+            description:
+              "all (default) = return when every named delegation has finished. any = return as soon as the first one " +
+              "finishes, so you can start on the earliest result; the rest stay joinable.",
+          },
+          timeout_seconds: {
+            type: "number",
+            description:
+              "Optional bound on the wait. On expiry you get whatever finished plus the ids still running, which remain " +
+              "joinable. Leave unset unless you have a reason — the default already allows for a long delegation.",
+          },
+        },
+        required: [],
+      },
+    },
+  };
+}
+
+// ── Model-facing result formatting ────────────────────────────────────────────────────────
+
+/** One delegation's conclusion, as the model sees it. */
+function renderOutcome(id: string, meta: DelegationMeta, state: string, result: string): string {
+  const head = state === "done" ? `${id} (${meta.agent}) finished` : `${id} (${meta.agent}) ${state}`;
+  return `── ${head} ──\ntask: ${meta.task}\n\n${result}`;
+}
+
+/** The tool result for a spawn: the handles, plus what to do next (which is: keep working, then join once). */
+export function formatSpawnResult(
+  spawned: Array<{ id: string; agent: string; coalesced: boolean; refused?: string }>,
+): string {
+  const lines: string[] = [];
+  const ok: string[] = [];
+  for (const s of spawned) {
+    if (s.refused) {
+      lines.push(`✗ ${s.agent}: ${s.refused}`);
+      continue;
+    }
+    ok.push(s.id);
+    lines.push(
+      s.coalesced
+        ? `• ${s.id} (${s.agent}) — identical to a delegation already running, attached to that one instead of starting a second copy`
+        : `• ${s.id} (${s.agent}) started`,
+    );
+  }
+  if (ok.length === 0) return `No delegations started.\n${lines.join("\n")}`;
+  return (
+    `${ok.length} delegation(s) now running in the background:\n${lines.join("\n")}\n\n` +
+    `Now go on with your own work — they run while you do, and each conclusion is appended to one of your tool results as ` +
+    `soon as it lands, without you asking. Do NOT call join_subagents next if you still have anything to do: it suspends ` +
+    `you until they finish, which would give back exactly the time you just spawned them to save.\n` +
+    `When you have run out of independent work, call join_subagents (ids: ${JSON.stringify(ok)}) once and let it block. ` +
+    `If you only want whatever has finished so far, add block=false and it returns immediately. Never call it repeatedly to check progress.`
+  );
+}
+
+/** The tool result for a join. */
+export function formatJoinResult(
+  ready: Array<{ meta: DelegationMeta; id: string; state: string; result: string }>,
+  pending: string[],
+  unknown: string[],
+  timedOut: boolean,
+  blocked = true,
+): string {
+  const parts: string[] = [];
+  if (ready.length > 0) {
+    parts.push(ready.map((r) => renderOutcome(r.id, r.meta, r.state, r.result)).join("\n\n"));
+  }
+  if (unknown.length > 0) {
+    parts.push(
+      `No delegation exists with id(s): ${unknown.join(", ")}. Only ids returned by spawn_subagents are valid.`,
+    );
+  }
+  if (pending.length > 0) {
+    // The non-blocking reply deliberately does not end on "call join again". A model that has just been
+    // handed an empty collect and a way to retry it will retry it, which is the poll loop rebuilt by hand
+    // — so the instruction is to carry on, and the promise made is that the result will find it.
+    parts.push(
+      !blocked
+        ? `Still running: ${pending.join(", ")}. Carry on with your own work — these will be appended to a later tool result on their own. Do not call join_subagents again to check; only block on them once you have nothing else left to do.`
+        : timedOut
+          ? `Still running after the timeout: ${pending.join(", ")}. They are unaffected and remain joinable — call join_subagents again for them when you want to wait further.`
+          : `Still running: ${pending.join(", ")}. Call join_subagents for them when you need their results; it will block until they finish.`,
+    );
+  }
+  if (parts.length === 0) {
+    return blocked
+      ? "No delegations were outstanding — nothing to wait for."
+      : "Nothing has finished yet. Carry on with your own work; results are appended to a later tool result as they land.";
+  }
+  return parts.join("\n\n");
+}
+
+/**
+ * The auto-delivery block appended to an unrelated tool result.
+ *
+ * Fenced and labelled because it is arriving somewhere the model did not ask for it: without a clear
+ * boundary a conclusion pasted under, say, an edit_file result reads as part of that result.
+ */
+export function formatAutoDelivery(
+  delivered: Array<{ meta: DelegationMeta; id: string; state: string; result: string }>,
+): string {
+  if (delivered.length === 0) return "";
+  const body = delivered.map((d) => renderOutcome(d.id, d.meta, d.state, d.result)).join("\n\n");
+  return (
+    `\n\n[Delegations that finished while you were working — delivered automatically, no need to join them]\n${body}\n` +
+    `[end of delegation results]`
+  );
+}
+
 // ── Repeat-delegation guard ───────────────────────────────────────────────────────────────
+
+/**
+ * The identity of a delegation: who was asked, what for, and the tokens that say what it is about.
+ * Both the completed-delegation guard and the in-flight duplicate check in the scheduler match on this.
+ */
+export interface DelegationRef {
+  agent: string;
+  task: string;
+  subject: ReadonlySet<string>;
+}
 
 /**
  * A delegation already completed in the current turn, kept so an identical one can be answered from it.
@@ -168,10 +407,7 @@ export function subAgentTool() {
  * "find all files related to the MarketingBuilder module" — for 140,560 and 106,767 prompt tokens and 96s
  * of wall clock. The second produced the same answer as the first and re-read the same eight files.
  */
-export interface PriorDelegation {
-  agent: string;
-  task: string;
-  subject: ReadonlySet<string>;
+export interface PriorDelegation extends DelegationRef {
   conclusion: string;
 }
 
@@ -206,26 +442,33 @@ export function delegationSubject(task: string): Set<string> {
 /** Overlap threshold. The measured gap is 1.00 (duplicate) against 0.00 (everything else), so anything in between works; this sits in the middle rather than on either edge. */
 export const REPEAT_DELEGATION_MIN_OVERLAP = 0.5;
 
+/** Whether two delegations are the same question: same role, and subject tokens overlapping past the threshold. */
+export function isSameDelegation(a: DelegationRef, b: DelegationRef): boolean {
+  if (a.agent !== b.agent || a.subject.size === 0 || b.subject.size === 0) return false;
+  let shared = 0;
+  for (const s of a.subject) if (b.subject.has(s)) shared++;
+  const union = a.subject.size + b.subject.size - shared;
+  return union > 0 && shared / union >= REPEAT_DELEGATION_MIN_OVERLAP;
+}
+
 /**
  * The earlier delegation this one repeats, or null.
  *
  * Scoped to the current turn by the caller, matching the existing MAX_SAME_TOOL_CALLS rule — across turns
  * the project has usually changed and re-asking is legitimate.
+ *
+ * Generic over the entry type so the same rule serves both users: the completed-delegation guard passes
+ * `PriorDelegation` (and wants its `conclusion` back), while the scheduler's duplicate check passes bare
+ * in-flight job metadata that has no conclusion yet.
  */
-export function findRepeatDelegation(
+export function findRepeatDelegation<T extends DelegationRef>(
   agent: string,
   task: string,
-  prior: readonly PriorDelegation[],
-): PriorDelegation | null {
-  const subject = delegationSubject(task);
-  if (subject.size === 0) return null;
-  for (const p of prior) {
-    if (p.agent !== agent || p.subject.size === 0) continue;
-    let shared = 0;
-    for (const s of subject) if (p.subject.has(s)) shared++;
-    const union = subject.size + p.subject.size - shared;
-    if (union > 0 && shared / union >= REPEAT_DELEGATION_MIN_OVERLAP) return p;
-  }
+  prior: readonly T[],
+): T | null {
+  const self: DelegationRef = { agent, task, subject: delegationSubject(task) };
+  if (self.subject.size === 0) return null;
+  for (const p of prior) if (isSameDelegation(self, p)) return p;
   return null;
 }
 
