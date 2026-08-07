@@ -5,8 +5,8 @@
     "arm64": "sha-e45397068284"
   },
   "seedPrefix": {
-    "daily": "215875f2d77cdb0e",
-    "dev": "72ed8f084403777f"
+    "daily": "60e831298641803b",
+    "dev": "9032da60354d11db"
   },
   "macLlama": {
     "tag": "mac-v7",
