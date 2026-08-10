@@ -310,6 +310,38 @@ function ChoiceCard({
   const complete = answeredCount === msg.questions.length;
   const discussLabel = t("chat.discuss");
 
+  const isMulti = Boolean(current.multiSelect);
+  // Card-level rather than per-question: on a card mixing single- and multi-select tabs, a submit
+  // affordance that jumped between the option list and the footer as the user changed tabs would be
+  // worse than either placement on its own.
+  const anyMulti = msg.questions.some((q) => q.multiSelect);
+  /**
+   * The offered options ticked in an answer, filtered to what the question actually offered so the typed
+   * extra — which lives in `typed` and is appended on compose — cannot be mistaken for a ticked option.
+   *
+   * Takes the answer rather than reading `chosen`, so the updaters below can derive it from their own
+   * previous state: two ticks landing in one React batch would otherwise both read the same render-time
+   * selection, and the second would silently drop the first.
+   */
+  const tickedIn = (a: ChoiceAnswer | null) =>
+    a && !a.discuss ? (a.values ?? []).filter((v) => current.options.includes(v)) : [];
+  const ticked = isMulti ? tickedIn(chosen) : [];
+  // Drives the free-text box's active ring. On a multi-select question `custom` is only set when nothing
+  // is ticked, so the flag alone would leave the box looking inert next to a tick plus typed text.
+  const textActive = isMulti ? Boolean((typed[tab] ?? "").trim()) : Boolean(chosen?.custom);
+
+  /**
+   * Build a multi-select answer from its ticked options plus whatever is typed. Both feed one answer: here
+   * the free-text box ADDS an item rather than replacing the selection, because "those two, and also this"
+   * is precisely what a multi-select question is for. Nothing ticked and nothing typed is not an answer.
+   */
+  const composeMulti = (opts: string[], text: string): ChoiceAnswer | null => {
+    const extra = text.trim();
+    const values = extra ? [...opts, extra] : opts;
+    if (values.length === 0) return null;
+    return { value: values.join(", "), discuss: false, values, custom: opts.length === 0 };
+  };
+
   const pick = (value: string, discuss: boolean) => {
     if (msg.submitted) return;
     // Choosing an offered option abandons anything typed for this question — two answers to one question
@@ -323,12 +355,36 @@ function ChoiceCard({
     if (multi && next !== -1) setTab(next);
   };
 
+  /** Multi-select: tick or untick one option, preserving the offered order and any typed text. */
+  const toggle = (opt: string) => {
+    if (msg.submitted) return;
+    setDraft((d) =>
+      d.map((a, i) => {
+        if (i !== tab) return a;
+        const prev = tickedIn(a);
+        // Re-filtered through the offered order rather than appended, so the answer reads in the order the
+        // question asked it, not the order the user happened to click.
+        const next = prev.includes(opt)
+          ? prev.filter((v) => v !== opt)
+          : current.options.filter((o) => o === opt || prev.includes(o));
+        return composeMulti(next, typed[tab] ?? "");
+      }),
+    );
+    // Deliberately no auto-advance, unlike pick: on a multi-select question the first tick is rarely the
+    // last one, so moving to another tab would interrupt the answer halfway through.
+  };
+
   /** Typing is answering: the text becomes this question's answer, and clearing it un-answers the question. */
   const type = (text: string) => {
     if (msg.submitted) return;
     setTyped((v) => v.map((x, i) => (i === tab ? text : x)));
     setDraft((d) =>
-      d.map((a, i) => (i === tab ? (text.trim() ? { value: text.trim(), discuss: false, custom: true } : null) : a)),
+      d.map((a, i) => {
+        if (i !== tab) return a;
+        // Same reason as toggle: derived from the updater's previous answer, never the render-time value.
+        if (isMulti) return composeMulti(tickedIn(a), text);
+        return text.trim() ? { value: text.trim(), discuss: false, custom: true } : null;
+      }),
     );
     // Deliberately no auto-advance here: moving the tab out from under someone mid-sentence is worse than
     // making them click.
@@ -375,12 +431,14 @@ function ChoiceCard({
 
           <div className="flex flex-col gap-2">
             {current.options.map((opt, idx) => {
-              const isChosen = chosen !== null && !chosen.discuss && chosen.value === opt;
+              const isChosen = isMulti
+                ? ticked.includes(opt)
+                : chosen !== null && !chosen.discuss && chosen.value === opt;
               return (
                 <button
                   key={idx}
                   disabled={msg.submitted}
-                  onClick={() => pick(opt, false)}
+                  onClick={() => (isMulti ? toggle(opt) : pick(opt, false))}
                   className={`group flex items-center gap-2.5 rounded-xl border px-3.5 py-2.5 text-left text-sm transition-all disabled:cursor-default ${
                     isChosen
                       ? "border-primary bg-primary font-medium text-white shadow-sm shadow-primary/25"
@@ -389,8 +447,12 @@ function ChoiceCard({
                         : "border-line bg-surface text-ink hover:-translate-y-px hover:border-primary hover:bg-primary/[0.06] hover:shadow-sm"
                   }`}
                 >
+                  {/* Square for multi-select, circle for single: the shape is the only thing telling the
+                      user whether a second click adds to the answer or replaces it. */}
                   <span
-                    className={`flex h-5 w-5 shrink-0 items-center justify-center rounded-full text-[11px] font-semibold transition-colors ${
+                    className={`flex h-5 w-5 shrink-0 items-center justify-center text-[11px] font-semibold transition-colors ${
+                      isMulti ? "rounded-md" : "rounded-full"
+                    } ${
                       isChosen
                         ? "bg-white/25 text-white"
                         : msg.submitted
@@ -415,7 +477,7 @@ function ChoiceCard({
               onChange={(e) => type(e.target.value)}
               placeholder={t("chat.choice.customPlaceholder")}
               className={`w-full rounded-xl border px-3.5 py-2.5 text-sm outline-none transition placeholder:text-ink-subtle disabled:cursor-default ${
-                chosen?.custom
+                textActive
                   ? "border-primary bg-primary/[0.06] text-ink ring-2 ring-primary/25"
                   : msg.submitted
                     ? "border-line bg-surface-muted text-ink-subtle"
@@ -438,19 +500,55 @@ function ChoiceCard({
               <span className="shrink-0 text-[13px]">💬</span>
               <span className="min-w-0 flex-1">{discussLabel}</span>
             </button>
+
+            {/* Submit, as the last item of the list rather than a footer button. On a single-select card a
+                click already says which option you mean and the footer button only confirms it; once a
+                question takes several options, clicking one no longer means "done", so the way to finish
+                has to sit among the things being clicked — otherwise the last tick looks like the end of
+                the interaction and the card just waits. */}
+            {!msg.submitted && anyMulti && (
+              <>
+                <div className="my-0.5 border-t border-line" />
+                <button
+                  disabled={!complete}
+                  onClick={() => onSubmit(msg.id, draft as ChoiceAnswer[])}
+                  className={`flex items-center gap-2.5 rounded-xl border px-3.5 py-2.5 text-left text-sm font-medium transition-all ${
+                    complete
+                      ? "border-primary bg-primary text-white shadow-sm shadow-primary/25 hover:-translate-y-px hover:brightness-110"
+                      : "cursor-not-allowed border-line bg-surface-muted text-ink-subtle"
+                  }`}
+                >
+                  <span className="shrink-0 text-[13px]">➤</span>
+                  <span className="min-w-0 flex-1">{t("chat.choice.submit")}</span>
+                  {/* The running count is the feedback a checkbox list otherwise lacks: with no single
+                      highlighted row to look at, this is how the user sees the answer taking shape. */}
+                  <span className={`shrink-0 text-[11px] font-normal ${complete ? "text-white/75" : "text-ink-subtle"}`}>
+                    {isMulti
+                      ? t("chat.choice.selected", { count: String(chosen?.values?.length ?? 0) })
+                      : t("chat.choice.progress", {
+                          answered: String(answeredCount),
+                          total: String(msg.questions.length),
+                        })}
+                  </span>
+                </button>
+              </>
+            )}
           </div>
 
           {/* Submit. Present even for a single question, so the interaction is the same shape either way and
-              a misclick is always recoverable before anything reaches the model. */}
+              a misclick is always recoverable before anything reaches the model. The button itself moves
+              into the option list on a multi-select card; the hint below stays put in both layouts. */}
           {!msg.submitted && (
             <div className="mt-3 flex items-center gap-2">
-              <button
-                disabled={!complete}
-                onClick={() => onSubmit(msg.id, draft as ChoiceAnswer[])}
-                className="rounded-lg bg-primary px-3 py-1.5 text-xs font-medium text-white shadow-sm transition hover:brightness-110 disabled:cursor-not-allowed disabled:bg-surface-muted disabled:text-ink-subtle disabled:shadow-none"
-              >
-                {t("chat.choice.submit")}
-              </button>
+              {!anyMulti && (
+                <button
+                  disabled={!complete}
+                  onClick={() => onSubmit(msg.id, draft as ChoiceAnswer[])}
+                  className="rounded-lg bg-primary px-3 py-1.5 text-xs font-medium text-white shadow-sm transition hover:brightness-110 disabled:cursor-not-allowed disabled:bg-surface-muted disabled:text-ink-subtle disabled:shadow-none"
+                >
+                  {t("chat.choice.submit")}
+                </button>
+              )}
               <span className="text-[11px] text-ink-subtle">
                 {complete
                   ? t("chat.choice.readyHint")

@@ -79,6 +79,12 @@ export type SubAgentStep = { name: string; args: unknown; ok: boolean; result: s
 export type ChoiceQuestion = {
   question: string;
   options: string[];
+  /**
+   * True when this question takes several options at once ("which of these do you want?") rather than
+   * exactly one. Its options render as checkboxes, and the free-text box adds to the selection instead
+   * of replacing it — in a multi-select question, typing is one more item, not a competing answer.
+   */
+  multiSelect?: boolean;
 };
 
 /** What the user picked for one question. `discuss` is the auto-appended "talk it through" escape. */
@@ -87,6 +93,12 @@ export type ChoiceAnswer = {
   discuss: boolean;
   /** True when the user typed the answer rather than picking one of the offered options. */
   custom?: boolean;
+  /**
+   * Multi-select only: every item picked, in the order the question offered them, with any typed text
+   * last. `value` is these joined, so everything downstream that only wants a string — the submitted
+   * summary, the text handed back to the model — keeps working without knowing about multi-select.
+   */
+  values?: string[];
 };
 
 /**

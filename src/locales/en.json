@@ -1175,5 +1175,6 @@
   "chat.choice.submit": "Submit",
   "chat.choice.progress": "{answered} of {total} answered",
   "chat.choice.readyHint": "You can still change your answers",
-  "chat.choice.customPlaceholder": "Type your own answer"
+  "chat.choice.customPlaceholder": "Type your own answer",
+  "chat.choice.selected": "{count} selected"
 }

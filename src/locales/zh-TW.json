@@ -1172,5 +1172,6 @@
   "chat.choice.submit": "提交",
   "chat.choice.progress": "已回答 {answered}/{total}",
   "chat.choice.readyHint": "提交前仍可修改",
-  "chat.choice.customPlaceholder": "或者自行輸入答案"
+  "chat.choice.customPlaceholder": "或者自行輸入答案",
+  "chat.choice.selected": "已選 {count} 項"
 }

@@ -102,7 +102,11 @@ export function askUserTool() {
         // to ask for text, turning an option into an instruction the card could not carry out.
         "Every question also gets a free-text box automatically, so the user can always answer in their own " +
         "words. Options should therefore be real choices — never write an option that tells the user to type " +
-        "something, and do not add an 'Other' option.",
+        "something, and do not add an 'Other' option. " +
+        // Without this, "which of these do you want?" had to be asked as one yes/no question per item, or as
+        // one question whose options were guessed combinations of the real ones.
+        "Set multiSelect on a question whose options are not mutually exclusive — features to enable, files to " +
+        "include, topics to cover — and the user can tick several; leave it off for a genuine either/or.",
       parameters: {
         type: "object",
         properties: {
@@ -123,6 +127,13 @@ export function askUserTool() {
                   description:
                     "The options you recommend (2-4, short). Do not include 'Discuss this'; the system " +
                     "appends it automatically.",
+                },
+                multiSelect: {
+                  type: "boolean",
+                  description:
+                    "True if the user may pick several of these options at once (they are not mutually " +
+                    "exclusive). Defaults to false — exactly one option. Do not add a 'Submit' or 'Done' " +
+                    "option; the card provides one.",
                 },
               },
               required: ["question", "options"],

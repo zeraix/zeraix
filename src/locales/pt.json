@@ -1172,5 +1172,6 @@
   "chat.choice.submit": "Enviar",
   "chat.choice.progress": "{answered} de {total} respondidas",
   "chat.choice.readyHint": "Ainda podes alterar as tuas respostas",
-  "chat.choice.customPlaceholder": "Escreve a tua própria resposta"
+  "chat.choice.customPlaceholder": "Escreve a tua própria resposta",
+  "chat.choice.selected": "{count} selecionadas"
 }

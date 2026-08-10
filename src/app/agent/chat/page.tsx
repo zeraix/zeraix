@@ -3132,7 +3132,10 @@ function ChatAgent() {
       const o = v as Record<string, unknown>;
       const question = String(o.question ?? "").trim();
       const options = Array.isArray(o.options) ? o.options.map((x) => String(x)).filter(Boolean) : [];
-      return question || options.length ? { question, options } : null;
+      // snake_case accepted alongside the declared camelCase: models mix the two conventions freely, and a
+      // multi-select question silently rendered as single-select is a wrong answer, not a cosmetic slip.
+      const multiSelect = o.multiSelect === true || o.multi_select === true;
+      return question || options.length ? { question, options, multiSelect } : null;
     };
     const questions = Array.isArray(rawArgs.questions)
       ? (rawArgs.questions.map(asQuestion).filter(Boolean) as ChoiceQuestion[])
@@ -3170,11 +3173,14 @@ function ChatAgent() {
     // One line per question, so a multi-question card comes back as one legible block rather than something
     // the model has to re-associate with what it asked. Single-question cards keep the original wording, to
     // avoid changing what every existing prompt has been tuned against.
+    // A multi-select answer is spelled out as a quoted list rather than the joined string, so that picking
+    // two options cannot be read back as one option that happened to contain a comma.
+    const answerText = (a: ChoiceAnswer) => (a.values ? a.values.map((v) => `"${v}"`).join(", ") : a.value);
     const lines = answers.map((a, i) => {
       const q = questions[i]?.question ?? "";
       return a.discuss
         ? `- ${q} → the user wants to discuss this rather than settle it`
-        : `- ${q} → ${a.value}`;
+        : `- ${q} → ${answerText(a)}`;
     });
     const anyDiscuss = answers.some((a) => a.discuss);
     const discussNote = anyDiscuss
@@ -3182,7 +3188,9 @@ function ChatAgent() {
       : "";
     entry.resolve(
       answers.length === 1 && !anyDiscuss
-        ? `The user chose: ${answers[0].value}`
+        ? answers[0].values
+          ? `The user selected: ${answerText(answers[0])}`
+          : `The user chose: ${answers[0].value}`
         : `The user answered:\n${lines.join("\n")}${discussNote}`,
     );
   }, []);

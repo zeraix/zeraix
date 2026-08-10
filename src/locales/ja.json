@@ -1172,5 +1172,6 @@
   "chat.choice.submit": "送信",
   "chat.choice.progress": "{total} 件中 {answered} 件回答済み",
   "chat.choice.readyHint": "送信前に変更できます",
-  "chat.choice.customPlaceholder": "自分で回答を入力"
+  "chat.choice.customPlaceholder": "自分で回答を入力",
+  "chat.choice.selected": "{count} 件選択中"
 }
