@@ -416,3 +416,83 @@ export function listRecordedProcesses() {
 export function clearAllProcesses() {
   getDb().prepare("DELETE FROM run_processes").run();
 }
+
+/* --------------------------------------------------------------- trigger state */
+
+/**
+ * When a trigger last fired. Null (no row) means "never" -- which the scheduler reads as "start the
+ * clock now" rather than "backfill from the epoch", or enabling a daily schedule on a workflow
+ * written last year would enqueue a year of runs on save.
+ */
+export function getTriggerLastFired(workflowId, triggerId) {
+  const row = getDb()
+    .prepare("SELECT last_fired_at FROM trigger_state WHERE workflow_id = ? AND trigger_id = ?")
+    .get(workflowId, triggerId);
+  return row?.last_fired_at ?? null;
+}
+
+/**
+ * Record a trigger's fire position. Written BEFORE the runs it accounts for are enqueued (§12.2): if
+ * the process dies in between, the window is lost -- but a lost window is a missed run, while the
+ * reverse ordering replays the window forever and turns `backfill` into an infinite loop.
+ */
+export function setTriggerLastFired(workflowId, triggerId, at) {
+  getDb()
+    .prepare(
+      `INSERT INTO trigger_state (workflow_id, trigger_id, last_fired_at) VALUES (?, ?, ?)
+       ON CONFLICT(workflow_id, trigger_id) DO UPDATE SET last_fired_at = excluded.last_fired_at`,
+    )
+    .run(workflowId, triggerId, at);
+}
+
+/** Every recorded trigger position, for the dashboard's "last / next run" column. */
+export function listTriggerState() {
+  return getDb().prepare("SELECT * FROM trigger_state").all();
+}
+
+/** Drop a workflow's trigger positions. Called when the workflow is deleted, so ids cannot be reused stale. */
+export function clearTriggerState(workflowId) {
+  getDb().prepare("DELETE FROM trigger_state WHERE workflow_id = ?").run(workflowId);
+}
+
+/* ----------------------------------------------------------------- aggregates */
+
+/**
+ * Per-workflow run totals for the overview.
+ *
+ * Aggregated in SQL rather than by reading every run into the renderer: the run table is the one
+ * that grows without bound here, and "how is this workflow doing" must not get slower the longer the
+ * user has been using the product.
+ *
+ * Counts only *finished* runs in the success rate. A queued or running one has no outcome yet, and
+ * folding it into the denominator would make the rate dip every time a run starts.
+ */
+export function workflowStats() {
+  return getDb()
+    .prepare(
+      `SELECT
+         workflow_id                                              AS workflowId,
+         COUNT(*)                                                 AS total,
+         SUM(CASE WHEN state = 'SUCCEEDED' THEN 1 ELSE 0 END)     AS succeeded,
+         SUM(CASE WHEN state IN ('FAILED','TIMED_OUT') THEN 1 ELSE 0 END) AS failed,
+         SUM(CASE WHEN state IN ('SUCCEEDED','FAILED','TIMED_OUT','CANCELLED') THEN 1 ELSE 0 END) AS finished,
+         MAX(created_at)                                          AS lastRunAt,
+         SUM(cost_usd_total)                                      AS costUsd,
+         SUM(tokens_total)                                        AS tokens
+       FROM runs
+       GROUP BY workflow_id`,
+    )
+    .all();
+}
+
+/** The most recent run's state per workflow — "how did it go last time", which a rate cannot answer. */
+export function lastRunStates() {
+  return getDb()
+    .prepare(
+      `SELECT r.workflow_id AS workflowId, r.state AS state, r.created_at AS createdAt, r.error AS error
+         FROM runs r
+         JOIN (SELECT workflow_id, MAX(created_at) AS m FROM runs GROUP BY workflow_id) t
+           ON t.workflow_id = r.workflow_id AND t.m = r.created_at`,
+    )
+    .all();
+}

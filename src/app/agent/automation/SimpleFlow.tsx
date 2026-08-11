@@ -44,15 +44,19 @@ import {
 } from "./blocks";
 import { loadModelList, resolveModelById, resolveActiveModel } from "@/lib/ai/models";
 import { isLocalEndpoint } from "@/lib/ai/localModel";
+import TriggerPicker from "./TriggerPicker";
 
 type Picker = { node: string; idx: number } | null;
 
 export default function SimpleFlow({
   definition,
   onChange,
+  onOpenAdvanced,
 }: {
   definition: WorkflowDefinition;
   onChange: (next: WorkflowDefinition) => void;
+  /** Switch the editor to Professional mode; the schedule rail offers it as the way past Simple. */
+  onOpenAdvanced?: () => void;
 }) {
   const t = useT();
   const ordered = useMemo(() => linearize(definition), [definition]);
@@ -215,6 +219,10 @@ export default function SimpleFlow({
 
   return (
     <div className="mx-auto flex max-w-2xl flex-col items-stretch pb-8">
+      {/* What starts the workflow, stated before the steps that follow it. This is the first thing a
+          beginner needs to answer and used to be unanswerable outside the JSON tab. */}
+      <TriggerPicker definition={definition} onChange={onChange} onOpenAdvanced={onOpenAdvanced} />
+
       {/* Start rail — the workflow reads from here downward. */}
       <div className="mx-auto mb-1 inline-flex items-center gap-2 rounded-full border border-line-strong bg-surface px-4 py-1.5 text-xs font-semibold text-foreground shadow-sm">
         <span className="flex size-5 items-center justify-center rounded-full bg-primary/10 text-primary">

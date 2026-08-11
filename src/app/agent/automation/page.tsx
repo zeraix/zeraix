@@ -19,6 +19,8 @@ import { useT } from "@/lib/i18n";
 import { useRouter, useSearchParams } from "next/navigation";
 import { openPathInShell } from "@/lib/electron/shell";
 import RunInputsDialog, { askableVariables } from "./RunInputsDialog";
+import ApprovalPreview from "./ApprovalPreview";
+import WorkflowOverviewList from "./WorkflowOverviewList";
 import CustomScrollbar, { PAGE_SCROLLBAR } from "@/components/CustomScrollbar";
 import {
   isWorkflowsAvailable,
@@ -34,7 +36,9 @@ import {
   isTerminal,
   eventRunId,
   eventNodeId,
+  workflowOverview,
   type WorkflowSummary,
+  type WorkflowOverview,
   type RunRow,
   type RunDetail,
   type RunState,
@@ -70,6 +74,62 @@ const STATE_STYLE: Record<RunState, string> = {
  * working example than to assemble from scratch.
  */
 
+/**
+ * Button and card treatments, defined once.
+ *
+ * These are not an abstraction for its own sake: the same secondary button is written six times
+ * between the toolbar, the folder button and the approval cards, and the copies had drifted apart by
+ * a padding step (py-1 / py-1.5 / py-2) and a hover colour. Naming them is what keeps a later edit
+ * from re-forking them.
+ *
+ * `focus-visible` rather than `focus`: these are all mouse targets in practice, and a ring that
+ * appears on click reads as a rendering glitch. Keyboard users still get it.
+ */
+const BTN_FOCUS = "outline-none focus-visible:ring-2 focus-visible:ring-ring/50 focus-visible:ring-offset-1 focus-visible:ring-offset-background";
+const BTN_BASE = `inline-flex items-center justify-center gap-1.5 rounded-lg font-medium transition active:scale-[0.98] ${BTN_FOCUS}`;
+const BTN_SECONDARY = `${BTN_BASE} border border-line-strong bg-surface text-foreground hover:border-line-strong hover:bg-surface-hover disabled:pointer-events-none disabled:opacity-40`;
+const BTN_PRIMARY = `${BTN_BASE} bg-primary text-primary-foreground shadow-sm hover:opacity-90 disabled:pointer-events-none disabled:opacity-40`;
+const BTN_DANGER = `${BTN_BASE} border border-line-strong bg-surface text-red-600 hover:border-red-500/40 hover:bg-red-500/5 dark:text-red-400`;
+
+/**
+ * Selectable rows (workflow list, run list).
+ *
+ * The rows live inside one bordered card and are separated by dividers, rather than each being its
+ * own bordered box in a gapped stack. Two lists of individually-outlined boxes is a lot of border for
+ * a page that is mostly lists -- one frame per list reads as a single object and leaves the borders
+ * that remain meaning something.
+ *
+ * Selection is a fill plus a left accent bar instead of a border colour, because inside a divided
+ * list there is no per-row border left to recolour.
+ */
+/**
+ * Every list here is UI, not prose, and has to say so.
+ *
+ * globals.css sets `ul { list-disc pl-5 }` in @layer base for rendered markdown, which overrides
+ * Tailwind's preflight reset and applies to *every* ul in the app. Without this, each row gets a
+ * bullet sitting outside its card and the whole list is indented five units.
+ */
+const LIST_RESET = "list-none pl-0";
+
+/**
+ * How often to re-read while the page is on screen.
+ *
+ * The live `wf:event` / `wf:state` stream only says something *during* a run, so on its own it leaves
+ * everything that changes between runs stale: a workflow edited in another window, a schedule whose
+ * fire was skipped, and `nextRunAt` itself, which is a clock reading that goes out of date simply by
+ * being looked at later. 30s is well under the resolution of anything shown here and costs one
+ * indexed query per tick.
+ */
+const REFRESH_MS = 30_000;
+
+const ROW_BASE = `relative w-full text-left transition ${BTN_FOCUS} focus-visible:z-10`;
+// `before:content-['']` is stated rather than relied upon: the variant injects a default in current
+// Tailwind, but the accent bar silently disappears if that ever stops being true, and a selection
+// indicator is not something to leave resting on a framework default.
+const ROW_SELECTED =
+  "bg-primary/[0.06] before:absolute before:inset-y-0 before:left-0 before:w-0.5 before:bg-primary before:content-['']";
+const ROW_IDLE = "hover:bg-surface-hover/60";
+
 export default function AgentAutomationPage() {
   const t = useT();
   const router = useRouter();
@@ -77,6 +137,7 @@ export default function AgentAutomationPage() {
   const available = useMemo(() => isWorkflowsAvailable(), []);
 
   const [workflows, setWorkflows] = useState<WorkflowSummary[]>([]);
+  const [overview, setOverview] = useState<WorkflowOverview[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [runs, setRuns] = useState<RunRow[]>([]);
   const [detail, setDetail] = useState<RunDetail | null>(null);
@@ -118,6 +179,20 @@ export default function AgentAutomationPage() {
     };
   }, [available, selectedId, runsKey]);
 
+  // The overview is keyed off the same bumps as the run list: a run finishing changes a workflow's
+  // success rate and its last-run dot, so the board would otherwise go stale exactly when it matters.
+  useEffect(() => {
+    if (!available) return;
+    let ignore = false;
+    void (async () => {
+      const rows = await workflowOverview();
+      if (!ignore) setOverview(rows);
+    })();
+    return () => {
+      ignore = true;
+    };
+  }, [available, workflowsKey, runsKey]);
+
   // `ignore` matters here: switching runs quickly would otherwise let a slower earlier response
   // land after a newer one and show the wrong run's timeline.
   useEffect(() => {
@@ -148,6 +223,78 @@ export default function AgentAutomationPage() {
       offState();
     };
   }, [available, selectedRunId]);
+
+  /**
+   * The other half of staying current: re-read on a timer, and on the way back to the app.
+   *
+   * The subscription above is necessary but not sufficient. It is a *run* stream — it fires while a
+   * run is executing and says nothing at any other time — so on its own this page went stale for
+   * every change that happens between runs: a workflow added or renamed in another window, a
+   * scheduled fire the policy skipped (which produces no run and therefore no event), and `nextRunAt`,
+   * which is a computed clock reading that becomes wrong just by sitting on screen past it.
+   *
+   * Gated on visibility so a backgrounded window costs nothing, and paired with a focus listener
+   * because returning after a while is exactly when the screen is most likely to be out of date —
+   * and the moment a poll interval alone would leave the user staring at old numbers until it ticks.
+   */
+  useEffect(() => {
+    if (!available) return;
+    const isVisible = () => document.visibilityState === "visible";
+
+    // Cheap sweep: the list, the run rows and the overview board.
+    const poll = () => {
+      if (!isVisible()) return;
+      bumpWorkflows();
+      bumpRuns();
+    };
+    // Coming back also re-reads the open run's timeline, since any events broadcast while this
+    // window was away are simply gone — the durable log is the only way to recover them.
+    const onReturn = () => {
+      if (!isVisible()) return;
+      bumpWorkflows();
+      bumpRuns();
+      bumpDetail();
+    };
+
+    const timer = setInterval(poll, REFRESH_MS);
+    window.addEventListener("focus", onReturn);
+    document.addEventListener("visibilitychange", onReturn);
+    return () => {
+      clearInterval(timer);
+      window.removeEventListener("focus", onReturn);
+      document.removeEventListener("visibilitychange", onReturn);
+    };
+  }, [available]);
+
+  /**
+   * The list the sidebar draws: every workflow, enriched with its stats where those are available.
+   *
+   * Driven by `workflows`, never by `overview`. The stats are a separate IPC call that can legitimately
+   * return nothing — outside Electron, or before a restart picks up a new `wf:*` handler — and a
+   * decoration failing must not empty the list the whole page navigates by. Missing stats degrade a
+   * row to its name; they never remove it.
+   */
+  const overviewRows = useMemo<WorkflowOverview[]>(() => {
+    const byId = new Map(overview.map((o) => [o.id, o]));
+    return workflows.map(
+      (w) =>
+        byId.get(w.id) ?? {
+          id: w.id,
+          name: w.name,
+          version: w.version,
+          nodeCount: w.nodeCount,
+          total: 0,
+          succeeded: 0,
+          failed: 0,
+          finished: 0,
+          costUsd: 0,
+          lastRunAt: null,
+          lastState: null,
+          lastError: null,
+          nextRunAt: null,
+        },
+    );
+  }, [workflows, overview]);
 
   /** Selecting a workflow clears the run selection — done here, not in an effect. */
   const selectWorkflow = (id: string) => {
@@ -281,8 +428,11 @@ export default function AgentAutomationPage() {
   // list where several are open at once stops being scannable as a sequence.
   const [openSeq, setOpenSeq] = useState<number | null>(null);
 
-  // Where a step's file tools write. Held only for the tooltip: the click re-reads it, because a
-  // chat session can move this folder while the page is open.
+  // The root every run's save folder sits under (<automation root>/runs). Held only for the tooltip.
+  // Unlike the chat session's workspace, this cannot move while the page is open -- it is derived
+  // from the automation root, which is fixed at startup. The click still re-reads it, because this
+  // value is null if the page mounted before that root was configured, and a button that is dead for
+  // the rest of the session is a worse failure than one extra IPC call.
   const [folder, setFolder] = useState<string | null>(null);
   const [folderError, setFolderError] = useState<string | null>(null);
   useEffect(() => {
@@ -303,18 +453,19 @@ export default function AgentAutomationPage() {
     setFolder(dir);
     if (!dir) return setFolderError(t("auto.folderUnknown"));
     const res = await openPathInShell(dir);
-    // openPath fails when the folder does not exist yet — which is the normal state until a run has
-    // written something. Saying which path was tried is the difference between a dead end and an
-    // answer, so the message carries it.
+    // openPath fails when the folder does not exist yet — which is the normal state until the first
+    // run writes something, since the manager creates it when a run's first node executes. Saying
+    // which path was tried is the difference between a dead end and an answer, so the message
+    // carries it.
     if (!res.ok) setFolderError(`${dir} — ${res.error ?? t("auto.folderUnknown")}`);
   };
 
   if (!available) {
     return (
       <Shell t={t}>
-        <div className="mt-8 flex h-64 flex-col items-center justify-center rounded-2xl border border-dashed border-line text-center">
-          <Workflow className="size-8 text-muted-foreground/60" />
-          <p className="mt-3 max-w-sm text-sm text-muted-foreground">{t("auto.desktopOnly")}</p>
+        <div className="mt-8 flex h-64 flex-col items-center justify-center gap-3 rounded-xl border border-dashed border-line text-center">
+          <Workflow className="size-7 text-muted-foreground/50" />
+          <p className="max-w-sm text-sm text-muted-foreground">{t("auto.desktopOnly")}</p>
         </div>
       </Shell>
     );
@@ -325,34 +476,28 @@ export default function AgentAutomationPage() {
       t={t}
       folder={folder}
       onOpenFolder={() => void onOpenFolder()}
-      notice={
-        folderError && (
-          <p className="mt-3 flex items-start gap-1.5 rounded-lg bg-red-500/5 px-3 py-2 text-xs text-red-600 dark:text-red-400">
-            <AlertCircle className="mt-px size-3.5 shrink-0" />
-            {folderError}
-          </p>
-        )
-      }
+      notice={folderError && <Notice className="mt-4">{folderError}</Notice>}
     >
+      {/* Both blocks stay pinned above the grid: they are the two states where the engine is waiting
+          on a human, and burying them beside a workflow selection would hide the one thing on this
+          page that is actually blocked. */}
       {approvals.length > 0 && (
-        <section className="mt-6 space-y-2">
-          <h2 className="flex items-center gap-1.5 text-sm font-semibold text-amber-600 dark:text-amber-400">
-            <ShieldQuestion className="size-4" />
-            {t("auto.approval.heading")} ({approvals.length})
-          </h2>
-          {/* Says plainly how the user will be told about these, and the condition under which a
-              system notification cannot reach them. Silently depending on notifications that only
-              fire while the app happens to be open would be the worst of both worlds. */}
-          <p className="text-xs text-muted-foreground">{t("auto.approval.howNotified")}</p>
+        <Callout
+          tone="amber"
+          icon={<ShieldQuestion className="size-4" />}
+          title={t("auto.approval.heading")}
+          count={approvals.length}
+          /* Says plainly how the user will be told about these, and the condition under which a
+             system notification cannot reach them. Silently depending on notifications that only
+             fire while the app happens to be open would be the worst of both worlds. */
+          desc={t("auto.approval.howNotified")}
+        >
           {approvals.map((a) => (
-            <div
-              key={a.id}
-              className="rounded-xl border border-amber-500/30 bg-amber-500/5 px-4 py-3"
-            >
+            <div key={a.id} className="px-4 py-3">
               <div className="flex flex-wrap items-center gap-2">
                 <p className="text-sm font-medium text-foreground">{a.title ?? a.node_id}</p>
                 {a.deadline_at && (
-                  <span className="rounded bg-amber-500/15 px-1.5 py-0.5 text-[10px] text-amber-700 dark:text-amber-300">
+                  <span className="rounded-md bg-amber-500/15 px-1.5 py-0.5 text-[10px] text-amber-700 dark:text-amber-300">
                     {/* Says what happens if they do nothing — the difference between "waiting" and
                         "this opportunity will be dropped" matters for an unattended pipeline. */}
                     {a.on_timeout === "approve"
@@ -362,41 +507,40 @@ export default function AgentAutomationPage() {
                   </span>
                 )}
               </div>
-              <pre className="mt-2 max-h-40 overflow-auto rounded-lg bg-surface p-2 font-mono text-[10px] leading-snug text-muted-foreground">
-                {JSON.stringify(a.preview, null, 2)}
-              </pre>
-              <div className="mt-2 flex gap-2">
+              <ApprovalPreview preview={a.preview} />
+              <div className="mt-2.5 flex gap-2">
                 <button
                   onClick={() => void onDecide(a.id, true)}
-                  className="rounded-lg bg-emerald-600 px-3 py-1 text-xs font-medium text-white transition hover:opacity-90"
+                  className={`${BTN_BASE} bg-emerald-600 px-3 py-1.5 text-xs text-white shadow-sm hover:opacity-90`}
                 >
                   {t("auto.approval.approve")}
                 </button>
                 <button
                   onClick={() => void onDecide(a.id, false)}
-                  className="rounded-lg border border-line-strong bg-surface px-3 py-1 text-xs text-foreground transition hover:bg-surface-muted"
+                  className={`${BTN_SECONDARY} px-3 py-1.5 text-xs`}
                 >
                   {t("auto.approval.reject")}
                 </button>
               </div>
             </div>
           ))}
-        </section>
+        </Callout>
       )}
 
       {waits.length > 0 && (
-        <section className="mt-6 space-y-2">
-          <h2 className="flex items-center gap-1.5 text-sm font-semibold text-sky-600 dark:text-sky-400">
-            <Hourglass className="size-4" />
-            {t("auto.waits.heading")} ({waits.length})
-          </h2>
-          <p className="text-xs text-muted-foreground">{t("auto.waits.desc")}</p>
+        <Callout
+          tone="sky"
+          icon={<Hourglass className="size-4" />}
+          title={t("auto.waits.heading")}
+          count={waits.length}
+          desc={t("auto.waits.desc")}
+        >
           {waits.map((w) => (
-            <div key={w.id} className="rounded-xl border border-sky-500/30 bg-sky-500/5 px-4 py-3">
+            <div key={w.id} className="px-4 py-3">
               <div className="flex flex-wrap items-center gap-2">
                 <span className="font-mono text-xs text-foreground">{w.match_key}</span>
                 {w.deadline_at && (
-                  <span className="rounded bg-sky-500/15 px-1.5 py-0.5 text-[10px] text-sky-700 dark:text-sky-300">
+                  <span className="rounded-md bg-sky-500/15 px-1.5 py-0.5 text-[10px] text-sky-700 dark:text-sky-300">
                     {/* Says what happens on silence — "waiting" and "this will be dropped" are very
                         different things to leave ambiguous. */}
                     {w.on_timeout === "continue" ? t("auto.waits.dropsAt") : t("auto.waits.failsAt")}{" "}
@@ -406,25 +550,25 @@ export default function AgentAutomationPage() {
                 <span className="flex-1" />
                 <button
                   onClick={() => setDeliverKey(deliverKey === w.match_key ? null : w.match_key)}
-                  className="flex items-center gap-1 rounded-lg border border-line-strong bg-surface px-2.5 py-1 text-xs text-foreground transition hover:bg-surface-muted"
+                  className={`${BTN_SECONDARY} px-2.5 py-1 text-xs`}
                 >
                   <Send className="size-3" />
                   {t("auto.waits.deliver")}
                 </button>
               </div>
               {deliverKey === w.match_key && (
-                <div className="mt-2 space-y-1.5">
+                <div className="mt-2.5 space-y-2">
                   <textarea
                     value={deliverText}
                     onChange={(e) => setDeliverText(e.target.value)}
                     placeholder={t("auto.waits.payloadHint")}
                     rows={3}
                     spellCheck={false}
-                    className="w-full resize-none rounded-lg border border-line-strong bg-surface px-2 py-1.5 font-mono text-[11px] outline-none focus:border-ring"
+                    className="w-full resize-none rounded-lg border border-line-strong bg-surface px-2.5 py-2 font-mono text-[11px] leading-relaxed outline-none transition focus:border-ring focus:ring-2 focus:ring-ring/20"
                   />
                   <button
                     onClick={() => void onDeliver(w.match_key)}
-                    className="rounded-lg bg-primary px-3 py-1 text-xs font-medium text-primary-foreground transition hover:opacity-90"
+                    className={`${BTN_PRIMARY} px-3 py-1.5 text-xs`}
                   >
                     {t("auto.waits.send")}
                   </button>
@@ -432,44 +576,35 @@ export default function AgentAutomationPage() {
               )}
             </div>
           ))}
-        </section>
+        </Callout>
       )}
 
-      <div className="mt-6 grid gap-6 lg:grid-cols-[260px_1fr]">
-        <aside className="space-y-2">
-          <button
-            onClick={onNew}
-            className="flex w-full items-center justify-center gap-1.5 rounded-lg border border-line-strong bg-surface px-3 py-2 text-sm font-medium text-foreground transition hover:bg-surface-muted"
-          >
+      <div className="mt-8 grid items-start gap-6 lg:grid-cols-[264px_1fr]">
+        <aside className="space-y-3">
+          <button onClick={onNew} className={`${BTN_SECONDARY} w-full px-3 py-2 text-sm`}>
             <Plus className="size-4" />
             {t("auto.new")}
           </button>
 
           {workflows.length === 0 ? (
-            <p className="px-1 py-6 text-center text-xs text-muted-foreground">{t("auto.empty")}</p>
+            <EmptyState icon={<Workflow className="size-5" />} text={t("auto.empty")} />
           ) : (
-            workflows.map((w) => (
-              <button
-                key={w.id}
-                onClick={() => selectWorkflow(w.id)}
-                className={`w-full rounded-lg border px-3 py-2.5 text-left transition ${
-                  selectedId === w.id
-                    ? "border-primary/40 bg-primary/5"
-                    : "border-line bg-surface hover:bg-surface-muted"
-                }`}
-              >
-                <p className="truncate text-sm font-medium text-foreground">{w.name}</p>
-                <p className="mt-0.5 text-[11px] text-muted-foreground">
-                  {t("auto.version")} {w.version} · {w.nodeCount} {t("auto.nodes")}
-                </p>
-              </button>
-            ))
+            <WorkflowOverviewList
+              rows={overviewRows}
+              selectedId={selectedId}
+              onSelect={selectWorkflow}
+              rowBase={ROW_BASE}
+              rowSelected={ROW_SELECTED}
+              rowIdle={ROW_IDLE}
+              listReset={LIST_RESET}
+            />
           )}
         </aside>
 
-        <section className="min-w-0">
+        <section className="min-w-0 space-y-5">
           {!selectedId ? (
-            <div className="flex h-64 items-center justify-center rounded-2xl border border-dashed border-line">
+            <div className="flex h-64 flex-col items-center justify-center gap-3 rounded-xl border border-dashed border-line text-center">
+              <Workflow className="size-6 text-muted-foreground/50" />
               <p className="text-sm text-muted-foreground">{t("auto.selectHint")}</p>
             </div>
           ) : (
@@ -478,7 +613,7 @@ export default function AgentAutomationPage() {
                 <button
                   onClick={() => void onRun()}
                   disabled={busy || !!activeRun}
-                  className="flex items-center gap-1.5 rounded-lg bg-primary px-3 py-1.5 text-sm font-medium text-primary-foreground transition hover:opacity-90 disabled:opacity-40"
+                  className={`${BTN_PRIMARY} px-3.5 py-1.5 text-sm`}
                 >
                   {busy ? <Loader2 className="size-4 animate-spin" /> : <Play className="size-4" />}
                   {t("auto.run")}
@@ -486,23 +621,20 @@ export default function AgentAutomationPage() {
                 {activeRun && (
                   <button
                     onClick={() => void onCancel(activeRun.id)}
-                    className="flex items-center gap-1.5 rounded-lg border border-line-strong bg-surface px-3 py-1.5 text-sm text-foreground transition hover:bg-surface-muted"
+                    className={`${BTN_SECONDARY} px-3 py-1.5 text-sm`}
                   >
                     <Square className="size-3.5" />
                     {t("auto.cancel")}
                   </button>
                 )}
                 <div className="flex-1" />
-                <button
-                  onClick={onEdit}
-                  className="flex items-center gap-1.5 rounded-lg border border-line-strong bg-surface px-3 py-1.5 text-sm text-foreground transition hover:bg-surface-muted"
-                >
+                <button onClick={onEdit} className={`${BTN_SECONDARY} px-3 py-1.5 text-sm`}>
                   <Pencil className="size-3.5" />
                   {t("auto.edit")}
                 </button>
                 <button
                   onClick={() => setConfirmingDelete(true)}
-                  className="flex items-center gap-1.5 rounded-lg border border-line-strong bg-surface px-3 py-1.5 text-sm text-red-600 transition hover:bg-red-500/5 dark:text-red-400"
+                  className={`${BTN_DANGER} px-3 py-1.5 text-sm`}
                 >
                   <Trash2 className="size-3.5" />
                   {t("auto.delete")}
@@ -512,80 +644,82 @@ export default function AgentAutomationPage() {
               {/* Inline rather than a modal: the thing being deleted stays on screen behind the
                   question, so "delete this one?" is answerable without remembering which one. */}
               {confirmingDelete && (
-                <div className="mt-3 flex flex-wrap items-center gap-3 rounded-xl border border-red-500/30 bg-red-500/5 px-4 py-3">
+                <div className="flex flex-wrap items-center gap-3 rounded-xl border border-red-500/30 bg-red-500/5 px-4 py-3">
                   <p className="min-w-0 flex-1 text-xs text-foreground">{t("auto.confirmDelete")}</p>
                   <button
                     onClick={() => void onDelete()}
-                    className="rounded-lg bg-red-600 px-3 py-1 text-xs font-medium text-white transition hover:opacity-90"
+                    className={`${BTN_BASE} bg-red-600 px-3 py-1.5 text-xs text-white shadow-sm hover:opacity-90`}
                   >
                     {t("auto.delete")}
                   </button>
                   <button
                     onClick={() => setConfirmingDelete(false)}
-                    className="rounded-lg border border-line-strong bg-surface px-3 py-1 text-xs text-foreground transition hover:bg-surface-muted"
+                    className={`${BTN_SECONDARY} px-3 py-1.5 text-xs`}
                   >
                     {t("auto.cancel")}
                   </button>
                 </div>
               )}
 
-              {runError && (
-                <p className="mt-3 flex items-start gap-1.5 rounded-lg bg-red-500/5 px-3 py-2 text-xs text-red-600 dark:text-red-400">
-                  <AlertCircle className="mt-px size-3.5 shrink-0" />
-                  {runError}
-                </p>
-              )}
+              {runError && <Notice>{runError}</Notice>}
 
-              <h2 className="mb-2 mt-6 text-sm font-semibold text-foreground">{t("auto.runs")}</h2>
-              {runs.length === 0 ? (
-                <p className="rounded-xl border border-dashed border-line px-4 py-6 text-center text-xs text-muted-foreground">
-                  {t("auto.noRuns")}
-                </p>
-              ) : (
-                <div className="space-y-1.5">
-                  {runs.map((r) => (
-                    <button
-                      key={r.id}
-                      onClick={() => setSelectedRunId(r.id)}
-                      className={`flex w-full items-center gap-3 rounded-lg border px-3 py-2 text-left transition ${
-                        selectedRunId === r.id
-                          ? "border-primary/40 bg-primary/5"
-                          : "border-line bg-surface hover:bg-surface-muted"
-                      }`}
-                    >
-                      <StateChip state={r.state} t={t} />
-                      <span className="text-xs text-muted-foreground">{formatTime(r.created_at)}</span>
-                      <span className="text-[11px] text-muted-foreground">
-                        {t("auto.version")} {r.definition_version}
-                      </span>
-                      <span className="flex-1" />
-                      {r.ended_at && r.started_at && (
-                        <span className="text-[11px] tabular-nums text-muted-foreground">
-                          {((r.ended_at - r.started_at) / 1000).toFixed(1)}s
-                        </span>
-                      )}
-                    </button>
-                  ))}
-                </div>
-              )}
+              <div>
+                <SectionLabel>
+                  {t("auto.runs")}
+                  {runs.length > 0 && <Count n={runs.length} />}
+                </SectionLabel>
+                {runs.length === 0 ? (
+                  <EmptyState text={t("auto.noRuns")} />
+                ) : (
+                  <div className="overflow-hidden rounded-xl border border-line bg-surface">
+                    <ul className={`${LIST_RESET} divide-y divide-line/70`}>
+                      {runs.map((r) => (
+                        <li key={r.id}>
+                          <button
+                            onClick={() => setSelectedRunId(r.id)}
+                            aria-current={selectedRunId === r.id}
+                            className={`${ROW_BASE} flex items-center gap-3 px-3 py-2.5 ${
+                              selectedRunId === r.id ? ROW_SELECTED : ROW_IDLE
+                            }`}
+                          >
+                            <StateChip state={r.state} t={t} />
+                            <span className="text-xs tabular-nums text-muted-foreground">
+                              {formatTime(r.created_at)}
+                            </span>
+                            <span className="text-[11px] text-muted-foreground">
+                              {t("auto.version")} {r.definition_version}
+                            </span>
+                            <span className="flex-1" />
+                            {r.ended_at && r.started_at && (
+                              <span className="text-[11px] tabular-nums text-muted-foreground">
+                                {((r.ended_at - r.started_at) / 1000).toFixed(1)}s
+                              </span>
+                            )}
+                          </button>
+                        </li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+              </div>
 
               {/* Timeline: a projection over the event log, never stored separately (§8). */}
               {detail?.run && (
-                <>
-                  <h2 className="mb-2 mt-6 text-sm font-semibold text-foreground">{t("auto.timeline")}</h2>
-                  {detail.run.error && (
-                    <p className="mb-2 flex items-start gap-1.5 rounded-lg bg-red-500/5 px-3 py-2 text-xs text-red-600 dark:text-red-400">
-                      <AlertCircle className="mt-px size-3.5 shrink-0" />
-                      {detail.run.error}
-                    </p>
-                  )}
-                  <div className="max-h-96 overflow-y-auto rounded-xl border border-line bg-surface-muted/40">
+                <div>
+                  <SectionLabel>
+                    {t("auto.timeline")}
+                    {detail.events.length > 0 && <Count n={detail.events.length} />}
+                  </SectionLabel>
+                  {detail.run.error && <Notice className="mb-2">{detail.run.error}</Notice>}
+                  {/* Capped and scrolled rather than left to run the length of the page: a long run
+                      would otherwise push the run list it belongs to entirely out of view. */}
+                  <div className="max-h-96 overflow-y-auto overscroll-contain rounded-xl border border-line bg-surface">
                     {detail.events.length === 0 ? (
-                      <p className="px-4 py-6 text-center text-xs text-muted-foreground">
+                      <p className="px-4 py-8 text-center text-xs text-muted-foreground">
                         {t("auto.noEvents")}
                       </p>
                     ) : (
-                      <ul className="divide-y divide-line/60">
+                      <ul className={`${LIST_RESET} divide-y divide-line/60`}>
                         {detail.events.map((e) => {
                           const expandable = hasDetail(e);
                           const open = openSeq === e.seq;
@@ -596,13 +730,15 @@ export default function AgentAutomationPage() {
                                 disabled={!expandable}
                                 aria-expanded={expandable ? open : undefined}
                                 onClick={() => setOpenSeq(open ? null : e.seq)}
-                                className="flex w-full items-center gap-3 px-3 py-1.5 text-left text-xs transition disabled:cursor-default enabled:hover:bg-surface"
+                                className={`flex w-full items-center gap-3 px-3 py-2 text-left text-xs transition disabled:cursor-default enabled:hover:bg-surface-hover/60 ${BTN_FOCUS} focus-visible:z-10 ${
+                                  open ? "bg-surface-hover/40" : ""
+                                }`}
                               >
                                 <span className="shrink-0 tabular-nums text-muted-foreground">
                                   {formatTime(e.at)}
                                 </span>
                                 {eventNodeId(e) && (
-                                  <span className="shrink-0 font-mono text-[11px] text-primary">
+                                  <span className="shrink-0 rounded bg-primary/10 px-1.5 py-0.5 font-mono text-[11px] text-primary">
                                     {eventNodeId(e)}
                                   </span>
                                 )}
@@ -623,7 +759,7 @@ export default function AgentAutomationPage() {
                       </ul>
                     )}
                   </div>
-                </>
+                </div>
               )}
             </>
           )}
@@ -658,25 +794,25 @@ function Shell({
     <CustomScrollbar className="h-full" config={PAGE_SCROLLBAR}>
     <div className="mx-auto max-w-5xl px-8 py-10">
       <div className="flex items-center gap-3">
-        <span className="flex size-9 items-center justify-center rounded-lg bg-accent text-foreground">
+        <span className="flex size-10 shrink-0 items-center justify-center rounded-xl bg-primary/10 text-primary ring-1 ring-inset ring-primary/20">
           <Workflow className="size-5" />
         </span>
         <h1 className="text-2xl font-bold tracking-tight text-foreground">{t("auto.title")}</h1>
         <span className="flex-1" />
-        {/* Page-level, not per-workflow: every run writes into the same folder, so hiding this until
-            a workflow happens to be selected would put it behind an unrelated choice. */}
+        {/* Page-level, not per-workflow: this opens the root every run's folder sits under, so hiding
+            it until a workflow happens to be selected would put it behind an unrelated choice. */}
         {onOpenFolder && (
           <button
             onClick={onOpenFolder}
             title={folder ?? undefined}
-            className="flex items-center gap-1.5 rounded-lg border border-line-strong bg-surface px-3 py-1.5 text-sm text-foreground transition hover:bg-surface-muted"
+            className={`${BTN_SECONDARY} px-3 py-1.5 text-sm`}
           >
             <FolderOpen className="size-3.5" />
             {t("auto.openFolder")}
           </button>
         )}
       </div>
-      <p className="mt-2 text-sm text-muted-foreground">{t("auto.desc")}</p>
+      <p className="mt-2 max-w-2xl text-sm leading-relaxed text-muted-foreground">{t("auto.desc")}</p>
       {notice}
       {children}
     </div>
@@ -686,9 +822,109 @@ function Shell({
 
 function StateChip({ state, t }: { state: RunState; t: (k: string) => string }) {
   return (
-    <span className={`rounded px-1.5 py-0.5 text-[10px] font-semibold ${STATE_STYLE[state]}`}>
+    <span
+      className={`shrink-0 rounded-md px-1.5 py-0.5 text-[10px] font-semibold tracking-wide ${STATE_STYLE[state]}`}
+    >
       {t(`auto.state.${state}`)}
     </span>
+  );
+}
+
+/**
+ * The one heading treatment on this page below the h1.
+ *
+ * Small, uppercase and muted rather than another near-body-weight `text-sm font-semibold`: the page
+ * is a stack of lists, and the labels have to be distinguishable from the list contents at a glance
+ * without competing with the title for the top of the hierarchy.
+ */
+function SectionLabel({ children }: { children: React.ReactNode }) {
+  return (
+    <h2 className="mb-2 flex items-center gap-2 text-[11px] font-semibold uppercase tracking-[0.08em] text-muted-foreground">
+      {children}
+    </h2>
+  );
+}
+
+/** Count beside a section label. Tabular so a list that grows past 9 does not shift the label. */
+function Count({ n }: { n: number }) {
+  return (
+    <span className="rounded bg-surface-muted px-1.5 py-px text-[10px] tabular-nums text-muted-foreground">
+      {n}
+    </span>
+  );
+}
+
+/** An error line. Same shape everywhere it appears -- folder failures, run failures, run errors. */
+function Notice({ children, className = "" }: { children: React.ReactNode; className?: string }) {
+  return (
+    <p
+      className={`flex items-start gap-1.5 rounded-lg border border-red-500/20 bg-red-500/5 px-3 py-2 text-xs text-red-600 dark:text-red-400 ${className}`}
+    >
+      <AlertCircle className="mt-px size-3.5 shrink-0" />
+      {children}
+    </p>
+  );
+}
+
+/** A list with nothing in it yet. Dashed, so it reads as a placeholder rather than a real container. */
+function EmptyState({ icon, text }: { icon?: React.ReactNode; text: string }) {
+  return (
+    <div className="flex flex-col items-center justify-center gap-2 rounded-xl border border-dashed border-line px-4 py-8 text-center">
+      {icon && <span className="text-muted-foreground/50">{icon}</span>}
+      <p className="text-xs text-muted-foreground">{text}</p>
+    </div>
+  );
+}
+
+/**
+ * The two "the engine is waiting on you" blocks. One frame around the whole group rather than a
+ * bordered box per item: with several pending at once, per-item frames stack into a wall of tinted
+ * rectangles and stop reading as one list.
+ */
+function Callout({
+  tone,
+  icon,
+  title,
+  count,
+  desc,
+  children,
+}: {
+  tone: "amber" | "sky";
+  icon: React.ReactNode;
+  title: string;
+  count: number;
+  desc: string;
+  children: React.ReactNode;
+}) {
+  // Written out rather than composed, because Tailwind resolves class names statically -- a
+  // `border-${tone}-500/25` would survive review and then ship with no border at all.
+  const TONE = {
+    amber: {
+      frame: "border-amber-500/25 bg-amber-500/[0.04]",
+      head: "text-amber-600 dark:text-amber-400",
+      divide: "divide-amber-500/15",
+      rule: "border-amber-500/25",
+    },
+    sky: {
+      frame: "border-sky-500/25 bg-sky-500/[0.04]",
+      head: "text-sky-600 dark:text-sky-400",
+      divide: "divide-sky-500/15",
+      rule: "border-sky-500/25",
+    },
+  }[tone];
+
+  return (
+    <section className={`mt-6 overflow-hidden rounded-xl border ${TONE.frame}`}>
+      <div className="px-4 pb-2 pt-3">
+        <h2 className={`flex items-center gap-1.5 text-sm font-semibold ${TONE.head}`}>
+          {icon}
+          {title}
+          <Count n={count} />
+        </h2>
+        <p className="mt-1 text-xs leading-relaxed text-muted-foreground">{desc}</p>
+      </div>
+      <div className={`divide-y border-t ${TONE.divide} ${TONE.rule}`}>{children}</div>
+    </section>
   );
 }
 
@@ -748,7 +984,7 @@ function summarizeEvent(e: RunEvent): string {
 function EventDetail({ payload }: { payload: Record<string, unknown> }) {
   const entries = Object.entries(payload).filter(([k]) => k !== "type");
   return (
-    <dl className="space-y-1.5 border-t border-line/60 bg-surface px-3 py-2">
+    <dl className="space-y-2 border-t border-line/60 bg-surface-muted/40 px-3 py-2.5">
       {entries.map(([k, v]) => {
         const isObject = typeof v === "object" && v !== null;
         const text = isObject ? JSON.stringify(v, null, 2) : String(v);
@@ -756,12 +992,15 @@ function EventDetail({ payload }: { payload: Record<string, unknown> }) {
         // squeezes into a 20%-wide column and is unreadable.
         const block = isObject || text.includes("\n") || text.length > 80;
         return (
-          <div key={k} className={block ? "space-y-0.5" : "flex gap-2"}>
-            <dt className="w-20 shrink-0 font-mono text-[10px] uppercase tracking-wide text-muted-foreground">
+          <div key={k} className={block ? "space-y-1" : "flex gap-3"}>
+            {/* break-words, not just a wider column: these are the engine's own field names and a
+                long one (`definitionVersion`) is wider than any fixed column worth giving it. Without
+                wrapping, `shrink-0` lets the label run straight over its own value. */}
+            <dt className="w-24 shrink-0 break-words font-mono text-[10px] uppercase leading-relaxed tracking-wide text-muted-foreground">
               {k}
             </dt>
             <dd className="min-w-0 flex-1">
-              <pre className="max-h-64 overflow-auto whitespace-pre-wrap break-words font-mono text-[10px] leading-snug text-foreground">
+              <pre className="max-h-64 overflow-auto whitespace-pre-wrap break-words font-mono text-[11px] leading-relaxed text-foreground">
                 {text}
               </pre>
             </dd>

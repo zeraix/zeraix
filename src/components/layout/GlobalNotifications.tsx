@@ -17,6 +17,7 @@ import { useNotificationStore, type AppNotification } from "@/store/notification
 import { useServicesStore, type RunningService } from "@/store/servicesStore";
 import { onServiceEvent, listServices, stopService } from "@/lib/ai/services";
 import { requestOpenBrowser } from "@/lib/automation";
+import { useWorkflowRunNotifications } from "@/hooks/useWorkflowRunNotifications";
 import { useT } from "@/lib/i18n";
 
 const AUTO_DISMISS_MS = 5000;
@@ -47,6 +48,10 @@ export default function GlobalNotifications() {
   const items = useNotificationStore((s) => s.items);
   const dismiss = useNotificationStore((s) => s.dismiss);
   const scheduled = useRef<Set<string>>(new Set());
+
+  // Announces automation runs that start while the user is elsewhere in the app; pushes into the same
+  // notificationStore rendered below, so it needs nothing from this component but a mount point.
+  useWorkflowRunNotifications();
 
   const services = useServicesStore((s) => s.services);
   const upsert = useServicesStore((s) => s.upsert);
@@ -315,15 +320,18 @@ function NotificationCard({ n, onClose }: { n: AppNotification; onClose: () => v
         <div className="min-w-0 flex-1">
           <p className="truncate text-sm font-semibold text-ink">{n.title}</p>
           {n.message && <p className="mt-0.5 break-words text-xs text-ink-subtle">{n.message}</p>}
-          {n.kind === "progress" && (
+          {/* Only when there is a real fraction to show. `progress` also means "indeterminate, and do
+              not auto-dismiss" — a workflow run has no percentage — and a bar frozen at 0% for the
+              whole job reads as stalled rather than as working. Those get the spinner alone. */}
+          {n.kind === "progress" && pct != null && (
             <div className="mt-2">
               <div className="h-1.5 w-full overflow-hidden rounded-full bg-line-strong/40">
                 <div
                   className="h-full rounded-full bg-primary transition-[width] duration-200"
-                  style={{ width: `${pct ?? 0}%` }}
+                  style={{ width: `${pct}%` }}
                 />
               </div>
-              {pct != null && <p className="mt-1 text-[10px] tabular-nums text-ink-subtle">{pct}%</p>}
+              <p className="mt-1 text-[10px] tabular-nums text-ink-subtle">{pct}%</p>
             </div>
           )}
         </div>

@@ -12,6 +12,9 @@
  * from SQLite rather than from anything the manager keeps in memory.
  */
 import { ipcMain, BrowserWindow, dialog } from "electron";
+import fs from "node:fs";
+import { runDir, runsDir } from "./storage.mjs";
+import { nextScheduledFire } from "./scheduler.mjs";
 import {
   listWorkflows,
   getWorkflow,
@@ -26,10 +29,8 @@ import { TEMPLATE_IDS, buildTemplate } from "./templates.mjs";
 /**
  * @param {object} deps
  * @param {() => (object|null)} deps.getManager Execution Manager accessor (null before init / after failure).
- * @param {() => string} [deps.getWorkdir] Where file-touching tools resolve relative paths. Injected
- *   rather than imported so this module keeps its single Electron dependency and nothing more.
  */
-export function registerWorkflowIpc({ getManager, getWorkdir }) {
+export function registerWorkflowIpc({ getManager }) {
   const broadcast = (channel, payload) => {
     for (const win of BrowserWindow.getAllWindows()) {
       if (!win.isDestroyed()) win.webContents.send(channel, payload);
@@ -68,13 +69,61 @@ export function registerWorkflowIpc({ getManager, getWorkdir }) {
   ipcMain.handle("wf:templates", () => TEMPLATE_IDS);
 
   /**
-   * Where a step's file tools actually write.
+   * One row per workflow: how it has been doing, and when it next runs by itself.
    *
-   * Reported rather than assumed: it is the agent toolkit's working directory, which the chat
-   * session also sets, so it is whatever it is *now* — the honest answer to "where did my file go",
-   * and the only path an Open-folder button can open without lying about it.
+   * Assembled here rather than by the renderer making three calls and joining them, because the join
+   * needs the definition (for triggers) and the run table (for outcomes) at the same time, and those
+   * live on opposite sides of the process boundary. Workflows with no runs yet are included with
+   * zeroed counts -- a freshly-scheduled workflow that has never fired is exactly the one a user most
+   * wants to see listed.
    */
-  ipcMain.handle("wf:workdir", () => ({ path: getWorkdir?.() ?? null }));
+  ipcMain.handle("wf:overview", () => {
+    const now = Date.now();
+    const stats = new Map(repo.workflowStats().map((s) => [s.workflowId, s]));
+    const last = new Map(repo.lastRunStates().map((r) => [r.workflowId, r]));
+
+    return listWorkflows().map((w) => {
+      const s = stats.get(w.id);
+      const l = last.get(w.id);
+      const def = getWorkflow(w.id);
+      return {
+        id: w.id,
+        name: w.name,
+        version: w.version,
+        nodeCount: w.nodeCount,
+        total: s?.total ?? 0,
+        succeeded: s?.succeeded ?? 0,
+        failed: s?.failed ?? 0,
+        finished: s?.finished ?? 0,
+        costUsd: s?.costUsd ?? 0,
+        lastRunAt: l?.createdAt ?? null,
+        lastState: l?.state ?? null,
+        lastError: l?.error ?? null,
+        // null for a manual-only workflow — the UI says "manual" rather than inventing a time.
+        nextRunAt: nextScheduledFire(def, now),
+      };
+    });
+  });
+
+  /**
+   * Where a run's file-touching steps actually write: <automation root>/runs/<runId>.
+   *
+   * Takes a runId because the path is per run, and answers with the runs root when given none — that
+   * is the folder an Open-folder button wants when no run is selected. Deliberately outside the
+   * workspace, so these files are reachable only through this handler, never the file tree.
+   *
+   * The directory is created when the run's first node executes, so this can name a path that does
+   * not exist yet (a queued run); `exists` says which, rather than making the caller guess.
+   */
+  ipcMain.handle("wf:workdir", (_e, { runId } = {}) => {
+    try {
+      const dir = runId ? runDir(runId) : runsDir();
+      return { path: dir, exists: fs.existsSync(dir) };
+    } catch (e) {
+      // An unconfigured root or a bad runId — report it instead of handing back a plausible wrong path.
+      return { path: null, exists: false, error: e?.message || String(e) };
+    }
+  });
 
   /**
    * Create a workflow from a template. Built and validated in the main process so the renderer
@@ -97,7 +146,12 @@ export function registerWorkflowIpc({ getManager, getWorkdir }) {
 
   ipcMain.handle("wf:delete", (_e, id) => {
     try {
-      return deleteWorkflow(id);
+      const res = deleteWorkflow(id);
+      // Drop the scheduler's position for this workflow too. Definitions are files and trigger state
+      // is a table, so nothing else joins them: recreating a workflow under the same id would
+      // otherwise inherit the deleted one's lastFiredAt and backfill the gap since it last fired.
+      if (res.ok) repo.clearTriggerState(id);
+      return res;
     } catch (e) {
       return { ok: false, error: e?.message || String(e) };
     }

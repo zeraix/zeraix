@@ -18,6 +18,7 @@ import path from "node:path";
 import { migrate, MIGRATIONS } from "../electron/automation/migrations.mjs";
 import { validateDefinition, linearOrder } from "../electron/automation/schema.mjs";
 import { setAutomationRoot } from "../electron/automation/storage.mjs";
+import { removeRoot } from "./helpers/tempRoot.mjs";
 import {
   saveWorkflow,
   getWorkflow,
@@ -318,7 +319,7 @@ test("definition store", async (t) => {
     assert.equal(currentVersion("nope"), 0);
   });
 
-  fs.rmSync(root, { recursive: true, force: true });
+  removeRoot(root);
 });
 
 test("database opens and migrates against a real file", async (t) => {
@@ -344,5 +345,5 @@ test("database opens and migrates against a real file", async (t) => {
   });
 
   closeDb();
-  fs.rmSync(root, { recursive: true, force: true });
+  removeRoot(root);
 });

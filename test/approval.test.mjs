@@ -12,6 +12,7 @@ import os from "node:os";
 import path from "node:path";
 
 import { setAutomationRoot } from "../electron/automation/storage.mjs";
+import { removeRoot } from "./helpers/tempRoot.mjs";
 import { openDb, closeDb } from "../electron/automation/db.mjs";
 import { saveWorkflow } from "../electron/automation/definitions.mjs";
 import { createExecutionManager } from "../electron/automation/executionManager.mjs";
@@ -19,7 +20,15 @@ import { validateDefinition } from "../electron/automation/schema.mjs";
 import * as repo from "../electron/automation/repo.mjs";
 
 const isWindows = process.platform === "win32";
-const echo = (text) => (isWindows ? `echo ${text}` : `printf '%s' ${JSON.stringify(text)}`);
+/**
+ * Portable "print this".
+ *
+ * The Windows branch quotes deliberately. The shell runtime spawns PowerShell, where `echo` is
+ * Write-Output, and Write-Output treats space-separated words as *separate arguments* — so an
+ * unquoted `echo draft message` prints two lines rather than one. Without the quotes every
+ * assertion on multi-word output fails on Windows for a reason unrelated to the code under test.
+ */
+const echo = (text) => (isWindows ? `echo ${JSON.stringify(text)}` : `printf '%s' ${JSON.stringify(text)}`);
 
 function freshRoot() {
   closeDb();
@@ -68,7 +77,7 @@ test("a gated node suspends the run instead of executing", async () => {
 
   await mgr.shutdown();
   closeDb();
-  fs.rmSync(root, { recursive: true, force: true });
+  removeRoot(root);
 });
 
 test("the approval preview shows the concrete action being authorised", async () => {
@@ -85,7 +94,7 @@ test("the approval preview shows the concrete action being authorised", async ()
 
   await mgr.shutdown();
   closeDb();
-  fs.rmSync(root, { recursive: true, force: true });
+  removeRoot(root);
 });
 
 test("secrets in node config are redacted from the preview", async () => {
@@ -105,7 +114,7 @@ test("secrets in node config are redacted from the preview", async () => {
 
   await mgr.shutdown();
   closeDb();
-  fs.rmSync(root, { recursive: true, force: true });
+  removeRoot(root);
 });
 
 test("approving resumes the run across an app restart", async () => {
@@ -135,7 +144,7 @@ test("approving resumes the run across an app restart", async () => {
 
   await mgr2.shutdown();
   closeDb();
-  fs.rmSync(root, { recursive: true, force: true });
+  removeRoot(root);
 });
 
 test("rejecting stops the run and never executes the node", async () => {
@@ -155,7 +164,7 @@ test("rejecting stops the run and never executes the node", async () => {
 
   await mgr.shutdown();
   closeDb();
-  fs.rmSync(root, { recursive: true, force: true });
+  removeRoot(root);
 });
 
 test("a decision cannot be made twice", async () => {
@@ -172,7 +181,7 @@ test("a decision cannot be made twice", async () => {
 
   await mgr.shutdown();
   closeDb();
-  fs.rmSync(root, { recursive: true, force: true });
+  removeRoot(root);
 });
 
 test("a deadline that elapsed while the app was closed is honoured at next start", async () => {
@@ -202,7 +211,7 @@ test("a deadline that elapsed while the app was closed is honoured at next start
 
   await mgr2.shutdown();
   closeDb();
-  fs.rmSync(root, { recursive: true, force: true });
+  removeRoot(root);
 });
 
 test("onApprovalTimeout 'approve' lets the run proceed when the deadline passes", async () => {
@@ -225,7 +234,7 @@ test("onApprovalTimeout 'approve' lets the run proceed when the deadline passes"
 
   await mgr.shutdown();
   closeDb();
-  fs.rmSync(root, { recursive: true, force: true });
+  removeRoot(root);
 });
 
 test("a resumed run does not re-request approval or re-notify", async () => {
@@ -246,7 +255,7 @@ test("a resumed run does not re-request approval or re-notify", async () => {
 
   await mgr.shutdown();
   closeDb();
-  fs.rmSync(root, { recursive: true, force: true });
+  removeRoot(root);
 });
 
 test("schema rejects auto-approve without an explicit deadline", () => {

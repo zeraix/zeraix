@@ -14,6 +14,8 @@ import path from "node:path";
 import { execSync } from "node:child_process";
 
 import { setAutomationRoot } from "../electron/automation/storage.mjs";
+import { removeRoot } from "./helpers/tempRoot.mjs";
+import { appendCount } from "./helpers/marker.mjs";
 import { openDb, closeDb } from "../electron/automation/db.mjs";
 import { saveWorkflow } from "../electron/automation/definitions.mjs";
 import { createExecutionManager } from "../electron/automation/executionManager.mjs";
@@ -24,7 +26,15 @@ import * as repo from "../electron/automation/repo.mjs";
 
 const isWindows = process.platform === "win32";
 /** Portable "print this" command, so these tests are not Unix-only. */
-const echo = (text) => (isWindows ? `echo ${text}` : `printf '%s' ${JSON.stringify(text)}`);
+/**
+ * Portable "print this".
+ *
+ * The Windows branch quotes deliberately. The shell runtime spawns PowerShell, where `echo` is
+ * Write-Output, and Write-Output treats space-separated words as *separate arguments* — so an
+ * unquoted `echo hello world` prints two lines rather than one. Without the quotes every assertion
+ * on multi-word output fails on Windows for a reason unrelated to the code under test.
+ */
+const echo = (text) => (isWindows ? `echo ${JSON.stringify(text)}` : `printf '%s' ${JSON.stringify(text)}`);
 
 /**
  * Portable "block for N seconds".
@@ -85,7 +95,29 @@ test("runs a single-node workflow end to end", async () => {
 
   await mgr.shutdown();
   closeDb();
-  fs.rmSync(root, { recursive: true, force: true });
+  removeRoot(root);
+});
+
+test("a shell node's relative path resolves to the run's own directory", async () => {
+  const root = freshRoot();
+  // No path in the command: where "saved.txt" lands is entirely the standard the manager sets.
+  saveWorkflow(oneNode("wf-save", `${echo("x")} > saved.txt`));
+
+  const mgr = createExecutionManager();
+  const res = await mgr.run({ workflowId: "wf-save" });
+  assert.ok(res.ok, res.error);
+
+  // The point of a per-run directory: an output is attributable to the run that produced it, and no
+  // run can write over another's. A regression here means writes escaping to process.cwd() -- which
+  // under `npm test` is this repository.
+  assert.ok(
+    fs.existsSync(path.join(root, "runs", res.runId, "saved.txt")),
+    "a relative write from a shell node must land in <automation root>/runs/<runId>",
+  );
+
+  await mgr.shutdown();
+  closeDb();
+  removeRoot(root);
 });
 
 test("the run is fully reconstructable from SQLite", async () => {
@@ -117,7 +149,7 @@ test("the run is fully reconstructable from SQLite", async () => {
   assert.match(repo.nodeOutputs(runId).only.stdout, /abc/);
 
   closeDb();
-  fs.rmSync(root, { recursive: true, force: true });
+  removeRoot(root);
 });
 
 test("passes output from one node to the next by reference", async () => {
@@ -136,7 +168,7 @@ test("passes output from one node to the next by reference", async () => {
         // Inputs arrive as $INPUT_<NAME>, never spliced into the command string -- an upstream
         // output containing a quote or semicolon would otherwise be shell injection.
         runtime: "shell",
-        config: { command: isWindows ? "echo %INPUT_PREV%" : 'printf "%s" "$INPUT_PREV"' },
+        config: { command: isWindows ? "echo $env:INPUT_PREV" : 'printf "%s" "$INPUT_PREV"' },
         inputs: [{ as: "prev", ref: "run://a/stdout" }],
       },
     ],
@@ -156,7 +188,7 @@ test("passes output from one node to the next by reference", async () => {
 
   await mgr.shutdown();
   closeDb();
-  fs.rmSync(root, { recursive: true, force: true });
+  removeRoot(root);
 });
 
 test("a failing node fails the run and stops the chain", async () => {
@@ -183,7 +215,7 @@ test("a failing node fails the run and stops the chain", async () => {
 
   await mgr.shutdown();
   closeDb();
-  fs.rmSync(root, { recursive: true, force: true });
+  removeRoot(root);
 });
 
 test("retries a failing node the configured number of times", async () => {
@@ -215,7 +247,7 @@ test("retries a failing node the configured number of times", async () => {
 
   await mgr.shutdown();
   closeDb();
-  fs.rmSync(root, { recursive: true, force: true });
+  removeRoot(root);
 });
 
 test("cancellation stops the run and kills the child process", async () => {
@@ -242,7 +274,7 @@ test("cancellation stops the run and kills the child process", async () => {
 
   await mgr.shutdown();
   closeDb();
-  fs.rmSync(root, { recursive: true, force: true });
+  removeRoot(root);
 });
 
 test("cancellation kills grandchildren, not just the shell", { skip: isWindows ? "POSIX process groups" : false }, async () => {
@@ -278,7 +310,7 @@ test("cancellation kills grandchildren, not just the shell", { skip: isWindows ?
 
   await mgr.shutdown();
   closeDb();
-  fs.rmSync(root, { recursive: true, force: true });
+  removeRoot(root);
 });
 
 test("a node timeout is recorded as TIMED_OUT, not FAILED", async () => {
@@ -308,7 +340,7 @@ test("a node timeout is recorded as TIMED_OUT, not FAILED", async () => {
 
   await mgr.shutdown();
   closeDb();
-  fs.rmSync(root, { recursive: true, force: true });
+  removeRoot(root);
 });
 
 test("concurrency 'single' refuses a second overlapping run", async () => {
@@ -327,7 +359,7 @@ test("concurrency 'single' refuses a second overlapping run", async () => {
   await pending;
   await mgr.shutdown();
   closeDb();
-  fs.rmSync(root, { recursive: true, force: true });
+  removeRoot(root);
 });
 
 test("the Policy Guard blocks a node before it executes", async () => {
@@ -353,7 +385,7 @@ test("the Policy Guard blocks a node before it executes", async () => {
 
   await mgr.shutdown();
   closeDb();
-  fs.rmSync(root, { recursive: true, force: true });
+  removeRoot(root);
 });
 
 test("a policy denial is not retried", async () => {
@@ -385,7 +417,7 @@ test("a policy denial is not retried", async () => {
 
   await mgr.shutdown();
   closeDb();
-  fs.rmSync(root, { recursive: true, force: true });
+  removeRoot(root);
 });
 
 test("resume skips nodes that already succeeded", async () => {
@@ -407,19 +439,19 @@ test("resume skips nodes that already succeeded", async () => {
   const mgr = createExecutionManager();
   const first = await mgr.run({ workflowId: "wf-resume" });
   assert.ok(!first.ok, "b fails, so the run fails");
-  const linesAfterFirst = fs.readFileSync(marker, "utf8").trim().split("\n").length;
+  const linesAfterFirst = appendCount(marker);
   assert.equal(linesAfterFirst, 1);
 
   // Simulate a crash-and-resume: put the run back to RUNNING and execute it again.
   repo.setRunState(first.runId, "RUNNING");
   await mgr.executeRun(first.runId);
 
-  const linesAfterResume = fs.readFileSync(marker, "utf8").trim().split("\n").length;
+  const linesAfterResume = appendCount(marker);
   assert.equal(linesAfterResume, 1, "node 'a' already succeeded and must not run twice");
 
   await mgr.shutdown();
   closeDb();
-  fs.rmSync(root, { recursive: true, force: true });
+  removeRoot(root);
 });
 
 test("recovery marks stranded runs INTERRUPTED and clears orphan pids", async () => {
@@ -440,7 +472,7 @@ test("recovery marks stranded runs INTERRUPTED and clears orphan pids", async ()
 
   await mgr.shutdown();
   closeDb();
-  fs.rmSync(root, { recursive: true, force: true });
+  removeRoot(root);
 });
 
 /* ----------------------------------------------- Phase 2 exit criterion: agent node */
@@ -492,7 +524,7 @@ test("runs a shell -> agent -> shell chain", async () => {
       {
         id: "report",
         runtime: "shell",
-        config: { command: isWindows ? "echo %INPUT_SUMMARY%" : 'printf "%s" "$INPUT_SUMMARY"' },
+        config: { command: isWindows ? "echo $env:INPUT_SUMMARY" : 'printf "%s" "$INPUT_SUMMARY"' },
         inputs: [{ as: "summary", ref: "run://think/text" }],
       },
     ],
@@ -510,7 +542,7 @@ test("runs a shell -> agent -> shell chain", async () => {
 
   await mgr.shutdown();
   closeDb();
-  fs.rmSync(root, { recursive: true, force: true });
+  removeRoot(root);
 });
 
 test("an interrupted mixed chain resumes without re-running the agent node", async () => {
@@ -549,7 +581,7 @@ test("an interrupted mixed chain resumes without re-running the agent node", asy
 
   await mgr.shutdown();
   closeDb();
-  fs.rmSync(root, { recursive: true, force: true });
+  removeRoot(root);
 });
 
 test("a node killed mid-execution re-runs cleanly on resume", async () => {
@@ -574,7 +606,7 @@ test("a node killed mid-execution re-runs cleanly on resume", async () => {
 
   await mgr.shutdown();
   closeDb();
-  fs.rmSync(root, { recursive: true, force: true });
+  removeRoot(root);
 });
 
 test("an unconfigured model fails the node with a clear reason", async () => {
@@ -596,7 +628,7 @@ test("an unconfigured model fails the node with a clear reason", async () => {
 
   await mgr.shutdown();
   closeDb();
-  fs.rmSync(root, { recursive: true, force: true });
+  removeRoot(root);
 });
 
 /* --------------------------------------------------------------------- helpers */

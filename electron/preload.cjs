@@ -424,8 +424,14 @@ contextBridge.exposeInMainWorld("workflows", {
   versions: (id) => ipcRenderer.invoke("wf:versions", id),
   /** Ids of the available starter templates. */
   templates: () => ipcRenderer.invoke("wf:templates"),
-  /** { path } — the folder a step's file tools write into. Open it with window.shellApi.openPath. */
-  workdir: () => ipcRenderer.invoke("wf:workdir"),
+  /** One row per workflow: run totals, how it went last time, and when it next fires by itself. */
+  overview: () => ipcRenderer.invoke("wf:overview"),
+  /**
+   * { path, exists } — the folder a run's file-touching steps write into (<automation>/runs/<runId>),
+   * or the runs root when runId is omitted. Open it with window.shellApi.openPath, but check `exists`
+   * first: a queued run's folder is only created when its first node executes.
+   */
+  workdir: (runId) => ipcRenderer.invoke("wf:workdir", { runId }),
   /** Create a workflow from a starter template; returns { ok, version } or { ok:false, errors }. */
   createFromTemplate: (templateId, name) =>
     ipcRenderer.invoke("wf:create-from-template", { templateId, name }),
