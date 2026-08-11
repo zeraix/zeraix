@@ -238,33 +238,61 @@ export const MODELS = [
       nMax: 7,
       pMin: 0.7,
     },
-    // Qwen3's own recommended sampling, because llama-server's defaults send this model into verbatim
-    // loops. The app declares no sampling fields anywhere (openai-adapter builds model/messages/
-    // max_tokens and nothing else), so every request ran the server defaults: temp 0.80, top-k 40,
-    // top-p 0.95, min-p 0.05, and every repetition control off (repeat-penalty 1.0, presence-penalty
-    // 0.0, dry-multiplier 0.0). Reproduced: "write ~300 words about West Lake" produced one good
-    // paragraph per season, then repeated a single 9-token sentence until stopped by hand at 4,670
-    // tokens. Same prompt at these values: 340 tokens, four seasons, ends on its own.
+    // Sampling, because llama-server's defaults send this model into endless loops. The app declares
+    // no sampling fields anywhere (openai-adapter builds model/messages/max_tokens and nothing else),
+    // so every request ran the server defaults: temp 0.80, top-k 40, top-p 0.95, min-p 0.05, and every
+    // repetition control off (repeat-penalty 1.0, presence-penalty 0.0, dry-multiplier 0.0).
     //
     // Not the drafter - measured, not assumed. The same prompt with the drafter off loops the same way
     // (no -md in the args, zero draft-acceptance lines, still going at 1,226 tokens). The target
     // verifies every drafted token, so speculative decoding cannot change the output in the first place.
     //
-    // Sampling rather than a repetition penalty, and this is the part worth keeping: DRY at
-    // multiplier 0.8 was tried FIRST and is not enough. It bounded the damage - generation terminated
-    // at 555 tokens instead of running away - but the text was still degenerate, emitting "荷荷" bursts
-    // that DRY chopped short rather than prevented. The loop is not a sampler failing to penalise
-    // repeats; it is a 2.125-bpw model whose logits are too noisy for a temp-0.8/top-k-40 window.
-    // Narrowing the window fixes the cause, and no repetition penalty is needed on top of it.
+    // The failure is stochastic, so every row below is repeated runs of one prompt ("write ~300 words
+    // about West Lake"), never a single sample. Reading these in order is the whole argument:
     //
-    // temp 0.6 / top-p 0.95 / top-k 20 is Qwen's published guidance for thinking mode, which is what
-    // this model's template forces (see reasoningBudget below). min-p 0 because Qwen specifies it and
-    // the server's 0.05 default is an extra filter they do not ask for.
+    //   defaults                          runaway, killed by hand at 4,670 tokens
+    //   DRY 0.8 alone                     ends at 555 tokens, text still degenerate ("荷荷" bursts)
+    //   temp 0.6 + top-k 20 + DRY         3/4 clean, 4th ran away
+    //   ... with "\n" out of DRY breakers 5/6 normal, 6th restarted the essay at 1,233 chars
+    //   temp 0.7 (Bonsai's card) + above  runaway at 2,372 tokens
+    //   + presence-penalty 1.5            6/6 clean, 256-379 tokens, zero repeated sentences
+    //
+    // presence-penalty is what actually fixes it, and it is Qwen's own prescription: their card says to
+    // "adjust presence_penalty between 0 and 2 to reduce endless repetitions", and ships 1.5 in the
+    // non-thinking profile. The narrowed window and DRY are kept because they were measured better than
+    // without, but neither of them closes it - a config was twice declared fixed on runs that looked
+    // clean and failed on the next prompt. Judge any change here by repeated runs.
+    //
+    // Qwen's caveat for presence-penalty is language mixing and slightly reduced quality. Checked, not
+    // taken on trust: prose stayed monolingual and the pool-filling word problem still answered 4.8 h
+    // with correct working, at 12.5 tok/s.
+    //
+    // temp 0.6 against the 0.7 on Bonsai's own model card. The card's number is its benchmark setting;
+    // 0.7 produced the 2,372-token runaway above and 0.6 did not, so the measurement wins. top-k 20 /
+    // top-p 0.95 / min-p 0 are common to both Bonsai's card and Qwen's thinking profile. DRY's penalty
+    // window is widened from the 64 default because 64 tokens spans only about seven repeats of a
+    // sentence this long.
     sampling: {
       temp: 0.6,
       topK: 20,
       topP: 0.95,
       minP: 0,
+      presencePenalty: 1.5,
+      dryMultiplier: 0.8,
+      dryBase: 1.75,
+      dryAllowedLength: 2,
+      dryPenaltyLastN: 2048,
+      // The default breaker list is ["\n", ":", "\"", "*"], and "\n" is why DRY sat in the sampler
+      // chain doing nothing. A breaker RESETS DRY's match, and the loop repeats across paragraph
+      // breaks - `西湖的四季，是"水光潁溢"。` then a blank line, then the same sentence again - so DRY
+      // only ever saw one short segment at a time and never a repeat. Verified against the server
+      // rather than assumed: /props reported dry_multiplier 0.8 and 'dry' in the sampler chain while
+      // that generation ran away.
+      //
+      // "\n" dropped, the other three kept. Clearing the list entirely would also work, but a
+      // newline-blind DRY with allowed_length 2 would start penalising legitimate repeated structure -
+      // list markers, indentation, boilerplate lines in generated code - which this app asks for often.
+      drySequenceBreakers: [":", "\"", "*"],
     },
     // Bonsai is Qwen3.6-derived and inherits its template's forced-open thinking: add_generation_prompt
     // emits a bare `<think>\n`, so every turn reasons whether it needs to. Measured here - three short
@@ -1181,10 +1209,16 @@ export function buildServerArgs({ hf, modelPath = null, hw, ctx = MIN_CTX, port 
     repeatPenalty: "--repeat-penalty", repeatLastN: "--repeat-last-n",
     dryMultiplier: "--dry-multiplier", dryBase: "--dry-base",
     dryAllowedLength: "--dry-allowed-length", dryPenaltyLastN: "--dry-penalty-last-n",
+    // Repeatable: llama.cpp clears its default list on the FIRST --dry-sequence-breaker and appends
+    // each one after that (common/arg.cpp), so an array here replaces the defaults wholesale.
+    drySequenceBreakers: "--dry-sequence-breaker",
   };
   if (sampling) {
     for (const [key, flag] of Object.entries(SAMPLING_FLAGS)) {
-      if (sampling[key] != null) args.push(flag, String(sampling[key]));
+      const v = sampling[key];
+      if (v == null) continue;
+      if (Array.isArray(v)) for (const one of v) args.push(flag, String(one));
+      else args.push(flag, String(v));
     }
   }
   if (mmproj) args.push("--mmproj", mmproj); // explicit file override (usually unused)
