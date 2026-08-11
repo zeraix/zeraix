@@ -614,6 +614,8 @@
   "ml.mtp": "MTP",
   "ml.mtpOn": "Activé (spéculatif, plus rapide)",
   "ml.mtpOff": "Désactivé",
+  "ml.draft": "Draft",
+  "ml.draftOn": "Activé (spéculatif, plus rapide)",
   "ml.estimate": "Utilisation est. {gb} GB · contexte {ctx} · KV {kv}",
   "ml.ctxTooBig": "Nécessite {gb} Go, au-delà du budget de {budget} Go de cette machine",
   "ml.openFolder": "Ouvrir le dossier",

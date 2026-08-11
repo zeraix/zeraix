@@ -614,6 +614,8 @@
   "ml.mtp": "MTP",
   "ml.mtpOn": "An (spekulativ, schneller)",
   "ml.mtpOff": "Aus",
+  "ml.draft": "Draft",
+  "ml.draftOn": "An (spekulativ, schneller)",
   "ml.estimate": "Geschätzte Nutzung {gb} GB · Kontext {ctx} · KV {kv}",
   "ml.ctxTooBig": "Benötigt {gb} GB, mehr als das Budget dieses Geräts von {budget} GB",
   "ml.openFolder": "Ordner öffnen",

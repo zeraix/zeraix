@@ -614,6 +614,8 @@
   "ml.mtp": "MTP",
   "ml.mtpOn": "オン（投機的デコード・高速）",
   "ml.mtpOff": "オフ",
+  "ml.draft": "Draft 高速化",
+  "ml.draftOn": "オン（投機的デコードで高速）",
   "ml.estimate": "推定使用量 {gb} GB · コンテキスト {ctx} · KV {kv}",
   "ml.ctxTooBig": "{gb} GB 必要で、このマシンの {budget} GB の上限を超えます",
   "ml.openFolder": "フォルダを開く",

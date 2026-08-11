@@ -617,6 +617,8 @@
   "ml.mtp": "MTP 加速",
   "ml.mtpOn": "开启（投机解码更快）",
   "ml.mtpOff": "关闭",
+  "ml.draft": "Draft 加速",
+  "ml.draftOn": "开启（投机解码更快）",
   "ml.estimate": "预计占用 {gb} GB · 上下文 {ctx} · KV {kv}",
   "ml.ctxTooBig": "需要 {gb} GB，超出本机 {budget} GB 预算",
   "ml.openFolder": "打开文件夹",

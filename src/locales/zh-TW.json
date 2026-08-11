@@ -614,6 +614,8 @@
   "ml.mtp": "MTP 加速",
   "ml.mtpOn": "開啟（投機解碼更快）",
   "ml.mtpOff": "關閉",
+  "ml.draft": "Draft 加速",
+  "ml.draftOn": "開啟（推測解碼更快）",
   "ml.estimate": "預計佔用 {gb} GB · 上下文 {ctx} · KV {kv}",
   "ml.ctxTooBig": "需要 {gb} GB，超出本機 {budget} GB 預算",
   "ml.openFolder": "開啟資料夾",

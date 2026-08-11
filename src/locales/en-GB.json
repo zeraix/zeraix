@@ -614,6 +614,8 @@
   "ml.mtp": "MTP",
   "ml.mtpOn": "On (speculative, faster)",
   "ml.mtpOff": "Off",
+  "ml.draft": "Draft",
+  "ml.draftOn": "On (speculative, faster)",
   "ml.estimate": "Est. usage {gb} GB · context {ctx} · KV {kv}",
   "ml.ctxTooBig": "Needs {gb} GB, over this machine's {budget} GB budget",
   "ml.openFolder": "Open folder",
