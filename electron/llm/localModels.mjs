@@ -43,7 +43,7 @@ export const QUANTS = [
  * Every entry also needs a pinned `revision` below, because the seed is only valid for the exact GGUF it was built against (the
  * chat template ships inside the file and model_key does not cover it). seedAvailable enforces that.
  */
-export const SEED_MODELS = new Set(["qwen3.6-35b-a3b", "gemma4-26b-a4b", "gemma4-e4b", "gemma4-12b"]);
+export const SEED_MODELS = new Set(["qwen3.6-35b-a3b", "gemma4-26b-a4b", "gemma4-e4b", "gemma4-12b", "ternary-bonsai-27b"]);
 
 /**
  * Models the MoE expert pool is enabled for.
@@ -200,6 +200,143 @@ export const MODELS = [
     notes: "MoE ~4B active → fast decode, high quality. Multimodal (images only, no audio)."
   },
   {
+    // The id stays `ternary-bonsai-27b` while the display name does not: the id is what seed archives,
+    // locale keys and installed model directories are named after, and the seeds published for this
+    // revision are already keyed to it. Renaming the id would orphan all three for a label change.
+    id: "ternary-bonsai-27b", name: "Qwen Bonsai 27B", params: 27.3, active: 27.3, moe: false, vision: true,
+    // macOS only, and the reason is the weights: the tier below is PQ2_0, a ggml type this project's
+    // Metal fork adds (id 142). A Windows/Linux build does not have it and would fail to load the file
+    // with a size mismatch, not a clean "unsupported quant". Those platforms keep gemma4-12b instead -
+    // see the entry after this one, which carries the complementary platforms list.
+    platforms: ["darwin"],
+    // mtp:false - this model's drafter is NOT an MTP head, so --spec-type draft-mtp does not apply.
+    // It is a DSpark block-diffusion drafter: a separate model that predicts a whole block of
+    // block_size positions at once and scores each with a confidence head. It gets its own descriptor
+    // below rather than reusing the mtp fields, because the launch flags and the download source both
+    // differ.
+    mtp: false,
+    // The drafter does not live in the model's own repo. prism-ml ships an unconverted one
+    // (Ternary-Bonsai-27B-dspark-Q4_1.gguf, 1.95 GB) whose arch is `dspark` and whose token_embd
+    // declares ggml type 42 - group-64 here, group-128 there - so mainline cannot load it. Ours is that
+    // file converted to the `dflash` arch with the target's tokenizer injected and token_embd/output
+    // dropped so it borrows the target's, which is what takes it to 825 MB.
+    //
+    // Pinned to the upload commit, not `main`: llama-seeds is also where seed payloads land, so its
+    // main moves for reasons that have nothing to do with this file.
+    //
+    // Measured on M3 Pro against Ternary-Bonsai-27B PQ2_0, 24-prompt suite, mean of three prompt
+    // orders: 1.262x aggregate, 67% of drafted tokens accepted. n_max 7 rather than the trained
+    // block_size of 4 on purpose - the target verifies 1 + n_draft tokens in one batch and that batch
+    // costs the same anywhere from 4 to 8 wide, so the surplus is free and gets filled from token
+    // history. p_min 0.7 is where the confidence head's truncation was measured best.
+    draft: {
+      type: "dspark",
+      repo: "Zeraix/llama-seeds",
+      path: "drafters/Ternary-Bonsai-27B-dspark-dflash-Q4_1.gguf",
+      revision: "710ab23950c66513344e51d324fe8bcb18a2d140",
+      bytes: 824995296,
+      nMax: 7,
+      pMin: 0.7,
+    },
+    // Sampling, because llama-server's defaults send this model into endless loops. The app declares
+    // no sampling fields anywhere (openai-adapter builds model/messages/max_tokens and nothing else),
+    // so every request ran the server defaults: temp 0.80, top-k 40, top-p 0.95, min-p 0.05, and every
+    // repetition control off (repeat-penalty 1.0, presence-penalty 0.0, dry-multiplier 0.0).
+    //
+    // Not the drafter - measured, not assumed. The same prompt with the drafter off loops the same way
+    // (no -md in the args, zero draft-acceptance lines, still going at 1,226 tokens). The target
+    // verifies every drafted token, so speculative decoding cannot change the output in the first place.
+    //
+    // The failure is stochastic, so every row below is repeated runs of one prompt ("write ~300 words
+    // about West Lake"), never a single sample. Reading these in order is the whole argument:
+    //
+    //   defaults                          runaway, killed by hand at 4,670 tokens
+    //   DRY 0.8 alone                     ends at 555 tokens, text still degenerate ("荷荷" bursts)
+    //   temp 0.6 + top-k 20 + DRY         3/4 clean, 4th ran away
+    //   ... with "\n" out of DRY breakers 5/6 normal, 6th restarted the essay at 1,233 chars
+    //   temp 0.7 (Bonsai's card) + above  runaway at 2,372 tokens
+    //   + presence-penalty 1.5            6/6 clean, 256-379 tokens, zero repeated sentences
+    //
+    // presence-penalty is what actually fixes it, and it is Qwen's own prescription: their card says to
+    // "adjust presence_penalty between 0 and 2 to reduce endless repetitions", and ships 1.5 in the
+    // non-thinking profile. The narrowed window and DRY are kept because they were measured better than
+    // without, but neither of them closes it - a config was twice declared fixed on runs that looked
+    // clean and failed on the next prompt. Judge any change here by repeated runs.
+    //
+    // Qwen's caveat for presence-penalty is language mixing and slightly reduced quality. Checked, not
+    // taken on trust: prose stayed monolingual and the pool-filling word problem still answered 4.8 h
+    // with correct working, at 12.5 tok/s.
+    //
+    // temp 0.6 against the 0.7 on Bonsai's own model card. The card's number is its benchmark setting;
+    // 0.7 produced the 2,372-token runaway above and 0.6 did not, so the measurement wins. top-k 20 /
+    // top-p 0.95 / min-p 0 are common to both Bonsai's card and Qwen's thinking profile. DRY's penalty
+    // window is widened from the 64 default because 64 tokens spans only about seven repeats of a
+    // sentence this long.
+    sampling: {
+      temp: 0.6,
+      topK: 20,
+      topP: 0.95,
+      minP: 0,
+      presencePenalty: 1.5,
+      dryMultiplier: 0.8,
+      dryBase: 1.75,
+      dryAllowedLength: 2,
+      dryPenaltyLastN: 2048,
+      // The default breaker list is ["\n", ":", "\"", "*"], and "\n" is why DRY sat in the sampler
+      // chain doing nothing. A breaker RESETS DRY's match, and the loop repeats across paragraph
+      // breaks - `西湖的四季，是"水光潁溢"。` then a blank line, then the same sentence again - so DRY
+      // only ever saw one short segment at a time and never a repeat. Verified against the server
+      // rather than assumed: /props reported dry_multiplier 0.8 and 'dry' in the sampler chain while
+      // that generation ran away.
+      //
+      // "\n" dropped, the other three kept. Clearing the list entirely would also work, but a
+      // newline-blind DRY with allowed_length 2 would start penalising legitimate repeated structure -
+      // list markers, indentation, boilerplate lines in generated code - which this app asks for often.
+      drySequenceBreakers: [":", "\"", "*"],
+    },
+    // Bonsai is Qwen3.6-derived and inherits its template's forced-open thinking: add_generation_prompt
+    // emits a bare `<think>\n`, so every turn reasons whether it needs to. Measured here - three short
+    // questions ("17 x 23?", "capital of France", "what is a hash table") each spent their whole budget
+    // in reasoning and returned content="". The repo README documents no thinking mode; it is wrong.
+    // Same cap and same message as qwen3.6 - see that entry for why the wording is deliberately neutral
+    // about what happens next.
+    reasoningBudget: 1000,
+    reasoningBudgetMessage: "\n\nI have enough to go on. Let me move on to the next step.\n",
+    hf: "prism-ml/Ternary-Bonsai-27B-gguf",
+    revision: "abbae723028d71be674e71e1a71201a6f43fab22", // pinned: the chat template ships inside the GGUF
+    // Two projectors in this repo: mmproj-BF16 (931 MB) and mmproj-Q8_0 (629 MB). The README recommends
+    // the Q8_0 (HQQ 4-bit in a Q8_0 container). Named explicitly because the scan would otherwise take
+    // whichever readdir listed first - see localModelFiles.
+    mmprojFile: "Ternary-Bonsai-27B-mmproj-Q8_0.gguf",
+    // Read from the GGUF: block_count 64, full_attention_interval 4, head_count_kv 4, key/value_length 256.
+    // Layer i is recurrent when (i+1) % 4 != 0, so 16 of the 64 hold KV and the other 48 are GDN-recurrent
+    // (window 0 - a fixed per-sequence state, not growing cells; that is recurrentGB's job).
+    //   kvElems.full = 16 layers x 4 kv heads x (256 + 256) = 32768.
+    // CONFIRMED against the server, not just derived: it reports
+    //   llama_kv_cache: size = 4608.00 MiB (262144 cells, 16 layers), K (q4_0) 2304 + V (q4_0) 2304
+    // 2304 MiB / 262144 cells = 9216 B/cell for K, and q4_0 is 18 B per 32 elements, so 16384 elements
+    // per cell for K and the same for V.
+    arch: { L: 64, kvH: 4, hd: 256, swa: { every: 4, window: 0 }, kvElems: { full: 32768, swa: 0 } }, maxCtx: 262144,
+    // MEASURED at --parallel 2, exactly as qwen3.6's was - deriving this from the ssm.* fields is what
+    // produced a 3x error there, so it is read off the startup line:
+    //   llama_memory_recurrent: size = 299.25 MiB (2 cells, 64 layers, 2 seqs 0 rs_seq)
+    // 299.25 / 2 = 149.63. The GGUF fields below are reference only.
+    recurrent: { perSeqMiB: 149.63, layers: 48, state: 128, inner: 6144, conv: 4, groups: 16 },
+    quantTiers: [
+      // PQ2_0: the same ternary codes as Q2_g64 but one fp16 scale per 128 weights instead of 64, so
+      // 2.125 bpw against 2.250 - 7.17 GB against 7.59. The repo ships both; the g128 file needs the
+      // PQ2_0 type (id 142) that this project's ggml adds, which is why the entry is darwin-only above.
+      // Measured on M3 Pro: decode 15.46 -> 16.24 tok/s (+5.0%) and 633 MiB less wired, with output
+      // byte-identical to the g64 file. bpw from the shipped file: 7.17 GB x 8 / 27.3B.
+      { minMemGB: 16, quant: "PQ2_0", bpw: 2.10 },
+    ],
+    notes: "Dense 27B at ~2 bits. Hybrid attention (16 of 64 layers full). Multimodal (images)."
+  },
+  {
+    // The Windows/Linux counterpart to ternary-bonsai-27b above: same slot in the catalog, but a model
+    // whose weights those builds can actually read. The two platforms lists are complementary on
+    // purpose - every platform sees exactly one of these, never both and never neither.
+    platforms: ["win32", "linux"],
     // mtp:true: dense 12B decoding is bandwidth-bound (reads ~6.7GB per token); speculative decoding gives ~1.5–2× speedup. The drafter (MTP/…-Q4_0-MTP.gguf,
     // ~254MB) is in the same repo as the main weights and is fetched alongside them during auto-download (hfDownload), then passed to llama-server via -md; not enabled on the -hf fallback path.
     id: "gemma4-12b", name: "Gemma 4 12B", params: 12, active: 12, moe: false, vision: true, mtp: true,
@@ -382,7 +519,14 @@ export function usableModelMemoryGB(hw, overrideGB) {
     //
     // Not higher than 0.75: at 0.83 a 24 GB Mac has ~0.1 GB of page cache left and the pooled layers
     // re-read their experts from disk on every ring forward.
-    return round(Math.max(2, hw.totalMemGB < 10 ? hw.totalMemGB - 3 : hw.totalMemGB * 0.75));
+    //
+    // 0.75 -> 0.70, UNDER TEST. Everything above was measured on a simulated 24 GB Mac, where the
+    // budget is the binding constraint and a larger one always won. It says nothing about a machine
+    // with room to spare: at 0.75 a 38.7 GB Mac budgets 29.0 GB and puts every layer native for both
+    // models, so the reserve is the only thing the factor still controls there. 0.70 budgets 27.1 GB,
+    // which is the first step that makes qwen3.6-35b pool again on this size of machine - gemma4-26b
+    // stays 30/30 either way. Revert to 0.75 if decode or prefill regresses.
+    return round(Math.max(2, hw.totalMemGB < 10 ? hw.totalMemGB - 3 : hw.totalMemGB * 0.70));
   }
   // Discrete GPU: partial offload can use "available VRAM + available system memory" (layers that don't fit stay on CPU); if VRAM is unreadable, use system memory only.
   const usableVram = hw.gpu && hw.gpu.vramGB ? Math.max(0, hw.gpu.vramGB - 1.2) : 0;
@@ -849,6 +993,12 @@ export function recommend(hw, budgetGB, { ctx = MIN_CTX, kvBits = 8, vision = fa
   const vram = hw.unified ? 0 : (hw.gpu && hw.gpu.vramGB) || 0;
   const options = [];
   for (const model of MODELS) {
+    // A model may be restricted to certain platforms when its weights need a ggml type only some
+    // builds carry (ternary-bonsai-27b is PQ2_0, macOS only). Absent = available everywhere, so
+    // every existing entry is unaffected. Filtered here rather than at the MODELS literal because
+    // this is the one place that knows the host, and because the catalog must stay complete for
+    // localServer's by-id lookups - a model already downloaded still has to resolve.
+    if (model.platforms && !model.platforms.includes(hw.platform)) continue;
     // The MoE pool changes what "fits": pooled experts stay file-backed, so a pooled model is sized by moeResidentGB
     // rather than by its whole GGUF. Supplied by the caller (localServer owns the profile directory) so this module stays
     // free of filesystem access; absent => every model is sized as fully resident, which is the pre-pool behaviour.
@@ -901,7 +1051,7 @@ export function recommend(hw, budgetGB, { ctx = MIN_CTX, kvBits = 8, vision = fa
  * Local first: given modelPath → `-m FILE` (+ explicit `--mmproj FILE` when vision), the weights already downloaded by us (with progress/resume);
  * if not auto-downloaded (fallback path) → `-hf repo:quant` is fetched by llama itself, and only then, when noMmproj=true, is --no-mmproj used to turn off the automatic vision projector.
  */
-export function buildServerArgs({ hf, modelPath = null, hw, ctx = MIN_CTX, port = 8080, kvBits = 8, mtpDraft = null, specMtp = false, mmproj = null, noMmproj = false, kvDiskDir = null, parallel = 0, ngl = null, chatTemplate = null, chatTemplateFile = null, reasoningBudget = null, reasoningBudgetMessage = null, extraArgs = [] }) {
+export function buildServerArgs({ hf, modelPath = null, hw, ctx = MIN_CTX, port = 8080, kvBits = 8, mtpDraft = null, specMtp = false, specDraft = null, mmproj = null, noMmproj = false, kvDiskDir = null, parallel = 0, ngl = null, chatTemplate = null, chatTemplateFile = null, reasoningBudget = null, reasoningBudgetMessage = null, sampling = null, extraArgs = [] }) {
   const args = modelPath ? ["-m", modelPath] : ["-hf", hf];
   args.push(
     "--host", "127.0.0.1",
@@ -1019,6 +1169,57 @@ export function buildServerArgs({ hf, modelPath = null, hw, ctx = MIN_CTX, port 
     // than assumed - identical output hash (135fde6b6aa2d51e) and decode 34.17 vs 34.04 tok/s, f16
     // against q4_0, same prompt.
     args.push("-ctkd", "q4_0", "-ctvd", "q4_0");
+  }
+  // DSpark drafter (ternary-bonsai-27b). A different --spec-type from MTP, and it needs its two tuning
+  // flags passed explicitly because the server's defaults are wrong for it:
+  //
+  //   --spec-draft-n-max 7   the drafter is TRAINED at block_size 4, so 7 looks wrong. It is not: the
+  //                          target verifies 1 + n_draft tokens in ONE batch, and that batch costs the
+  //                          same at 4 as at 8 (pp4 148.4ms, pp5 147.2, pp8 149.4 - flat, because the
+  //                          8-wide tile's dequantise-and-stage half does not depend on the column
+  //                          count). The surplus over the trained block is therefore free, and the
+  //                          drafter fills it from token history. Dropping to 4 measured 1.227x
+  //                          against 1.262x - the three spare columns are worth 3.5%.
+  //   --spec-draft-p-min 0.7 truncate the block at the first position the confidence head puts below
+  //                          this. The width chooser prices each width against its measured cost, so
+  //                          this only bounds it; it is not what picks the width.
+  //
+  // NOT passed: -ctkd/-ctvd. Quantising the DRAFTER's cache is measured and safe for MTP above, but
+  // this drafter carries a recurrent state as well as KV and that combination was never measured. An
+  // unmeasured flag on a path that only costs acceptance is not worth the silent risk.
+  if (specDraft && specDraft.path) {
+    args.push("-md", specDraft.path, "--spec-type", "draft-dspark");
+    if (specDraft.nMax != null) args.push("--spec-draft-n-max", String(specDraft.nMax));
+    if (specDraft.pMin != null) args.push("--spec-draft-p-min", String(specDraft.pMin));
+  }
+  // Sampling, when the catalog entry declares it. Nothing is emitted otherwise, so every model that
+  // shipped before this keeps the server defaults it was measured with.
+  //
+  // It belongs on the LAUNCH, not in the request body: the app sends no sampling fields at all (see
+  // openai-adapter.ts, which builds model/messages/max_tokens and nothing else), so a per-model value
+  // put in the request would have to travel from the catalog, through the main process, into the
+  // renderer's chat path. The server takes the same numbers as flags and applies them to every
+  // request, including ones the app does not originate.
+  //
+  // Flag names are the ones this build prints in --help; the map exists so a typo is a missing flag
+  // at review time rather than an argument llama-server silently rejects at launch.
+  const SAMPLING_FLAGS = {
+    temp: "--temp", topK: "--top-k", topP: "--top-p", minP: "--min-p",
+    presencePenalty: "--presence-penalty", frequencyPenalty: "--frequency-penalty",
+    repeatPenalty: "--repeat-penalty", repeatLastN: "--repeat-last-n",
+    dryMultiplier: "--dry-multiplier", dryBase: "--dry-base",
+    dryAllowedLength: "--dry-allowed-length", dryPenaltyLastN: "--dry-penalty-last-n",
+    // Repeatable: llama.cpp clears its default list on the FIRST --dry-sequence-breaker and appends
+    // each one after that (common/arg.cpp), so an array here replaces the defaults wholesale.
+    drySequenceBreakers: "--dry-sequence-breaker",
+  };
+  if (sampling) {
+    for (const [key, flag] of Object.entries(SAMPLING_FLAGS)) {
+      const v = sampling[key];
+      if (v == null) continue;
+      if (Array.isArray(v)) for (const one of v) args.push(flag, String(one));
+      else args.push(flag, String(v));
+    }
   }
   if (mmproj) args.push("--mmproj", mmproj); // explicit file override (usually unused)
   else if (noMmproj) args.push("--no-mmproj"); // vision off: don't load the vision projector that -hf brings in automatically

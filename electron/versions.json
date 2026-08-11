@@ -5,11 +5,11 @@
     "arm64": "sha-e45397068284"
   },
   "seedPrefix": {
-    "daily": "60e831298641803b",
-    "dev": "9032da60354d11db"
+    "daily": "48884a0bad4fbd79",
+    "dev": "e9eaa64fbfe2ec5c"
   },
   "macLlama": {
-    "tag": "mac-v7",
+    "tag": "mac-v8",
     "kvdVersion": 5
   }
 }

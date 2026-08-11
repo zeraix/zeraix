@@ -577,12 +577,17 @@ const findTemplateFile = (files) => {
 };
 
 /** Classify the ready (final names, not .part) model files in a directory. */
-function localModelFiles(dir) {
+function localModelFiles(dir, prefer = null) {
   let files = [];
   try { files = fs.readdirSync(dir); } catch { return { weights: [], mmproj: null, mtp: null, template: null, hasPart: false }; }
   return {
     weights: files.filter((f) => /\.gguf$/i.test(f) && !isAuxFile(f)).sort(),
-    mmproj: files.find((f) => /mmproj.*\.gguf$/i.test(f)) || null,
+    // `prefer` (MODELS[].mmprojFile) wins when the repo ships more than one projector, because
+    // find() returns whichever readdir happened to list first - a silent choice between files that
+    // differ in size and precision. prism-ml/Ternary-Bonsai-27B-gguf ships mmproj-BF16 (931 MB) and
+    // mmproj-Q8_0 (629 MB); its README recommends the Q8_0, and 300 MB is real on a 16 GB machine.
+    // Falls back to the scan, so a repo with one projector needs no descriptor field.
+    mmproj: (prefer && files.includes(prefer) ? prefer : files.find((f) => /mmproj.*\.gguf$/i.test(f))) || null,
     mtp: files.find((f) => /^mtp-.*\.gguf$/i.test(f) || /-mtp\.gguf$/i.test(f)) || null,
     template: findTemplateFile(files),
     hasPart: files.some((f) => /\.part$/i.test(f)),
@@ -1108,7 +1113,13 @@ export function start(opts = {}) {
   // charged for it.
   const forkLlama = process.platform === "darwin" && !!MAC_LLAMA_TAG;
   const visionCharged = visionOn && !forkLlama;
-  const mtpOn = !!r.mtp && opts.mtp !== false;  // MTP speculative decoding (model supports it and the toggle is not off, on by default)
+  // One user-facing switch ("speculative decoding", on unless turned off) resolved against whichever
+  // drafter the model actually has. Keeping these separate matters: a model with a DSpark drafter
+  // declares mtp:false, so folding the two into mtpOn made the draft branch unreachable by
+  // construction rather than merely unused - it launched without -md and looked like a race.
+  const specOn  = opts.mtp !== false;
+  const mtpOn   = !!r.mtp && specOn;              // MTP head (embedded, or a sidecar in the model's repo)
+  const draftOn = !!r.model?.draft && specOn;     // a separate drafter model (DSpark)
   // Context / KV quantization auto-tiering: when not explicitly specified, pick the largest -c that fits per "model + quantization + device memory"
   // (capped at the native window), at one of the offered KV quantizations (see localModels.pickCtxKv).
   // The fallback for a custom -hf model with no catalog entry is 16K at the first offered quantization, NOT a hardcoded one — a
@@ -1133,7 +1144,7 @@ export function start(opts = {}) {
   // Prefer reusing the variant installed in wizard step 1; otherwise choose now per useCuda (launch will ensure it is installed).
   const variant = state.installedVariant || llamaVariant(hw, { preferCuda: !!opts.useCuda });
   const gen = ++launchGen; // this startup's generation id; checked after awaits inside launch, abandon spawn if stale
-  launch(variant, { r, hw, ctx, kvBits, visionOn, visionCharged, mtpOn, gen, modelDir, modelRevision });
+  launch(variant, { r, hw, ctx, kvBits, visionOn, visionCharged, mtpOn, draftOn, gen, modelDir, modelRevision });
   emit();
   return status();
 }
@@ -1143,7 +1154,7 @@ async function launch(variant, cfg) {
   // visionOn decides what the SERVER does (whether --mmproj is passed at all); visionCharged decides
   // what the memory plan RESERVES. They differ on the mac fork, which releases the projector between
   // images - see where visionCharged is derived.
-  const { r, hw, ctx, kvBits = KV_BITS_OFFERED[0], visionOn, visionCharged = visionOn, mtpOn, gen } = cfg;
+  const { r, hw, ctx, kvBits = KV_BITS_OFFERED[0], visionOn, visionCharged = visionOn, mtpOn, draftOn, gen } = cfg;
   // Computed in start() from the catalog pin, and carried in cfg — NOT closed over, because start() and launch() are separate
   // functions and a fallback retry re-enters launch() with the same cfg. `let`: a community model has no pin, so the branch
   // below resolves `main` and reassigns both. The reassignment does not need to travel back to start(); what the UI reads is
@@ -1174,7 +1185,7 @@ async function launch(variant, cfg) {
     // Versioned path, matching isModelInstalled. Reassigned after the revision is resolved for a community model, which is why
     // it is `let` — a flat destDir here would write the download to the pre-migration location.
     let destDir = modelDir || path.join(modelsDir, r.repo.replace(/\//g, "_"), r.quant);
-    const local = localModelFiles(destDir);
+    const local = localModelFiles(destDir, r.model?.mmprojFile || null);
     // Seed planning sits OUTSIDE the download branch on purpose. A seed download that was paused leaves a .part with the weights
     // already complete, so the next launch takes the "already installed" path — and if the seed work lived only in the download
     // branch, that partial could never resume. Weights complete does not mean seeds complete.
@@ -1205,7 +1216,15 @@ async function launch(variant, cfg) {
       const p = Math.min(100, Math.floor(((modelDone + seedDone + thisSeedDone) / total) * 100));
       if (p !== comboLast) { comboLast = p; state.pct = p; emit(); }
     };
-    const drafterMissing = mtpSeparate && !local.mtp; // needs a standalone drafter but not present locally -> needs to be fetched (~hundred MB)
+    // A standalone drafter that is not on disk has to be fetched even when the weights are fully
+    // installed, or the model launches without speculative decoding forever: the drafter rides
+    // downloadModel, and downloadModel only runs on this branch. Two kinds qualify - the MTP
+    // sidecar from the model's own repo (Gemma) and a `draft` descriptor pointing at a repo of
+    // ours (bonsai). Sending it through the same branch is what puts it on the existing progress
+    // bar; downloadFile skips any file already complete, so only the drafter actually transfers.
+    const draftSpec = r.model?.draft || null;
+    const draftMissing = !!draftSpec && !fs.existsSync(path.join(destDir, path.basename(draftSpec.path)));
+    const drafterMissing = (mtpSeparate && !local.mtp) || draftMissing; // needs a standalone drafter but not present locally -> needs to be fetched (~hundred MB)
     if (r.model && isModelInstalled(r.model, r.quant) && !drafterMissing) {
       // Fully installed (and no missing drafter): use the local files directly, skipping the download phase (do not show "downloading").
       modelPath = path.join(destDir, local.weights[0]);
@@ -1229,14 +1248,19 @@ async function launch(variant, cfg) {
           // manifest: identifies the directory for listDownloaded (community models keep their gguf header for restarts, see descriptorFromGguf).
           // revision: catalog models on the KV tier pin an exact commit — a seed is only valid for the GGUF it was built against,
           // and the chat template lives inside that file. Community/non-catalog downloads keep tracking main.
+          // draft: a speculative drafter kept in a repo of ours rather than the model's (bonsai). Fetched
+          // on the same pass and counted in the same progress total, for the same reason the MTP drafter
+          // is: toggling speculation off and on must not trigger a second download.
           { endpoint: hfEnd, repo: r.repo, quant: r.quant, vision: !!r.vision, mtp: mtpSeparate, destDir,
+            draft: MODELS.find((m) => m.id === r.id)?.draft || null,
             revision: modelRevision || "main",
             manifest: { name: r.name, modelId: r.id, gguf: r.meta || null, revision: MODELS.find((m) => m.id === r.id)?.revision || null } },
           (pct, b) => { if (b) { modelBytes = b.total; combo(b.done, b.total, 0); } },
           ac.signal,
         );
         modelPath = out.modelPath; mmprojPath = out.mmprojPath; mtpPath = out.mtpPath || null;
-        pushLog(`[llama] model ready: ${path.basename(modelPath)}${mmprojPath ? ` + ${path.basename(mmprojPath)}` : ""}${mtpPath ? ` + ${path.basename(mtpPath)}` : ""}\n`);
+        const draftDl = out.draftPath || null;
+        pushLog(`[llama] model ready: ${path.basename(modelPath)}${mmprojPath ? ` + ${path.basename(mmprojPath)}` : ""}${mtpPath ? ` + ${path.basename(mtpPath)}` : ""}${draftDl ? ` + ${path.basename(draftDl)}` : ""}\n`);
       } catch (e) {
         if (ac.signal.aborted) { pushLog("[llama] model download cancelled\n"); return; } // user stop: do not bring up the service
         // Do not fall back to -hf (would land in the HF cache layout, uncontrollable): a self-download failure is an error.
@@ -1290,6 +1314,19 @@ async function launch(variant, cfg) {
   const useMtp = !!mtpOn && haveMtp;
   const mtpDraft = useMtp && mtpSeparate ? mtpPath : null;
   if (mtpOn && !haveMtp) pushLog("[llama] MTP is enabled but no drafter found, speculative decoding not enabled this time\n");
+  // DSpark drafter: a separate file like Gemma's MTP one, but from a repo of ours and with its own
+  // --spec-type. It rides the same UI toggle as MTP - to a user "speculative decoding" is one switch,
+  // and a model has at most one drafter - and degrades the same way: file missing => no flags, stock
+  // decode, never a startup error. The path is resolved from the model directory rather than kept from
+  // the download, so an already-installed model gets it on a later launch without re-downloading.
+  const draftSpec = r.model?.draft || null;
+  let specDraft = null;
+  if (draftSpec && draftOn) {
+    const p = path.join(path.dirname(modelPath), path.basename(draftSpec.path));
+    if (fs.existsSync(p)) specDraft = { ...draftSpec, path: p };
+    else pushLog(`[llama] ${draftSpec.type} drafter not found (${path.basename(draftSpec.path)}), speculative decoding not enabled this time\n`);
+  }
+  if (specDraft) pushLog(`[llama] ${specDraft.type} drafter: ${path.basename(specDraft.path)} (n_max ${specDraft.nMax}, p_min ${specDraft.pMin})\n`);
   // macOS installs the fork build from GitHub (see llamaInstaller.macForkAsset), so these flags are always supported there;
   // kvTierEnabled is exactly the darwin check. Every model gets the tier — the server content-addresses the KV layout into its
   // own model_key and files units under <dir>/<model_key>/, so an unknown GGUF cannot collide with another model's units.
@@ -1299,7 +1336,7 @@ async function launch(variant, cfg) {
   // index-order experts, so a missing file degrades to stock speed instead of degrading output.
   const moeProfile = moeProfileFor(r.model, { hw, bpw: r.bpw, ctx, kvBits, vision: visionCharged, log: pushLog });
   const moeOn = !!moeProfile;
-  const args = buildServerArgs({ modelPath, mmproj: visionOn ? mmprojPath : null, mtpDraft, specMtp: useMtp, hw, ctx, port: state.port, kvBits, kvDiskDir: kvTier ? kvDiskDir() : null, parallel: kvTier ? 2 : 0, ngl, chatTemplate: r.chatTemplate, chatTemplateFile: templatePath, reasoningBudget: r.model?.reasoningBudget ?? null, reasoningBudgetMessage: r.model?.reasoningBudgetMessage ?? null });
+  const args = buildServerArgs({ modelPath, mmproj: visionOn ? mmprojPath : null, mtpDraft, specMtp: useMtp, specDraft, hw, ctx, port: state.port, kvBits, kvDiskDir: kvTier ? kvDiskDir() : null, parallel: kvTier ? 2 : 0, ngl, chatTemplate: r.chatTemplate, chatTemplateFile: templatePath, reasoningBudget: r.model?.reasoningBudget ?? null, reasoningBudgetMessage: r.model?.reasoningBudgetMessage ?? null, sampling: r.model?.sampling ?? null });
   if (templatePath) pushLog(`[llama] chat template file: ${path.basename(templatePath)}${r.chatTemplate ? ` (overrides the "${r.chatTemplate}" built-in)` : ""}\n`);
   else if (r.chatTemplate) pushLog(`[llama] chat template override: ${r.chatTemplate}\n`);
   pushLog(`[llama] argv: ${bin} ${args.join(" ")}\n`); // full startup command (for troubleshooting)

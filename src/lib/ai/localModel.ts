@@ -196,7 +196,9 @@ export interface LocalLlmStatus {
 }
 
 export interface LocalLlmFitOption {
-  model: { id: string; name: string; params: number; vision: boolean; notes: string; hf?: string; moe?: boolean; active?: number; maxCtx?: number; mtp?: boolean; mtpEmbedded?: boolean };
+  /** draft: a speculative drafter that is a separate model rather than an MTP head (electron/llm/localModels MODELS[].draft).
+   *  Present => the UI offers the same on/off switch it offers for MTP, under its own label. */
+  model: { id: string; name: string; params: number; vision: boolean; notes: string; hf?: string; moe?: boolean; active?: number; maxCtx?: number; mtp?: boolean; mtpEmbedded?: boolean; draft?: { type?: string; nMax?: number; pMin?: number } };
   quant: { id: string; label: string; quality: number };
   fit: { weightGB: number; kvGB: number; totalGB: number };
   speed: string;

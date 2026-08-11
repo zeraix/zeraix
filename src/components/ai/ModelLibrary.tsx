@@ -516,6 +516,16 @@ export default function ModelLibrary() {
                         <label className="flex h-[30px] items-center gap-2 rounded-md border border-line-strong bg-surface px-2 text-ink"><input type="checkbox" checked={mo.mtp !== false} disabled={locked} onChange={(e) => setOpt(o.model.id, { mtp: e.target.checked })} />{mo.mtp !== false ? t("ml.mtpOn") : t("ml.mtpOff")}</label>
                       </label>
                     )}
+                    {/* Same switch as MTP above and deliberately the same `mtp` option key: to a user this is one
+                        control ("speculative decoding on/off") and a model has at most one drafter, so the launch
+                        path reads a single flag. Only the label differs, because this drafter is a separate model
+                        rather than an MTP head. Shown when the model declares a draft descriptor and has no MTP
+                        head, so the two are mutually exclusive and never both render. */}
+                    {!o.model.mtp && o.model.draft && (
+                      <label className="flex flex-col gap-1 text-xs text-ink-subtle">{t("ml.draft")}
+                        <label className="flex h-[30px] items-center gap-2 rounded-md border border-line-strong bg-surface px-2 text-ink"><input type="checkbox" checked={mo.mtp !== false} disabled={locked} onChange={(e) => setOpt(o.model.id, { mtp: e.target.checked })} />{mo.mtp !== false ? t("ml.draftOn") : t("ml.mtpOff")}</label>
+                      </label>
+                    )}
                   </div>
                   <p className="text-[11px] text-ink-muted">{t("ml.estimate", { gb: s.sizeGB != null ? s.sizeGB : "…", ctx: fmtK(mo.ctx), kv: kvTag(mo.kvBits) })}</p>
                   {s.isRunning && status?.endpoint && (
