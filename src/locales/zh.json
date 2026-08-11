@@ -669,6 +669,7 @@
   "lm.chipNoModel": "未选择模型（去设置添加）",
   "lm.noModelShort": "未选择模型",
   "local.note.gemma4-26b-a4b": "MoE 约 4B 激活 → 解码快、质量高。多模态（仅图像，无音频）。",
+  "local.note.ternary-bonsai-27b": "稠密 27B，约 2 比特量化。混合注意力（64 层中 16 层为全注意力）。多模态（图像）。",
   "local.note.gemma4-12b": "稠密 12B，质量接近 26B-A4B。多模态（图/音）。",
   "local.note.gemma4-e4b": "≈4.5B 有效参数。原生工具调用，QAT 4-bit 近 bf16。多模态（图/音）。",
   "ml.pageDesc": "在本机运行开源大模型：安装运行时，下载并管理推荐模型，随时启动 / 停止（同时至多一个）。",

@@ -666,6 +666,7 @@
   "lm.chipNoModel": "Nessun modello selezionato (aggiungine uno nelle Impostazioni)",
   "lm.noModelShort": "Nessun modello selezionato",
   "local.note.gemma4-26b-a4b": "MoE, ~4B attivi → decodifica veloce, alta qualità. Multimodale (solo immagini, senza audio).",
+  "local.note.ternary-bonsai-27b": "27B denso a ~2 bit. Attenzione ibrida (16 di 64 livelli completi). Multimodale (immagini).",
   "local.note.gemma4-12b": "12B denso, qualità vicina a 26B-A4B. Multimodale (immagini/audio).",
   "local.note.gemma4-e4b": "~4,5B parametri effettivi. Tool-calling nativo, QAT 4-bit vicino a bf16. Multimodale (immagini/audio).",
   "ml.pageDesc": "Esegui modelli open source su questa macchina: installa il runtime, poi scarica, gestisci e avvia i modelli consigliati (al massimo uno alla volta).",

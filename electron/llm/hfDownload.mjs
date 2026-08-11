@@ -278,9 +278,17 @@ export async function resolveRevision(endpoint, repo, ref = "main") {
   } catch { return null; }
 }
 
-export async function downloadModel({ endpoint, repo, quant, vision, mtp, destDir, manifest = null, revision = "main" }, onProgress = () => {}, signal) {
+export async function downloadModel({ endpoint, repo, quant, vision, mtp, draft = null, destDir, manifest = null, revision = "main" }, onProgress = () => {}, signal) {
   const { weights, mmproj, mtp: mtpFile, template } = await listRepoFiles(endpoint, repo, quant, { vision, mtp, revision });
-  const all = [...weights, ...(mmproj ? [mmproj] : []), ...(mtpFile ? [mtpFile] : []), ...(template ? [template] : [])];
+  // A speculative drafter that lives in a DIFFERENT repo from the weights (ternary-bonsai-27b: the
+  // model is prism-ml's, the converted drafter is ours). It is described by the catalog rather than
+  // discovered by listRepoFiles, because there is nothing in the model's repo to discover - and its
+  // size is declared so it can join the same progress total instead of appearing as a second bar
+  // after the first one already reached 100%.
+  const draftFile = draft && draft.repo && draft.path
+    ? { path: draft.path, size: draft.bytes || 0, repo: draft.repo, revision: draft.revision || "main" }
+    : null;
+  const all = [...weights, ...(mmproj ? [mmproj] : []), ...(mtpFile ? [mtpFile] : []), ...(template ? [template] : []), ...(draftFile ? [draftFile] : [])];
   const total = all.reduce((s, f) => s + (f.size || 0), 0);
   fs.mkdirSync(destDir, { recursive: true });
 
@@ -291,19 +299,24 @@ export async function downloadModel({ endpoint, repo, quant, vision, mtp, destDi
     done += d;
     if (total > 0) { const p = Math.min(100, Math.floor((done / total) * 100)); if (p !== lastPct) { lastPct = p; onProgress(p, { done, total }); } }
   };
-  for (const f of all) await downloadFile(endpoint, repo, f, path.join(destDir, path.basename(f.path)), bump, signal, revision);
+  // f.repo/f.revision override the model's for the cross-repo drafter above; everything else is
+  // unaffected because those fields are absent on files listRepoFiles produced.
+  for (const f of all) {
+    await downloadFile(endpoint, f.repo || repo, f, path.join(destDir, path.basename(f.path)), bump, signal, f.revision || revision);
+  }
   if (lastPct !== 100) onProgress(100, { done: total, total });
 
   // Written only after every file is finalized (same "complete ⇔ present" convention as the atomic rename above). Failure is non-fatal:
   // listDownloaded falls back to synthesizing an entry from the directory names.
   try {
-    fs.writeFileSync(path.join(destDir, "manifest.json"), JSON.stringify({ repo, quant, revision, vision: !!mmproj, mtp: !!mtpFile, templateFile: template ? path.basename(template.path) : null, bytes: total, ...(manifest || {}) }, null, 2));
+    fs.writeFileSync(path.join(destDir, "manifest.json"), JSON.stringify({ repo, quant, revision, vision: !!mmproj, mtp: !!mtpFile, draft: draftFile ? path.basename(draftFile.path) : null, templateFile: template ? path.basename(template.path) : null, bytes: total, ...(manifest || {}) }, null, 2));
   } catch { /* ignore */ }
 
   return {
     modelPath: path.join(destDir, path.basename(weights[0].path)), // first shard; llama.cpp auto-completes the rest of the shards in the same directory by -00001-of-000NN
     mmprojPath: mmproj ? path.join(destDir, path.basename(mmproj.path)) : null,
     mtpPath: mtpFile ? path.join(destDir, path.basename(mtpFile.path)) : null,
+    draftPath: draftFile ? path.join(destDir, path.basename(draftFile.path)) : null,
     templatePath: template ? path.join(destDir, path.basename(template.path)) : null,
   };
 }
