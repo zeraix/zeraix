@@ -13,6 +13,7 @@ import os from "node:os";
 import path from "node:path";
 
 import { setAutomationRoot } from "../electron/automation/storage.mjs";
+import { removeRoot } from "./helpers/tempRoot.mjs";
 import { openDb, closeDb } from "../electron/automation/db.mjs";
 import { saveWorkflow } from "../electron/automation/definitions.mjs";
 import { createExecutionManager } from "../electron/automation/executionManager.mjs";
@@ -20,7 +21,9 @@ import { validateDefinition } from "../electron/automation/schema.mjs";
 import * as repo from "../electron/automation/repo.mjs";
 
 const isWindows = process.platform === "win32";
-const echoEvent = isWindows ? "echo %INPUT_EVENT%" : 'printf "%s" "$INPUT_EVENT"';
+// PowerShell, not cmd: the shell runtime spawns powershell.exe on Windows, where `%INPUT_EVENT%` is
+// literal text rather than a variable (see shell.mjs).
+const echoEvent = isWindows ? "echo $env:INPUT_EVENT" : 'printf "%s" "$INPUT_EVENT"';
 
 function freshRoot() {
   closeDb();
@@ -71,7 +74,7 @@ test("a waiting node suspends the run until an event arrives", async () => {
 
   await mgr.shutdown();
   closeDb();
-  fs.rmSync(root, { recursive: true, force: true });
+  removeRoot(root);
 });
 
 test("delivering the event resumes the run across a restart", async () => {
@@ -97,7 +100,7 @@ test("delivering the event resumes the run across a restart", async () => {
 
   await mgr2.shutdown();
   closeDb();
-  fs.rmSync(root, { recursive: true, force: true });
+  removeRoot(root);
 });
 
 test("an event nobody is waiting for is reported, not silently dropped", async () => {
@@ -111,7 +114,7 @@ test("an event nobody is waiting for is reported, not silently dropped", async (
 
   await mgr.shutdown();
   closeDb();
-  fs.rmSync(root, { recursive: true, force: true });
+  removeRoot(root);
 });
 
 test("a deadline that elapsed while the app was closed fails the run", async () => {
@@ -138,7 +141,7 @@ test("a deadline that elapsed while the app was closed fails the run", async () 
 
   await mgr2.shutdown();
   closeDb();
-  fs.rmSync(root, { recursive: true, force: true });
+  removeRoot(root);
 });
 
 test("per-item waits: each candidate waits on its own key", async () => {
@@ -172,7 +175,7 @@ test("per-item waits: each candidate waits on its own key", async () => {
 
   await mgr.shutdown();
   closeDb();
-  fs.rmSync(root, { recursive: true, force: true });
+  removeRoot(root);
 });
 
 test("a silent candidate is dropped, the rest of the batch continues", async () => {
@@ -211,7 +214,7 @@ test("a silent candidate is dropped, the rest of the batch continues", async () 
 
   await mgr.shutdown();
   closeDb();
-  fs.rmSync(root, { recursive: true, force: true });
+  removeRoot(root);
 });
 
 test("a resumed run does not open a second wait", async () => {
@@ -227,7 +230,7 @@ test("a resumed run does not open a second wait", async () => {
 
   await mgr.shutdown();
   closeDb();
-  fs.rmSync(root, { recursive: true, force: true });
+  removeRoot(root);
 });
 
 async function waitFor(predicate, timeoutMs) {

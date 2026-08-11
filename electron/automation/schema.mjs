@@ -9,6 +9,7 @@
  * linear chain. Keeping edges[] in the schema preserves the migration path without shipping a class
  * of workflow the editor cannot render -- see design doc §13, open question 4.
  */
+import { parseCron } from "./cron.mjs";
 
 export const RUNTIME_KINDS = ["agent", "shell", "python", "browser", "mcp", "webhook"];
 /** Implemented so far. Everything else parses but cannot run yet (design doc §4.2). */
@@ -62,8 +63,20 @@ export function validateDefinition(def) {
         if (!MISSED_RUN_POLICIES.includes(t.missedRunPolicy)) {
           err(`${at}.missedRunPolicy must be one of ${MISSED_RUN_POLICIES.join("|")}`);
         }
-        if (t.type === "cron" && !isNonEmptyString(t.config?.expression)) {
-          err(`${at}.config.expression is required for cron triggers`);
+        if (t.type === "cron") {
+          if (!isNonEmptyString(t.config?.expression)) {
+            err(`${at}.config.expression is required for cron triggers`);
+          } else {
+            // Parsed here, not just checked for being a string. An expression the scheduler cannot
+            // read is a schedule that silently never fires -- the worst possible failure for this
+            // feature, and indistinguishable to the user from the app being broken. Rejecting it at
+            // save time puts the error in the editor, where it can still be fixed.
+            try {
+              parseCron(t.config.expression);
+            } catch (e) {
+              err(`${at}.config.expression is not a valid cron expression — ${e.message}`);
+            }
+          }
         }
       }
       if ("lastFiredAt" in t) {

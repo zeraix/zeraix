@@ -33,6 +33,31 @@ export interface WorkflowSummary {
   nodeCount: number;
 }
 
+/**
+ * One row of the overview: how a workflow has been doing, and when it next runs by itself.
+ *
+ * Assembled in the main process (`wf:overview`), because the answer needs the run table and the
+ * definition's triggers at the same time and those sit on opposite sides of the bridge.
+ */
+export interface WorkflowOverview {
+  id: string;
+  name: string;
+  version: number;
+  nodeCount: number;
+  /** Every run ever, including ones still in flight. */
+  total: number;
+  succeeded: number;
+  failed: number;
+  /** Runs that reached a terminal state — the denominator for a success rate. */
+  finished: number;
+  costUsd: number;
+  lastRunAt: number | null;
+  lastState: RunState | null;
+  lastError: string | null;
+  /** null when nothing schedules this workflow; the UI says "manual" rather than inventing a time. */
+  nextRunAt: number | null;
+}
+
 export interface WorkflowNode {
   id: string;
   runtime: "agent" | "shell" | "python" | "browser" | "mcp" | "webhook";
@@ -137,7 +162,9 @@ interface WorkflowsBridge {
   get(id: string, version?: number): Promise<WorkflowDefinition | null>;
   versions(id: string): Promise<number[]>;
   templates(): Promise<string[]>;
-  workdir(): Promise<{ path: string | null }>;
+  overview(): Promise<WorkflowOverview[]>;
+  /** Omit runId for the folder every run's directory sits under; `exists` is false until it is created. */
+  workdir(runId?: string): Promise<{ path: string | null; exists?: boolean }>;
   createFromTemplate(
     templateId: string,
     name: string,
@@ -201,8 +228,24 @@ export async function listTemplates(): Promise<string[]> {
  * directory, which a chat session can move, so a value remembered at mount would send the user to
  * the wrong folder without ever looking wrong.
  */
-export async function workflowFolder(): Promise<string | null> {
-  return (await bridge()?.workdir?.())?.path ?? null;
+export async function workflowFolder(runId?: string): Promise<string | null> {
+  return (await bridge()?.workdir?.(runId))?.path ?? null;
+}
+
+/**
+ * Per-workflow run totals and next scheduled fire. Empty outside Electron.
+ *
+ * Rejection is swallowed rather than propagated: this is decoration over the workflow list, and the
+ * main-process handler is absent until Electron is fully restarted after a `wf:*` change (the
+ * renderer hot-reloads, the main process does not). Statistics failing must never be the reason a
+ * user cannot see their workflows — callers treat an empty result as "no stats yet".
+ */
+export async function workflowOverview(): Promise<WorkflowOverview[]> {
+  try {
+    return (await bridge()?.overview?.()) ?? [];
+  } catch {
+    return [];
+  }
 }
 
 /** Create a workflow from a template. The main process mints the id and returns it. */

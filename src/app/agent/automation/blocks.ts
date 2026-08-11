@@ -92,6 +92,141 @@ export function getStepType(runtime: string): StepType | undefined {
   return STEP_TYPES.find((s) => s.runtime === runtime);
 }
 
+/* ------------------------------------------------------------------- schedules */
+
+/**
+ * The schedules Simple mode can express, and the cron each one compiles to.
+ *
+ * Deliberately a short list. The point is that a user who wants "every morning at 9" never types
+ * cron syntax, not that every cron shape gets a UI -- anything outside this set stays readable and
+ * editable in the Professional JSON tab, and `readSchedule` reports it as `custom` rather than
+ * silently rewriting it into the nearest preset.
+ *
+ * `electron/automation/cron.mjs` is the authority on what an expression *means*; this only builds the
+ * handful it also knows how to read back. The two cannot drift silently: schema.mjs parses every
+ * expression with that module at save time, so anything generated here that it disagrees with is
+ * rejected in the editor rather than becoming a schedule that never fires.
+ */
+export type SchedulePreset = "manual" | "daily" | "weekdays" | "hourly" | "everyMinutes" | "custom";
+
+/** Minute intervals offered for `everyMinutes`. Divisors of 60, so the fires stay evenly spaced. */
+export const MINUTE_CHOICES = [5, 10, 15, 30] as const;
+
+export interface ScheduleValue {
+  preset: SchedulePreset;
+  /** "HH:MM", for the presets that fire at a fixed time. */
+  time: string;
+  /** Interval for `everyMinutes`. */
+  minutes: number;
+  /** What to do about fires missed while the app was closed (§12.2). Ignored when preset is manual. */
+  missedRunPolicy: "skip" | "run-once-on-launch" | "backfill";
+  /** The raw expression, when the schedule is one this editor cannot draw. */
+  expression?: string;
+}
+
+export const DEFAULT_SCHEDULE: ScheduleValue = {
+  preset: "manual",
+  time: "09:00",
+  minutes: 15,
+  // `skip` is the safe default for anything with side effects (§12.2): a workflow that sends email
+  // must not fire four times because the laptop was shut for four days.
+  missedRunPolicy: "skip",
+};
+
+const clampTime = (time: string) => {
+  const m = /^(\d{1,2}):(\d{2})$/.exec(String(time ?? "").trim());
+  if (!m) return { h: 9, min: 0 };
+  return { h: Math.min(23, Math.max(0, Number(m[1]))), min: Math.min(59, Math.max(0, Number(m[2]))) };
+};
+
+/** Compile a picker value into a cron expression, or null for `manual` (which has no schedule). */
+export function scheduleToCron(value: ScheduleValue): string | null {
+  const { h, min } = clampTime(value.time);
+  switch (value.preset) {
+    case "daily":
+      return `${min} ${h} * * *`;
+    case "weekdays":
+      return `${min} ${h} * * 1-5`;
+    case "hourly":
+      return `${min} * * * *`;
+    case "everyMinutes":
+      return `*/${value.minutes} * * * *`;
+    case "custom":
+      return value.expression ?? null;
+    default:
+      return null;
+  }
+}
+
+/**
+ * Read a definition's triggers back into picker state.
+ *
+ * Anything this cannot round-trip exactly -- a hand-written expression, a file-watch or deeplink
+ * trigger, several triggers at once -- comes back as `custom` carrying the raw text. Guessing at the
+ * nearest preset would silently rewrite a schedule the user deliberately hand-tuned the moment they
+ * opened Simple mode.
+ */
+export function readSchedule(def: WorkflowDefinition): ScheduleValue {
+  const triggers = def.triggers ?? [];
+  const cron = triggers.filter((t) => t.type === "cron");
+  const nonManual = triggers.filter((t) => t.type !== "manual");
+
+  if (cron.length === 0) {
+    // A non-cron automatic trigger (file-watch, deeplink) is still "not manual" and must not be
+    // reported as manual, or Simple mode would offer to overwrite it with a schedule.
+    if (nonManual.length > 0) return { ...DEFAULT_SCHEDULE, preset: "custom" };
+    return { ...DEFAULT_SCHEDULE };
+  }
+  if (cron.length > 1 || nonManual.length > cron.length) return { ...DEFAULT_SCHEDULE, preset: "custom" };
+
+  const expression = String(cron[0].config?.expression ?? "");
+  const policy = (cron[0].missedRunPolicy as ScheduleValue["missedRunPolicy"]) ?? DEFAULT_SCHEDULE.missedRunPolicy;
+  const base = { ...DEFAULT_SCHEDULE, missedRunPolicy: policy, expression };
+
+  const parts = expression.trim().split(/\s+/);
+  if (parts.length !== 5) return { ...base, preset: "custom" };
+  const [minute, hour, dom, month, dow] = parts;
+  const everyDate = dom === "*" && month === "*";
+  const hhmm = (h: string, m: string) => `${String(Number(h)).padStart(2, "0")}:${String(Number(m)).padStart(2, "0")}`;
+  const isNum = (s: string) => /^\d{1,2}$/.test(s);
+
+  if (everyDate && isNum(minute) && isNum(hour) && dow === "*") {
+    return { ...base, preset: "daily", time: hhmm(hour, minute) };
+  }
+  if (everyDate && isNum(minute) && isNum(hour) && dow === "1-5") {
+    return { ...base, preset: "weekdays", time: hhmm(hour, minute) };
+  }
+  if (everyDate && isNum(minute) && hour === "*" && dow === "*") {
+    return { ...base, preset: "hourly", time: hhmm("0", minute) };
+  }
+  const step = /^\*\/(\d{1,2})$/.exec(minute);
+  if (everyDate && step && hour === "*" && dow === "*" && MINUTE_CHOICES.includes(Number(step[1]) as never)) {
+    return { ...base, preset: "everyMinutes", minutes: Number(step[1]) };
+  }
+  return { ...base, preset: "custom" };
+}
+
+/**
+ * Write a picker value back onto a definition's triggers.
+ *
+ * Every workflow keeps a manual trigger regardless of schedule: "run it now to see if it works" is
+ * how anyone checks a schedule they just set, and removing the Run button when a cron is added would
+ * make a scheduled workflow untestable until its next fire.
+ */
+export function applySchedule(def: WorkflowDefinition, value: ScheduleValue): WorkflowDefinition {
+  const manual = (def.triggers ?? []).find((t) => t.type === "manual") ?? { id: "manual", type: "manual", config: {} };
+  if (value.preset === "custom") return def; // not ours to rewrite — see readSchedule
+  const expression = scheduleToCron(value);
+  if (!expression) return { ...def, triggers: [manual] };
+  return {
+    ...def,
+    triggers: [
+      manual,
+      { id: "schedule", type: "cron", config: { expression }, missedRunPolicy: value.missedRunPolicy },
+    ],
+  };
+}
+
 /** Legacy-shaped views onto the registry, kept so existing call sites need no change. */
 export const RUNTIME_META: Record<string, { emoji: string; kindKey: string }> = Object.fromEntries(
   STEP_TYPES.map((s) => [s.runtime, { emoji: s.emoji, kindKey: s.kindKey }]),

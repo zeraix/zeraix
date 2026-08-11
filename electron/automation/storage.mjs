@@ -37,3 +37,21 @@ export function isConfigured() {
 
 export const dbFile = () => path.join(automationRoot(), "automation.db");
 export const workflowsDir = () => path.join(automationRoot(), "workflows");
+export const runsDir = () => path.join(automationRoot(), "runs");
+
+/**
+ * The one place an automated run saves files: <root>/runs/<runId>/.
+ *
+ * Standardized per run rather than per session, so an output is always attributable to the run that
+ * produced it and a run's leftovers can be deleted as a unit. Note the consequence: this is outside
+ * the agent toolkit's WORKDIR, so these files do NOT appear in the workspace file tree -- the UI
+ * reaches them through `wf:workdir`, which is why that handler takes a runId.
+ */
+export function runDir(runId) {
+  // runIds are randomUUID()s in practice, but createRun() accepts a caller-supplied id, so this is a
+  // real check and not a restatement of an invariant: a traversing id would escape the root.
+  if (!runId || typeof runId !== "string" || runId === "." || runId === ".." || runId !== path.basename(runId)) {
+    throw new Error(`unsafe run id for a directory name: ${JSON.stringify(runId)}`);
+  }
+  return path.join(runsDir(), runId);
+}

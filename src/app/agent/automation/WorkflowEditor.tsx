@@ -255,7 +255,16 @@ export default function WorkflowEditor({ id }: { id: string }) {
           <div className="h-full p-4">
             {mode === "simple" ? (
               definition ? (
-                <SimpleFlow definition={definition} onChange={onChange} />
+                <SimpleFlow
+                  definition={definition}
+                  onChange={onChange}
+                  // Lands on the JSON tab, not the canvas: the schedules Simple mode hands over are
+                  // exactly the ones only the raw definition can express.
+                  onOpenAdvanced={() => {
+                    setProTab("json");
+                    switchMode("pro");
+                  }}
+                />
               ) : (
                 <Centered>{t("auto.edit.invalidJson")}</Centered>
               )

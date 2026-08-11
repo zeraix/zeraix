@@ -12,6 +12,7 @@ import os from "node:os";
 import path from "node:path";
 
 import { setAutomationRoot } from "../electron/automation/storage.mjs";
+import { removeRoot } from "./helpers/tempRoot.mjs";
 import { openDb, closeDb } from "../electron/automation/db.mjs";
 import { saveWorkflow } from "../electron/automation/definitions.mjs";
 import { createExecutionManager } from "../electron/automation/executionManager.mjs";
@@ -159,7 +160,7 @@ test("a token ceiling stops a runaway agent node mid-run", async () => {
 
   await mgr.shutdown();
   closeDb();
-  fs.rmSync(root, { recursive: true, force: true });
+  removeRoot(root);
 });
 
 test("a budget stop is not retried", async () => {
@@ -191,7 +192,7 @@ test("a budget stop is not retried", async () => {
 
   await mgr.shutdown();
   closeDb();
-  fs.rmSync(root, { recursive: true, force: true });
+  removeRoot(root);
 });
 
 test("usage accrues to the run record for the Timeline to show", async () => {
@@ -216,7 +217,7 @@ test("usage accrues to the run record for the Timeline to show", async () => {
 
   await mgr.shutdown();
   closeDb();
-  fs.rmSync(root, { recursive: true, force: true });
+  removeRoot(root);
 });
 
 test("a local model is exempt from the token ceiling", async () => {
@@ -250,5 +251,5 @@ test("a local model is exempt from the token ceiling", async () => {
 
   await mgr.shutdown();
   closeDb();
-  fs.rmSync(root, { recursive: true, force: true });
+  removeRoot(root);
 });

@@ -14,7 +14,9 @@
  * No `electron` import (§9.1 testability constraint).
  */
 import { EventEmitter } from "node:events";
+import fs from "node:fs";
 import { getWorkflow } from "./definitions.mjs";
+import { runDir } from "./storage.mjs";
 import { linearOrder } from "./schema.mjs";
 import { resolveInputs, buildVariables, resolveList } from "./dataBus.mjs";
 import { createDispatcher } from "./dispatcher.mjs";
@@ -30,7 +32,6 @@ const {
 
 export function createExecutionManager({
   dispatcher = createDispatcher(),
-  workdir = process.cwd(),
   now = () => Date.now(),
   /** Optional OS-notification hook, injected by the wiring layer so this module stays electron-free. */
   notifyApproval = null,
@@ -53,6 +54,19 @@ export function createExecutionManager({
   const setState = (runId, state, opts = {}) => {
     repo.setRunState(runId, state, { now: now(), ...opts });
     bus.emit("state", { runId, state, error: opts.error ?? null });
+  };
+
+  /**
+   * The one directory a run's filesystem-touching runtimes may treat as "here" (see storage.mjs).
+   *
+   * Created on demand rather than once at run start, and deliberately so: a resumed run must not
+   * depend on the directory having survived whatever killed the process. mkdir -p is idempotent, so
+   * paying it per node costs nothing and removes a crash window.
+   */
+  const ensureRunDir = (runId) => {
+    const dir = runDir(runId);
+    fs.mkdirSync(dir, { recursive: true });
+    return dir;
   };
 
   /**
@@ -440,7 +454,7 @@ export function createExecutionManager({
         config: node.config ?? {},
         inputs: resolved.inputs,
         signal: nodeController.signal,
-        workdir,
+        workdir: ensureRunDir(runId),
         policy: guard,
       })) {
         if (event.type === "output") {

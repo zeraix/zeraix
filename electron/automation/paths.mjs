@@ -11,6 +11,7 @@ import path from "node:path";
 import { setAutomationRoot } from "./storage.mjs";
 import { openDb } from "./db.mjs";
 import { createExecutionManager } from "./executionManager.mjs";
+import { createScheduler } from "./scheduler.mjs";
 import { createDispatcher } from "./dispatcher.mjs";
 import { registerWorkflowIpc } from "./ipc.mjs";
 import { approvalStrings } from "./approvalStrings.mjs";
@@ -18,7 +19,7 @@ import { setLlmConfigReader } from "../agent/modelResolver.mjs";
 import { getAppConfig } from "../appConfig.mjs";
 import { llmChat } from "../llm/proxy.mjs";
 import { appendEntry } from "../store/usageLogStore.mjs";
-import { listTools, runTool, getWorkingDir } from "../tools/aiToolkit.mjs";
+import { listTools, runTool } from "../tools/aiToolkit.mjs";
 
 /** Default location, alongside the conversation store under userData/agent. */
 export function defaultAutomationDir() {
@@ -28,6 +29,7 @@ export function defaultAutomationDir() {
 let manager = null;
 let notifier = null;
 let expiryTimer = null;
+let scheduler = null;
 
 /** Inject the notification service (created in main.mjs, which owns the window accessors). */
 export function setAutomationNotifier(service) {
@@ -61,7 +63,8 @@ export function initAutomation(dir) {
 
   manager = createExecutionManager({
     dispatcher,
-    workdir: app.getPath("userData"),
+    // No workdir here on purpose: a run's save path is derived from the automation root, per run
+    // (storage.mjs runDir), so there is nothing for the wiring layer to choose or get wrong.
     // How the user finds out a run is waiting on them. Deliberately best-effort: an OS notification
     // can only fire while this process is alive, so it is a *nudge*, never the system of record.
     // Pending approvals are also listed in the UI on open, and their deadlines are evaluated by the
@@ -88,7 +91,14 @@ export function initAutomation(dir) {
   // run never contends with a dead run's leftovers (§5.1).
   manager.recoverInterrupted();
   // Registered after the manager exists so the IPC layer can subscribe to its event bus.
-  registerWorkflowIpc({ getManager: () => manager, getWorkdir: getWorkingDir });
+  registerWorkflowIpc({ getManager: () => manager });
+
+  // The scheduler starts AFTER recoverInterrupted() above: catch-up may enqueue runs immediately,
+  // and a new run must never contend with a dead run's leftovers (§5.1). Its first act is a catch-up
+  // pass for everything that came due while the app was closed, which is the normal case rather than
+  // the exception -- see §12.2.
+  scheduler = createScheduler({ getManager: () => manager });
+  scheduler.start();
 
   // Deadlines almost always elapse while the app is closed, so recoverInterrupted() already swept
   // them once above. This timer only covers a deadline that falls during a long session.
@@ -109,6 +119,10 @@ export function initAutomation(dir) {
 export async function shutdownAutomation() {
   clearInterval(expiryTimer);
   expiryTimer = null;
+  // Stopped before the manager: a tick landing mid-shutdown would otherwise enqueue a run into an
+  // executor that is already tearing down.
+  scheduler?.stop();
+  scheduler = null;
   await manager?.shutdown();
   manager = null;
 }

@@ -12,6 +12,7 @@ import os from "node:os";
 import path from "node:path";
 
 import { setAutomationRoot } from "../electron/automation/storage.mjs";
+import { removeRoot } from "./helpers/tempRoot.mjs";
 import { openDb, closeDb } from "../electron/automation/db.mjs";
 import { saveWorkflow } from "../electron/automation/definitions.mjs";
 import { createExecutionManager } from "../electron/automation/executionManager.mjs";
@@ -19,7 +20,9 @@ import { validateDefinition } from "../electron/automation/schema.mjs";
 import * as repo from "../electron/automation/repo.mjs";
 
 const isWindows = process.platform === "win32";
-const echoVar = isWindows ? "echo %INPUT_V%" : 'printf "%s" "$INPUT_V"';
+// PowerShell, not cmd: the shell runtime spawns powershell.exe on Windows, where `%INPUT_V%` is
+// literal text rather than a variable (see shell.mjs).
+const echoVar = isWindows ? "echo $env:INPUT_V" : 'printf "%s" "$INPUT_V"';
 
 function freshRoot() {
   closeDb();
@@ -82,7 +85,7 @@ test("a run is refused when a required input is missing", async () => {
 
   await mgr.shutdown();
   closeDb();
-  fs.rmSync(root, { recursive: true, force: true });
+  removeRoot(root);
 });
 
 test("supplied variables reach the node", async () => {
@@ -97,7 +100,7 @@ test("supplied variables reach the node", async () => {
 
   await mgr.shutdown();
   closeDb();
-  fs.rmSync(root, { recursive: true, force: true });
+  removeRoot(root);
 });
 
 test("run variables survive a restart and an approval resume", async () => {
@@ -126,7 +129,7 @@ test("run variables survive a restart and an approval resume", async () => {
 
   await mgr2.shutdown();
   closeDb();
-  fs.rmSync(root, { recursive: true, force: true });
+  removeRoot(root);
 });
 
 test("the approval preview shows the value that will actually be used", async () => {
@@ -143,7 +146,7 @@ test("the approval preview shows the value that will actually be used", async ()
 
   await mgr.shutdown();
   closeDb();
-  fs.rmSync(root, { recursive: true, force: true });
+  removeRoot(root);
 });
 
 test("input values are not written into the event log", async () => {
@@ -161,7 +164,7 @@ test("input values are not written into the event log", async () => {
 
   await mgr.shutdown();
   closeDb();
-  fs.rmSync(root, { recursive: true, force: true });
+  removeRoot(root);
 });
 
 test("a definition default is used when no value is supplied", async () => {
@@ -176,7 +179,7 @@ test("a definition default is used when no value is supplied", async () => {
 
   await mgr.shutdown();
   closeDb();
-  fs.rmSync(root, { recursive: true, force: true });
+  removeRoot(root);
 });
 
 async function waitFor(predicate, timeoutMs) {

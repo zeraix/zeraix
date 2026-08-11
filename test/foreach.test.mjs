@@ -12,6 +12,8 @@ import os from "node:os";
 import path from "node:path";
 
 import { setAutomationRoot } from "../electron/automation/storage.mjs";
+import { removeRoot } from "./helpers/tempRoot.mjs";
+import { appendCount } from "./helpers/marker.mjs";
 import { openDb, closeDb } from "../electron/automation/db.mjs";
 import { saveWorkflow } from "../electron/automation/definitions.mjs";
 import { createExecutionManager } from "../electron/automation/executionManager.mjs";
@@ -20,7 +22,14 @@ import { resolveList } from "../electron/automation/dataBus.mjs";
 import * as repo from "../electron/automation/repo.mjs";
 
 const isWindows = process.platform === "win32";
-const echoItem = isWindows ? "echo %INPUT_ITEM%" : 'printf "%s" "$INPUT_ITEM"';
+// PowerShell, not cmd: the shell runtime spawns powershell.exe on Windows, where `%INPUT_ITEM%` is
+// literal text rather than a variable (see shell.mjs).
+const echoItem = isWindows ? "echo $env:INPUT_ITEM" : 'printf "%s" "$INPUT_ITEM"';
+
+/** "fail on the sentinel item, otherwise echo it" — the fan-out error-policy fixture, per shell. */
+const failOnSentinel = isWindows
+  ? 'if ($env:INPUT_ITEM -eq "FAIL") { exit 1 } else { echo $env:INPUT_ITEM }'
+  : '[ "$INPUT_ITEM" = FAIL ] && exit 1; printf "%s" "$INPUT_ITEM"';
 
 function freshRoot() {
   closeDb();
@@ -147,7 +156,7 @@ test("runs the node once per item and collects the outputs", async () => {
 
   await mgr.shutdown();
   closeDb();
-  fs.rmSync(root, { recursive: true, force: true });
+  removeRoot(root);
 });
 
 test("maxItems caps the fan-out and says so", async () => {
@@ -167,16 +176,14 @@ test("maxItems caps the fan-out and says so", async () => {
 
   await mgr.shutdown();
   closeDb();
-  fs.rmSync(root, { recursive: true, force: true });
+  removeRoot(root);
 });
 
 test("onItemError 'continue' skips a bad item and keeps going", async () => {
   const root = freshRoot();
   // The middle item exits non-zero; the others must still be processed.
   const def = fanOut("wf-continue", { onItemError: "continue" }, '["ok1","FAIL","ok2"]');
-  def.nodes[0].config.command = isWindows
-    ? 'if "%INPUT_ITEM%"=="FAIL" (exit 1) else (echo %INPUT_ITEM%)'
-    : '[ "$INPUT_ITEM" = FAIL ] && exit 1; printf "%s" "$INPUT_ITEM"';
+  def.nodes[0].config.command = failOnSentinel;
   saveWorkflow(def);
 
   const mgr = createExecutionManager();
@@ -187,15 +194,13 @@ test("onItemError 'continue' skips a bad item and keeps going", async () => {
 
   await mgr.shutdown();
   closeDb();
-  fs.rmSync(root, { recursive: true, force: true });
+  removeRoot(root);
 });
 
 test("onItemError 'fail' (default) stops the whole run", async () => {
   const root = freshRoot();
   const def = fanOut("wf-failfast", {}, '["ok1","FAIL","ok2"]');
-  def.nodes[0].config.command = isWindows
-    ? 'if "%INPUT_ITEM%"=="FAIL" (exit 1) else (echo %INPUT_ITEM%)'
-    : '[ "$INPUT_ITEM" = FAIL ] && exit 1; printf "%s" "$INPUT_ITEM"';
+  def.nodes[0].config.command = failOnSentinel;
   saveWorkflow(def);
 
   const mgr = createExecutionManager();
@@ -208,7 +213,7 @@ test("onItemError 'fail' (default) stops the whole run", async () => {
 
   await mgr.shutdown();
   closeDb();
-  fs.rmSync(root, { recursive: true, force: true });
+  removeRoot(root);
 });
 
 test("each item is approved separately", async () => {
@@ -239,7 +244,7 @@ test("each item is approved separately", async () => {
 
   await mgr.shutdown();
   closeDb();
-  fs.rmSync(root, { recursive: true, force: true });
+  removeRoot(root);
 });
 
 test("rejecting one item skips only that item when onItemError is 'continue'", async () => {
@@ -264,7 +269,7 @@ test("rejecting one item skips only that item when onItemError is 'continue'", a
 
   await mgr.shutdown();
   closeDb();
-  fs.rmSync(root, { recursive: true, force: true });
+  removeRoot(root);
 });
 
 test("a resumed fan-out does not redo completed items", async () => {
@@ -277,19 +282,19 @@ test("a resumed fan-out does not redo completed items", async () => {
   const mgr = createExecutionManager();
   const res = await mgr.run({ workflowId: "wf-resume-each" });
   assert.ok(res.ok, res.error);
-  const linesAfterRun = fs.readFileSync(marker, "utf8").trim().split("\n").length;
+  const linesAfterRun = appendCount(marker);
   assert.equal(linesAfterRun, 2);
 
   // Force a re-execution the way a crash recovery would.
   repo.setRunState(res.runId, "RUNNING");
   await mgr.executeRun(res.runId);
 
-  const linesAfterResume = fs.readFileSync(marker, "utf8").trim().split("\n").length;
+  const linesAfterResume = appendCount(marker);
   assert.equal(linesAfterResume, 2, "already-completed items must not run again");
 
   await mgr.shutdown();
   closeDb();
-  fs.rmSync(root, { recursive: true, force: true });
+  removeRoot(root);
 });
 
 async function waitFor(predicate, timeoutMs) {
