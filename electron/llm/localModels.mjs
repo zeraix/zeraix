@@ -238,6 +238,34 @@ export const MODELS = [
       nMax: 7,
       pMin: 0.7,
     },
+    // Qwen3's own recommended sampling, because llama-server's defaults send this model into verbatim
+    // loops. The app declares no sampling fields anywhere (openai-adapter builds model/messages/
+    // max_tokens and nothing else), so every request ran the server defaults: temp 0.80, top-k 40,
+    // top-p 0.95, min-p 0.05, and every repetition control off (repeat-penalty 1.0, presence-penalty
+    // 0.0, dry-multiplier 0.0). Reproduced: "write ~300 words about West Lake" produced one good
+    // paragraph per season, then repeated a single 9-token sentence until stopped by hand at 4,670
+    // tokens. Same prompt at these values: 340 tokens, four seasons, ends on its own.
+    //
+    // Not the drafter - measured, not assumed. The same prompt with the drafter off loops the same way
+    // (no -md in the args, zero draft-acceptance lines, still going at 1,226 tokens). The target
+    // verifies every drafted token, so speculative decoding cannot change the output in the first place.
+    //
+    // Sampling rather than a repetition penalty, and this is the part worth keeping: DRY at
+    // multiplier 0.8 was tried FIRST and is not enough. It bounded the damage - generation terminated
+    // at 555 tokens instead of running away - but the text was still degenerate, emitting "荷荷" bursts
+    // that DRY chopped short rather than prevented. The loop is not a sampler failing to penalise
+    // repeats; it is a 2.125-bpw model whose logits are too noisy for a temp-0.8/top-k-40 window.
+    // Narrowing the window fixes the cause, and no repetition penalty is needed on top of it.
+    //
+    // temp 0.6 / top-p 0.95 / top-k 20 is Qwen's published guidance for thinking mode, which is what
+    // this model's template forces (see reasoningBudget below). min-p 0 because Qwen specifies it and
+    // the server's 0.05 default is an extra filter they do not ask for.
+    sampling: {
+      temp: 0.6,
+      topK: 20,
+      topP: 0.95,
+      minP: 0,
+    },
     // Bonsai is Qwen3.6-derived and inherits its template's forced-open thinking: add_generation_prompt
     // emits a bare `<think>\n`, so every turn reasons whether it needs to. Measured here - three short
     // questions ("17 x 23?", "capital of France", "what is a hash table") each spent their whole budget
@@ -995,7 +1023,7 @@ export function recommend(hw, budgetGB, { ctx = MIN_CTX, kvBits = 8, vision = fa
  * Local first: given modelPath → `-m FILE` (+ explicit `--mmproj FILE` when vision), the weights already downloaded by us (with progress/resume);
  * if not auto-downloaded (fallback path) → `-hf repo:quant` is fetched by llama itself, and only then, when noMmproj=true, is --no-mmproj used to turn off the automatic vision projector.
  */
-export function buildServerArgs({ hf, modelPath = null, hw, ctx = MIN_CTX, port = 8080, kvBits = 8, mtpDraft = null, specMtp = false, specDraft = null, mmproj = null, noMmproj = false, kvDiskDir = null, parallel = 0, ngl = null, chatTemplate = null, chatTemplateFile = null, reasoningBudget = null, reasoningBudgetMessage = null, extraArgs = [] }) {
+export function buildServerArgs({ hf, modelPath = null, hw, ctx = MIN_CTX, port = 8080, kvBits = 8, mtpDraft = null, specMtp = false, specDraft = null, mmproj = null, noMmproj = false, kvDiskDir = null, parallel = 0, ngl = null, chatTemplate = null, chatTemplateFile = null, reasoningBudget = null, reasoningBudgetMessage = null, sampling = null, extraArgs = [] }) {
   const args = modelPath ? ["-m", modelPath] : ["-hf", hf];
   args.push(
     "--host", "127.0.0.1",
@@ -1135,6 +1163,29 @@ export function buildServerArgs({ hf, modelPath = null, hw, ctx = MIN_CTX, port 
     args.push("-md", specDraft.path, "--spec-type", "draft-dspark");
     if (specDraft.nMax != null) args.push("--spec-draft-n-max", String(specDraft.nMax));
     if (specDraft.pMin != null) args.push("--spec-draft-p-min", String(specDraft.pMin));
+  }
+  // Sampling, when the catalog entry declares it. Nothing is emitted otherwise, so every model that
+  // shipped before this keeps the server defaults it was measured with.
+  //
+  // It belongs on the LAUNCH, not in the request body: the app sends no sampling fields at all (see
+  // openai-adapter.ts, which builds model/messages/max_tokens and nothing else), so a per-model value
+  // put in the request would have to travel from the catalog, through the main process, into the
+  // renderer's chat path. The server takes the same numbers as flags and applies them to every
+  // request, including ones the app does not originate.
+  //
+  // Flag names are the ones this build prints in --help; the map exists so a typo is a missing flag
+  // at review time rather than an argument llama-server silently rejects at launch.
+  const SAMPLING_FLAGS = {
+    temp: "--temp", topK: "--top-k", topP: "--top-p", minP: "--min-p",
+    presencePenalty: "--presence-penalty", frequencyPenalty: "--frequency-penalty",
+    repeatPenalty: "--repeat-penalty", repeatLastN: "--repeat-last-n",
+    dryMultiplier: "--dry-multiplier", dryBase: "--dry-base",
+    dryAllowedLength: "--dry-allowed-length", dryPenaltyLastN: "--dry-penalty-last-n",
+  };
+  if (sampling) {
+    for (const [key, flag] of Object.entries(SAMPLING_FLAGS)) {
+      if (sampling[key] != null) args.push(flag, String(sampling[key]));
+    }
   }
   if (mmproj) args.push("--mmproj", mmproj); // explicit file override (usually unused)
   else if (noMmproj) args.push("--no-mmproj"); // vision off: don't load the vision projector that -hf brings in automatically
