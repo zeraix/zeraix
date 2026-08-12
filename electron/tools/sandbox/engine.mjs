@@ -233,7 +233,10 @@ export function initEngine(opts = {}) {
       const mountRoot = await resolveMountRoot(opts);
       setStatus("starting");
       await m.provision(mountRoot, (pct, msg) => setStatus("starting", { pct, reason: msg }), !!opts.forceConfigured);
-      loaded.push(m);
+      // Only once, however many times we boot. ESM caches modules, so every re-init hands back the SAME qemu module
+      // object; pushing it again made `loaded` grow per restart, and listProcesses (a flatMap over `loaded`) then
+      // reported one service as two, three, four... each entry naming the same pid.
+      if (!loaded.includes(m)) loaded.push(m);
       sandbox = m;
       ready = true;
       setStatus("ready");
@@ -255,7 +258,10 @@ export function initEngine(opts = {}) {
  */
 export async function restartSandbox(opts = {}) {
   disposing = true; // stopping the old VM triggers its exit callback; mark it an expected shutdown so handleVmExit doesn't wrongly set status to error
-  try { if (sandbox?.dispose) sandbox.dispose(); } catch { /* ignore */ }
+  // AWAIT the teardown. It used to be fire-and-forget, so the next boot began while the old VM still held the control
+  // sockets, and the new QMP connection was left queued in the accept backlog — a restart that sat in "starting" for
+  // ever, next to a VM that had booted perfectly well.
+  try { await sandbox?.dispose?.(); } catch { /* ignore */ }
   ready = false;
   sandbox = null;
   initPromise = null;
@@ -311,7 +317,9 @@ export function disposeEngines() {
   stopBackgroundProcs();
   for (const e of loaded) {
     try {
-      e.dispose?.();
+      // The exit path does not wait (the process is going away regardless); just make sure the now-async dispose cannot
+      // surface as an unhandled rejection on the way out.
+      e.dispose?.()?.catch?.(() => {});
     } catch {
       /* best effort */
     }
