@@ -32,6 +32,15 @@ export const SANDBOX_TOOLBOX_SKILL: InstalledSkill = {
 ## Python 3.13
 /opt/venv is already on PATH: python / pip / uv are directly usable, with network access.
 
+## OCR an image (screenshot / photo / any picture with text)
+- Use RapidOCR python package directly to extract the text from an image:
+  from rapidocr import RapidOCR
+
+  output = RapidOCR(params={'Global.log_level': 'error'})('image_file_path')
+  print(output.txts)
+- output.txts is a tuple of the recognised lines in reading order
+- Not the rapidocr CLI: it prints repr(RapidOCROutput), ~60 lines of the image's numpy array with the text buried in a txts=(...) tail
+
 ## PDF → Markdown (preferred for LLM ingestion)
 - pymupdf4llm (good with multi-column / tables):
   python -c "import pymupdf4llm; open('out.md','w').write(pymupdf4llm.to_markdown('in.pdf'))"
