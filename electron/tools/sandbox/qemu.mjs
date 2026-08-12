@@ -626,6 +626,13 @@ function watchGuestJob({ key, gpid, cmd, log }) {
       /* gone → fall through and report */
     }
     stopWatching(key);
+    // Drop it from the service table too. The job is gone; leaving the entry behind would keep listing it as a
+    // running service and give stop_service a pid that answers to nothing.
+    const p = procs.get(key);
+    if (p) {
+      procs.delete(key);
+      for (const hp of p.hostPorts ?? []) vm?.ports.removePort(hp).catch(() => {});
+    }
     let tail = "";
     // The exit CODE is not recoverable: the job was launched with `setsid … &` and its shell is long gone, so
     // there is nothing left to reap. The log tail is what remains, and it is what the model actually reads.
@@ -726,6 +733,9 @@ export async function startBackground(cmd, opts = {}) {
     // hostPorts holds only the forwards that actually took, so stopping never removes one that was never added.
     procs.set(id, { id, gpid, hostPorts: forwarded, url, command: cmd, log });
     emitService({ type: "started", pid: id, url, command: cmd });
+    // `notify` jobs only: poll for the end and announce it (see watchGuestJob). Keyed by the same id the table
+    // uses, so a stop cancels the same entry the watcher would have reported.
+    if (opts.notify) watchGuestJob({ key: id, gpid, cmd, log });
   }
   const headline = alive
     ? `✅ Service started in the background inside the sandbox${url ? `, and forwarded to the host: ${url}` : ports.length ? ` (guest port ${ports.join(", ")}, forwarding failed)` : ""}.`
@@ -749,6 +759,7 @@ export function stopProcess(pid) {
   const p = procs.get(key);
   if (!p) return false;
   procs.delete(key);
+  stopWatching(key); // a user-initiated stop is not a completion; do not wake the model for it
   // Every forward this service got, not just one: a dev server with an HMR port would otherwise leave the second
   // hostfwd behind, pointing into a VM where nothing answers.
   for (const hp of p.hostPorts ?? []) vm?.ports.removePort(hp).catch(() => {});
@@ -791,6 +802,9 @@ export async function dispose({ waitMs = 10000 } = {}) {
   // killed. Everything here dies with the VM anyway, but leaving `procs` to be cleared by a half-working sweep would
   // hide a bug the moment this is ever called without the VM going away.
   try { stopAll(); } catch { /* best effort */ }
+  // stopAll goes through stopProcess, which cancels each watcher — but only for jobs still in `procs`. This is the
+  // backstop for any that are not, so no poller is left ticking against a VM that is about to be gone.
+  for (const key of [...watchers.keys()]) stopWatching(key);
   vm = null; // from here on no command may reach a VM that is going away
   try { ninep?.close(); } catch { /* best effort */ } finally { ninep = null; }
   try { ports?.quit(); } catch { /* best effort */ }
