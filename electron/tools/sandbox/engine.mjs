@@ -182,11 +182,14 @@ async function hypervisorPresent() {
 }
 
 /**
- * Resolve the mount set: the shared root (userData/agent/ai-agent, the parent of every session workdir in
- * daily mode; only this one level is mounted, so the conversation storage under agent/ is not exposed) ∪
- * folders explicitly chosen in the past (derived from the project index).
+ * The shared root: userData/agent/ai-agent, the parent of every session workdir in daily mode.
+ *
+ * This is NOT a mount set. Each command mounts its own cwd at /workspace and nothing else (see bwrapFlags), so no
+ * directory has to be declared up front — the root is only the fallback for a command that arrives without a cwd.
+ * It used to be unioned with every past daily project workdir, read out of the project index; those folders reach
+ * the sandbox on their own now, as the cwd of the command that uses them.
  */
-async function resolveMounts(opts) {
+async function resolveMountRoot(opts) {
   let mountRoot;
   try {
     const { app } = await import("electron");
@@ -241,17 +244,19 @@ export function initEngine(opts = {}) {
         return getSandboxStatus();
       }
 
-      // Directly create the single long-lived QEMU VM: mount the shared root of the session working
-      // directories (userData/agent/ai-agent, under which every session's workdir lives in daily mode) ∪
-      // folders explicitly chosen in the past — no matter how many sessions/projects there are, there is
-      // only this one VM, and each session merely switches the guest cwd. Boot is the verification; a
-      // missing rootfs throws → error, downgrading to native.
+      // Directly create the single long-lived QEMU VM. No matter how many sessions/projects there are, there is
+      // only this one VM: each command binds its own working directory to /workspace, so a new session or project
+      // needs no mount change at all. Boot is the verification; a missing rootfs throws → error, downgrading to
+      // native.
       const m = await import("./qemu.mjs");
       m.configure({ ...cfg, onExit: handleVmExit }); // downgrade status as soon as the VM process exits (see handleVmExit)
-      const { mountRoot, extraMounts } = await resolveMounts(opts);
+      const mountRoot = await resolveMountRoot(opts);
       setStatus("starting");
-      await m.provision(mountRoot, (pct, msg) => setStatus("starting", { pct, reason: msg }), extraMounts, !!opts.forceConfigured);
-      loaded.push(m);
+      await m.provision(mountRoot, (pct, msg) => setStatus("starting", { pct, reason: msg }), !!opts.forceConfigured);
+      // Only once, however many times we boot. ESM caches modules, so every re-init hands back the SAME qemu module
+      // object; pushing it again made `loaded` grow per restart, and listProcesses (a flatMap over `loaded`) then
+      // reported one service as two, three, four... each entry naming the same pid.
+      if (!loaded.includes(m)) loaded.push(m);
       sandbox = m;
       ready = true;
       setStatus("ready");
@@ -273,7 +278,10 @@ export function initEngine(opts = {}) {
  */
 export async function restartSandbox(opts = {}) {
   disposing = true; // stopping the old VM triggers its exit callback; mark it an expected shutdown so handleVmExit doesn't wrongly set status to error
-  try { if (sandbox?.dispose) sandbox.dispose(); } catch { /* ignore */ }
+  // AWAIT the teardown. It used to be fire-and-forget, so the next boot began while the old VM still held the control
+  // sockets, and the new QMP connection was left queued in the accept backlog — a restart that sat in "starting" for
+  // ever, next to a VM that had booted perfectly well.
+  try { await sandbox?.dispose?.(); } catch { /* ignore */ }
   ready = false;
   sandbox = null;
   initPromise = null;
@@ -343,7 +351,9 @@ export function disposeEngines() {
   stopBackgroundProcs();
   for (const e of loaded) {
     try {
-      e.dispose?.();
+      // The exit path does not wait (the process is going away regardless); just make sure the now-async dispose cannot
+      // surface as an unhandled rejection on the way out.
+      e.dispose?.()?.catch?.(() => {});
     } catch {
       /* best effort */
     }

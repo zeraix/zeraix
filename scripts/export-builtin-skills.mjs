@@ -23,7 +23,7 @@ import { fileURLToPath } from "node:url";
 import { validateManifest } from "../electron/plugins/manifest.mjs";
 
 const PUBLISHER = "zeraix";
-const LICENSE = "AGPL-3.0-or-later";
+const LICENSE = "Apache-2.0";
 
 function arg(name, fallback = null) {
   const i = process.argv.indexOf(`--${name}`);

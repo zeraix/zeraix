@@ -9,7 +9,7 @@
     "dev": "42bb246e27b3c9b4"
   },
   "macLlama": {
-    "tag": "mac-v8",
+    "tag": "mac-v9.1",
     "kvdVersion": 5
   }
 }

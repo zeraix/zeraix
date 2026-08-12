@@ -18,7 +18,7 @@ import { spawn, execSync } from "node:child_process";
 import { app } from "electron";
 import {
   detectHardware, usableModelMemoryGB, recommend as recommendModels, buildServerArgs,
-  MODELS, autoQuantId, quantBpw, gpuLayers, localSupported, MIN_LOCAL_MEM_GB, isSharedGpu, pickCtxKv, computeFit, descriptorFromGguf, MIN_CTX, kvTierEnabled, seedAvailable, moePoolEnabled, KV_BITS_OFFERED, moeNativePlan, moeFloorPool, CTX_LADDER,
+  MODELS, autoQuantId, quantBpw, gpuLayers, localSupported, MIN_LOCAL_MEM_GB, isSharedGpu, pickCtxKv, computeFit, descriptorFromGguf, MIN_CTX, kvTierEnabled, seedAvailable, moePoolEnabled, KV_BITS_OFFERED, moeNativePlan, moeFloorPool, ctxLadder,
 } from "./localModels.mjs";
 import { ensureInstalled, installedBin, llamaVariant, fallbackVariant, detectCuda, llamaVersionDir, localFilesBase, installDir, llamaRootDir, installedLlamaVersions, migrateLegacyLayout } from "./llamaInstaller.mjs";
 import { downloadModel, searchModels, repoDetail, resolveRevision, TRUSTED_AUTHORS } from "./hfDownload.mjs";
@@ -364,8 +364,11 @@ function pushLog(s) { state.log.push(s); if (state.log.length > 300) state.log.s
 /**
  * Bring on-disk state in line with the current pins. Runs once per launch, before anything reads the model list.
  *
- * Two steps: drop pre-versioning installs, whose revision is unknown and unknowable, then reclaim what the current pins have
- * superseded — old model versions and the seeds keyed to them.
+ * Two steps: drop pre-versioning installs, whose revision is unknown and unknowable, then reclaim the model versions the current
+ * pins have superseded. Both concern the MODELS directory, which is what the caller is about to read.
+ *
+ * Seeds are deliberately not swept here. Retiring a seed removes a directory this launch may be about to install into, so it has
+ * to run in the launch path immediately before the install — see sweepStaleSeeds.
  *
  * Both delete without asking, for the same reason: what they remove can never be loaded again. A superseded version directory
  * names a revision the catalog no longer points at, and an unversioned directory has no revision at all, so neither can satisfy
@@ -541,7 +544,7 @@ export function estimate(opts = {}) {
   // Rung eligibility is decided at the pool FLOOR - the cheapest split moeNativePlan can emit - so a rung marked
   // fits is one the planner can always deliver. totalGB on each rung is that same floor cost, which is the useful
   // number for a DISABLED rung: "even at its minimum this needs X".
-  const rungs = CTX_LADDER.filter((c) => c <= (model.maxCtx || MIN_CTX)).sort((a, b) => a - b).map((c) => {
+  const rungs = ctxLadder(model).sort((a, b) => a - b).map((c) => {
     const t = computeFit(model, { bpw }, c, kvBits, vision, moePoolInfo(model.id)).totalGB + mtpGB;
     return { ctx: c, totalGB: round1(t), fits: t <= budgetGB };
   });
@@ -653,28 +656,25 @@ function dirBytes(dir) {
   } catch { return 0; }
 }
 
+/** Remove `dir`, recording the outcome. Shared by both sweeps so a dry run reports identically. */
+function rmRecording(removed, dryRun, dir, why, extra) {
+  const rec = { dir, why, ...extra, removed: false, error: null };
+  if (!dryRun) {
+    try { fs.rmSync(dir, { recursive: true, force: true }); rec.removed = true; } catch (e) { rec.error = e.message; }
+  }
+  removed.push(rec);
+}
+
 /**
- * Reclaim what a version bump superseded: old model versions, and the seeds that belonged to them.
+ * Reclaim model versions the catalog no longer pins: any `<repo_>/<rev8>/` that is not the current
+ * revision. Safe to delete outright — unlike the legacy layout, a version dir says exactly which
+ * revision it is, so there is no ambiguity about what is being removed.
  *
- * Run after the catalog's pins change. Two sweeps, kept together because they retire for the same reason — a model version bump
- * invalidates both the weights directory AND every seed keyed on that revision.
- *
- * Models: any `<repo_>/<rev8>/` that is not the current pin. Safe to delete outright — unlike the legacy layout, a version dir
- * says exactly which revision it is, so there is no ambiguity about what is being removed.
- *
- * Seeds: the marker files record `<model>-<mode>` and the key they installed, and the key embeds `r<rev8>`. A marker whose
- * revision is not the current pin means those KV units can never be borrowed again. The unit directory is keyed by model_key
- * rather than revision, so it is removed via the marker rather than by name.
+ * Seeds are NOT swept here; see sweepStaleSeeds and the note on where it has to run.
  */
 export function sweepSuperseded({ dryRun = false } = {}) {
   const removed = [];
-  const rm = (dir, why, extra) => {
-    const rec = { dir, why, ...extra, removed: false, error: null };
-    if (!dryRun) {
-      try { fs.rmSync(dir, { recursive: true, force: true }); rec.removed = true; } catch (e) { rec.error = e.message; }
-    }
-    removed.push(rec);
-  };
+  const rm = (dir, why, extra) => rmRecording(removed, dryRun, dir, why, extra);
 
   const base = modelsDir();
   let repoDirs = [];
@@ -690,6 +690,34 @@ export function sweepSuperseded({ dryRun = false } = {}) {
       rm(path.join(base, rd.name, v.name), "superseded model version", { modelId: model.id, version: v.name, wanted: want });
     }
   }
+
+  return removed;
+}
+
+/**
+ * Retire seeds the current pins can no longer use: a marker whose key names a prefix, revision or KV
+ * quantisation we would not install today. The marker's body is the model_key directory it unpacked
+ * into, and that whole directory goes.
+ *
+ * Nothing in it survives the change that retired the seed. A manifest is a restore candidate only if
+ * one of its checkpoints sits at or before the shared prefix (kv_disk_find_prefix_match in the fork),
+ * and a prompt change diverges inside the tool block — before any turn boundary — so every
+ * conversation's checkpoints, and the retired seed's own, fall past it. It is dead weight, not cache.
+ *
+ * CALLED FROM THE LAUNCH PATH, IMMEDIATELY BEFORE INSTALLING THIS LAUNCH'S SEEDS, and from nowhere
+ * else. Both constraints matter:
+ *
+ *   - Before the install, because model_key covers KV geometry and not the prefix: a seed update
+ *     changes only the marker NAME and leaves the directory identical. Sweeping afterwards deletes the
+ *     seed just unpacked while its marker survives, so seedInstalled() reports true forever and it is
+ *     never fetched again.
+ *   - Not from getHardware(), which fires whenever the model library mounts — including mid-session,
+ *     with a server running and holding this directory. At launch the previous server has already been
+ *     stopped.
+ */
+export function sweepStaleSeeds({ dryRun = false } = {}) {
+  const removed = [];
+  const rm = (dir, why, extra) => rmRecording(removed, dryRun, dir, why, extra);
 
   const kv = kvDiskDir();
   let entries = [];
@@ -709,7 +737,6 @@ export function sweepSuperseded({ dryRun = false } = {}) {
   }
   for (const e of entries) {
     if (!e.startsWith(".seed-") || liveKeys.has(e)) continue;
-    // The marker's body is the model_key directory it installed; remove that, then the marker.
     let unitDir = null;
     try { unitDir = fs.readFileSync(path.join(kv, e), "utf8").trim(); } catch { /* unreadable marker */ }
     if (unitDir && /^\d+$/.test(unitDir)) rm(path.join(kv, unitDir), "seed for a superseded prefix or model version", { marker: e });
@@ -1273,7 +1300,19 @@ async function launch(variant, cfg) {
     // Seeds, after the branch above so they run whether or not the weights were fetched this launch. Must land before
     // llama-server starts: the startup scan is what makes a seed resident, so one installed afterwards does nothing until the
     // next restart. Aborting is a pause, not a failure — the .part survives and the next attempt resumes from it.
-    //
+
+    // Retire superseded seeds here, before installing this launch's, and nowhere else. Sweeping after the install deletes the
+    // seed just unpacked; sweeping from getHardware() can run against a live server. sweepStaleSeeds explains both.
+    if (seedPlan.length) {
+      try {
+        for (const r of sweepStaleSeeds()) {
+          if (r.removed) pushLog(`[seed] reclaimed (${r.why}): ${path.basename(r.dir)}\n`);
+        }
+      } catch (e) {
+        pushLog(`[seed] sweep skipped: ${e?.message ?? e}\n`); // never throw into the launch path
+      }
+    }
+
     // The phase has to be announced here, not only in the download branch above. "fetching" is what makes the model card show a
     // percentage and a progress bar; when the weights are already present the launch is otherwise still in "loading", which
     // renders as a bare spinner — so a few hundred MB of seed would download with nothing on screen moving. The spawn below

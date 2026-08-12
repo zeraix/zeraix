@@ -2421,8 +2421,14 @@ function ChatAgent() {
     // prompt alone, so without this it never learns that batched read-only calls run concurrently here.
     // Only the scope half of the workdir rules: a sub-agent never receives user uploads, so WORKDIR_UPLOAD_RULES would be dead
     // weight here. It does not see the main conversation's messages[0], so the rule has to be composed explicitly.
+    // Name the working directory the way the sub-agent must address it. In the sandbox that is /workspace — for commands
+    // because it is the cwd there, and for file tools because they accept it as an alias of the working directory. That
+    // also makes this system prompt BYTE-IDENTICAL across conversations and installs, where the host path made every
+    // sub-agent call a fresh prefix (the path differs per conversation), so nothing before the task could be reused.
+    // Native (dev mode, or the VM down): there is no /workspace, so the host path is the only name that works.
+    const subWorkdir = isSandboxEngine(sandboxStatusRef.current?.active) ? "/workspace" : workdir;
     const sys = [
-      workdir ? `${def.systemPrompt}\n${workdirPrompt(workdir)}\n${WORKDIR_SCOPE_RULE}` : def.systemPrompt,
+      workdir ? `${def.systemPrompt}\n${workdirPrompt(subWorkdir)}\n${WORKDIR_SCOPE_RULE}` : def.systemPrompt,
       SUBAGENT_TOOL_DISCIPLINE,
       sandboxEnvHint(sandboxStatusRef.current),
     ].join("\n");
@@ -3507,6 +3513,11 @@ function ChatAgent() {
       }
       if (url) imageParts.push({ type: "image_url" as const, image_url: { url } });
     }
+    // The note names the upload the way the model has to address it: RELATIVE to the working directory. saveAttachment
+    // returns an absolute host path, and that path is not usable in a command — the sandbox mounts the working directory
+    // at /workspace and nothing else — while a relative name is correct in either environment. Uploads are written
+    // straight into the working directory, so the basename is that relative path.
+    const workspaceName = (abs: string) => abs.split(/[\\/]/).pop() || abs;
     let composed = text;
     for (const a of atts) {
       if (a.kind === "text" && a.text != null) {
@@ -3514,7 +3525,7 @@ function ChatAgent() {
       } else if (a.kind === "binary") {
         const saved = savedPaths.get(a.id);
         composed += saved
-          ? `${composed ? "\n\n" : ""}[Attachment: ${a.name} (${formatBytes(a.size)}) has been saved to the working directory: ${saved} — please process this file directly with file tools or commands]`
+          ? `${composed ? "\n\n" : ""}[Attachment: ${a.name} (${formatBytes(a.size)}) has been saved to the working directory: ${workspaceName(saved)} — please process this file directly with file tools or commands]`
           : `${composed ? "\n\n" : ""}[Attachment: ${a.name} (${formatBytes(a.size)}) — binary/oversized file, content not inlined]`;
       } else if (a.kind === "image") {
         // The path note is worth its tokens even for a vision model: the picture in the wire is
@@ -3523,7 +3534,7 @@ function ChatAgent() {
         // run through a command-line tool.
         const saved = savedPaths.get(a.id);
         if (saved) {
-          composed += `${composed ? "\n\n" : ""}[Image: ${a.name} (${formatBytes(a.size)}) has been saved to the working directory: ${saved} — to edit or process it (crop, annotate, OCR, convert, feed to a script), work on this file directly with file tools or commands; do not ask the user to place the file anywhere]`;
+          composed += `${composed ? "\n\n" : ""}[Image: ${a.name} (${formatBytes(a.size)}) has been saved to the working directory: ${workspaceName(saved)} — to edit or process it (crop, annotate, OCR, convert, feed to a script), work on this file directly with file tools or commands; do not ask the user to place the file anywhere]`;
         } else {
           // Save failed (or there was nothing to save from). Tell the model the truth so it does NOT
           // recreate the image from scratch — a redrawn copy differs from the original and is never what
@@ -3675,6 +3686,9 @@ function ChatAgent() {
         }
         const current: ReminderState = {
           workdir: effectiveWorkdir || "",
+          // Decides how the line above names itself: the host path is only one of this folder's two names, and in the
+          // sandbox it is the one the model must NOT use.
+          sandboxed: isSandboxEngine(sandboxStatusRef.current?.active),
           // The command environment, announced on change rather than baked into messages[0]. It depends on the VM being up, and
           // the VM can fall back to native mid-conversation — a system prompt frozen at the first send cannot express either.
           env: sandboxEnvHint(sandboxStatusRef.current),

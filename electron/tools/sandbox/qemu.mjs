@@ -12,8 +12,9 @@
  *
  * Mount model (no hot-mount / never rebuild): a one-time 9p share of the "host root" (posix "/", Windows drive
  * letters) into the guest's /mnt/hostfs; any cwd is already covered. The visible scope of untrusted commands is
- * confined per-command to the mount set by bwrap (homeRoot ∪ explicit extras), bound on posix as an "isomorphic
- * path" (host path == guest path, so tool output paths match on both sides).
+ * confined per-command by bwrap to ONE directory: the command's own cwd, bound at the fixed guest path
+ * /workspace (GUEST_WORKSPACE) and used as the guest cwd. The host path is therefore absent from the guest —
+ * a command cannot name it and no `pwd` / error message can leak it.
  *
  * A sandbox failure is reported as a failed command, never re-run on the host (see sandboxFailure below). Routing to
  * native at all — dev mode, engine=native, before the VM is ready — is engine.mjs's decision, not this module's.
@@ -46,6 +47,11 @@ const isWin = process.platform === "win32";
 const QMP_PORT = 4444;
 const GA_PORT = 4445;
 const GUEST_MNT = "/mnt/hostfs"; // Mount point of the host root inside the guest (firstboot.sh mounts it via 9p; must match)
+// The one name the working directory has inside the sandbox. The bind used to be "isomorphic" (guest path == host path),
+// which put the user's real directory structure inside the VM: `pwd` printed it, every command could name it, and every
+// stack trace carried it. A fixed mount point removes it, and gives the model one workspace path that is identical in
+// every conversation and on every install.
+const GUEST_WORKSPACE = "/workspace";
 /**
  * Backing directory for the sandbox's /tmp, on the guest's DISK rather than in RAM.
  *
@@ -140,11 +146,10 @@ const VM_CDN = (process.env.ZERAIX_CDN || "https://docker.zeraix.com").replace(/
 
 let vm = null; // { proc, ports, guest }
 let ninep = null; // Windows: in-process 9p-over-TCP server backing the host share
-let homeRoot = ""; // The common root from provision (parent directory of the session workdir)
-let extraRoots = []; // Explicitly selected folders outside the root (accumulated; merged into the bwrap bind set per command)
-const EXTRA_ROOTS_MAX = 16;
+let homeRoot = ""; // The common root from provision (parent of the session workdirs); only a fallback for a command that carries no cwd
 
-// Background long-lived service table: hostPort -> { gpid, hostPort, guestPort, url, command, log }
+// Background long-lived service table: id -> { id, gpid, hostPorts, url, command, log }. The id is the service's primary
+// port when it has one, otherwise PORTLESS_ID_BASE + gpid; hostPorts lists every forward it actually got.
 const procs = new Map();
 let svcSeq = 0;
 
@@ -220,52 +225,37 @@ function qemuBin() {
   return sys;
 }
 
-/** Host path -> { src: 9p path inside the guest, dst: target inside bwrap (posix keeps isomorphism) }. */
-function mapRoot(hostPath) {
+/** Host path -> where it appears inside the guest, under the 9p share of the host root.
+ *  This used to also return the bwrap target, which on posix was the host path itself and on Windows was not — the bind
+ *  is a fixed mount point on both now, so the two platforms no longer differ and there is one path to compute. */
+function guestPath(hostPath) {
   const abs = path.resolve(hostPath);
-  if (!isWin) {
-    const rel = abs.replace(/^\//, "");
-    return { src: path.posix.join(GUEST_MNT, rel), dst: abs };
-  }
+  if (!isWin) return path.posix.join(GUEST_MNT, abs.replace(/^\//, ""));
   // Windows multi-drive: /mnt/hostfs/<drive>/<rest> (matching ninep-server's virtual multi-drive root), so a
   // workdir on any drive (C:, E:, ...) maps correctly.
   const m = abs.match(/^([A-Za-z]):[\\/]?(.*)$/);
   const drive = m ? m[1].toUpperCase() : "C";
   const rest = (m ? m[2] : "").split(path.sep).join("/");
-  const g = path.posix.join(GUEST_MNT, drive, rest);
-  return { src: g, dst: g }; // Windows does not keep isomorphism
+  return path.posix.join(GUEST_MNT, drive, rest);
 }
 
-/** When cwd is not covered by the mount set, merge it into extras (the broadcast root already covers the whole disk, no VM rebuild needed). */
-function ensureRoot(cwd) {
-  const abs = path.resolve(cwd || homeRoot || HOME);
-  const under = (r) => {
-    const rel = path.relative(r, abs);
-    return rel === "" || (!rel.startsWith("..") && !path.isAbsolute(rel));
-  };
-  if (homeRoot && under(homeRoot)) return;
-  if (extraRoots.some(under)) return;
-  extraRoots.push(abs);
-  if (extraRoots.length > EXTRA_ROOTS_MAX) extraRoots = extraRoots.slice(-EXTRA_ROOTS_MAX);
-}
-
-/** bubblewrap flags (excluding argv[0] and the trailing command): only bind the mount set from /mnt/hostfs, chdir cwd.
+/** bubblewrap flags (excluding argv[0] and the trailing command): bind this command's cwd from /mnt/hostfs to /workspace, and chdir there.
  *  Network is open by default (no --unshare-net) -- commands inside the sandbox can reach the internet directly: pip / npm / git / curl, etc.
  *  DNS and routing are provided by the guest's SLIRP network (firstboot.sh configures 10.0.2.x + nameserver). */
 /** bwrap args that overlay the host's OCR adapter onto the image's, or nothing when the host copy is absent. */
 function ocrAdapterBind() {
   const host = ocrAdapterHostPath();
-  // Reached through the 9p share like every other host path (mapRoot), not by any special channel.
-  try { if (fs.existsSync(host)) return ["--ro-bind", mapRoot(host).src, GUEST_OCR_ADAPTER]; } catch { /* fall through */ }
+  // Reached through the 9p share like every other host path (guestPath), not by any special channel.
+  try { if (fs.existsSync(host)) return ["--ro-bind", guestPath(host), GUEST_OCR_ADAPTER]; } catch { /* fall through */ }
   return [];
 }
 
 function bwrapFlags(cwd) {
-  const binds = [homeRoot, ...extraRoots].filter(Boolean).flatMap((r) => {
-    const { src, dst } = mapRoot(r);
-    return ["--bind", src, dst];
-  });
-  const { dst: chdir } = mapRoot(cwd || homeRoot || HOME);
+  // Exactly one host directory is visible: this command's own cwd. Nothing has to be registered in advance for that to
+  // hold — the 9p share already covers the whole disk — so there is no mount set to keep in sync, and a command cannot
+  // reach a sibling session's files. This matches what the host-side file tools already enforce (resolveInside rejects
+  // anything outside the working directory); the old union of roots was the one way around it.
+  const workspace = guestPath(cwd || homeRoot || HOME);
   return [
     "--ro-bind", "/usr", "/usr", "--ro-bind", "/etc", "/etc", "--ro-bind", "/opt", "/opt",
     // Shadow the image's OCR adapter with the host's, AFTER /opt is bound so it lands on top. See GUEST_OCR_ADAPTER.
@@ -304,7 +294,7 @@ function bwrapFlags(cwd) {
     ...binds, "--chdir", chdir,
     // NOT --unshare-user: bwrap runs as root in the guest, and a user namespace makes the 9p
     // share (security_model=none) refuse the bind source with EPERM. bwrap-as-root still confines
-    // the filesystem view to the mount set (that's the goal here); the VM is the privilege boundary.
+    // the filesystem view to the workspace (that's the goal here); the VM is the privilege boundary.
     // Net is NOT unshared → the workload uses the guest's SLIRP network (internet reachable).
     "--unshare-ipc", "--unshare-pid", "--unshare-uts", "--unshare-cgroup-try",
     "--die-with-parent", "--new-session",
@@ -504,10 +494,8 @@ async function boot(onProgress, forceConfigured = false) {
 
 /** Called by engine.mjs: start the long-lived VM. onProgress(pct,msg): progress callback for downloading the VM disk/kernel on first run.
  *  forceConfigured=true: user "update" -- download the versions.json target version and switch to it. */
-export async function provision(rootHost, onProgress, extras = [], forceConfigured = false) {
+export async function provision(rootHost, onProgress, forceConfigured = false) {
   homeRoot = path.resolve(rootHost);
-  extraRoots = [];
-  for (const d of extras) if (d) ensureRoot(d);
   await boot(onProgress, forceConfigured);
 }
 
@@ -534,7 +522,6 @@ export async function run(cmd, opts = {}) {
   const { cwd, timeoutMs, maxBuffer } = opts;
   try {
     if (!vm) throw new Error("vm not ready");
-    ensureRoot(cwd);
     const argv = ["/usr/bin/bwrap", ...bwrapFlags(cwd), "--", "/bin/bash", "-c", cmd];
     const { out, err, code, killed } = await vm.guest.runStatus(argv, {
       timeoutSec: Math.max(1, Math.round((timeoutMs ?? 60000) / 1000)),
@@ -552,6 +539,62 @@ const pickPort = (s) => {
   const m = s.match(/https?:\/\/(?:localhost|127\.0\.0\.1|0\.0\.0\.0):(\d+)/i);
   return m ? Number(m[1]) : 0;
 };
+const PORTLESS_ID_BASE = 100000; // above the top of the port range (65535), so a portless service's id can never be mistaken for a port
+const PORT_WAIT_MS = 8000; // total time a service is given to bind before we return without a forward
+const READY_GRACE_MS = 1500; // extra time after the log looks ready — a server binds before it logs, so this is slack, not a wait
+
+/**
+ * Every TCP port THIS service is listening on, ascending (empty if none).
+ *
+ * Plural because one service commonly binds several: a dev server with a separate HMR/websocket port, an app plus its
+ * debug port, a framework that opens both v4 and v6 sockets. Returning just the first would forward whichever the
+ * kernel happened to list first — ss output is in hash order, not port order — so the one the user was told about could
+ * be the wrong one.
+ *
+ * The socket table decides, not the log. A log line is a convention every framework writes differently --
+ * "http://localhost:5173/", "Listening on 0.0.0.0:9123", "Server listening on port 3000", or nothing at all -- while a
+ * LISTEN socket is the fact we need. Reading the text forwarded the frameworks that print a URL and silently forwarded
+ * nothing for the rest.
+ *
+ * The socket is attributed to the service by PROCESS ANCESTRY, not by diffing the guest's ports before and after: a
+ * diff cannot tell two services starting at once apart, and answers "some port appeared" when the question is "which
+ * port is this service's". Walking PPid from each listening socket's owner up to gpid answers exactly that, and it also
+ * covers a server that forks workers, since every worker is still a descendant.
+ *
+ * Ancestry rather than session or process group: bwrap is invoked with --new-session, so the sandboxed process gets a
+ * fresh session and pgid of its own and neither matches gpid.
+ *
+ * Asked through the guest agent, which runs OUTSIDE bwrap. Each command has its own PID namespace (--unshare-pid), so
+ * one command can never see another's processes, but the guest agent sees the whole guest, and the network namespace is
+ * shared, so the service's socket and its owning pid are both visible from there.
+ */
+async function servicePorts(gpid) {
+  if (!gpid) return [];
+  // For each LISTEN socket: take its owning pids out of the ss "users:((...,pid=N,...))" column, then walk each one up
+  // the PPid chain (from /proc/<pid>/status, whose PPid line is safe to parse — /proc/<pid>/stat is not, because the
+  // comm field can itself contain spaces and parentheses). First hit wins; the depth cap is a cycle guard.
+  const script = `
+ss -Hltnp 2>/dev/null | while read -r st rq sq local rest; do
+  port=\${local##*:}
+  for pid in $(printf '%s' "$rest" | grep -oE 'pid=[0-9]+' | cut -d= -f2 | sort -u); do
+    p=$pid; n=0
+    while [ -n "$p" ] && [ "$p" != "0" ] && [ "$p" != "1" ] && [ "$n" -lt 40 ]; do
+      if [ "$p" = "$SVC_PID" ]; then echo "$port"; break 2; fi
+      p=$(awk '/^PPid:/{print $2}' "/proc/$p/status" 2>/dev/null)
+      n=$((n + 1))
+    done
+  done
+done | sort -un`;
+  try {
+    const { out } = await vm.guest.exec("/bin/bash", ["-lc", script], { env: [`SVC_PID=${gpid}`] });
+    return String(out)
+      .split(/\s+/)
+      .map(Number)
+      .filter((p) => Number.isInteger(p) && p > 0 && p < 65536);
+  } catch {
+    return []; // ss unavailable / agent hiccup — the caller falls back to reading the log
+  }
+}
 
 /**
  * Start a long-lived command in the background inside the guest (bwrap-confined + network allowed), scan early output for a port, QMP hostfwd
@@ -605,7 +648,6 @@ function stopWatching(key) {
 export async function startBackground(cmd, opts = {}) {
   if (!vm) return sandboxFailure("vm not ready");
   const cwd = opts.cwd;
-  ensureRoot(cwd);
   const log = `/tmp/zx-svc-${++svcSeq}.log`;
   const flags = bwrapFlags(cwd).map(shq).join(" ");
   // SVC_CMD is passed via the guest-exec env (execve directly, no shell), and "$SVC_CMD" is used as a single whole string argument to bash -lc.
@@ -619,61 +661,96 @@ export async function startBackground(cmd, opts = {}) {
     return sandboxFailure(`service launch failed: ${e?.message ?? e}`);
   }
 
-  // Early readiness scan: read the log, match READY / extract the port / 8s cap (same cadence as native).
+  // Wait for the service to bind. The log supplies only the startup text shown to the user and the hint that the process
+  // is up; the port comes from the socket table (servicePort), so a service that prints its port in an unusual format,
+  // or prints nothing at all, is forwarded exactly like one that prints a tidy URL.
+  //
+  // READY no longer ends the scan on its own. It used to, and that lost the port for anything whose first line matched
+  // before it had bound — "Server listening on port 3000" satisfies READY, carries no URL for pickPort, and the loop
+  // exited right there:
+  //   before: "listening" seen -> break -> no port -> no forward, and the service was left untracked
+  //   after:  "listening" seen -> keep polling the socket table for READY_GRACE_MS -> port -> forward
+  // Something that never listens (a watcher, a compiler) still returns promptly, one grace period after it looks ready,
+  // instead of costing the full timeout.
   let out = "";
-  let guestPort = 0;
+  let ports = [];
+  let readyAt = 0;
   const t0 = Date.now();
-  while (Date.now() - t0 < 8000) {
+  while (Date.now() - t0 < PORT_WAIT_MS) {
     try {
       const r = await vm.guest.exec("/bin/cat", [log]);
       out = r.out || out;
     } catch {
       /* log not generated yet */
     }
-    guestPort = pickPort(out);
-    if (guestPort || READY.test(out)) break;
+    ports = await servicePorts(gpid);
+    if (ports.length) break;
+    if (readyAt && Date.now() - readyAt > READY_GRACE_MS) break;
+    if (!readyAt && READY.test(out)) readyAt = Date.now();
     await new Promise((r) => setTimeout(r, 300));
   }
+  // Last resort, for a guest where ss cannot answer: believe the log if it printed a URL.
+  const logPort = pickPort(out);
+  if (!ports.length && logPort) ports = [logPort];
 
-  // Port forwarding: guest port -> same host port (the guest must listen on 0.0.0.0, reached via the SLIRP gateway 10.0.2.x).
-  let url = "";
-  if (guestPort) {
+  // Forward every port the service owns, guest port -> same host port (the guest must listen on 0.0.0.0, reached via the
+  // SLIRP gateway 10.0.2.x). One may fail while others succeed — the host port can already be taken by something else on
+  // the machine — so each is tried on its own and only the ones that took are remembered for teardown.
+  const forwarded = [];
+  for (const p of ports) {
     try {
-      await vm.ports.addPort(guestPort, guestPort);
-      url = `http://localhost:${guestPort}`;
-      procs.set(guestPort, { gpid, hostPort: guestPort, guestPort, url, command: cmd, log });
-      emitService({ type: "started", pid: guestPort, url, command: cmd });
+      await vm.ports.addPort(p, p);
+      forwarded.push(p);
     } catch {
-      url = "";
+      /* that host port is busy; the service still runs, and its other ports may still forward */
     }
   }
+  // The URL names the port the service itself announced, when it announced one — for a dev server that is the page to
+  // open, not its HMR socket, and the lowest number is not reliably either. Otherwise: the lowest forwarded port.
+  const primary = forwarded.includes(logPort) ? logPort : forwarded[0] || 0;
+  const url = primary ? `http://localhost:${primary}` : "";
+  const extra = forwarded.filter((p) => p !== primary);
 
   const alive = gpid > 0;
-  // Watch keyed by the forwarded port when there is one, so a later stopProcess cancels the same entry; a
-  // port-less job (an install — the case notify exists for) is keyed by its guest pid instead, which is why
-  // this cannot simply reuse `procs`, whose keys are host ports.
-  if (alive && opts.notify) watchGuestJob({ key: guestPort || gpid, gpid, cmd, log });
+  // Register whether or not a port was found. This used to live inside the branch above, so anything without a forward --
+  // a watcher, a compiler, or a server whose port was missed -- ran on with no entry here: listProcesses could not list
+  // it and stop_service could not stop it. Nothing else could either, because every command gets its own PID namespace,
+  // so a kill from a later command cannot even see the process; only restarting the VM ended it.
+  // The id is the primary port when there is one, so "stop_service 5173" reads naturally. Otherwise it is derived from
+  // the guest pid and offset past the top of the port range, so a portless service can never be handed the same id as a
+  // forwarded one — and if that number is somehow already taken, fall back too rather than evict the existing entry.
+  let id = primary;
+  if (!id || procs.has(id)) id = PORTLESS_ID_BASE + gpid;
+  if (alive) {
+    // hostPorts holds only the forwards that actually took, so stopping never removes one that was never added.
+    procs.set(id, { id, gpid, hostPorts: forwarded, url, command: cmd, log });
+    emitService({ type: "started", pid: id, url, command: cmd });
+  }
   const headline = alive
-    ? `✅ Service started in the background inside the sandbox${url ? `, and forwarded to the host: ${url}` : guestPort ? ` (guest port ${guestPort}, forwarding failed)` : ""}.`
+    ? `✅ Service started in the background inside the sandbox${url ? `, and forwarded to the host: ${url}` : ports.length ? ` (guest port ${ports.join(", ")}, forwarding failed)` : ""}.`
     : "⚠️ The process failed to start.";
   return (
     `${headline}\n\n--- Startup output ---\n${(out.trim() || "(no output yet)").slice(-4000)}\n` +
     (url
-      ? `\nNote: the service runs inside an isolated sandbox with its port forwarded, so the host can reach ${url} (use it to preview). If it's unreachable, make the service listen on 0.0.0.0. Do not start it again.`
+      ? `\nNote: the service runs inside an isolated sandbox with its port forwarded, so the host can reach ${url} (use it to preview).${extra.length ? ` Its other ports are forwarded too: ${extra.map((p) => `http://localhost:${p}`).join(", ")}.` : ""} If it's unreachable, make the service listen on 0.0.0.0. Do not start it again.`
       : alive
-        ? "\nNote: the service runs in the background inside the sandbox; no port was detected/forwarded. If you need host access, use expose_port and make the service listen on 0.0.0.0."
+        ? // Names stop_service and the id, because that is the only way to stop this process — it has no port to be
+          // known by, and no other command can reach it (separate PID namespaces). The old text sent the model to
+          // "expose_port", which is not a declared tool, for a service it also could not have stopped.
+          `\nNote: the service runs in the background inside the sandbox. Nothing is listening yet, so no port is forwarded — if it should serve HTTP, make it listen on 0.0.0.0 (not 127.0.0.1, which the host cannot reach) and it will be forwarded on the next start. Stop it with stop_service pid ${id}.`
         : "")
   );
 }
 
-/** Stop a background service (by hostPort): remove the hostfwd + terminate the guest process group. */
+/** Stop a background service (by the id it was started under): remove the hostfwd, if it has one, + terminate the guest process group. */
 export function stopProcess(pid) {
   const key = Number(pid);
   const p = procs.get(key);
   if (!p) return false;
   procs.delete(key);
-  stopWatching(key); // a user-initiated stop is not a completion; do not wake the model for it
-  vm?.ports.removePort(p.hostPort).catch(() => {});
+  // Every forward this service got, not just one: a dev server with an HMR port would otherwise leave the second
+  // hostfwd behind, pointing into a VM where nothing answers.
+  for (const hp of p.hostPorts ?? []) vm?.ports.removePort(hp).catch(() => {});
   // setsid makes gpid the process-group leader; a negative kill terminates the whole group, falling back to the single process on failure.
   vm?.guest
     .exec("/bin/kill", ["-TERM", `-${p.gpid}`])
@@ -683,7 +760,9 @@ export function stopProcess(pid) {
 }
 
 export function listProcesses() {
-  return [...procs.values()].map((p) => ({ pid: p.hostPort, url: p.url, command: p.command }));
+  // p.id, not a port: a service without a forward has no port to be named by, and reporting 0 for all of them would make
+  // every such service look like the same one and stop none of them.
+  return [...procs.values()].map((p) => ({ pid: p.id, url: p.url, command: p.command }));
 }
 
 export function stopAll() {
@@ -702,21 +781,36 @@ export async function unexposePort(hostPort) {
   return true;
 }
 
-/** Prewarm: merge a new directory into the mount set (no rebuild needed, the broadcast root already covers everything). */
-export function prewarm(cwd) {
-  if (cwd) ensureRoot(cwd);
-}
-
 /** Exit cleanup: remove all forwards + shut down the VM. */
-export function dispose() {
-  // Before stopAll: a port-less watched job is not in `procs`, so nothing else would ever clear its poller,
-  // and once vm is null every tick would just churn against a dead guest.
-  for (const key of [...watchers.keys()]) stopWatching(key);
+export async function dispose({ waitMs = 10000 } = {}) {
+  const proc = vm?.proc;
+  const ports = vm?.ports;
+  const guest = vm?.guest;
+  // Sweep the services while `vm` is still set, so each one really does have its forward removed and its process group
+  // killed. Everything here dies with the VM anyway, but leaving `procs` to be cleared by a half-working sweep would
+  // hide a bug the moment this is ever called without the VM going away.
   try { stopAll(); } catch { /* best effort */ }
+  vm = null; // from here on no command may reach a VM that is going away
   try { ninep?.close(); } catch { /* best effort */ } finally { ninep = null; }
-  try { vm?.ports.quit(); } catch { /* best effort */ }
-  try { vm?.proc.kill(); } catch { /* best effort */ }
-  vm = null;
+  try { ports?.quit(); } catch { /* best effort */ }
+  try { proc?.kill(); } catch { /* best effort */ }
+  // Hand back the control sockets. Both the QMP monitor and the guest agent serve ONE client, so a socket left open here
+  // is not merely untidy: the next VM's handshake connects, is never accepted, and waits forever. That is exactly how a
+  // restart used to stall in "starting" with a healthy VM running beside it.
+  try { ports?.close?.(); } catch { /* best effort */ }
+  try { guest?.close?.(); } catch { /* best effort */ }
+  // Wait for the process to be gone before returning, so a caller that starts a new VM next cannot race the old one for
+  // the fixed control ports. SIGTERM first; escalate only if it will not leave.
+  if (proc && proc.exitCode === null && proc.signalCode === null) {
+    await new Promise((resolve) => {
+      const done = () => { clearTimeout(timer); resolve(); };
+      const timer = setTimeout(() => {
+        try { proc.kill("SIGKILL"); } catch { /* ignore */ }
+        resolve();
+      }, waitMs);
+      proc.once("exit", done);
+    });
+  }
 }
 
 /**

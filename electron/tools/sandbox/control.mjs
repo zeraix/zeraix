@@ -76,15 +76,33 @@ function jsonSock(sock) {
 }
 
 /** QMP: capabilities handshake + dynamic host->guest port forwards. */
-export async function qmp({ port = +(process.env.QMP_PORT || 4444) } = {}) {
-  const c = jsonSock(await connect(port));
-  // Drain the QMP greeting line, then negotiate capabilities.
-  await c.send({ execute: 'qmp_capabilities' });
+export async function qmp({ port = +(process.env.QMP_PORT || 4444), handshakeMs = 15000 } = {}) {
+  const sock = await connect(port);
+  const c = jsonSock(sock);
+  // Drain the QMP greeting line, then negotiate capabilities -- under a timeout, because connecting is not the same as
+  // being served. QMP hands out ONE client slot: while another client holds it, a second connection still completes at
+  // the TCP level and then sits in the accept backlog, unread. Observed as a restart that never finished, with the
+  // kernel showing the 31 bytes of this very command queued forever:
+  //   127.0.0.1.4444 <- .56900  Recv-Q 31  ESTABLISHED   (qemu never accepted it)
+  //   127.0.0.1.4444 <- .56899  Recv-Q  0  ESTABLISHED   (qemu holds this one)
+  // An await with no timeout turns that into a permanent "starting", so fail with the reason instead.
+  await new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      try { sock.destroy(); } catch { /* ignore */ }
+      reject(new Error(`QMP handshake timed out after ${handshakeMs}ms on 127.0.0.1:${port} — the port is open but another client holds the monitor`));
+    }, handshakeMs);
+    c.send({ execute: 'qmp_capabilities' }).then(
+      (v) => { clearTimeout(timer); resolve(v); },
+      (e) => { clearTimeout(timer); reject(e); },
+    );
+  });
   const hmp = line => c.send({ execute: 'human-monitor-command', arguments: { 'command-line': line } });
   return {
     addPort:    (host, guest, ip = '127.0.0.1') => hmp(`hostfwd_add net0 tcp:${ip}:${host}-:${guest}`),
     removePort: (host, ip = '127.0.0.1')        => hmp(`hostfwd_remove net0 tcp:${ip}:${host}`),
     quit:       () => c.send({ execute: 'quit' }).catch(() => {}),
+    /** Drop this client's socket, freeing qemu's single monitor slot for the next connection. */
+    close:      () => { try { sock.destroy(); } catch { /* ignore */ } },
     raw: c.send,
   };
 }
@@ -167,6 +185,9 @@ export async function guestAgent({ port = +(process.env.GA_PORT || 4445) } = {})
   };
 
   return {
+    /** Drop this client's socket. The agent's chardev takes one client too, so a socket left over from a previous VM
+     *  would keep the next one from being served. */
+    close: () => { try { sock.destroy(); } catch { /* ignore */ } },
     /** Non-throwing, timed run (for the run_command engine). Wraps in coreutils
      *  `timeout`; returns exit status instead of throwing. code 124 => timed out. */
     async runStatus(argv, { timeoutSec = 60 } = {}) {
