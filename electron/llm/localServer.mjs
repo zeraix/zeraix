@@ -18,7 +18,7 @@ import { spawn, execSync } from "node:child_process";
 import { app } from "electron";
 import {
   detectHardware, usableModelMemoryGB, recommend as recommendModels, buildServerArgs,
-  MODELS, autoQuantId, quantBpw, gpuLayers, localSupported, MIN_LOCAL_MEM_GB, isSharedGpu, pickCtxKv, computeFit, descriptorFromGguf, MIN_CTX, kvTierEnabled, seedAvailable, moePoolEnabled, KV_BITS_OFFERED, moeNativePlan, moeFloorPool, CTX_LADDER,
+  MODELS, autoQuantId, quantBpw, gpuLayers, localSupported, MIN_LOCAL_MEM_GB, isSharedGpu, pickCtxKv, computeFit, descriptorFromGguf, MIN_CTX, kvTierEnabled, seedAvailable, moePoolEnabled, KV_BITS_OFFERED, moeNativePlan, moeFloorPool, ctxLadder,
 } from "./localModels.mjs";
 import { ensureInstalled, installedBin, llamaVariant, fallbackVariant, detectCuda, llamaVersionDir, localFilesBase, installDir, llamaRootDir, installedLlamaVersions, migrateLegacyLayout } from "./llamaInstaller.mjs";
 import { downloadModel, searchModels, repoDetail, resolveRevision, TRUSTED_AUTHORS } from "./hfDownload.mjs";
@@ -544,7 +544,7 @@ export function estimate(opts = {}) {
   // Rung eligibility is decided at the pool FLOOR - the cheapest split moeNativePlan can emit - so a rung marked
   // fits is one the planner can always deliver. totalGB on each rung is that same floor cost, which is the useful
   // number for a DISABLED rung: "even at its minimum this needs X".
-  const rungs = CTX_LADDER.filter((c) => c <= (model.maxCtx || MIN_CTX)).sort((a, b) => a - b).map((c) => {
+  const rungs = ctxLadder(model).sort((a, b) => a - b).map((c) => {
     const t = computeFit(model, { bpw }, c, kvBits, vision, moePoolInfo(model.id)).totalGB + mtpGB;
     return { ctx: c, totalGB: round1(t), fits: t <= budgetGB };
   });

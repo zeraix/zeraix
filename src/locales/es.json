@@ -671,6 +671,7 @@
   "local.note.ternary-bonsai-27b": "27B denso a ~2 bits. Atención híbrida (16 de 64 capas completas). Multimodal (imágenes).",
   "local.note.gemma4-12b": "12B denso, calidad cercana a 26B-A4B. Multimodal (imagen/audio).",
   "local.note.gemma4-e4b": "~4,5B parámetros efectivos. Llamada a herramientas nativa, QAT 4-bit cercano a bf16. Multimodal (imagen/audio).",
+  "local.note.lfm2.5-2.6b": "El más pequeño y rápido: funciona con holgura en 8 GB. Contexto de 128K, llamada a herramientas nativa. Solo texto.",
   "ml.pageDesc": "Ejecuta modelos de código abierto en este equipo: instala el runtime y luego descarga, gestiona e inicia los modelos recomendados (como máximo uno a la vez).",
   "ml.tabRecommended": "Recomendados",
   "ml.tabInstalled": "Instalados",

@@ -43,7 +43,7 @@ export const QUANTS = [
  * Every entry also needs a pinned `revision` below, because the seed is only valid for the exact GGUF it was built against (the
  * chat template ships inside the file and model_key does not cover it). seedAvailable enforces that.
  */
-export const SEED_MODELS = new Set(["qwen3.6-35b-a3b", "gemma4-26b-a4b", "gemma4-e4b", "gemma4-12b", "ternary-bonsai-27b"]);
+export const SEED_MODELS = new Set(["qwen3.6-35b-a3b", "gemma4-26b-a4b", "gemma4-e4b", "gemma4-12b", "ternary-bonsai-27b", "lfm2.5-2.6b"]);
 
 /**
  * Models the MoE expert pool is enabled for.
@@ -364,6 +364,56 @@ export const MODELS = [
       { minMemGB: 8, quant: "UD-Q4_K_XL", bpw: 4.22 }, // 4.22 GB
     ],
     notes: "≈4.5B effective parameters. Native tool calling, QAT 4-bit near bf16. Multimodal (image/audio)."
+  },
+  {
+    id: "lfm2.5-2.6b", name: "LFM2.5 2.6B", params: 2.7, active: 2.7, moe: false, vision: false, mtp: false,
+    hf: "LiquidAI/LFM2.5-2.6B-GGUF",
+    revision: "b421ad1d549afeda6a0fb2ad3a697cb5a7879adc", // pinned: the chat template ships inside the GGUF
+    // Hybrid, and the KV shape is the reason it belongs on a small machine: of 30 layers only 8 are full
+    // attention; the other 22 are double-gated short convolutions whose state is fixed per sequence rather
+    // than growing per token. Read from the GGUF, where head_count_kv is a PER-LAYER ARRAY, not a scalar:
+    //
+    //   lfm2.attention.head_count_kv = [0, 0, 8, 0, 0, 8, 0, 0, 0, 8, ...]   attention at 2,5,9,13,17,21,24,27
+    //   n_embd_k_gqa = n_embd_v_gqa  = 512 on those layers (8 kv heads x 64)
+    //   kvElems.full = 8 x (512 + 512) = 8192
+    //
+    // Verified against the server, not only derived - at ctx 32768 with q4_0 it reports
+    //   llama_kv_cache: size = 144.00 MiB (32768 cells, 8 layers)
+    // and 8192 x 32768 x 4.5/8 is 144.0 MiB exactly.
+    //
+    // No `swa` field: those 8 layers are FULL attention, so there is no window cache to size, and the
+    // pattern is irregular (ccAccAcccAcccAcccAcccAccAccAcc) which `swa.every` could not describe anyway.
+    // kvGB only reads swa.window when kvElems is present, and absent behaves as window 0.
+    arch: { L: 30, kvH: 8, hd: 64, kvElems: { full: 8192, swa: 0 } }, maxCtx: 128000,
+    // One rung, the native window. The shared ladder trades context for memory, and here there is nothing
+    // to trade: 8 of 30 layers hold KV, so the WHOLE cache at 128000 is 0.6 GB and the rungs below it save
+    // 0.3 GB at most while giving up 30-60K of context. Measured on the 8 GB machine this entry targets -
+    // 65536 -> 3.8 GB, 98304 -> 3.9, 128000 -> 4.1, against a 5.00 GB budget: every rung fits, so offering
+    // the smaller ones only invites a worse choice.
+    ctxRungs: [128000],
+    // MEASURED from the startup line, exactly as bonsai's was, because deriving it is wrong here too:
+    // shortconv.l_cache (3) x conv_dim (2048) x 22 layers x f32 predicts 0.516 MiB and the server says
+    //   llama_memory_recurrent: size = 0.69 MiB (2 cells, 30 layers, 2 seqs 0 rs_seq)
+    // 0.69 / 2 = 0.345 per seq. Negligible beside KV at this size - it is carried for the same reason the
+    // GDN models carry it, so the field means one thing everywhere.
+    recurrent: { perSeqMiB: 0.345, layers: 22, conv: 3, inner: 2048 },
+    // LiquidAI's own card, unchanged. The low temperature is theirs, not a guess. Nothing is stacked on
+    // top: this model has not been seen looping the way bonsai did at 2.125 bpw, so it gets no DRY and no
+    // presence penalty. Add them only against repeated runs, never one clean sample.
+    sampling: { temp: 0.1, topK: 50, repeatPenalty: 1.1 },
+    // No reasoningBudget, deliberately. The card calls it "a pure reasoning model that always thinks", and
+    // its template does open <think> every turn - but unlike qwen3.6 and bonsai it comes back on its own:
+    // "What is the capital of France?" spent 582 characters reasoning and then answered, 142 completion
+    // tokens, finish_reason "stop". A budget is a cap for models that spend the whole allowance and return
+    // content="", which is what those two measurably did. This one does not, so capping it would only cut
+    // answers short.
+    quantTiers: [
+      { minMemGB: 8, quant: "Q8_0", bpw: 8.50 }, // print_info: file size = 2.67 GiB (8.50 BPW), 2.70 B params
+    ],
+    // English fallback only — the shown copy is local.note.lfm2.5-2.6b in src/locales (see modelNote()).
+    // It sells the machine it fits on, not the architecture: the reason this entry exists is that it is
+    // the one capable model an 8 GB Mac can run with room left over.
+    notes: "The smallest and fastest option — runs comfortably on an 8 GB machine. 128K context, native tool calling. Text only.",
   },
   // { id: "qwen3.6-27b", name: "Qwen3.6-27B", params: 27, active: 27, moe: false, vision: true, mtp: false,
   //   hf: "unsloth/Qwen3.6-27B-GGUF", arch: { L: 64, kvH: 8, hd: 128 },
@@ -862,6 +912,32 @@ export const MIN_CTX = 65536;
 export const CTX_LADDER = [262144, 196608, 131072, 98304, 65536];
 
 /**
+ * The rungs for ONE model, largest first: the shared ladder capped at its native window, with that window
+ * itself on top whenever it is not already a rung.
+ *
+ * The ladder is powers-of-two-ish, and a native window that is not costs the model everything between the
+ * two: LFM2.5's is 128000, so ladder-only rungs stop at 98304 and 30K of usable context disappears for no
+ * reason — the fit at 128000 is 4.1 GB against a 5.00 GB budget on the machine it targets.
+ *
+ * The renderer already worked this way (ctxPresets in ModelLibrary.tsx: "always ending at the window
+ * itself, so a non-power-of-2 max like 40960 gets its exact value as the top button"). The main process
+ * did not, so the UI offered a rung the recommender would never pick and estimate() never priced. This is
+ * the same rule on both sides rather than a new one.
+ */
+export function ctxLadder(model) {
+  const maxCtx = model?.maxCtx || MIN_CTX;
+  if (maxCtx < MIN_CTX) return [];
+  // A model may state its own rungs. Worth doing only when the ladder has nothing to offer: the rungs
+  // exist to trade context for memory, and on a model whose whole KV at the native window is a fraction
+  // of a gigabyte there is no trade to make - see ctxRungs on lfm2.5-2.6b.
+  if (model?.ctxRungs?.length) {
+    return model.ctxRungs.filter((c) => c <= maxCtx).sort((a, b) => b - a);
+  }
+  const rungs = CTX_LADDER.filter((c) => c <= maxCtx);
+  return rungs[0] === maxCtx ? rungs : [maxCtx, ...rungs];
+}
+
+/**
  * KV cache quantisations offered for catalog models, best first.
  *
  * ONE list, and everything follows from it: the model library's picker lists exactly these, pickCtxKv chooses from exactly these,
@@ -896,9 +972,7 @@ export function pickCtxKv(model, bpw, hw, budgetGB, vision = false, pool = null)
   // disagree with estimate()'s per-rung verdict: it would default a 16 GB Mac to 128K on 26B while the UI showed
   // that same rung disabled. One budget, one answer.
   const cap = budgetGB || 0;
-  const maxCtx = model.maxCtx || MIN_CTX;
-  for (const ctx of CTX_LADDER) {
-    if (ctx > maxCtx) continue;
+  for (const ctx of ctxLadder(model)) {
     for (const kvBits of KV_BITS_OFFERED) {
       if (computeFit(model, { bpw }, ctx, kvBits, vision, pool).totalGB <= cap) return { ctx, kvBits };
     }

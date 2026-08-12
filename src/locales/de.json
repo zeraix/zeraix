@@ -671,6 +671,7 @@
   "local.note.ternary-bonsai-27b": "Dichtes 27B mit ~2 Bit. Hybride Attention (16 von 64 Schichten voll). Multimodal (Bilder).",
   "local.note.gemma4-12b": "Dichtes 12B, Qualität nahe 26B-A4B. Multimodal (Bild/Audio).",
   "local.note.gemma4-e4b": "~4,5B effektive Parameter. Natives Tool-Calling, QAT 4-Bit nahe bf16. Multimodal (Bild/Audio).",
+  "local.note.lfm2.5-2.6b": "Das kleinste und schnellste Modell – läuft bequem auf 8 GB. 128K Kontext, natives Tool-Calling. Nur Text.",
   "ml.pageDesc": "Open-Source-Modelle lokal ausführen: Runtime installieren, dann empfohlene Modelle herunterladen, verwalten und starten (höchstens eines gleichzeitig).",
   "ml.tabRecommended": "Empfohlen",
   "ml.tabInstalled": "Installiert",
