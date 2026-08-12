@@ -78,13 +78,14 @@ function engineSwitchNote(engineId) {
   if (engineId === "qemu") {
     return (
       "[Execution environment switched] From this command on, commands run inside an isolated Linux " +
-      "(Debian, bash) sandbox; the working directory and file tools still point to the same directory " +
-      "(the host directory is mounted into the sandbox). Please use Linux commands.\n\n"
+      "(Debian, bash) sandbox, where the working directory is /workspace — the same folder the file tools use, " +
+      "so use /workspace or relative paths, not the host path. Please use Linux commands.\n\n"
     );
   }
   const host =
     process.platform === "win32" ? "Windows (cmd/PowerShell)" : process.platform === "darwin" ? "macOS (zsh/bash)" : "Linux (bash)";
-  return `[Execution environment switched] From this command on, commands run directly on the host ${host} again; please use commands matching that system.\n\n`;
+  // Leaving the sandbox takes /workspace with it, so the one instruction that holds in both environments is "relative".
+  return `[Execution environment switched] From this command on, commands run directly on the host ${host} again; please use commands matching that system, and relative paths (there is no /workspace outside the sandbox).\n\n`;
 }
 
 /** URL → origin (scheme+host+port), for matching background services by address. */
@@ -134,16 +135,14 @@ const SKIP_DIRS = new Set([".git", "node_modules", ".next", "dist", "Zeraix"]);
 let WORKDIR = path.join(os.homedir(), "zeraix-workspace");
 
 /** Set the working directory (absolute path). Returns the normalized path.
- *  Each session's workdir is set at session start and never changes afterward — here we also let the
- *  sandbox engine prewarm that directory in the background (fold it into the VM's mount set) so the
- *  session's first command hits the sandbox with zero wait; the native engine has no prewarm, so this
- *  is a harmless no-op. */
+ *  Each session's workdir is set at session start and never changes afterward. The sandbox needs no notice of it:
+ *  every command binds its own cwd to /workspace, so a new workdir costs nothing to adopt (this used to prewarm the
+ *  engine to fold the directory into the VM's mount set). */
 export function setWorkingDir(dir) {
   WORKDIR = path.resolve(dir);
   invalidateWalkCache(); // directory changed: the old file-list cache is now stale
   resetObservations(); // reads observed for the previous workspace say nothing about this one
   resetConversationCapture();
-  getEngine().prewarm?.(WORKDIR);
   return WORKDIR;
 }
 export function getWorkingDir() {
@@ -349,10 +348,17 @@ export function getLLMConfig() {
   };
 }
 
+/** The path the sandbox mounts the working directory at (GUEST_WORKSPACE in sandbox/qemu.mjs — keep in step).
+ *  The model is told that name for its commands, so it uses it for file paths too. These tools run on the HOST, where
+ *  the same folder is WORKDIR, and without this the model gets "path escapes the working directory: /workspace/x" for
+ *  a path it was told to use. One folder, one name, on both sides of the tool surface. */
+const WORKSPACE_ALIAS = /^\/workspace(?:\/(.*))?$/;
+
 /** Resolve a user-given path inside WORKDIR, preventing out-of-bounds access (path traversal). */
 function resolveInside(p) {
   if (typeof p !== "string") throw new Error("path must be a string");
-  const abs = path.resolve(WORKDIR, p);
+  const alias = WORKSPACE_ALIAS.exec(p);
+  const abs = path.resolve(WORKDIR, alias ? (alias[1] ?? "") : p);
   const rel = path.relative(WORKDIR, abs);
   if (rel === ".." || rel.startsWith(`..${path.sep}`) || path.isAbsolute(rel)) {
     throw new Error(`path escapes the working directory: ${p}`);

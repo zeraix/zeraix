@@ -102,7 +102,7 @@ function renderBody(state: ReminderState, atCut: boolean): string {
     lines.push(
       state.skills.length
         ? `- skills available — call load_skill with an id for its full instructions:\n` +
-            state.skills.map((s) => `- ${s.id}: ${s.description}`).join("\n")
+        state.skills.map((s) => `- ${s.id}: ${s.description}`).join("\n")
         : `- no skills available; do not call load_skill.`,
     );
   }
@@ -119,7 +119,19 @@ function renderBody(state: ReminderState, atCut: boolean): string {
   // Most volatile LAST: the workdir changes per project and the date changes daily, so anything placed
   // after them would lose its cached prefix every time either moves.
   if (state.workdir !== undefined) {
-    lines.push(`- working directory: ${state.workdir}`);
+    // The mapping is stated HERE, on the only line that shows the host path, rather than in the environment text above:
+    // that text is also used verbatim as a sub-agent's system prompt, where no reminder and no host path exist, so a
+    // sentence about "the host path in this reminder" would point at nothing. Unlabelled, two names for one folder read
+    // as a contradiction.
+    lines.push(
+      // Not called "working directory" in the sandbox: there the working directory is /workspace, and naming this path
+      // that too would be the contradiction the line exists to prevent. The environment text above already names
+      // /workspace, so nothing is lost. Native keeps the label — nothing else there says what the working directory is,
+      // and messages[0]'s rules speak of "the working directory" by that name.
+      state.sandboxed
+        ? `- Actual host path: ${state.workdir} — mapped to /workspace in the sandbox. Use /workspace in sandbox; the actual host path is for information only.`
+        : `- working directory: ${state.workdir}`,
+    );
   }
   if (state.ctx) {
     const { date, model, tz } = state.ctx;

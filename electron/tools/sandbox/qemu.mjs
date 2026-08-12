@@ -12,8 +12,9 @@
  *
  * Mount model (no hot-mount / never rebuild): a one-time 9p share of the "host root" (posix "/", Windows drive
  * letters) into the guest's /mnt/hostfs; any cwd is already covered. The visible scope of untrusted commands is
- * confined per-command to the mount set by bwrap (homeRoot ∪ explicit extras), bound on posix as an "isomorphic
- * path" (host path == guest path, so tool output paths match on both sides).
+ * confined per-command by bwrap to ONE directory: the command's own cwd, bound at the fixed guest path
+ * /workspace (GUEST_WORKSPACE) and used as the guest cwd. The host path is therefore absent from the guest —
+ * a command cannot name it and no `pwd` / error message can leak it.
  *
  * A sandbox failure is reported as a failed command, never re-run on the host (see sandboxFailure below). Routing to
  * native at all — dev mode, engine=native, before the VM is ready — is engine.mjs's decision, not this module's.
@@ -46,6 +47,11 @@ const isWin = process.platform === "win32";
 const QMP_PORT = 4444;
 const GA_PORT = 4445;
 const GUEST_MNT = "/mnt/hostfs"; // Mount point of the host root inside the guest (firstboot.sh mounts it via 9p; must match)
+// The one name the working directory has inside the sandbox. The bind used to be "isomorphic" (guest path == host path),
+// which put the user's real directory structure inside the VM: `pwd` printed it, every command could name it, and every
+// stack trace carried it. A fixed mount point removes it, and gives the model one workspace path that is identical in
+// every conversation and on every install.
+const GUEST_WORKSPACE = "/workspace";
 /**
  * Backing directory for the sandbox's /tmp, on the guest's DISK rather than in RAM.
  *
@@ -140,9 +146,7 @@ const VM_CDN = (process.env.ZERAIX_CDN || "https://docker.zeraix.com").replace(/
 
 let vm = null; // { proc, ports, guest }
 let ninep = null; // Windows: in-process 9p-over-TCP server backing the host share
-let homeRoot = ""; // The common root from provision (parent directory of the session workdir)
-let extraRoots = []; // Explicitly selected folders outside the root (accumulated; merged into the bwrap bind set per command)
-const EXTRA_ROOTS_MAX = 16;
+let homeRoot = ""; // The common root from provision (parent of the session workdirs); only a fallback for a command that carries no cwd
 
 // Background long-lived service table: hostPort -> { gpid, hostPort, guestPort, url, command, log }
 const procs = new Map();
@@ -220,52 +224,37 @@ function qemuBin() {
   return sys;
 }
 
-/** Host path -> { src: 9p path inside the guest, dst: target inside bwrap (posix keeps isomorphism) }. */
-function mapRoot(hostPath) {
+/** Host path -> where it appears inside the guest, under the 9p share of the host root.
+ *  This used to also return the bwrap target, which on posix was the host path itself and on Windows was not — the bind
+ *  is a fixed mount point on both now, so the two platforms no longer differ and there is one path to compute. */
+function guestPath(hostPath) {
   const abs = path.resolve(hostPath);
-  if (!isWin) {
-    const rel = abs.replace(/^\//, "");
-    return { src: path.posix.join(GUEST_MNT, rel), dst: abs };
-  }
+  if (!isWin) return path.posix.join(GUEST_MNT, abs.replace(/^\//, ""));
   // Windows multi-drive: /mnt/hostfs/<drive>/<rest> (matching ninep-server's virtual multi-drive root), so a
   // workdir on any drive (C:, E:, ...) maps correctly.
   const m = abs.match(/^([A-Za-z]):[\\/]?(.*)$/);
   const drive = m ? m[1].toUpperCase() : "C";
   const rest = (m ? m[2] : "").split(path.sep).join("/");
-  const g = path.posix.join(GUEST_MNT, drive, rest);
-  return { src: g, dst: g }; // Windows does not keep isomorphism
+  return path.posix.join(GUEST_MNT, drive, rest);
 }
 
-/** When cwd is not covered by the mount set, merge it into extras (the broadcast root already covers the whole disk, no VM rebuild needed). */
-function ensureRoot(cwd) {
-  const abs = path.resolve(cwd || homeRoot || HOME);
-  const under = (r) => {
-    const rel = path.relative(r, abs);
-    return rel === "" || (!rel.startsWith("..") && !path.isAbsolute(rel));
-  };
-  if (homeRoot && under(homeRoot)) return;
-  if (extraRoots.some(under)) return;
-  extraRoots.push(abs);
-  if (extraRoots.length > EXTRA_ROOTS_MAX) extraRoots = extraRoots.slice(-EXTRA_ROOTS_MAX);
-}
-
-/** bubblewrap flags (excluding argv[0] and the trailing command): only bind the mount set from /mnt/hostfs, chdir cwd.
+/** bubblewrap flags (excluding argv[0] and the trailing command): bind this command's cwd from /mnt/hostfs to /workspace, and chdir there.
  *  Network is open by default (no --unshare-net) -- commands inside the sandbox can reach the internet directly: pip / npm / git / curl, etc.
  *  DNS and routing are provided by the guest's SLIRP network (firstboot.sh configures 10.0.2.x + nameserver). */
 /** bwrap args that overlay the host's OCR adapter onto the image's, or nothing when the host copy is absent. */
 function ocrAdapterBind() {
   const host = ocrAdapterHostPath();
-  // Reached through the 9p share like every other host path (mapRoot), not by any special channel.
-  try { if (fs.existsSync(host)) return ["--ro-bind", mapRoot(host).src, GUEST_OCR_ADAPTER]; } catch { /* fall through */ }
+  // Reached through the 9p share like every other host path (guestPath), not by any special channel.
+  try { if (fs.existsSync(host)) return ["--ro-bind", guestPath(host), GUEST_OCR_ADAPTER]; } catch { /* fall through */ }
   return [];
 }
 
 function bwrapFlags(cwd) {
-  const binds = [homeRoot, ...extraRoots].filter(Boolean).flatMap((r) => {
-    const { src, dst } = mapRoot(r);
-    return ["--bind", src, dst];
-  });
-  const { dst: chdir } = mapRoot(cwd || homeRoot || HOME);
+  // Exactly one host directory is visible: this command's own cwd. Nothing has to be registered in advance for that to
+  // hold — the 9p share already covers the whole disk — so there is no mount set to keep in sync, and a command cannot
+  // reach a sibling session's files. This matches what the host-side file tools already enforce (resolveInside rejects
+  // anything outside the working directory); the old union of roots was the one way around it.
+  const workspace = guestPath(cwd || homeRoot || HOME);
   return [
     "--ro-bind", "/usr", "/usr", "--ro-bind", "/etc", "/etc", "--ro-bind", "/opt", "/opt",
     // Shadow the image's OCR adapter with the host's, AFTER /opt is bound so it lands on top. See GUEST_OCR_ADAPTER.
@@ -297,10 +286,10 @@ function bwrapFlags(cwd) {
     "--setenv", "PYTHONPATH", "/opt/ocr",
     "--setenv", "LANG", "C.UTF-8",
     "--setenv", "PYTHONUNBUFFERED", "1",
-    ...binds, "--chdir", chdir,
+    "--bind", workspace, GUEST_WORKSPACE, "--chdir", GUEST_WORKSPACE,
     // NOT --unshare-user: bwrap runs as root in the guest, and a user namespace makes the 9p
     // share (security_model=none) refuse the bind source with EPERM. bwrap-as-root still confines
-    // the filesystem view to the mount set (that's the goal here); the VM is the privilege boundary.
+    // the filesystem view to the workspace (that's the goal here); the VM is the privilege boundary.
     // Net is NOT unshared → the workload uses the guest's SLIRP network (internet reachable).
     "--unshare-ipc", "--unshare-pid", "--unshare-uts", "--unshare-cgroup-try",
     "--die-with-parent", "--new-session",
@@ -500,10 +489,8 @@ async function boot(onProgress, forceConfigured = false) {
 
 /** Called by engine.mjs: start the long-lived VM. onProgress(pct,msg): progress callback for downloading the VM disk/kernel on first run.
  *  forceConfigured=true: user "update" -- download the versions.json target version and switch to it. */
-export async function provision(rootHost, onProgress, extras = [], forceConfigured = false) {
+export async function provision(rootHost, onProgress, forceConfigured = false) {
   homeRoot = path.resolve(rootHost);
-  extraRoots = [];
-  for (const d of extras) if (d) ensureRoot(d);
   await boot(onProgress, forceConfigured);
 }
 
@@ -530,7 +517,6 @@ export async function run(cmd, opts = {}) {
   const { cwd, timeoutMs, maxBuffer } = opts;
   try {
     if (!vm) throw new Error("vm not ready");
-    ensureRoot(cwd);
     const argv = ["/usr/bin/bwrap", ...bwrapFlags(cwd), "--", "/bin/bash", "-c", cmd];
     const { out, err, code, killed } = await vm.guest.runStatus(argv, {
       timeoutSec: Math.max(1, Math.round((timeoutMs ?? 60000) / 1000)),
@@ -558,7 +544,6 @@ const pickPort = (s) => {
 export async function startBackground(cmd, opts = {}) {
   if (!vm) return sandboxFailure("vm not ready");
   const cwd = opts.cwd;
-  ensureRoot(cwd);
   const log = `/tmp/zx-svc-${++svcSeq}.log`;
   const flags = bwrapFlags(cwd).map(shq).join(" ");
   // SVC_CMD is passed via the guest-exec env (execve directly, no shell), and "$SVC_CMD" is used as a single whole string argument to bash -lc.
@@ -648,11 +633,6 @@ export async function unexposePort(hostPort) {
   if (!vm) return false;
   await vm.ports.removePort(hostPort).catch(() => {});
   return true;
-}
-
-/** Prewarm: merge a new directory into the mount set (no rebuild needed, the broadcast root already covers everything). */
-export function prewarm(cwd) {
-  if (cwd) ensureRoot(cwd);
 }
 
 /** Exit cleanup: remove all forwards + shut down the VM. */

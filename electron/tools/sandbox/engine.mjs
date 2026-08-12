@@ -177,11 +177,14 @@ async function hypervisorPresent() {
 }
 
 /**
- * Resolve the mount set: the shared root (userData/agent/ai-agent, the parent of every session workdir in
- * daily mode; only this one level is mounted, so the conversation storage under agent/ is not exposed) ∪
- * folders explicitly chosen in the past (derived from the project index).
+ * The shared root: userData/agent/ai-agent, the parent of every session workdir in daily mode.
+ *
+ * This is NOT a mount set. Each command mounts its own cwd at /workspace and nothing else (see bwrapFlags), so no
+ * directory has to be declared up front — the root is only the fallback for a command that arrives without a cwd.
+ * It used to be unioned with every past daily project workdir, read out of the project index; those folders reach
+ * the sandbox on their own now, as the cwd of the command that uses them.
  */
-async function resolveMounts(opts) {
+async function resolveMountRoot(opts) {
   let mountRoot;
   try {
     const { app } = await import("electron");
@@ -190,19 +193,7 @@ async function resolveMounts(opts) {
     mountRoot = opts.getWorkdir?.() ?? path.join(os.homedir(), "zeraix-workspace");
   }
   fs.mkdirSync(mountRoot, { recursive: true }); // a bind mount requires the directory to already exist
-  let extraMounts = [];
-  try {
-    const { loadIndex } = await import("../../store/conversationStore.mjs");
-    const { projects } = await loadIndex();
-    extraMounts = projects
-      .filter((p) => p?.mode === "daily" && typeof p?.workdir === "string" && p.workdir)
-      .filter((p) => fs.existsSync(p.workdir))
-      .sort((a, b) => (a.createdAt ?? 0) - (b.createdAt ?? 0))
-      .map((p) => p.workdir);
-  } catch {
-    /* not Electron / storage unavailable → shared root only */
-  }
-  return { mountRoot, extraMounts };
+  return mountRoot;
 }
 
 /**
@@ -233,16 +224,15 @@ export function initEngine(opts = {}) {
         return getSandboxStatus();
       }
 
-      // Directly create the single long-lived QEMU VM: mount the shared root of the session working
-      // directories (userData/agent/ai-agent, under which every session's workdir lives in daily mode) ∪
-      // folders explicitly chosen in the past — no matter how many sessions/projects there are, there is
-      // only this one VM, and each session merely switches the guest cwd. Boot is the verification; a
-      // missing rootfs throws → error, downgrading to native.
+      // Directly create the single long-lived QEMU VM. No matter how many sessions/projects there are, there is
+      // only this one VM: each command binds its own working directory to /workspace, so a new session or project
+      // needs no mount change at all. Boot is the verification; a missing rootfs throws → error, downgrading to
+      // native.
       const m = await import("./qemu.mjs");
       m.configure({ ...cfg, onExit: handleVmExit }); // downgrade status as soon as the VM process exits (see handleVmExit)
-      const { mountRoot, extraMounts } = await resolveMounts(opts);
+      const mountRoot = await resolveMountRoot(opts);
       setStatus("starting");
-      await m.provision(mountRoot, (pct, msg) => setStatus("starting", { pct, reason: msg }), extraMounts, !!opts.forceConfigured);
+      await m.provision(mountRoot, (pct, msg) => setStatus("starting", { pct, reason: msg }), !!opts.forceConfigured);
       loaded.push(m);
       sandbox = m;
       ready = true;

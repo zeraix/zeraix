@@ -21,6 +21,9 @@ export type { Attachment } from "@/lib/ai/attachments";
  */
 export type ReminderState = {
   workdir?: string;
+  /** Whether `workdir` is reachable as /workspace: in the sandbox it is, so the line says which of the two names to use.
+   *  Always changes together with `env` (the two engines produce different text), so it never forms a delta on its own. */
+  sandboxed?: boolean;
   /** Where run_command actually runs: the Linux sandbox, or the host directly. Flips when the VM comes up or falls back. */
   env?: string;
   ctx?: { date: string; model: string; tz: string };

@@ -264,6 +264,8 @@ export const systemPromptFor = (mode: "daily" | "dev") =>
  * docs/cache-stable-prompt-context.md. Every reference in them is to "the working directory" by name rather than "this directory"
  * / "here", because they no longer sit next to the sentence that names the path.
  */
+/** `dir` is the path the agent should USE, not necessarily the host path: in the sandbox that is /workspace, which is
+ *  also what keeps this sentence identical across conversations (see the call site's note on the prefix cache). */
 export const workdirPrompt = (dir: string) => `All your tool calls are restricted to the working directory: ${dir}.`;
 
 /** Scope half of the rules: what "restricted to the working directory" actually means. Also used for sub-agent prompts. */

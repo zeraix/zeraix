@@ -43,7 +43,13 @@ export function sandboxEnvHint(st: SandboxStatus | null): string {
       // environment is live. Restating what the sandbox is would be paying ~100 tokens a conversation to
       // repeat the seed.
       "【Command Execution Environment】`run_command` / `check_project` run in the Linux sandbox (Debian, bash); use Linux commands. " +
-      "File tools share its working directory. On an 【Execution Environment Switch】 notice, switch accordingly."
+      // Only what is true wherever this text is used. It is a reminder line in the main conversation AND a sub-agent's
+      // system prompt, and a sub-agent has no reminder and is never given the host path — so the host-path mapping is
+      // stated on the reminder's working-directory line instead, which is the line that actually shows it.
+      "The working directory is `/workspace` there — use `/workspace` or relative paths for commands and for file-tool paths. " +
+      // The emitted marker is "[Execution environment switched]" (engineSwitchNote, main process). It used to be quoted
+      // here as 【Execution Environment Switch】, which is not a string the model ever receives.
+      "File tools share this working directory. On an [Execution environment switched] notice, switch accordingly."
     );
   }
   const p = st?.hostPlatform ?? "";
@@ -55,13 +61,14 @@ export function sandboxEnvHint(st: SandboxStatus | null): string {
         : p === "linux"
           ? "Linux（bash）"
           : "Host Machine";
-  // Also states which built-in skill this costs. The toolbox skill is listed unconditionally in the system prompt (it is fixed
-  // text, so it must be, to keep the prompt prefix identical on every install) — so the model has to be told here when the
-  // sandbox that actually provides its toolchain is not running, or it will load a skill whose tools do not exist.
+  // Deliberately does NOT repeat that doc-media-toolbox is unavailable here. messages[0] lists the skill with its own
+  // description, which already ends "REQUIRES the Linux sandbox … when commands are running directly on the host, this
+  // skill is unavailable and its tools will not be found — the Command Execution Environment note says which is in
+  // effect". The rule is stated there once, and it points at THIS line for the answer; restating it made the model read
+  // the same rule twice and cost the tokens on every native-mode turn.
   return (
     `【Command Execution Environment】run_command / check_project run directly on the ${osName}; use matching commands. ` +
-    "On an 【Execution Environment Switch】 notice, switch accordingly. " +
-    "doc-media-toolbox is UNAVAILABLE on the host (its toolchain lives in the sandbox image): do not load it, and say media/document work needs the sandbox."
+    "On an [Execution environment switched] notice, switch accordingly."
   );
 }
 
