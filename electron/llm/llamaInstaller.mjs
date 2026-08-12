@@ -3,7 +3,8 @@
  *
  * The llama binary is no longer shipped in the bundle (many build variants: Metal/CUDA/Vulkan/CPU × architecture, and large in size).
  * On first launch of a local model, pick the matching build by platform/architecture and download
- * `llama/<version>/<variant>.tar.gz` from docker.zeraix.com (public CDN, read-only, no credentials),
+ * `llama/<version>/<variant>.tar.gz` from the Hugging Face repo Zeraix/llama-builds (public, no credentials, and
+ * mirrored to hf-mirror.com where huggingface.co is blocked),
  * extract it to <local app data>/llama/<version>/<variant>/ (Windows %LOCALAPPDATA%),
  * and localServer starts llama-server from there. For publishing, see scripts/publish-llama.mjs.
  * (qemu is still bundled: its HVF needs build-time signing + entitlements, see scripts/bundle-bin-mac.mjs +
@@ -17,13 +18,17 @@ import { app } from "electron";
 import { detectHardware } from "./localModels.mjs";
 import { localDataDir } from "../tools/sandbox/vmpaths.mjs";
 import { LLAMA_VERSION, MAC_LLAMA_TAG } from "../versions.mjs";
+import { resolveHfEndpoint } from "./hfEndpoint.mjs";
 import { getAppConfig } from "../appConfig.mjs";
 
 // The llama.cpp release version was moved to the single source electron/versions.mjs (alongside VM_VERSION); re-exported here. To upgrade: change it there and re-run publish:llama.
 export { LLAMA_VERSION };
 // Public CDN base + prefix (corresponds to OSS_CDN / OSS_PREFIX used by bundle/publish; CDN objects are read-only, no credentials needed).
-const CDN_BASE = (process.env.LLAMA_CDN_BASE || "https://docker.zeraix.com").replace(/\/+$/, "");
-const CDN_PREFIX = process.env.LLAMA_CDN_PREFIX || ""; // If the OSS bucket uses a prefix, keep this consistent with it
+// Where the per-platform runtime packages live. Hugging Face, not the OSS bucket behind docker.zeraix.com: the app
+// already probes huggingface.co and falls back to hf-mirror.com for model weights and KV seeds (hfEndpoint.mjs), which
+// is the same reachability problem the CDN was paying for — so one host now serves all three, with no credentials and
+// no bucket to keep alive. The published objects stay on OSS for app versions that were shipped pointing at it.
+const LLAMA_REPO = process.env.ZERAIX_LLAMA_BUILDS_REPO || "Zeraix/llama-builds";
 
 /** Windows: vulkan-1.dll is installed into System32 by the GPU driver; present ⇔ a Vulkan loader exists (almost every modern laptop has one). */
 function hasVulkanWindows() {
@@ -151,9 +156,12 @@ export function migrateLegacyLayout() {
 /**
  * The version directory a build installs into.
  *
- * macOS runs the fork, pinned by MAC_LLAMA_TAG; every other platform runs the CDN's upstream LLAMA_VERSION. The directory has to
+ * macOS runs the fork, pinned by MAC_LLAMA_TAG; every other platform runs the pinned upstream LLAMA_VERSION. The directory has to
  * carry whichever one it actually IS: with both under `LLAMA_VERSION`, bumping the mac tag would leave the old binary sitting at
  * an unchanged path, installedBin() would find it, and the new build would never be fetched.
+ *
+ * It is also the <version> segment of the download URL, so the directory a build lands in and the path it came from cannot
+ * drift apart.
  */
 export function llamaVersionDir() {
   return (process.platform === "darwin" && MAC_LLAMA_TAG) ? MAC_LLAMA_TAG : LLAMA_VERSION;
@@ -169,20 +177,11 @@ export function installedBin(variant = llamaVariant()) {
   return fs.existsSync(p) ? p : null;
 }
 
-/** llama runtime root directory (.../llama, containing all versions/variants). For UI display / opening the folder. */
-/**
- * The macOS fork build, published as a GitHub release asset.
- *
- * Returns null on any other platform, which is what keeps Windows on the CDN's upstream binary. MAC_LLAMA_TAG is the release tag;
- * bump it when a new mac build ships. Overridable by env for testing against a pre-release.
- */
-export function macForkAsset() {
-  if (process.platform !== "darwin" || process.arch !== "arm64") return null;
-  const repo = process.env.ZERAIX_LLAMA_REPO || "zeraix/llama-server-releases";
-  const tag = process.env.ZERAIX_LLAMA_TAG || MAC_LLAMA_TAG;
-  const asset = `llama-${tag.replace(/^mac-/, "")}-bin-macos-arm64.tar.gz`;
-  return { url: `https://github.com/${repo}/releases/download/${tag}/${asset}`, tag, asset };
-}
+// macForkAsset() lived here: it built a GitHub release-asset URL for the mac fork, and was the one reason the installer had
+// two download hosts. The fork's release workflow now publishes to the same Hugging Face repo under the same
+// llama/<version>/<variant>.tar.gz layout, so the ordinary URL covers mac as well and the special case is gone. The GitHub
+// release still exists as the human-facing artefact; nothing downloads from it.
+
 
 export function llamaRootDir() { return llamaRoot(); }
 
@@ -244,16 +243,17 @@ export async function ensureInstalled(onProgress = () => {}, variant = llamaVari
 
   const dir = installDir(variant);
   fs.mkdirSync(dir, { recursive: true });
-  // macOS pulls the FORK build from GitHub; every other platform keeps the pinned upstream build from the CDN.
+  // One URL for every platform: llama/<version>/<variant>.tar.gz, where <version> is llamaVersionDir() — the mac fork tag
+  // on darwin, the pinned upstream build everywhere else — and so is exactly the directory this unpacks into.
   //
-  // The KV disk tier, the resident-seed path and the MoE expert pool exist only in the fork, and only its mac build is published.
-  // Windows must keep the stock binary until a fork build exists for it — which is why this is a platform switch and not a version
-  // bump: the two platforms are deliberately on different builds.
-  const mac = macForkAsset();
-  const url = mac
-    ? mac.url
-    : `${CDN_BASE}/${`${CDN_PREFIX}llama/${LLAMA_VERSION}/${variant}.tar.gz`.split("/").map(encodeURIComponent).join("/")}`;
-  const tmp = path.join(app.getPath("temp"), `llama-${LLAMA_VERSION}-${variant}.tar.gz`);
+  // macOS still runs a DIFFERENT BUILD: the KV disk tier, the resident-seed path and the MoE expert pool exist only in the
+  // fork, and only its mac build is published, so Windows keeps the stock binary until a fork build exists for it. That
+  // difference is now carried by the version alone (mac-v9.1 vs b10369), not by a second download host: the fork's release
+  // workflow publishes to the same Hugging Face repo, so mac gains the hf-mirror.com fallback that GitHub release assets
+  // never had. The GitHub release remains as the human-facing artefact.
+  const version = llamaVersionDir();
+  const url = `${await resolveHfEndpoint()}/${LLAMA_REPO}/resolve/main/llama/${version}/${variant}.tar.gz`;
+  const tmp = path.join(app.getPath("temp"), `llama-${version}-${variant}.tar.gz`);
   fs.rmSync(tmp, { force: true });
 
   onProgress("downloading", 0);

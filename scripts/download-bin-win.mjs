@@ -1,10 +1,10 @@
 #!/usr/bin/env node
 /**
- * DOWNLOAD a single Windows binary bundle (containing the qemu + llama subdirectories) and lay it
- * out under resources/bin/win32-<arch>/{qemu,llama}/ for dist:win to embed.
- *   - qemu: the sandbox command-execution engine;
- *   - llama: local large-model inference (llama-server.exe, Vulkan backend recommended: works across NVIDIA/AMD/Intel).
- * Downloads one zip at a time (bin/win32-<arch>.zip) and splits it by subdirectory after extraction. CDN first, falling back to authenticated OSS on failure.
+ * DOWNLOAD the Windows binary bundle and lay it out under resources/bin/win32-<arch>/qemu/ for dist:win to embed.
+ *   - qemu: the sandbox command-execution engine.
+ * llama is NOT in here. It is installed at runtime from Hugging Face (electron/llm/llamaInstaller.mjs), which is why
+ * PAYLOADS below has a single entry; an older zip may still carry a llama/ directory, and nothing lays it out.
+ * Downloads one zip (bin/win32-<arch>.zip) and copies the qemu subdirectory out of it. CDN first, falling back to authenticated OSS on failure.
  * Can run on any build host; only runs the --version self-test on Windows. For the matching upload see scripts/bundle-bin-win.mjs.
  *
  *   node scripts/download-bin-win.mjs

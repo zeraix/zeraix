@@ -13,7 +13,6 @@ import http from "node:http";
 import net from "node:net";
 import path from "node:path";
 import fs from "node:fs";
-import https from "node:https";
 import { spawn, execSync } from "node:child_process";
 import { app } from "electron";
 import {
@@ -22,6 +21,7 @@ import {
 } from "./localModels.mjs";
 import { ensureInstalled, installedBin, llamaVariant, fallbackVariant, detectCuda, llamaVersionDir, localFilesBase, installDir, llamaRootDir, installedLlamaVersions, migrateLegacyLayout } from "./llamaInstaller.mjs";
 import { downloadModel, searchModels, repoDetail, resolveRevision, TRUSTED_AUTHORS } from "./hfDownload.mjs";
+import { resolveHfEndpoint as resolveHfEndpointShared } from "./hfEndpoint.mjs";
 import { SUPPORTED_ARCHS, SEED_PREFIX, SEED_KVD, MAC_LLAMA_TAG } from "../versions.mjs";
 import { getAppConfig, setAppConfig } from "../appConfig.mjs";
 import { ensureSeed, seedSize, seedInstalled, seedKey } from "./seeds.mjs";
@@ -240,28 +240,10 @@ function moePools() {
   return out;
 }
 
-// Hugging Face endpoint used by -hf to fetch GGUF. Before startup, test huggingface.co reachability: if a direct connection fails (blocked / DNS poisoning / timeout)
-// switch to the mirror hf-mirror.com, otherwise connect directly to huggingface.co. The HF_ENDPOINT env var can force an override. The result is cached in this process.
-let _hfEndpoint = null;
-function reachable(url, timeoutMs = 2500) {
-  return new Promise((resolve) => {
-    let done = false;
-    const finish = (ok) => { if (!done) { done = true; resolve(ok); } };
-    try {
-      const req = https.get(url, { timeout: timeoutMs }, (res) => { res.resume(); finish(true); }); // any response received = reachable
-      req.on("error", () => finish(false));
-      req.on("timeout", () => { req.destroy(); finish(false); });
-    } catch { finish(false); }
-  });
-}
-async function resolveHfEndpoint() {
-  if (_hfEndpoint) return _hfEndpoint;
-  if (process.env.HF_ENDPOINT) { _hfEndpoint = process.env.HF_ENDPOINT; return _hfEndpoint; }
-  const ok = await reachable("https://huggingface.co/");
-  _hfEndpoint = ok ? "https://huggingface.co" : "https://hf-mirror.com";
-  pushLog(`[llama] HF endpoint: ${_hfEndpoint} (huggingface.co ${ok ? "reachable, connecting directly" : "unreachable -> using mirror"})\n`);
-  return _hfEndpoint;
-}
+// Hugging Face endpoint used by -hf to fetch GGUF: huggingface.co, or hf-mirror.com when it is unreachable (blocked / DNS
+// poisoning / timeout). Shared with the seed and llama-runtime downloads, so the probe runs once per process — see
+// hfEndpoint.mjs, which owns it because llamaInstaller needs the same answer and cannot import this module back.
+const resolveHfEndpoint = () => resolveHfEndpointShared((line) => pushLog(`[llama] ${line}\n`));
 
 const state = {
   proc: null,

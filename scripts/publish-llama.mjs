@@ -1,8 +1,14 @@
 #!/usr/bin/env node
 /**
- * PUBLISH: publishes the llama.cpp builds for each platform/backend (runtime files only) to OSS
- * (fronted by the docker.zeraix.com CDN), for the app to dynamically download and install per-platform
- * at runtime (see electron/llm/llamaInstaller.mjs).
+ * PUBLISH: publishes the llama.cpp builds for each platform/backend (runtime files only) to the Hugging Face
+ * repo Zeraix/llama-builds, for the app to dynamically download and install per-platform at runtime
+ * (see electron/llm/llamaInstaller.mjs).
+ *
+ * This used to upload to an Ali OSS bucket fronted by docker.zeraix.com. Hugging Face already hosts the model
+ * weights and the KV seeds, and the app already falls back to hf-mirror.com where huggingface.co is blocked —
+ * the very reachability problem the CDN was there to solve — so one host now serves all three and the bucket
+ * needs no credentials, no ACLs and no upkeep. Objects already published to OSS are LEFT IN PLACE: app versions
+ * that shipped pointing at the CDN still resolve them.
  *
  * For each variant: pull assets from the GitHub release (LLAMA_VERSION) → extract runtime files
  * (llama-server etc. + backend libraries)
@@ -20,7 +26,8 @@
  * After publishing, sync LLAMA_VERSION in electron/llm/llamaInstaller.mjs to this tag so the app will
  * download the new version.
  *
- * Requires OSS credentials (.env / sandbox/qemu/.env: OSS_ACCESS_KEY_ID/_SECRET/_BUCKET/_ENDPOINT/OSS_PREFIX?/OSS_ACL?).
+ * Requires the huggingface CLI (`pip install -U huggingface_hub` gives `hf`) and write access to the repo:
+ * `hf auth login`, or HF_TOKEN in the environment / .env / sandbox/qemu/.env.
  * SKIP_UPLOAD=1 only stages the package without uploading; to publish only some platforms: ONLY=macos-arm64,win-vulkan-x64.
  */
 import fs from "node:fs";
@@ -29,19 +36,22 @@ import path from "node:path";
 import https from "node:https";
 import { execFileSync } from "node:child_process";
 import AdmZip from "adm-zip";
-import OSS from "ali-oss";
 import { LLAMA_VERSION } from "../electron/versions.mjs";
 import { writeLlamaVersion } from "./vmVersion.mjs";
 
 const REPO = process.cwd();
+// Must match LLAMA_REPO in electron/llm/llamaInstaller.mjs — this writes what that reads.
+const HF_REPO = process.env.ZERAIX_LLAMA_BUILDS_REPO || "Zeraix/llama-builds";
 // Version tag: CLI argument / LLAMA_VERSION env var; accepts a bare tag (b9912) or a release-page URL (.../tag/b9912).
 const VERSION = (process.argv[2] || LLAMA_VERSION).replace(/^.*\/tag\//, "").replace(/\/+$/, "").trim();
 
 // variant → GitHub release asset-name suffix (one-to-one with the values of llamaInstaller.llamaVariant).
 // variant → { asset: GitHub asset-name suffix, extra?: extra asset to merge into the same directory (CUDA's cudart DLL package) }
+// No macOS entries, deliberately. Apple Silicon installs the FORK from GitHub releases (llamaInstaller.macForkAsset), so it
+// never looks here; and no Intel package is produced at all — see the mac target in electron-builder.yml, which is arm64-only
+// because an x64 build ships without native darwin-x64 binaries and leaves local models and the sandbox unusable. Publishing
+// macos-* therefore uploads ~40MB per release that nothing can ever download.
 const VARIANTS = {
-  "macos-arm64": { asset: "bin-macos-arm64.tar.gz" },
-  "macos-x64": { asset: "bin-macos-x64.tar.gz" },
   "win-vulkan-x64": { asset: "bin-win-vulkan-x64.zip" },
   "win-cpu-x64": { asset: "bin-win-cpu-x64.zip" }, // fallback when there is no Vulkan loader
   "win-cpu-arm64": { asset: "bin-win-cpu-arm64.zip" },
@@ -104,11 +114,22 @@ async function fetchExtract(rel, suffix, destDir) {
   return asset.name;
 }
 
+/** The huggingface CLI under whichever name is installed: `hf` since huggingface_hub 0.34, `huggingface-cli` before it. */
+function hfCli() {
+  for (const bin of ["hf", "huggingface-cli"]) {
+    try { execFileSync(bin, ["--help"], { stdio: "ignore" }); return bin; } catch { /* try the next name */ }
+  }
+  return null;
+}
+
 async function main() {
   const only = (env.ONLY || "").split(",").map((s) => s.trim()).filter(Boolean);
   const skip = /^(1|true|yes)$/i.test(env.SKIP_UPLOAD || "");
-  const haveOss = env.OSS_ACCESS_KEY_ID && env.OSS_ACCESS_KEY_SECRET && env.OSS_BUCKET && env.OSS_ENDPOINT;
-  const client = haveOss ? new OSS({ accessKeyId: env.OSS_ACCESS_KEY_ID, accessKeySecret: env.OSS_ACCESS_KEY_SECRET, bucket: env.OSS_BUCKET, region: env.OSS_ENDPOINT.replace(/\.aliyuncs\.com$/, ""), secure: true }) : null;
+  // Upload through the CLI rather than the HTTP API: these packages are LFS-sized (the CUDA one is ~600MB), and the CLI
+  // already speaks the LFS batch protocol, resumes, and hashes. Reimplementing that here would be the whole point of the
+  // library.
+  const cli = skip ? null : hfCli();
+  if (!skip && !cli) console.warn("[publish-llama] no huggingface CLI found (`pip install -U huggingface_hub`) — staging only, nothing will be uploaded");
 
   console.log(`[publish-llama] llama.cpp ${VERSION} → llama/${VERSION}/<variant>.tar.gz`);
   const rel = await get(`https://api.github.com/repos/ggml-org/llama.cpp/releases/tags/${VERSION}`, true);
@@ -145,19 +166,18 @@ async function main() {
     execFileSync("tar", ["-czf", outTar, "-C", stage, "."]);
     console.log(`[publish-llama] ${variant} staged ${kept} files → ${(fs.statSync(outTar).size / 1048576).toFixed(0)} MB`);
 
-    const key = `${env.OSS_PREFIX || ""}llama/${VERSION}/${variant}.tar.gz`;
-    if (skip || !client) { console.log(`[publish-llama] ${variant} not uploaded (SKIP_UPLOAD/no credentials) → ${outTar}  (key: ${key})`); continue; }
-    console.log(`[publish-llama] ${variant} uploading → oss://${env.OSS_BUCKET}/${key} …`);
-    // Multipart upload: the CUDA package is ~600MB and a single put would hit ali-oss's 60s timeout; multipart uses 10MB per part, well under the timeout.
-    await client.multipartUpload(key, outTar, {
-      partSize: 10 * 1024 * 1024,
-      headers: env.OSS_ACL ? { "x-oss-object-acl": env.OSS_ACL } : {},
-      progress: (p) => { process.stdout.write(`\r    upload ${Math.floor(p * 100)}%   `); },
-    });
-    process.stdout.write("\n");
+    const key = `llama/${VERSION}/${variant}.tar.gz`;
+    if (skip || !cli) { console.log(`[publish-llama] ${variant} not uploaded (SKIP_UPLOAD/no CLI) → ${outTar}  (path: ${key})`); continue; }
+    console.log(`[publish-llama] ${variant} uploading → ${HF_REPO}/${key} …`);
+    execFileSync(
+      cli,
+      ["upload", HF_REPO, outTar, key, "--repo-type", "model", "--commit-message", `llama ${VERSION}: ${variant}`,
+        ...(env.HF_TOKEN ? ["--token", env.HF_TOKEN] : [])],
+      { stdio: "inherit" }, // the CLI draws its own progress; let it through
+    );
     console.log(`[publish-llama] ${variant} OK → ${key}`);
   }
-  if (!skip && client && writeLlamaVersion(VERSION))
+  if (!skip && cli && writeLlamaVersion(VERSION))
     console.log(`[publish-llama] LLAMA_VERSION → ${VERSION} (written to electron/versions.json, please commit)`);
   console.log("[publish-llama] done.");
 }

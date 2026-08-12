@@ -1,10 +1,11 @@
 #!/usr/bin/env node
 /**
- * DOWNLOAD a single macOS binary package (containing the two subdirectories qemu + llama) and lay it out into
- * resources/bin/darwin-<arch>/{qemu,llama}/, to be bundled by dist:mac.
- *   - qemu: the sandbox command-execution engine (only needed on Apple Silicon);
- *   - llama: local large-model inference (llama-server, Metal backend).
- * Downloads one zip at a time (bin/darwin-<arch>.zip), then splits it by subdirectory into the respective resources directories.
+ * DOWNLOAD the macOS binary package and lay it out into resources/bin/darwin-<arch>/qemu/, to be bundled by dist:mac.
+ *   - qemu: the sandbox command-execution engine (only needed on Apple Silicon). Bundled rather than fetched at runtime
+ *     because HVF needs build-time signing and the com.apple.security.hypervisor entitlement.
+ * llama is NOT in here. It is installed at runtime from Hugging Face (electron/llm/llamaInstaller.mjs), which is why
+ * PAYLOADS below has a single entry; an older zip may still carry a llama/ directory, and nothing lays it out.
+ * Downloads one zip (bin/darwin-<arch>.zip) and copies the qemu subdirectory out of it.
  * CDN first (docker.zeraix.com, no credentials), falling back to authenticated OSS on failure. For the corresponding upload see scripts/bundle-bin-mac.mjs.
  *
  *   node scripts/download-bin-mac.mjs
@@ -80,7 +81,7 @@ try {
 }
 console.log(`[download-mac] downloaded ${(fs.statSync(zip).size / 1048576).toFixed(0)} MB`);
 
-// Extract into a temp directory, then lay out the qemu/ and llama/ subdirectories into their respective resources directories.
+// Extract into a temp directory, then copy each PAYLOADS subdirectory (qemu only) into its resources directory.
 const base = path.join(os.tmpdir(), `bin-darwin-${ARCH}.x`);
 fs.rmSync(base, { recursive: true, force: true });
 fs.mkdirSync(base, { recursive: true });
