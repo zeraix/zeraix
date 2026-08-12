@@ -68,6 +68,7 @@
     "framer-motion": "12.38.0",
     "highlight.js": "11.11.1",
     "js-tiktoken": "1.0.21",
+    "katex": "0.18.4",
     "lucide-react": "^0.577.0",
     "markdown-it": "14.1.1",
     "next": "16.3.0-preview.10",

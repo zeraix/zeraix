@@ -19,6 +19,12 @@ export interface SandboxStatus {
   mode: string;
   /** The execution engine id currently in effect (native / qemu). */
   active: string;
+  /**
+   * Whether the VM is up at all, independent of whether it is the active engine. Differs from
+   * `active === "qemu"` only in dev mode, which runs commands on the host but can still reach the guest
+   * per-command via `run_command({ sandbox: true })` — which is what `sandbox_tools` tells the model about.
+   */
+  available?: boolean;
   /** Host platform (process.platform: win32 / darwin / linux), used to describe the native environment in hint text. */
   hostPlatform?: string;
 }

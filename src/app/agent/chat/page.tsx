@@ -60,6 +60,7 @@ import {
   setWorkingDir,
 } from "@/lib/ai/toolkit";
 import { chatViaProxy, chatStreamViaProxy, isLlmProxyAvailable, isLlmStreamAvailable } from "@/lib/ai/llm";
+import { onServiceEvent, type ServiceEvent } from "@/lib/ai/services";
 import {
   buildLogMeta,
   isUsageLogEnabledSync,
@@ -2977,13 +2978,20 @@ function ChatAgent() {
   /**
    * Write a generated artifact into the working directory and return its absolute path (null when
    * tools are unavailable or the write fails — the caller treats the path as a bonus, never a
-   * precondition). fetch() handles both artifact shapes uniformly: a data: URL decodes locally, a
-   * vendor URL downloads once, which also rescues the pixels before the vendor link expires.
+   * precondition). Handles both artifact shapes: a data: URL decodes inline, a vendor URL downloads
+   * once, which also rescues the pixels before the vendor link expires.
+   *
+   * The download happens in the MAIN process, via saveAttachment's `url` source. It used to `fetch()`
+   * here and hand over the bytes, which worked only for the base64 dialect: an adapter that returns a
+   * hosted link instead (OpenAI's `data[0].url`, and wan-image always — see firstArtifact in
+   * generation/adapters.ts) produces a cross-origin URL, and the renderer has webSecurity on, so the
+   * fetch failed CORS and the catch below swallowed it. The image still appeared on screen, because an
+   * <img> tag is not CORS-bound, while nothing ever reached disk and the model got no path. Main has no
+   * such limit, and this also keeps a multi-MB base64 from crossing IPC.
    */
   const saveGeneratedArtifact = async (src: string, mime: string, prompt: string): Promise<string | null> => {
     if (!toolsReady) return null;
     try {
-      const bytes = await (await fetch(src)).arrayBuffer();
       // Name from the prompt so a directory of generated images stays readable; saveAttachment
       // sanitizes the name and de-duplicates collisions (-1/-2…), so no timestamp is needed.
       const slug =
@@ -2995,9 +3003,13 @@ function ChatAgent() {
           .slice(0, 6)
           .join("-") || "image";
       const ext = /png|jpeg|jpg|webp|gif/.exec(mime)?.[0].replace("jpeg", "jpg") ?? "png";
-      return await saveAttachment({ name: `generated-${slug}.${ext}`, bytes });
-    } catch {
-      return null; // The user already has the image on screen; a missing file is a degraded path, not a failure.
+      return await saveAttachment({ name: `generated-${slug}.${ext}`, url: src });
+    } catch (e) {
+      // The user already has the image on screen; a missing file is a degraded path, not a failure. Still
+      // logged rather than dropped: this returning null silently is what hid the CORS bug above, and the
+      // only other symptom is a path the model never mentions.
+      console.warn("[image_generation] could not save the artifact into the working directory:", e);
+      return null;
     }
   };
 
@@ -3043,7 +3055,9 @@ function ChatAgent() {
       `Generated the image with ${res.artifact.servedBy}. It is already displayed to the user — do not repeat the URL or embed it in markdown.` +
       (savedPath
         ? ` The file is saved in the working directory at ${savedPath} — use that path if you need to process it further (edit, convert, compose into a video); do not redraw it in code.`
-        : "")
+        : // Said outright rather than left to silence. The model otherwise assumes the usual path exists and
+          // goes looking for a file that was never written, or invents a plausible-looking one.
+          " It could NOT be written to the working directory, so there is no file to process — do not guess a path for it. If the user needs it on disk, say the save failed.")
     );
   };
 
@@ -3198,6 +3212,18 @@ function ChatAgent() {
   // The implementation of "edit user message / regenerate": updated to the latest closure on every render (capturing the latest send / states),
   // so the stably-referenced regenerate / editUser below call the latest version when clicked (avoiding useCallback capturing a stale send).
   const resendRef = useRef<(displayIndex: number, newText: string, feedbackNudge?: string | null) => void>(() => {});
+
+  /**
+   * A `notify` background job finishing wakes the conversation back up. Same late-bound-ref shape as resendRef
+   * and for the same reason: the subscription is mounted once, but it has to reach the CURRENT `send`.
+   *
+   * The event may land at any moment, including while a round is generating or while the user is reading a
+   * different conversation — so it is routed exactly like a user message rather than sent straight out:
+   * idle here → send now; busy → the FIFO queue drains it when this round ends; another conversation → the
+   * queue holds it until that one is opened again. Nothing new has to be taught about concurrency.
+   */
+  const jobFinishedRef = useRef<(evt: ServiceEvent) => void>(() => {});
+  useEffect(() => onServiceEvent((evt) => jobFinishedRef.current(evt)), []);
 
   // Resend from "the displayIndex-th display message (must be a user message)": truncate this point and everything after it
   // (the display / wire / persistence are aligned by "user message ordinal" — user messages correspond one-to-one across all three), then resend with newText.
@@ -4216,6 +4242,28 @@ function ChatAgent() {
       // Interruption (the user clicked "stop") does not resume — cancel() clears this conversation's queue at the same time.
       if (!ctrl.signal.aborted) processQueue(genConvId);
     }
+  };
+
+  // Refreshed every render alongside resendRef, for the same closure reason. See the declaration above.
+  jobFinishedRef.current = (evt) => {
+    // `reason` is absent on events from an older main process, so a missing one is never treated as a
+    // completion — and only jobs the model asked to be woken for get here. Everything else (a dev server the
+    // user stopped, a job nobody is waiting on) still just updates the running-services indicator.
+    if (evt.type !== "stopped" || evt.reason !== "exited" || !evt.notify) return;
+    const convId = convIdRef.current;
+    if (!convId) return;
+    const ok = evt.code == null ? null : evt.code === 0;
+    const outcome = ok === null ? "finished" : ok ? "finished successfully" : `failed with exit code ${evt.code}`;
+    const text =
+      `[Background job ${outcome}] \`${evt.command ?? "(unknown command)"}\`\n\n` +
+      (evt.tail ? `Its output ended with:\n${evt.tail}\n\n` : "There was no output.\n\n") +
+      "This is an automatic notification, not the user speaking — they may have asked about something else " +
+      "since. Pick the waiting task back up from here. If it failed, report what went wrong instead of " +
+      "re-running it blindly.";
+    // Idle → go now; mid-round → the queue sends it when this round ends. Deliberately the same road a user
+    // message takes, so an arriving job cannot interleave into a turn that is half-built.
+    if (useAgentChatStore.getState().generating[convId]) enqueueMessage(convId, text, []);
+    else void send({ text, attachments: [], _fromQueue: true });
   };
 
   // On every render, refresh the "resend from a user message" implementation, capturing the latest send / state (see the note at the resendRef declaration).

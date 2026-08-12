@@ -1,12 +1,12 @@
 {
   "llama": "b9946",
   "vm": {
-    "amd64": "sha-d37b5e4d3c15",
+    "amd64": "sha-56012493f5e0",
     "arm64": "sha-e45397068284"
   },
   "seedPrefix": {
-    "daily": "48884a0bad4fbd79",
-    "dev": "e9eaa64fbfe2ec5c"
+    "daily": "d075a53e54545671",
+    "dev": "42bb246e27b3c9b4"
   },
   "macLlama": {
     "tag": "mac-v8",

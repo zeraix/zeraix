@@ -7,6 +7,18 @@ export interface ServiceEvent {
   pid: number;
   url?: string;
   command?: string;
+  /**
+   * How a "stopped" ended: the process finished on its own, versus being killed by the user or by shutdown.
+   * Absent on events from an older main process, which is why nothing may treat missing as "exited".
+   */
+  reason?: "exited" | "stopped";
+  /** Exit code where the engine can recover one. Null in the sandbox: a `setsid …&` job has no shell left to reap it. */
+  code?: number | null;
+  signal?: string | null;
+  /** Last few KB of the job's output — for a finished install this is the result, not a detail. */
+  tail?: string;
+  /** The job was started with `notify`, i.e. the model asked to be woken when it finished. */
+  notify?: boolean;
 }
 
 interface AiToolsServiceBridge {

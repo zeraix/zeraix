@@ -15,7 +15,7 @@
  * one it means in the only field it controls. A reverse index resolves the name back to a connection,
  * so a server whose tool names contain characters providers reject can still be addressed.
  */
-import { CONNECT_TIMEOUT_MS, getServer, listServers } from "./config.mjs";
+import { CONNECT_TIMEOUT_DOWNLOAD_MS, CONNECT_TIMEOUT_MS, getServer, listServers, usesPackageRunner } from "./config.mjs";
 
 /**
  * The SDK is loaded on first connect, not at import time. aiToolkit imports this module, and
@@ -262,7 +262,11 @@ export function connectServer(id) {
       // is that it never rejects -- a caller awaiting it would otherwise get an unhandled rejection
       // instead of a server marked `error`.
       const transport = buildTransport(sdk, cfg, e);
-      await client.connect(transport, { timeout: CONNECT_TIMEOUT_MS });
+      // npx/uvx download the package — and possibly a runtime — before the server says a word, so they
+      // get the longer ceiling. Everything else keeps the short one. See config.mjs for the reasoning.
+      await client.connect(transport, {
+        timeout: usesPackageRunner(cfg) ? CONNECT_TIMEOUT_DOWNLOAD_MS : CONNECT_TIMEOUT_MS,
+      });
       e.client = client;
       e.transport = transport;
       e.pid = cfg.kind === "stdio" ? (transport.pid ?? null) : null;

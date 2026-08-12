@@ -9,8 +9,15 @@
  * Links all open in a new tab (target=_blank + rel=noreferrer noopener).
  * Typography uses Tailwind child-selector variants, reusing the project's design-system tokens (primary / surface / ink / line…),
  * automatically adapting to light/dark and the accent color.
+ *
+ * Math is rendered with KaTeX through the rules added below — see the note above them for which delimiters
+ * are recognised and, more importantly, which deliberately are not.
  */
 import MarkdownIt from "markdown-it";
+import katex from "katex";
+// Local stylesheet, never a CDN: this ships as a packaged Electron app, and the cn edition runs where CDNs
+// are unreliable. Importing it here lets the bundler emit KaTeX's woff2 fonts as build assets.
+import "katex/dist/katex.min.css";
 import { memo } from "react";
 
 // Module-level singleton, avoiding rebuilding the parser on every render.
@@ -31,6 +38,100 @@ md.renderer.rules.link_open = (tokens, idx, options, env, self) => {
   token.attrSet("rel", "noreferrer noopener");
   return defaultLinkOpen(tokens, idx, options, env, self);
 };
+
+/**
+ * Math, via KaTeX.
+ *
+ * Recognised: `$$…$$` and `\[…\]` as display math, `\(…\)` and `$…$` inline.
+ *
+ * Bare `$…$` was left out at first, on the grounds that "it costs $5 and $10 to ship" would silently become
+ * an equation in a general chat window. That was the wrong trade: models write `$\frac{1}{6}$ 池/小时` inline
+ * constantly, so refusing it left literal LaTeX all over ordinary answers — a certain, frequent bug traded
+ * against a rare one. It is accepted under the guards in mathInlineDollar below, which reject the currency
+ * shape rather than the delimiter.
+ *
+ * All three are INLINE rules rather than block rules, which is what lets `$$…$$` work both on a line of its
+ * own (the common case) and mid-sentence. Display mode renders as `<span class="katex-display">`, a span, so
+ * it stays valid inside the paragraph markdown-it wraps around it.
+ *
+ * Registered BEFORE markdown-it's `escape` rule on purpose: `(` and `[` are CommonMark-escapable, so left to
+ * run first that rule would turn `\(` into a literal `(` and the delimiter would never be seen.
+ */
+function renderMath(latex: string, displayMode: boolean): string {
+  try {
+    return katex.renderToString(latex, {
+      displayMode,
+      // Render KaTeX's own red error text in place instead of throwing: a model typo in one formula must not
+      // blank out the whole message, and showing the broken source is what lets anyone see why.
+      throwOnError: false,
+      // The toolchain answers in Chinese, and `\text{ 小时}` — CJK inside \text — is precisely what strict mode
+      // complains about. It is valid and common here.
+      strict: false,
+      // No \htmlClass / \href style escapes out of KaTeX into raw markup. `html:false` above exists to keep
+      // model output from injecting anything; this keeps that true through the math path too.
+      trust: false,
+    });
+  } catch {
+    // Anything KaTeX could not handle at all falls back to the literal source, escaped.
+    return md.utils.escapeHtml(latex);
+  }
+}
+
+function addMathRule(name: string, open: string, close: string, displayMode: boolean) {
+  md.inline.ruler.before("escape", name, (state, silent) => {
+    const start = state.pos;
+    if (!state.src.startsWith(open, start)) return false;
+    const from = start + open.length;
+    const end = state.src.indexOf(close, from);
+    if (end < 0) return false; // unterminated → not math, leave the text alone
+    const latex = state.src.slice(from, end);
+    if (!latex.trim()) return false; // `$$$$` is not an equation
+    if (!silent) state.push(name, "math", 0).content = latex;
+    state.pos = end + close.length;
+    return true;
+  });
+  md.renderer.rules[name] = (tokens, idx) => renderMath(tokens[idx].content, displayMode);
+}
+
+// `$$` MUST be registered before the single-`$` rule below: ruler.before("escape", …) appends in call order
+// ahead of `escape`, so registering `$$` first is what stops `$…$` claiming the first half of a `$$…$$`.
+addMathRule("math_block_dollar", "$$", "$$", true);
+addMathRule("math_block_bracket", "\\[", "\\]", true);
+addMathRule("math_inline_paren", "\\(", "\\)", false);
+
+/**
+ * `$…$` inline math, with the guards that separate an equation from a price.
+ *
+ * Three tests, all of which real inline math passes and the currency shape fails:
+ *  - the opening `$` is followed by non-whitespace, and the closing `$` is preceded by non-whitespace, so a
+ *    delimiter has to hug its content. This alone kills "$5 and $10 to ship": the only candidate closer has
+ *    a space before it, and no other `$` follows.
+ *  - the closing `$` is not followed by a digit, which catches the run-together "$5+$3".
+ *  - no newline inside. Inline math does not span lines, and without this one stray `$` in a long message
+ *    could swallow a paragraph before finding a partner.
+ * A backslash-escaped `\$` is never a delimiter — markdown-it's own escape rule consumes it before this rule
+ * sees it as an opener, and the closer scan skips it explicitly.
+ */
+md.inline.ruler.before("escape", "math_inline_dollar", (state, silent) => {
+  const src = state.src;
+  const start = state.pos;
+  if (src[start] !== "$" || src.startsWith("$$", start)) return false;
+  if (!src[start + 1] || /\s/.test(src[start + 1])) return false;
+  let end = -1;
+  for (let i = start + 1; i < src.length; i++) {
+    if (src[i] !== "$" || src[i - 1] === "\\" || /\s/.test(src[i - 1])) continue;
+    end = i;
+    break;
+  }
+  if (end < 0) return false;
+  if (/[0-9]/.test(src[end + 1] ?? "")) return false;
+  const latex = src.slice(start + 1, end);
+  if (!latex.trim() || latex.includes("\n")) return false;
+  if (!silent) state.push("math_inline_dollar", "math", 0).content = latex;
+  state.pos = end + 1;
+  return true;
+});
+md.renderer.rules.math_inline_dollar = (tokens, idx) => renderMath(tokens[idx].content, false);
 
 // Wrap tables in a horizontal-scroll container: overly wide tables scroll horizontally within the container instead of breaking out of the message block.
 md.renderer.rules.table_open = () => '<div class="md-table-wrap"><table>';
@@ -67,6 +168,10 @@ const PROSE = [
   "[&_th]:px-2.5 [&_th]:py-1.5 [&_th]:text-left [&_th]:font-semibold [&_th]:text-ink",
   "[&_tbody_tr]:border-b [&_tbody_tr]:border-line [&_tbody_tr:last-child]:border-0",
   "[&_td]:px-2.5 [&_td]:py-1.5 [&_td]:align-top [&_td]:text-ink-muted",
+  // Display math: a long equation scrolls inside its own strip rather than widening the message bubble,
+  // the same rule the tables above follow. overflow-y stays hidden so tall fractions are not given a
+  // spurious vertical scrollbar by the horizontal one.
+  "[&_.katex-display]:my-2 [&_.katex-display]:overflow-x-auto [&_.katex-display]:overflow-y-hidden [&_.katex-display]:py-0.5",
   // Emphasis
   "[&_strong]:font-semibold [&_strong]:text-ink",
   "[&_img]:my-1 [&_img]:max-w-full [&_img]:rounded-lg",

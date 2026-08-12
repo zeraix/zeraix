@@ -18,7 +18,11 @@
  *   unsupported(reason) | disabled | starting → ready | error(reason)
  * Initialization directly creates the single long-lived VM (mounting the shared root ∪ folders explicitly
  * chosen in the past) —— startup itself is the availability check, so the first command waits nothing extra.
- * The sandbox is only switched in when ready and in "daily" mode; dev mode always stays native. The VM
+ * The sandbox is only switched in as the DEFAULT engine when ready and in "daily" mode; dev mode keeps
+ * running commands on the host, because a dev-mode working directory is one of the user's real projects
+ * and its toolchain (git, node_modules, installed SDKs) is the host's. Dev mode can still reach the VM
+ * per-command via getSandboxEngine() — that is what `run_command({ sandbox: true })` uses to get at the
+ * image's document/media toolchain, which exists nowhere on the host. The VM
  * binaries ship with the app and the rootfs is downloaded on first run (see sandbox/qemu/README).
  *
  * Configuration (the [sandbox] section of app.config, all optional):
@@ -61,7 +65,7 @@ const DEFAULTS = {
 
 let sandbox = null; // qemu engine module loaded once ready
 let ready = false;
-let mode = "daily"; // synced from the renderer via setSandboxMode; the sandbox only serves "daily" mode
+let mode = "daily"; // synced from the renderer via setSandboxMode; only "daily" gets the sandbox as its DEFAULT engine
 let initPromise = null;
 let disposing = false; // during intentional shutdown/restart: ignore the ensuing VM exit callback (not treated as a crash)
 const loaded = [native]; // loaded engine instances (iterated in full on stop/cleanup)
@@ -78,7 +82,7 @@ export function onSandboxStatus(fn) {
 
 /** Current sandbox status (for the renderer's initial sync + building the system prompt). */
 export function getSandboxStatus() {
-  return { ...status, mode, active: getEngine().id, hostPlatform: process.platform };
+  return { ...status, mode, active: getEngine().id, available: !!(ready && sandbox), hostPlatform: process.platform };
 }
 
 function setStatus(phase, extra = {}) {
@@ -115,7 +119,8 @@ function handleVmExit(code, signal, stderr = "") {
   console.warn(`[sandbox] VM exited unexpectedly (${how}): ${why}; falling back to native`);
 }
 
-/** The renderer syncs the current mode (daily / dev). dev mode routes back to native immediately. */
+/** The renderer syncs the current mode (daily / dev). dev mode routes the DEFAULT engine back to native
+ *  immediately; the VM stays up and reachable through getSandboxEngine(). */
 export function setSandboxMode(m) {
   mode = m === "dev" ? "dev" : "daily";
   return getSandboxStatus();
@@ -194,8 +199,11 @@ async function resolveMounts(opts) {
   try {
     const { loadIndex } = await import("../../store/conversationStore.mjs");
     const { projects } = await loadIndex();
+    // Both modes: a dev-mode project's directory has to be in the mount set too, or a `sandbox: true`
+    // command could not see the files it was asked to convert. (cwd outside the set is merged on demand —
+    // see the note above bwrapFlags in qemu.mjs — so this only pre-seeds; it is not what makes it work.)
     extraMounts = projects
-      .filter((p) => p?.mode === "daily" && typeof p?.workdir === "string" && p.workdir)
+      .filter((p) => typeof p?.workdir === "string" && p.workdir)
       .filter((p) => fs.existsSync(p.workdir))
       .sort((a, b) => (a.createdAt ?? 0) - (b.createdAt ?? 0))
       .map((p) => p.workdir);
@@ -283,9 +291,23 @@ export async function sandboxVmInfo() {
   try { const m = await import("./qemu.mjs"); return m.sandboxVmInfo(); } catch { return null; }
 }
 
-/** Current engine (synchronous). qemu only when ready and in "daily" mode, otherwise always native. */
+/** Current DEFAULT engine (synchronous). qemu only when ready and in "daily" mode, otherwise always native. */
 export function getEngine() {
   return ready && sandbox && mode === "daily" ? sandbox : native;
+}
+
+/**
+ * The sandbox engine itself, regardless of mode — null when the VM is not up.
+ *
+ * Separate from getEngine() on purpose. getEngine answers "where does a command go by default", and in dev
+ * mode that must stay native: the working directory is one of the user's real projects, built against the
+ * host's git / node_modules / SDKs, and silently running its build inside a Debian guest would break it.
+ * This answers the different question "is the VM there if a caller explicitly wants it", which is what lets
+ * dev mode use the image's document/media toolchain (imagemagick, ffmpeg, pandoc, OCR) — software that is
+ * only ever installed in the guest, so there is no host fallback to prefer.
+ */
+export function getSandboxEngine() {
+  return ready && sandbox ? sandbox : null;
 }
 
 /** Backward-compatible legacy diagnostics interface: { id, reason }. */

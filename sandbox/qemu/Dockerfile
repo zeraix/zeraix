@@ -63,6 +63,24 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       make tmux bc \
  && rm -rf /var/lib/apt/lists/*
 
+# ── Language runtimes: Node.js and Java (Python is above) ────────────────────
+# The three runtimes the agent is asked to run code in. Python was already here — the `python3`
+# interpreter above plus the /opt/venv toolchain below — so this block adds the other two.
+#
+# From apt, not NodeSource / Adoptium: both are carried by $APT_MIRROR, which is the whole reason a
+# China build is fast, and neither upstream is mirrored there. The cost is that the suite chooses the
+# versions rather than us. Nothing downstream hardcodes them — `sandbox_tools` reports what the guest
+# actually has (see electron/tools/sandbox/inventory.mjs) — so a suite bump needs no code change.
+#
+# The JDK, not a JRE: an agent asked to work in Java has to compile, not just run.
+#
+# Roughly 300 MB of image, which every user downloads on first run. That is the real price of this
+# block; drop `default-jdk-headless` first if the image ever has to shrink.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      nodejs npm \
+      default-jdk-headless \
+ && rm -rf /var/lib/apt/lists/*
+
 # uv (ultra-fast installer). Pin a version for reproducible builds.
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /usr/local/bin/
 

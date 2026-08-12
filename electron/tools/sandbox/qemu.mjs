@@ -294,9 +294,13 @@ function bwrapFlags(cwd) {
     //               coerces C -> C.UTF-8 on its own (PEP 538), the native tools do not.
     //   PYTHONUNBUFFERED  every command's stdout is redirected to a log file, so block buffering would hold a long-running
     //               script's output back until it exits instead of streaming it.
+    //   JAVA_HOME   `java` and `javac` are on PATH without it, but Maven, Gradle and most JVM build scripts read JAVA_HOME and
+    //               fail outright when it is unset. /usr/lib/jvm/default-java is the stable symlink java-common maintains, so
+    //               this survives the suite moving to a new JDK release.
     "--setenv", "PYTHONPATH", "/opt/ocr",
     "--setenv", "LANG", "C.UTF-8",
     "--setenv", "PYTHONUNBUFFERED", "1",
+    "--setenv", "JAVA_HOME", "/usr/lib/jvm/default-java",
     ...binds, "--chdir", chdir,
     // NOT --unshare-user: bwrap runs as root in the guest, and a user namespace makes the 9p
     // share (security_model=none) refuse the bind source with EPERM. bwrap-as-root still confines
@@ -555,6 +559,49 @@ const pickPort = (s) => {
  * is reported, not run on the host — same reasoning as sandboxFailure above, and a long-lived service escaping the sandbox is
  * worse than a one-shot command doing so.
  */
+/**
+ * Watch a guest background job and report how it ended.
+ *
+ * The host has no child process to hang an `exit` handler on — the job lives inside the VM behind the guest
+ * agent — so completion has to be polled. `kill -0` is the cheapest liveness question there is, and 3s is
+ * frequent enough that a finished install is announced while the user still cares, without making the guest
+ * agent busy for the hours a dev server may run.
+ *
+ * Only started for `notify` jobs. Every other background command keeps the previous behaviour, where nobody
+ * is listening for the end and polling would be pure cost.
+ */
+const watchers = new Map(); // key → interval id
+function watchGuestJob({ key, gpid, cmd, log }) {
+  if (watchers.has(key)) return;
+  const timer = setInterval(async () => {
+    if (!vm) return stopWatching(key);
+    try {
+      await vm.guest.exec("/bin/kill", ["-0", String(gpid)]);
+      return; // still running
+    } catch {
+      /* gone → fall through and report */
+    }
+    stopWatching(key);
+    let tail = "";
+    // The exit CODE is not recoverable: the job was launched with `setsid … &` and its shell is long gone, so
+    // there is nothing left to reap. The log tail is what remains, and it is what the model actually reads.
+    try {
+      const r = await vm.guest.exec("/bin/tail", ["-c", "4000", log]);
+      tail = String(r.out ?? "").trim();
+    } catch {
+      /* log unreadable (VM restarted, /tmp cleared) — report completion without it */
+    }
+    emitService({ type: "stopped", pid: key, reason: "exited", command: cmd, code: null, tail, notify: true });
+  }, 3000);
+  timer.unref?.(); // a pending poll must never hold the app open at quit
+  watchers.set(key, timer);
+}
+function stopWatching(key) {
+  const t = watchers.get(key);
+  if (t) clearInterval(t);
+  watchers.delete(key);
+}
+
 export async function startBackground(cmd, opts = {}) {
   if (!vm) return sandboxFailure("vm not ready");
   const cwd = opts.cwd;
@@ -602,6 +649,10 @@ export async function startBackground(cmd, opts = {}) {
   }
 
   const alive = gpid > 0;
+  // Watch keyed by the forwarded port when there is one, so a later stopProcess cancels the same entry; a
+  // port-less job (an install — the case notify exists for) is keyed by its guest pid instead, which is why
+  // this cannot simply reuse `procs`, whose keys are host ports.
+  if (alive && opts.notify) watchGuestJob({ key: guestPort || gpid, gpid, cmd, log });
   const headline = alive
     ? `✅ Service started in the background inside the sandbox${url ? `, and forwarded to the host: ${url}` : guestPort ? ` (guest port ${guestPort}, forwarding failed)` : ""}.`
     : "⚠️ The process failed to start.";
@@ -621,6 +672,7 @@ export function stopProcess(pid) {
   const p = procs.get(key);
   if (!p) return false;
   procs.delete(key);
+  stopWatching(key); // a user-initiated stop is not a completion; do not wake the model for it
   vm?.ports.removePort(p.hostPort).catch(() => {});
   // setsid makes gpid the process-group leader; a negative kill terminates the whole group, falling back to the single process on failure.
   vm?.guest
@@ -657,6 +709,9 @@ export function prewarm(cwd) {
 
 /** Exit cleanup: remove all forwards + shut down the VM. */
 export function dispose() {
+  // Before stopAll: a port-less watched job is not in `procs`, so nothing else would ever clear its poller,
+  // and once vm is null every tick would just churn against a dead guest.
+  for (const key of [...watchers.keys()]) stopWatching(key);
   try { stopAll(); } catch { /* best effort */ }
   try { ninep?.close(); } catch { /* best effort */ } finally { ninep = null; }
   try { vm?.ports.quit(); } catch { /* best effort */ }

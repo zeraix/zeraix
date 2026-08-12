@@ -57,6 +57,9 @@ const RISK: ReadonlyArray<readonly [string, RiskLevel]> = [
   ["refine_question", "low"],
   ["mcp_tools", "low"],
   ["mcp_discover", "low"],
+  // Runs a command in the guest, but a fixed read-only one (`command -v` and an import check) that the caller
+  // cannot influence — `query` only filters the reply. Discovery, like the two above.
+  ["sandbox_tools", "low"],
 
   // ── Mutating but recoverable, or outbound but observable. ──────────────────────────────
   ["write_file", "medium"],

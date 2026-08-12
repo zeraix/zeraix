@@ -200,6 +200,7 @@ const TOOL_LABELS: Record<string, string> = {
   mcp_discover: "Finding MCP servers",
   mcp_connect: "Connecting MCP server",
   mcp_tools: "Checking connected integrations",
+  sandbox_tools: "Checking sandbox toolchain",
   spawn_subagents: "Starting sub-agents",
   join_subagents: "Waiting for sub-agents",
 };

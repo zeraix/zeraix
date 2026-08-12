@@ -43,6 +43,12 @@ export function decodeConsole(buf) {
   }
 }
 
+/** Last few KB of a background process's output, decoded — what a completion notice reports back to the model. */
+export function tailOf(buf, max = 4000) {
+  const s = decodeConsole(buf).trim();
+  return s.length > max ? `…\n${s.slice(-max)}` : s;
+}
+
 /** Foreground execution: exec + timeout + output cap, returns decoded { stdout, stderr, code, killed }, does not throw. */
 export async function run(cmd, { cwd, timeoutMs, maxBuffer } = {}) {
   try {
@@ -71,7 +77,7 @@ export async function run(cmd, { cwd, timeoutMs, maxBuffer } = {}) {
  * output (returns early once a local address / readiness keyword appears, otherwise waits up to 8s) while the
  * process keeps running in the background. Returns the startup output + a pid hint.
  */
-export function startBackground(cmd, { cwd } = {}) {
+export function startBackground(cmd, { cwd, notify } = {}) {
   return new Promise((resolve) => {
     let child;
     try {
@@ -87,7 +93,7 @@ export function startBackground(cmd, { cwd } = {}) {
       return;
     }
     const pid = child.pid;
-    if (pid) bgProcs.set(pid, { command: cmd, url: "" });
+    if (pid) bgProcs.set(pid, { command: cmd, url: "", notify: !!notify });
     let buf = Buffer.alloc(0);
     const onData = (d) => {
       buf = Buffer.concat([buf, d]);
@@ -99,10 +105,22 @@ export function startBackground(cmd, { cwd } = {}) {
       if (pid) bgProcs.delete(pid);
       resolve(`Background startup failed: ${e?.message || e}`);
     });
-    child.on("exit", () => {
+    child.on("exit", (code, signal) => {
       if (pid && bgProcs.has(pid)) {
         bgProcs.delete(pid);
-        emitService({ type: "stopped", pid }); // process ended → notify the renderer to remove it
+        // Still `stopped`, so the running-services indicator keeps working unchanged; the extra fields are
+        // what a `notify` job needs — the model has to learn whether the install SUCCEEDED and what it said,
+        // and a bare "the pid is gone" cannot answer either.
+        emitService({
+          type: "stopped",
+          pid,
+          reason: "exited",
+          command: cmd,
+          code: code ?? null,
+          signal: signal ?? null,
+          tail: tailOf(buf),
+          notify: !!notify,
+        });
       }
     });
     child.unref?.();
@@ -126,8 +144,10 @@ export function startBackground(cmd, { cwd } = {}) {
       const exited = !pid || !bgProcs.has(pid);
       if (READY.test(out) || exited || Date.now() - startedAt > 8000) {
         clearInterval(timer);
-        child.stdout?.off("data", onData);
-        child.stderr?.off("data", onData);
+        // The `data` handlers stay attached on purpose. They used to be removed here, which both threw away
+        // the output a completion notice reports and left the pipes with no reader — a chatty process then
+        // fills the OS pipe buffer and blocks on write. `buf` is capped at 64 KB above, so holding on costs
+        // a bounded amount of memory for the life of the process.
         const alive = pid && bgProcs.has(pid);
         const url = pickUrl(out);
         // Record the address and notify the renderer to display it (GlobalNotifications shows "running project + address + stop").

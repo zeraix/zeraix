@@ -22,10 +22,12 @@ import { shell } from "electron";
 import { llmChat } from "../llm/proxy.mjs";
 import {
   getEngine,
+  getSandboxEngine,
   initEngine as engineInit,
   listProcesses as engineListProcesses,
   stopProcess as engineStopProcess,
 } from "./sandbox/engine.mjs";
+import { sandboxInventory } from "./sandbox/inventory.mjs";
 import { ensureProjectMemory, summarise as summariseMemory } from "./projectMemory/index.mjs";
 import { rememberProject } from "./projectMemory/remember.mjs";
 import { noteFileRead, resetObservations } from "./projectMemory/observations.mjs";
@@ -119,6 +121,40 @@ const READ_MAX_CHARS = 200_000; // read_file per-call ceiling; a line cap cannot
 const MAX_MATCHES = 200; // search_* result cap
 const MAX_LINE_LEN = 400; // search_in_files per-line echo cap
 const CMD_TIMEOUT_MS = 60_000; // run_command timeout
+/**
+ * The ceiling for commands whose job IS to fetch over the network.
+ *
+ * `npm install` on a cold cache routinely runs for several minutes, so at 60s it was killed every time,
+ * half-way through writing node_modules. What the model does next is the visible damage: the kill notice
+ * below used to read as "a GUI or service may already have started", which is nonsense for an install, so
+ * it would re-run it, or push it to the background and then poll again and again asking whether it had
+ * finished. Both cost far more of the user's time than simply waiting would have.
+ *
+ * A ceiling, not a delay: a warm `npm install` still returns in two seconds. The trade is that a fetch
+ * command wedged on an unreachable mirror now takes ten minutes to report instead of one — acceptable,
+ * because the alternative failed the common case in order to fail the rare one faster.
+ */
+const CMD_FETCH_TIMEOUT_MS = 600_000;
+/**
+ * Commands that download. Matched on the command line because there is nothing else to go on: output is
+ * buffered until exit (see the engine contract), so an idle-based timeout — which would need no list at
+ * all — is not available until run_command streams. Deliberately narrow: a false positive here only
+ * delays reporting a hung command, but a false negative kills a legitimate install mid-write.
+ */
+const FETCH_COMMAND_PATTERNS = [
+  /\b(npm|pnpm|yarn|bun)\s+(install|i|ci|add|update|up|rebuild)\b/i,
+  /\b(npx|uvx|bunx|pipx)\b/i, // package runners fetch on first use
+  /\b(pip3?|uv)\s+(install|sync|add|pip\s+install)\b/i,
+  /\b(apt|apt-get|dnf|yum|apk|brew)\s+(install|update|upgrade|add)\b/i,
+  /\bgit\s+(clone|fetch|pull|submodule)\b/i,
+  /\b(cargo|go|gem|composer|mvn|gradle|dotnet|bundle)\s+(install|build|get|add|fetch|restore|tidy|download|mod)\b/i,
+  /\bdocker\s+(pull|build)\b/i,
+  /\bwget\b/i,
+  // curl only when it is downloading TO A FILE. Bare `curl` is just as often a one-second poke at a local
+  // endpoint, and handing that the ten-minute ceiling would mean a black-holed request hangs the turn.
+  /\bcurl\b[^|]*(\s-O\b|\s-o\s|--output\b|--remote-name\b)/i,
+];
+const isFetchCommand = (cmd) => FETCH_COMMAND_PATTERNS.some((re) => re.test(cmd));
 const CMD_MAX_BUFFER = 10 * 1024 * 1024; // run_command output cap: 10MB
 // web_search / fetch_url (headless HTTP in the main process; no visible browser).
 const WEB_UA =
@@ -1213,7 +1249,7 @@ const handlers = {
     );
   },
 
-  async run_command({ command, background }) {
+  async run_command({ command, background, sandbox, notify }) {
     await ensureWorkdir();
     const cmd = String(command ?? "").trim();
     if (!cmd) throw new Error("command must not be empty");
@@ -1236,15 +1272,43 @@ const handlers = {
     // Through the current execution engine (native = run directly on the host; qemu = isolated
     // execution inside a VM). When the engine differs from last time (sandbox became ready mid-run
     // / degraded / switched mode), prepend the environment-switch note before the result.
-    const engine = getEngine();
-    const note = engineSwitchNote(engine.id);
-    if (background ?? looksLongRunning) {
-      const msg = await engine.startBackground(cmd, { cwd: WORKDIR });
-      return `${note}${msg}`;
+    //
+    // `sandbox: true` overrides that choice for THIS command only. It exists for dev mode, where the
+    // default engine is the host but the document/media toolchain the model needs (imagemagick, ffmpeg,
+    // pandoc, OCR) is installed only in the guest image. The working directory is the same either way —
+    // it is mounted into the VM — so the artifacts land where the file tools can read them.
+    const guest = sandbox === true ? getSandboxEngine() : null;
+    if (sandbox === true && !guest) {
+      return (
+        "The Linux sandbox is not running, so this command cannot be run inside it. Its toolchain " +
+        "(imagemagick, ffmpeg, pandoc, OCR, …) is not installed on this machine either — do not fall back " +
+        "to running those tools on the host. Tell the user the sandbox needs to be started from the " +
+        "sandbox status indicator, or re-run the command without sandbox:true if the host can do the job."
+      );
     }
+    const engine = guest ?? getEngine();
+    // Only the DEFAULT engine's identity is tracked: a one-off `sandbox: true` call is not an environment
+    // switch, and letting it move lastRunEngineId would make the NEXT ordinary command announce a switch
+    // back to a host it never left.
+    const note = guest ? "" : engineSwitchNote(engine.id);
+    if (background ?? looksLongRunning) {
+      const wantsNotify = notify === true;
+      const msg = await engine.startBackground(cmd, { cwd: WORKDIR, notify: wantsNotify });
+      // The whole point of notify is that the model STOPS here. Said explicitly, because the default reflex
+      // after starting something in the background is to poll it, and polling is exactly what this replaces.
+      const wait = wantsNotify
+        ? "\n\nYou asked to be notified, so this command will announce its own completion with its output. " +
+          "Do NOT poll it, re-run it, sleep, or check whether it has finished — you will be told. End your turn now: " +
+          "tell the user it is running and that you will continue when it lands, then answer anything else they ask " +
+          "in the meantime."
+        : "";
+      return `${note}${msg}${wait}`;
+    }
+    const fetches = isFetchCommand(cmd);
+    const timeoutMs = fetches ? CMD_FETCH_TIMEOUT_MS : CMD_TIMEOUT_MS;
     const r = await engine.run(cmd, {
       cwd: WORKDIR,
-      timeoutMs: CMD_TIMEOUT_MS,
+      timeoutMs,
       maxBuffer: CMD_MAX_BUFFER,
     });
     if (r.code === 0 && !r.killed) {
@@ -1256,18 +1320,42 @@ const handlers = {
     if (r.stdout) parts.push(r.stdout.trim());
     if (r.stderr) parts.push(`[stderr]\n${r.stderr.trim()}`);
     parts.push(`[exit code ${r.code ?? "?"}${r.killed ? ", killed (timeout)" : ""}]`);
-    // A timeout is usually because the command started a program that opens a window / stays resident
-    // (a GUI / server) and blocked waiting: explicitly tell the model not to keep retrying similar
-    // commands, to avoid a spinning loop.
-    if (r.killed) {
+    // What to say about a timeout depends entirely on what timed out, and saying the wrong thing is
+    // expensive. The generic advice below — "a GUI or service may already have started" — is actively
+    // misleading for an install that was simply still downloading: it invites a re-run or a poll loop,
+    // when the truth is that the network is slow and the work is half-done on disk.
+    if (r.killed && fetches) {
       parts.push(
-        "Note: the command did not finish within 60 seconds and was terminated. If this is a program " +
+        `Note: this download did not finish within ${Math.round(timeoutMs / 60_000)} minutes and was terminated, ` +
+          "so whatever it was fetching is incomplete. It was NOT left running in the background — there is " +
+          "nothing to poll or wait for, and re-checking will not help. Re-running it is safe and resumes from " +
+          "whatever was already cached, but do that at most once: a second timeout means the network or the " +
+          "registry mirror is the problem, and the user has to be told rather than waited on.",
+      );
+    } else if (r.killed) {
+      parts.push(
+        `Note: the command did not finish within ${Math.round(timeoutMs / 1000)} seconds and was terminated. If this is a program ` +
           "that opens a window or keeps running (e.g. a GUI app or a service), it may already have " +
           "started. Do not keep retrying similar commands; to run in the background use a non-blocking " +
           "launch, or just tell the user to run it manually.",
       );
     }
     return parts.filter(Boolean).join("\n");
+  },
+
+  async sandbox_tools({ query } = {}) {
+    const guest = getSandboxEngine();
+    // Deliberately not "no tools available": the toolchain is a property of the image, not of whether the VM
+    // happens to be up, and the actionable part is that it can be started.
+    if (!guest) {
+      return (
+        "The Linux sandbox is not running, so its toolchain cannot be reached or listed. Those tools " +
+        "(imagemagick, ffmpeg, pandoc, LibreOffice, OCR, …) are not installed on the user's machine either, so " +
+        "do not try to run them here. Tell the user that image / media / document work needs the sandbox, and " +
+        "that it can be started or restarted from the sandbox status indicator."
+      );
+    }
+    return sandboxInventory(guest, { query });
   },
 
   async stop_service({ pid, url } = {}) {
