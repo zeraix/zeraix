@@ -156,6 +156,44 @@ const FETCH_COMMAND_PATTERNS = [
   /\bcurl\b[^|]*(\s-O\b|\s-o\s|--output\b|--remote-name\b)/i,
 ];
 const isFetchCommand = (cmd) => FETCH_COMMAND_PATTERNS.some((re) => re.test(cmd));
+
+/**
+ * Did this command fail only because the program it names is not installed? Returns the program, or "".
+ *
+ * Every shell says so differently, and the exit code alone is not enough — 127 is conventional on POSIX but
+ * a script is free to return it, and cmd.exe uses 9009. So the code is corroborated by the message, and the
+ * name is read out of the message when the shell gives it, since the first token of the command line can be
+ * `env`, `sudo` or a variable assignment rather than the thing that was missing.
+ */
+function missingExecutable(r, cmd) {
+  const text = `${r?.stderr ?? ""}\n${r?.stdout ?? ""}`;
+  const patterns = [
+    // zsh MUST come before the bash pattern. zsh says `zsh: command not found: python` — the shell's own name
+    // sits where bash puts the missing program, so the bash rule matches it first and reports "zsh" as missing.
+    /command not found: (\S+)/im, // zsh
+    /(?:^|[:\s])([^\s:]+): (?:command not found|not found)/im, // bash / sh / dash
+    /'([^']+)' is not recognized as an internal or external command/im, // cmd.exe
+    /The term '([^']+)' is not recognized as (?:the name of )?a cmdlet/im, // PowerShell
+    /(\S+): No such file or directory/im, // exec of an absolute path that is not there
+  ];
+  for (const re of patterns) {
+    const m = text.match(re);
+    if (m) return m[1].trim();
+  }
+  // Message unrecognised: trust the code only, and fall back to the first bare word of the command.
+  if (r?.code === 127 || r?.code === 9009) return cmd.trim().split(/\s+/)[0] ?? "";
+  return "";
+}
+
+/**
+ * Is it safe to re-run this whole command somewhere else after a missing-program failure?
+ *
+ * Only when nothing in it can already have taken effect. A bare `python x.py` failed before doing anything,
+ * so running it again in the sandbox costs nothing. `rm -rf build && python x.py` did NOT — the removal
+ * happened, and a blind re-run would repeat it. Redirections are excluded for the same reason: `> out.txt`
+ * truncates the file whether or not the program exists.
+ */
+const SAFE_TO_RERUN = /^[^&|;\n<>`$()]+$/;
 const CMD_MAX_BUFFER = 10 * 1024 * 1024; // run_command output cap: 10MB
 // web_search / fetch_url (headless HTTP in the main process; no visible browser).
 const WEB_UA =
@@ -1312,17 +1350,52 @@ const handlers = {
     }
     const fetches = isFetchCommand(cmd);
     const timeoutMs = fetches ? CMD_FETCH_TIMEOUT_MS : CMD_TIMEOUT_MS;
-    const r = await engine.run(cmd, {
+    let r = await engine.run(cmd, {
       cwd: WORKDIR,
       timeoutMs,
       maxBuffer: CMD_MAX_BUFFER,
     });
+    /**
+     * The host does not have that program, but the sandbox does — so use it, rather than reporting defeat.
+     *
+     * This is the "python is not installed" case: on the host the model runs `python x.py`, gets
+     * "command not found", and tells the user the language is missing, when a full Python / Node / JDK is
+     * sitting in the sandbox one flag away. It has no way to know that without asking, so it does not ask.
+     *
+     * Deliberately one-directional. It fires only when the HOST was already the engine — never in daily mode,
+     * where commands run in the sandbox precisely so that everyday work cannot touch the user's real machine.
+     * Falling back the other way would spend that isolation to fix a convenience problem.
+     *
+     * `command -v` first rather than just re-running: if the sandbox has not got it either, the honest answer
+     * is the host's own error, and a second identical failure would only muddy it.
+     */
+    let fellBackTo = "";
+    if (!guest && engine.id === "native" && !r.killed && r.code !== 0) {
+      const missing = missingExecutable(r, cmd);
+      const vm = missing && SAFE_TO_RERUN.test(cmd) ? getSandboxEngine() : null;
+      if (vm) {
+        const probe = await vm.run(`command -v ${JSON.stringify(missing)}`, { cwd: WORKDIR, timeoutMs: 15_000 });
+        if (probe.code === 0 && String(probe.stdout).trim()) {
+          const retry = await vm.run(cmd, { cwd: WORKDIR, timeoutMs, maxBuffer: CMD_MAX_BUFFER });
+          r = retry;
+          fellBackTo = missing;
+        }
+      }
+    }
+    // Stated on success as well as failure: the model has to know WHERE this ran, or it will describe host
+    // state it never touched, and follow-up commands will go back to the host and fail the same way.
+    const fellBack = fellBackTo
+      ? `[Ran in the Linux sandbox] \`${fellBackTo}\` is not installed on this machine, but the sandbox has it, so the ` +
+        `command was re-run there — same working directory, mounted in. Tell the user this ran in the sandbox rather ` +
+        `than saying ${fellBackTo} is missing, and pass sandbox:true yourself for follow-up commands that need it.\n\n`
+      : "";
     if (r.code === 0 && !r.killed) {
       const out = `${r.stdout}${r.stderr ? `\n[stderr]\n${r.stderr}` : ""}`.trim();
-      return `${note}${out || "(no output, exit code 0)"}`;
+      return `${note}${fellBack}${out || "(no output, exit code 0)"}`;
     }
     const parts = [];
     if (note) parts.push(note.trim());
+    if (fellBack) parts.push(fellBack.trim());
     if (r.stdout) parts.push(r.stdout.trim());
     if (r.stderr) parts.push(`[stderr]\n${r.stderr.trim()}`);
     parts.push(`[exit code ${r.code ?? "?"}${r.killed ? ", killed (timeout)" : ""}]`);

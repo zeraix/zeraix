@@ -198,22 +198,10 @@ async function resolveMountRoot(opts) {
     mountRoot = opts.getWorkdir?.() ?? path.join(os.homedir(), "zeraix-workspace");
   }
   fs.mkdirSync(mountRoot, { recursive: true }); // a bind mount requires the directory to already exist
-  let extraMounts = [];
-  try {
-    const { loadIndex } = await import("../../store/conversationStore.mjs");
-    const { projects } = await loadIndex();
-    // Both modes: a dev-mode project's directory has to be in the mount set too, or a `sandbox: true`
-    // command could not see the files it was asked to convert. (cwd outside the set is merged on demand —
-    // see the note above bwrapFlags in qemu.mjs — so this only pre-seeds; it is not what makes it work.)
-    extraMounts = projects
-      .filter((p) => typeof p?.workdir === "string" && p.workdir)
-      .filter((p) => fs.existsSync(p.workdir))
-      .sort((a, b) => (a.createdAt ?? 0) - (b.createdAt ?? 0))
-      .map((p) => p.workdir);
-  } catch {
-    /* not Electron / storage unavailable → shared root only */
-  }
-  return { mountRoot, extraMounts };
+  // Returns the PATH, not a record. provision() does `path.resolve(rootHost)` on whatever it is handed, so an
+  // object here is not a type mismatch that shows up as a wrong path — it throws
+  // `The "paths[0]" argument must be of type string` out of initEngine and the sandbox never starts.
+  return mountRoot;
 }
 
 /**

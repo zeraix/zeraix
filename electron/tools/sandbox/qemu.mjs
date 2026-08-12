@@ -291,7 +291,8 @@ function bwrapFlags(cwd) {
     "--setenv", "LANG", "C.UTF-8",
     "--setenv", "PYTHONUNBUFFERED", "1",
     "--setenv", "JAVA_HOME", "/usr/lib/jvm/default-java",
-    ...binds, "--chdir", chdir,
+    // The one host directory this command can see, at the fixed mount point, and the cwd it starts in.
+    "--bind", workspace, GUEST_WORKSPACE, "--chdir", GUEST_WORKSPACE,
     // NOT --unshare-user: bwrap runs as root in the guest, and a user namespace makes the 9p
     // share (security_model=none) refuse the bind source with EPERM. bwrap-as-root still confines
     // the filesystem view to the workspace (that's the goal here); the VM is the privilege boundary.
