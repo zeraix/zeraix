@@ -6,14 +6,14 @@ Please read this document before submitting your first contribution.
 
 ## ⚖️ Legal Notice (Please Read First)
 
-Zeraix is developed and maintained by the Zeraix team. The open-source components of Zeraix are licensed under the **GNU Affero General Public License v3.0 (AGPL-3.0)**. Some components of the Zeraix platform (including cloud services) are proprietary and not part of this repository.
+Zeraix is developed and maintained by the Zeraix team. The contents of this repository are licensed under the **Apache License 2.0** unless a file or directory clearly states otherwise. Separately licensed third-party models, runtimes, libraries, and downloaded components remain governed by their respective licenses.
 
 **By submitting a contribution (pull request, patch, or code snippet) to this repository, you agree that:**
 
-1. You have read and accepted our **[Contributor License Agreement (CLA.md)](./CLA.md)**. Your first pull request will not be merged until the CLA is accepted.
-2. Your contribution is your original work, or you have the legal right to submit it.
-3. You grant the Zeraix team the rights described in the CLA, which allows us to license your contribution under AGPL-3.0 as well as under other license terms (e.g., commercial licenses) as the project evolves.
-4. Your contribution does not include any third-party code that is incompatible with AGPL-3.0.
+1. Your contribution is your original work, or you have the legal right to submit it.
+2. Unless you explicitly state otherwise, you submit the contribution under the Apache License 2.0 without additional terms or conditions, as described in Section 5 of that license.
+3. Your contribution does not include third-party code or other material that is incompatible with Apache-2.0 or that you do not have the right to submit.
+4. You identify the source and license of any third-party material included in your contribution.
 
 If you are contributing on behalf of your employer, please make sure you are authorized to do so.
 
@@ -21,7 +21,7 @@ If you are contributing on behalf of your employer, please make sure you are aut
 
 - Search [existing issues](../../issues) first to avoid duplicates.
 - Use a clear title and include: your OS and hardware, Zeraix version, steps to reproduce, expected vs. actual behavior, and relevant logs.
-- **Do not report security vulnerabilities in public issues.** See [SECURITY.md](./SECURITY.md) instead.
+- **Do not report security vulnerabilities in public issues.** See [Security.md](./Security.md) instead.
 
 ## 💡 Suggesting Features
 
@@ -37,7 +37,6 @@ Open an issue with the `enhancement` label. Please describe the problem you are 
 3. **Follow the existing code style.** Run the linter and formatter before committing.
 4. **Add tests** where it makes sense, and make sure the existing test suite passes.
 5. **Write a clear PR description** explaining what the change does and why.
-6. Sign the CLA when prompted on your first pull request.
 
 ### Commit Messages
 
@@ -60,7 +59,7 @@ Be respectful and constructive. We are building this together. (If a `CODE_OF_CO
 
 ## ❓ Questions
 
-- Licensing questions: see [LICENSING_FAQ.md](./LICENSING_FAQ.md) if available, or open a discussion.
+- Licensing questions: review the [Apache License 2.0](./LICENSE) or open a discussion.
 - Commercial use or partnership inquiries: contact us at **emma@zeraix.com**.
 
 ---

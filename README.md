@@ -17,7 +17,7 @@ Alongside the application, we continuously research how modern AI models can run
 
 [![Discord](https://img.shields.io/badge/Discord-Join%20us-5865F2?style=flat-square&logo=discord&logoColor=white)](https://discord.gg/PcQ3jr3MfH)
 [![X](https://img.shields.io/badge/X-@ZeraixAI-000000?style=flat-square&logo=x&logoColor=white)](https://x.com/ZeraixAI)
-[![License: AGPL-3.0](https://img.shields.io/badge/License-AGPL--3.0-orange?style=flat-square)](LICENSE)
+[![License: Apache-2.0](https://img.shields.io/badge/License-Apache--2.0-blue?style=flat-square)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Windows-lightgrey?style=flat-square)](#-quick-start)
 
 
@@ -45,6 +45,8 @@ The open-source application people can use today:
 
 - run supported local models without a Zeraix account or subscription;
 - work with conversations, files, terminal tools, Skills, and sub-agents;
+- schedule recurring AI workflows and review their run history;
+- connect local or remote MCP services and install compatible plugins;
 - install and manage GGUF models and compatible runtimes;
 - use hardware-aware model and quantization recommendations;
 - execute Agent commands through an optional QEMU-based sandbox;
@@ -164,7 +166,7 @@ Models keep evolving. Zeraix continuously profiles, adapts, and optimizes how th
 
 Our work is not limited to a single architecture or model family.
 
-> **Current research platform scope (July 2026):** ExactFlux model-systems research currently focuses on **Apple Silicon and macOS**. Zeraix Desktop is available on Windows and can use compatible general-purpose runtimes, but the ExactFlux optimization work described in this section has **not yet been researched or validated on Windows**. Windows model-systems research is planned and will begin as soon as the current Apple Silicon research baseline is sufficiently stable.
+> **Current research platform scope (August 2026):** ExactFlux model-systems research currently focuses on **Apple Silicon and macOS**. Zeraix Desktop is available on Windows and can use compatible general-purpose runtimes, but the ExactFlux optimization work described in this section has **not yet been researched or validated on Windows**. Windows model-systems research is planned and will begin as soon as the current Apple Silicon research baseline is sufficiently stable.
 
 ### Research areas
 
@@ -178,46 +180,62 @@ Our work is not limited to a single architecture or model family.
 | Model preparation | Quantization selection, runtime packaging, model assets, and validated device profiles |
 | Correctness | Same-algorithm comparisons, deterministic checks, long requests, and multi-turn stability |
 
-### Current research tracks
+### Latest progress
 
-_Last updated: July 2026_
+_Last updated: August 2026_
 
-## What's new in v1.7.0
+#### v1.11.0: automation and local model updates
 
-Zeraix now ships public Apple Silicon optimization paths for **Qwen3.6-35B-A3B** and the **Gemma 4** family, while also allowing users to browse, download, configure, and run compatible external GGUF repositories from Hugging Face.
+- **Scheduled workflows** — run AI workflows daily, on weekdays, hourly, or every few minutes, with configurable missed-run behavior.
+- **Observable automation** — review the next run, latest result, run count, success rate, notifications, and a separate output folder for each run.
+- **Readable approvals** — permission requests show the command or instruction and its values, with the raw payload available only when needed.
+- **Qwen Bonsai 27B** — a 7.2 GB dense approximately 2-bit model path with multimodal support, up to 256K context, and an optional DSpark speculative-decoding drafter.
+- **Hybrid GDN work** — faster Qwen3.6-35B decoding through in-place recurrent-state updates in the KV cache and improved SSM-convolution thread utilization.
 
-### Shipped model paths
+#### v1.9.0-v1.10.0: MCP, plugins, and safer delegation
+
+- connect local or remote MCP services and make their tools available inside conversations;
+- install compatible plugins from the Zeraix registry;
+- delegate temporary tasks to concurrent sub-agents with task-scoped capabilities;
+- keep capability assignment under application control and recheck it before each protected action;
+- separate user approvals from autonomous sub-agent permissions and record protected actions in the audit trail;
+- answer several model questions in one structured card without losing the task context.
+
+#### v1.8.0-v1.11.0: model and runtime progress
+
+- **Mapped model weights** reduced repeated loading and memory-copy overhead on supported Apple Silicon paths.
+- **Correctness gates** produced byte-identical reference outputs for the validated Gemma 4 E4B, Gemma 4 26B-A4B, and Qwen3.6-35B configurations reported in v1.8.0.
+- **Right-sized compute buffers** allocate for the active batch instead of the maximum configured batch.
+- **Short-lived vision projection** releases the vision projector after image encoding.
+- **Lower-overhead speculative decoding** reads fewer language-model-head rows for the drafter path.
+- **Parallel MoE staging** improves the I/O path used to prepare expert data.
+
+#### Shipping model paths
 
 | Model | Public configuration | Shipping optimization path |
 |---|---|---|
-| Qwen3.6-35B-A3B | MTP GGUF · vision · up to 256K context | Profile-guided MoE expert pooling, per-host resident/pooled layer planning, embedded MTP, persistent KV reuse, and published prefix seeds |
-| Gemma 4 26B-A4B | QAT GGUF · vision · up to 256K context | Profile-guided MoE expert pooling, per-host memory planning, MTP speculative decoding, persistent KV reuse, and published prefix seeds |
+| Qwen Bonsai 27B | Dense approximately 2-bit · 7.2 GB · multimodal · up to 256K context | Optional DSpark speculative decoding and hardware-aware local configuration |
+| Qwen3.6-35B-A3B | MTP GGUF · vision · up to 256K context | Profile-guided MoE pooling, mapped weights, hybrid GDN improvements, persistent KV reuse, and published prefix seeds |
+| Gemma 4 26B-A4B | QAT GGUF · vision · up to 256K context | Profile-guided MoE pooling, mapped weights, per-host memory planning, MTP speculative decoding, and persistent KV reuse |
 | Gemma 4 12B | QAT GGUF · vision/audio · up to 256K context | Hardware-aware sizing, MTP speculative decoding, persistent KV reuse, and published prefix seeds |
 | Gemma 4 E4B | QAT GGUF · vision/audio · up to 128K context | Low-memory profile, MTP speculative decoding, persistent KV reuse, and published prefix seeds |
 | Community GGUF | Compatible external Hugging Face GGUF repositories | Repository search, architecture checks, quantization selection, memory estimation, context/KV controls, optional vision/MTP assets, and chat-template overrides |
 
-### Runtime improvements
+#### Selected release measurements
 
-- **Measured memory planning** — Zeraix sizes supported pooled models by their real resident working set instead of treating the full GGUF file as permanently resident.
-- **Per-host MoE placement** — the resident/pooled layer split is derived at launch from the machine's available memory and the selected context.
-- **Hardware-aware context choices** — supported profiles offer only the 64K, 96K, 128K, 196K, or 256K windows that the current machine can hold.
-- **Faster repeated prompts** — short-prefill routing, persistent KV prefixes, and published prefix seeds reduce redundant prompt processing across turns and restarts.
-- **Correct local tool loops** — reasoning content is replayed in the form expected by supported local model chat templates.
-
-Example measurements from the v1.7.0 release validation:
-
-| Measurement | Before | v1.7.0 observation |
+| Release validation | Before | Reported result |
 |---|---:|---:|
-| Qwen3.6 pooled-model resident memory compared with its 22.8 GB GGUF file | Full-file sizing | 8.5 GB measured resident working set in the reported run |
-| Qwen3.6 decode on a 36 GiB Mac | 11.4 tok/s | 31.6 tok/s |
-| 30-token follow-up prefill | 23.8 s | 2.2 s |
-| Reusing a persisted system prefix after restart | 47.6 s cold | 182 ms |
+| Qwen3.6-35B load time on the reported 36 GB Mac | 40.4 s | 8.2 s |
+| Additional loading footprint in that run | 18 GB | 0.5 GB |
+| Qwen3.6-35B prompt processing in that run | 6.9 tok/s | 121 tok/s |
+| Qwen Bonsai 27B decode across the reported 24-prompt suite | 16.2 tok/s | 20.5 tok/s (1.26x) |
+| Qwen Bonsai 27B drafted-token acceptance | — | 67% |
 
-These measurements describe the specific release-validation runs documented in [v1.7.0](https://github.com/zeraix/zeraix/releases/tag/v1.7.0); they are not universal performance guarantees. Results vary with the model, quantization, context, enabled capabilities, hardware, thermals, and workload.
+These measurements describe the specific release-validation runs documented in [v1.8.0](https://github.com/zeraix/zeraix/releases/tag/v1.8.0) and [v1.11.0](https://github.com/zeraix/zeraix/releases/tag/v1.11.0). They are not universal performance guarantees. Results vary with the exact model, quantization, context, enabled capabilities, hardware, thermals, and workload. Earlier memory-planning, MoE-pooling, persistent-KV, and prefix-seed results remain documented in [v1.7.0](https://github.com/zeraix/zeraix/releases/tag/v1.7.0).
 
-> The optimizations above are shipping capabilities in Zeraix Desktop. **ExactFlux remains a broader active research runtime and is not yet included in this public source tree.**
+> The optimizations above are shipping capabilities in Zeraix Desktop's supported runtime paths. **ExactFlux remains a broader active research runtime and is not yet included in this public source tree.**
 
-Research status definitions:
+### Research status definitions
 
 | Status | Meaning |
 |---|---|
@@ -270,8 +288,10 @@ Zeraix combines the tools needed for local AI work in one desktop application:
 - integrated terminal and command execution;
 - QEMU-based execution sandbox;
 - browser tools and automation;
+- scheduled workflows with run history and notifications;
 - persistent conversations and local memory;
 - Skills and specialized sub-agents;
+- local or remote MCP services and compatible plugins;
 - optional cloud models and custom API endpoints.
 
 ## ✨ Features
@@ -323,6 +343,16 @@ Developer Mode gives the selected model controlled access to a workspace:
 
 File and command tools are scoped to the working directory selected by the user. Sensitive operations may require explicit approval.
 
+### Scheduled automation
+
+Zeraix can turn repeatable AI work into scheduled workflows:
+
+- schedule daily, weekday, hourly, or frequent interval runs;
+- choose whether a missed run is skipped, run once, or backfilled;
+- review the next run, last outcome, run count, and success rate;
+- receive run notifications and keep each run in a separate output folder;
+- inspect and approve sensitive commands through readable permission requests.
+
 ### 🛡️ Local execution sandbox
 
 Zeraix includes an optional QEMU-based Linux environment for Agent commands:
@@ -353,8 +383,18 @@ Always verify the execution indicator before approving commands that affect impo
 - built-in Skills for coding, research, review, writing, and data extraction;
 - project-level Skill discovery;
 - user control over project instructions;
-- specialized exploration, planning, and review sub-agents;
-- restricted tool sets for read-only and review-oriented agents.
+- temporary specialized sub-agents for focused tasks;
+- concurrent delegation without giving sub-agents unrestricted application access;
+- task-scoped capabilities assigned and rechecked by the application;
+- separate user-approval and autonomous-agent permission boundaries;
+- an audit trail for protected actions.
+
+### MCP services and plugins
+
+- connect local or remote Model Context Protocol services;
+- make approved MCP tools available inside AI conversations;
+- install compatible plugins from the Zeraix registry;
+- manage plugin capabilities and integrity checks through the desktop application.
 
 ### ☁️ Cloud when you choose it
 
@@ -392,6 +432,9 @@ The interface includes translations for:
 | File and terminal Agent tools | ✅ | No | ✅ | Open source in this repository |
 | QEMU execution sandbox | ✅ | No | ✅ | Open source in this repository |
 | Skills and sub-agents | ✅ | No | ✅ | Open source in this repository |
+| Scheduled workflows | ✅ | No | ✅ | Open source in this repository |
+| Local and remote MCP connections | ✅ | No | Depends on service | Open source in this repository |
+| Compatible plugins | ✅ | No | Depends on plugin | Open source in this repository; registry content may use separate licenses |
 | Custom OpenAI-compatible endpoints | ✅ | No | Depends on endpoint | Open source in this repository |
 | General local inference | ✅ | No | ✅ | Uses separately licensed upstream runtimes such as llama.cpp |
 | Zeraix-tested model profiles | ✅ | No | ✅ | Configuration and validation layer in this repository |
@@ -431,6 +474,8 @@ Review the provider’s terms, pricing, privacy policy, and retention policy bef
 ### Agent permissions
 
 AI-generated commands and file modifications can be incorrect or unsafe.
+
+Zeraix keeps protected capabilities under application control. A model or sub-agent can request a capability, but cannot grant it to itself. Protected actions are rechecked at execution time, and user approval for a direct request does not automatically authorize an autonomous sub-agent.
 
 Always:
 
@@ -534,13 +579,17 @@ Zeraix
 │   ├── Next.js / React renderer
 │   │   ├── Assistant and Developer interfaces
 │   │   ├── Conversation state and context compaction
-│   │   ├── Skills and sub-agents
+│   │   ├── Skills, plugins, and sub-agents
+│   │   ├── Automation dashboard and run history
 │   │   └── Permission and diff views
 │   ├── Electron main process
 │   │   ├── Secure preload and IPC bridges
 │   │   ├── Local conversation storage
 │   │   ├── LLM request proxy
 │   │   ├── Local model and runtime management
+│   │   ├── Workflow scheduler and notifications
+│   │   ├── MCP and plugin management
+│   │   ├── Capability broker and audit log
 │   │   ├── File and terminal tools
 │   │   └── Browser automation
 │   ├── Execution layer
@@ -565,9 +614,12 @@ Important source directories:
 |---|---|
 | `src/app/agent/` | Assistant and Developer application pages |
 | `src/app/agent/chat/` | Agent conversation UI and runtime loop |
-| `src/lib/ai/` | Models, memory, Skills, sub-agents, and AI utilities |
+| `src/lib/ai/` | Models, memory, Skills, sub-agents, orchestration, permissions, and AI utilities |
 | `src/components/ai/` | Model library and AI interface components |
 | `electron/` | Electron main process and renderer bridges |
+| `electron/automation/` | Scheduled workflow parsing, persistence, and execution |
+| `electron/mcp/` | Local and remote MCP connection management |
+| `electron/plugins/` | Plugin installation, validation, and lifecycle management |
 | `electron/llm/` | Local model runtime management and request proxy |
 | `electron/tools/` | Agent tools, terminal integration, and sandbox routing |
 | `electron/tools/sandbox/` | QEMU control, filesystem sharing, and execution engine |
@@ -655,22 +707,28 @@ to run the full desktop application.
 - [x] Skills and specialized sub-agents
 - [x] QEMU-based execution sandbox
 - [x] Multimodal attachments for supported models
-- [ ] Expand automated tests and continuous integration
-- [ ] Improve sandbox visibility and strict execution policies
+- [x] Scheduled workflows with run history and notifications
+- [x] Local and remote MCP service connections
+- [x] Plugin installation and registry integration
+- [x] Task-scoped sub-agent capabilities, readable approvals, and execution audit trails
+- [x] Expand automated test coverage for orchestration, automation, plugins, permissions, and scheduling
+- [ ] Add dedicated pull-request CI for tests, type checking, and linting
+- [ ] Continue hardening sandbox isolation and execution-policy coverage
 - [ ] Add intelligent local and cloud model routing
 
 ### Zeraix Model Systems
 
 - [x] Establish repeatable low-memory model research baselines
 - [x] Add correctness gates for model-specific optimization experiments
-- [ ] Complete validation of the initial Qwen3.6 and Gemma 4 research tracks
+- [x] Validate deterministic correctness for the initial shipping Qwen3.6 and Gemma 4 paths
+- [x] Extend shipping optimization work across MoE, dense, multimodal, and hybrid GDN paths
+- [x] Publish recurring release-level model-systems updates
 - [ ] Publish reproducible benchmark methodology and hardware reports
 - [ ] Expand validation across Apple Silicon memory tiers
 - [ ] Begin Windows model-systems profiling and establish the first Windows research baseline
 - [ ] Generalize model-specific research code into reusable architecture adapters
 - [ ] Prepare the first ExactFlux research preview
 - [ ] Extend research to additional architectures and hardware backends
-- [ ] Publish recurring model-systems research updates
 
 Roadmap items are directional and may change as model architectures, upstream runtimes, hardware, and validation results evolve.
 
@@ -710,11 +768,11 @@ Do not report security vulnerabilities through public Issues, Discussions, or pu
 
 Follow the private reporting process described in [Security.md](Security.md).
 
-## Open-source and commercial services
+## Open source and optional services
 
 This repository contains Zeraix Desktop and its local-first application runtime.
 
-The public local core is free to use under the terms of AGPL-3.0. Separately licensed third-party runtimes, models, and downloaded assets remain governed by their respective licenses.
+The public local core is available under the permissive Apache License 2.0. Separately licensed third-party runtimes, models, and downloaded assets remain governed by their respective licenses.
 
 ExactFlux is an active research runtime and is not currently included in this public source tree. We intend to open-source it after the architecture, interfaces, and validation baseline are stable enough for external use and contribution. The exact release scope, timing, and license will be stated clearly before publication; no specific release date is promised while the research remains unstable.
 
@@ -730,13 +788,11 @@ These services are not required to use the public local core and are not part of
 
 ## License
 
-Zeraix Desktop is licensed under the [GNU Affero General Public License v3.0](LICENSE).
+Zeraix Desktop is licensed under the [Apache License 2.0](LICENSE).
 
-You may use, study, modify, and redistribute the software in this repository under the terms of that license.
+You may use, study, modify, distribute, and use the software commercially under the terms of that license.
 
-AGPL-3.0 obligations may apply when distributing modified versions or providing modified versions for use over a network.
-
-If AGPL-3.0 does not fit your commercial use case, contact **emma@zeraix.com** to discuss commercial licensing.
+Apache-2.0 does not require derivative works or larger works to be released as open source. Distributions must preserve the applicable license and copyright notices, and modified files must carry notices stating that they were changed.
 
 Third-party models, runtimes, libraries, and downloaded components remain governed by their respective licenses.
 

@@ -1,6 +1,7 @@
 {
   "name": "Zeraix",
   "version": "1.11.0",
+  "license": "Apache-2.0",
   "private": true,
   "main": "electron/main.mjs",
   "type": "module",
