@@ -1,7 +1,7 @@
 {
   "llama": "b10369",
   "vm": {
-    "amd64": "sha-56012493f5e0",
+    "amd64": "sha-c576b40e5653",
     "arm64": "sha-e1d67c55484e"
   },
   "seedPrefix": {
