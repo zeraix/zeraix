@@ -13,7 +13,7 @@
 # otherwise it falls back to UEFI/edk2.
 #
 #   ./build-rootfs-local.sh [OUTDIR]     # OUTDIR default: platform local app-data (Zeraix/vm)
-#   (npm run build:rootfs passes the right OUTDIR via scripts/build-rootfs.mjs → vmpaths.mjs)
+#   (.github/workflows/vm-image.yml passes an explicit OUTDIR; it is the supported way to build one)
 set -euo pipefail
 
 ARCH_DEB="${ARCH_DEB:-arm64}"                 # Debian arch (arm64 for Apple Silicon)
@@ -29,7 +29,7 @@ APT_MIRROR="${APT_MIRROR:-mirrors.aliyun.com}"
 PIP_INDEX_URL="${PIP_INDEX_URL:-https://mirrors.aliyun.com/pypi/simple/}"
 HERE="$(cd "$(dirname "$0")" && pwd)"
 # Default OUTDIR = platform local app-data VM dir (matches electron/tools/sandbox/vmpaths.mjs so the
-# runtime picks up a local build). npm run build:rootfs passes it explicitly; this is the standalone default.
+# runtime picks up a local build, though it looks under vm/<VM_VERSION>/ — pass that path to be found).
 case "$(uname -s)" in
   Darwin) DEF_OUT="$HOME/Library/Application Support/Zeraix/vm" ;;
   *)      DEF_OUT="${XDG_DATA_HOME:-$HOME/.local/share}/Zeraix/vm" ;;
@@ -43,9 +43,15 @@ rm -rf "$BUILD"; mkdir -p "$BUILD" "$OUT"
 
 # ── The one image: toolbox + VM bits, in a single build (FROM debian, no registry pull) ──
 echo ">> building VM image ($PLATFORM) from sandbox/qemu/Dockerfile …"
-docker build --platform "$PLATFORM" -f "$HERE/Dockerfile" \
+# DOCKER_BUILD / DOCKER_BUILD_FLAGS are hooks for CI, empty by default so a local build is unchanged.
+# A GitHub runner starts with an empty layer store, so without them every run reinstalls the whole
+# toolbox (LibreOffice, ffmpeg, the OCR models) from apt. CI sets them to buildx + a GitHub Actions
+# cache; see .github/workflows/vm-image.yml. Unquoted on purpose: they carry several flags.
+# shellcheck disable=SC2086
+${DOCKER_BUILD:-docker build} --platform "$PLATFORM" -f "$HERE/Dockerfile" \
   --build-arg "DEBIAN_SUITE=$SUITE" --build-arg "TARGETARCH=$ARCH_DEB" \
   --build-arg "APT_MIRROR=$APT_MIRROR" --build-arg "PIP_INDEX_URL=$PIP_INDEX_URL" \
+  ${DOCKER_BUILD_FLAGS:-} \
   -t "$IMG_TAG" "$HERE"
 
 echo ">> exporting rootfs filesystem …"

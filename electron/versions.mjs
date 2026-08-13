@@ -5,7 +5,7 @@
  * Pure node, no electron dependency.
  *
  * llama: the llama.cpp release tag; `npm run publish:llama <tag>` writes it back to the JSON after publishing.
- * vm: per-arch short hash of the docker image ID. `npm run build:rootfs` writes it back automatically
+ * vm: per-arch short hash of the docker image ID. The vm-image workflow reports it; commit it here
  *   based on `docker image inspect`.
  *   The OSS/CDN path is vm/<arch>/<id>/; the local directory is .../vm/<id>/. An empty value = that
  *   architecture has not been built/published yet.

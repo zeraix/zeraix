@@ -50,7 +50,7 @@ on macOS `afterSign` re-signs it with the `com.apple.security.hypervisor` entitl
 is downloaded from the CDN at **first run** into the platform's local app-data dir (Win
 `%LOCALAPPDATA%\<App>\vm\<VM_VERSION>`, macOS `~/Library/Application Support/<App>/vm/<VM_VERSION>`, Linux
 `~/.local/share/<App>/vm/<VM_VERSION>`) — `rootfs.qcow2`, `Image`, `initrd.img`. `<VM_VERSION>` is the per-arch
-**docker image ID** short hash (`sha-<12hex>`), auto-written to `electron/versions.mjs` by `npm run build:rootfs`;
+**docker image ID** short hash (`sha-<12hex>`), written into `electron/versions.json` by the vm-image workflow;
 a new image → new dir → re-download + prune old. Dir layout is in `vmpaths.mjs` (`ZERAIX_VMDIR` overrides the dir).
 See **Distribution** below.
 
@@ -61,10 +61,13 @@ no loop device, no registry round-trip (works where HTTPS/registries are blocked
 mirrors are reachable, and on a macOS host with no loop devices). Needs Docker.
 
 ```sh
-# from the repo root — cross-platform wrapper (WSL Docker on Windows, bash on macOS/Linux):
-npm run build:rootfs                 # ARCH_DEB defaults: amd64 (Win/Linux-x64), arm64 (Apple Silicon)
-# …or call the script directly (no OUTDIR arg = platform local app-data VM dir):
+# Normally you do NOT run this: .github/workflows/vm-image.yml builds each guest arch natively (amd64 on
+# the x64 runner, arm64 on the ARM one) and publishes it to Hugging Face. Build by hand only to iterate
+# on the Dockerfile — and note the wrapper needs bash + Docker, so on Windows run it from inside WSL.
+# from the repo root:
 cd sandbox/qemu && ARCH_DEB=amd64 SUITE=trixie ./build-rootfs-local.sh
+# No OUTDIR arg = the local app-data VM dir. The runtime looks in <appdata>/vm/<VM_VERSION>/, so to have
+# a hand-built image picked up, pass that path: ./build-rootfs-local.sh "<appdata>/vm/sha-<12hex>"
 # override: ARCH_DEB / SUITE / APT_MIRROR / SIZE, or pass an explicit OUTDIR
 ```
 
@@ -75,19 +78,21 @@ overlay holds writes).
 
 ## Distribution — OSS/CDN & scripts
 
-Neither the qemu binaries nor the rootfs are committed. Both are published to Aliyun OSS (bucket
-`zeraix-docker`) and served publicly via the CDN **`docker.zeraix.com`**. Uploads authenticate (OSS
-creds in gitignored `sandbox/qemu/.env`); downloads use the public CDN URL, so clients need **no
-credentials**. All scripts are pure Node in `scripts/` (dev deps `adm-zip` + `ali-oss`; no
-ossutil/tar).
+Neither the qemu binaries nor the rootfs are committed. Both are published to the Hugging Face repo
+**`Zeraix/llama-builds`** — qemu under `qemu/<platform>-<arch>.zip`, the VM image under
+`vm/<arch>/<VM_VERSION>/`. Public, so downloads need **no credentials**, and the client falls back to
+`hf-mirror.com` where huggingface.co is blocked, which is what the Ali CDN used to provide. Uploads
+need write access (`hf auth login`, or `HF_TOKEN`).
+
+They used to live in an Aliyun OSS bucket behind `docker.zeraix.com`. Objects already published there
+are left in place: app versions that shipped before the move still resolve them.
 
 | command | what it does |
 | --- | --- |
 | `npm run bundle:bin:win` | stage local qemu → zip → upload `qemu/win32-x64.zip` (run on a Windows publisher) |
 | `npm run bundle:bin:mac` | stage + relocate + ad-hoc-sign local qemu → zip → upload `qemu/darwin-arm64.zip` (macOS publisher) |
-| `npm run build:rootfs` | build the VM disk + kernel → local app-data VM dir (Docker) |
-| `npm run publish:rootfs` | upload `rootfs.qcow2` / `Image` / `initrd.img` → `vm/<arch>/<VM_VERSION>/` (resumable multipart) |
-| **`npm run image:publish`** | **build + publish the rootfs in one step** (`build:rootfs` → `publish:rootfs`) |
+| **vm-image workflow** | **build + publish the VM image for ONE guest arch** — manual dispatch, amd64 on the x64 runner, arm64 on the ARM one. Reports the new `VM_VERSION` to commit |
+| `sandbox/qemu/build-rootfs-local.sh` | build the disk + kernel locally, for iterating on the Dockerfile (needs Docker + bash). Publishing by hand is not supported |
 | `npm run download:bin:win` · `:mac` | fetch qemu from the CDN → `resources/qemu/<os>-<arch>/` (run automatically by `dist:*`) |
 
 **How it's consumed:**
@@ -97,14 +102,19 @@ ossutil/tar).
   `afterSign` re-signs the downloaded qemu with the app's Developer ID + hypervisor entitlement.
 - **rootfs (VM disk)** — downloaded **at runtime on first launch** by `qemu.mjs` `ensureRootfs()`
   into the local app-data VM dir (`vmpaths.mjs`; `ZERAIX_VMDIR` overrides): if it lacks the disk/kernel,
-  it pulls `vm/<arch>/<VM_VERSION>/{rootfs.qcow2,Image,initrd.img}` from `docker.zeraix.com` (~1.15 GB; progress
-  broadcast to the UI; atomic `.part`→rename; a failed download degrades to native). `npm run build:rootfs`
-  writes to the **same** dir, so a local build is picked up by the runtime with no extra config.
+  it pulls `vm/<arch>/<VM_VERSION>/{rootfs.qcow2,Image,initrd.img}` (~1.15 GB; progress
+  broadcast to the UI; atomic `.part`→rename; a failed download degrades to native). A local build placed in
+  that dir under its `sha-<12hex>` name is picked up by the runtime with no extra config.
 
-**Publisher workflow** (one-time, or when qemu/rootfs changes): install qemu locally, put OSS creds
-in `sandbox/qemu/.env`, then `npm run bundle:bin:win` (or `:mac`) + `npm run image:publish`.
-`SKIP_UPLOAD=1` stages+zips a qemu bundle without uploading; `ZERAIX_CDN` / `OSS_QEMU_KEY` /
-`ARCH_DEB` / `SUITE` override defaults.
+**Publishing:**
+
+- **qemu** — still by hand, because it harvests the publisher's own installed qemu and, on macOS,
+  ad-hoc-signs it with the hypervisor entitlement: `npm run bundle:bin:mac` on an Apple Silicon mac,
+  `npm run bundle:bin:win` on a Windows box. Needs the `hf` CLI with write access. `SKIP_UPLOAD=1`
+  stages+zips without uploading.
+- **VM image** — the `vm-image` workflow, one guest arch per run. Not from a laptop: the image is
+  ~1.1 GB per arch, and a China-based connection uploads to Hugging Face at ~50 KB/s. Commit the
+  `VM_VERSION` it reports, or the app keeps fetching the previous image.
 
 ## Boot / mount notes
 

@@ -1,15 +1,14 @@
 #!/usr/bin/env node
 /**
- * PUBLISH a self-contained Windows QEMU to Aliyun OSS.
+ * PUBLISH a self-contained Windows QEMU to Hugging Face (Zeraix/llama-builds, under qemu/).
  *
  * Stages qemu (x86_64 emulator + qemu-img + DLLs + the x86 SeaBIOS/option-ROM firmware) into
- * resources/bin/win32-<arch>/qemu/, self-tests it, zips it (adm-zip), and uploads the zip to OSS
- * (ali-oss) so build machines can fetch it with scripts/download-bin-win.mjs instead of needing
- * a local qemu install. The staged dir is left in place for an immediate local `dist:win`.
+ * resources/bin/win32-<arch>/qemu/, self-tests it, zips it (adm-zip), and uploads the zip so build
+ * machines can fetch it with scripts/download-bin-win.mjs instead of needing a local qemu install. The staged dir is left in place for an immediate local `dist:win`.
  *
- * OSS config from sandbox/qemu/.env (or process.env): OSS_BUCKET, OSS_ENDPOINT,
- * OSS_ACCESS_KEY_ID, OSS_ACCESS_KEY_SECRET, OSS_PREFIX?, OSS_QEMU_KEY?, OSS_ACL? (this bucket
- * blocks public object ACLs, so the object is private and download needs the OSS creds). Source
+ * Needs the huggingface CLI and write access to the repo (hf auth login, or HF_TOKEN in the env /
+ * sandbox/qemu/.env). The published object is PUBLIC, so downloading needs no credentials at all —
+ * unlike the OSS bucket, which blocked public ACLs and made creds a build prerequisite. Source
  * qemu: ZERAIX_QEMU_SRC, else %ProgramFiles%\qemu, else `where`. SKIP_UPLOAD=1 = stage+zip only.
  *
  *   winget install --id SoftwareFreedomConservancy.QEMU   # once, on the publisher
@@ -20,7 +19,6 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import AdmZip from "adm-zip";
-import OSS from "ali-oss";
 
 if (process.platform !== "win32") { console.log("[bundle-bin] not Windows — skip"); process.exit(0); }
 
@@ -119,15 +117,15 @@ az.writeZip(zip);
 console.log(`[publish] zip: ${(fs.statSync(zip).size / 1048576).toFixed(0)} MB → ${zip}`);
 
 if (/^(1|true|yes)$/i.test(env.SKIP_UPLOAD || "")) { console.log("[publish] SKIP_UPLOAD set — staged+zipped only."); process.exit(0); }
-const { OSS_BUCKET: bucket, OSS_ENDPOINT: endpoint, OSS_ACCESS_KEY_ID: keyId, OSS_ACCESS_KEY_SECRET: keySecret } = env;
-if (!bucket || !endpoint || !keyId || !keySecret) {
-  console.error("[publish] missing OSS config (OSS_BUCKET/OSS_ENDPOINT/OSS_ACCESS_KEY_ID/OSS_ACCESS_KEY_SECRET in sandbox/qemu/.env). Staged+zipped only.");
-  process.exit(1);
-}
-const key = env.OSS_BIN_WIN_KEY || `${env.OSS_PREFIX || ""}bin/win32-${process.arch}.zip`;
-const client = new OSS({ accessKeyId: keyId, accessKeySecret: keySecret, bucket, region: endpoint.replace(/\.aliyuncs\.com$/, ""), secure: true });
-console.log(`[publish] uploading ${(fs.statSync(zip).size / 1048576).toFixed(0)} MB → oss://${bucket}/${key} …`);
-// This bucket blocks public object ACLs, so upload private (download authenticates). Only set
-// OSS_ACL (e.g. public-read) if the bucket actually permits it.
-await client.put(key, zip, env.OSS_ACL ? { headers: { "x-oss-object-acl": env.OSS_ACL } } : {});
-console.log(`[publish] OK — published (private): oss://${bucket}/${key}`);
+// Hugging Face, not the OSS bucket. This bundle in particular was uploaded PRIVATE, because the bucket blocks public
+// object ACLs — so every build machine that missed the CDN needed OSS credentials just to fetch qemu. On HF it is public,
+// and scripts/download-bin-win.mjs needs no credentials at all. Uploaded through the huggingface CLI, which already
+// speaks the LFS protocol a 62 MB zip needs.
+const HF_REPO = env.ZERAIX_LLAMA_BUILDS_REPO || "Zeraix/llama-builds";
+const key = env.ZERAIX_BIN_WIN_KEY || `qemu/win32-${process.arch}.zip`;
+const cli = ["hf", "huggingface-cli"].find((b) => { try { execFileSync(b, ["--help"], { stdio: "ignore" }); return true; } catch { return false; } });
+if (!cli) { console.error("[publish] no huggingface CLI found (`pip install -U huggingface_hub`) — staged+zipped only."); process.exit(1); }
+console.log(`[publish] uploading ${(fs.statSync(zip).size / 1048576).toFixed(0)} MB → ${HF_REPO}/${key} …`);
+execFileSync(cli, ["upload", HF_REPO, zip, key, "--repo-type", "model", "--commit-message", `qemu bundle for win32-${process.arch}`,
+  ...(env.HF_TOKEN ? ["--token", env.HF_TOKEN] : [])], { stdio: "inherit" });
+console.log(`[publish] OK — published: ${HF_REPO}/${key}`);

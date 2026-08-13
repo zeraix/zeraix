@@ -1,12 +1,12 @@
 #!/usr/bin/env node
 /**
- * DOWNLOAD the macOS binary package and lay it out into resources/bin/darwin-<arch>/qemu/, to be bundled by dist:mac.
+ * DOWNLOAD the macOS binary package from Hugging Face and lay it out into resources/bin/darwin-<arch>/qemu/, to be bundled by dist:mac.
  *   - qemu: the sandbox command-execution engine (only needed on Apple Silicon). Bundled rather than fetched at runtime
  *     because HVF needs build-time signing and the com.apple.security.hypervisor entitlement.
  * llama is NOT in here. It is installed at runtime from Hugging Face (electron/llm/llamaInstaller.mjs), which is why
  * PAYLOADS below has a single entry; an older zip may still carry a llama/ directory, and nothing lays it out.
- * Downloads one zip (bin/darwin-<arch>.zip) and copies the qemu subdirectory out of it.
- * CDN first (docker.zeraix.com, no credentials), falling back to authenticated OSS on failure. For the corresponding upload see scripts/bundle-bin-mac.mjs.
+ * Downloads one zip (qemu/darwin-<arch>.zip) and copies the qemu subdirectory out of it.
+ * Public on Hugging Face, so no credentials are needed. For the corresponding upload see scripts/bundle-bin-mac.mjs.
  *
  *   node scripts/download-bin-mac.mjs
  */
@@ -16,7 +16,7 @@ import os from "node:os";
 import path from "node:path";
 import https from "node:https";
 import AdmZip from "adm-zip";
-import OSS from "ali-oss";
+import { resolveHfEndpoint } from "../electron/llm/hfEndpoint.mjs";
 
 if (process.platform !== "darwin") { console.log("[download-mac] not macOS — skip"); process.exit(0); }
 const REPO = process.cwd();
@@ -35,9 +35,11 @@ function loadEnv() {
   return env;
 }
 const env = loadEnv();
-const cdn = (env.OSS_CDN || "https://docker.zeraix.com").replace(/\/+$/, "");
-const key = env.OSS_BIN_MAC_KEY || `${env.OSS_PREFIX || ""}bin/darwin-${ARCH}.zip`;
-const encKey = key.split("/").map(encodeURIComponent).join("/");
+// Hugging Face, not the OSS bucket behind docker.zeraix.com. The bundle is public there, so a build machine needs no
+// credentials at all — the Windows object in OSS was private, which made OSS_ACCESS_KEY_ID/_SECRET a build prerequisite
+// whenever the CDN missed. Same repo and the same resolve URL the app already uses for the llama runtime.
+const HF_REPO = env.ZERAIX_LLAMA_BUILDS_REPO || "Zeraix/llama-builds";
+const key = env.ZERAIX_BIN_MAC_KEY || `qemu/darwin-${ARCH}.zip`;
 
 // The two subdirectories inside the zip → their respective resources directories; the self-test differs for each.
 const PAYLOADS = [
@@ -68,17 +70,12 @@ function fetchTo(url, dest, maxRedirs = 5) {
 
 const zip = path.join(os.tmpdir(), `bin-darwin-${ARCH}.dl.zip`);
 fs.rmSync(zip, { force: true });
-const cdnUrl = `${cdn}/${encKey}`;
-console.log(`[download-mac] GET ${cdnUrl}`);
-try {
-  await fetchTo(cdnUrl, zip);
-} catch (e) {
-  if (env.OSS_ACCESS_KEY_ID && env.OSS_ACCESS_KEY_SECRET && env.OSS_BUCKET && env.OSS_ENDPOINT) {
-    console.warn(`[download-mac] CDN GET failed (${e.statusCode || e.message}) — falling back to authenticated OSS`);
-    const client = new OSS({ accessKeyId: env.OSS_ACCESS_KEY_ID, accessKeySecret: env.OSS_ACCESS_KEY_SECRET, bucket: env.OSS_BUCKET, region: env.OSS_ENDPOINT.replace(/\.aliyuncs\.com$/, ""), secure: true });
-    await client.get(key, zip);
-  } else throw e;
-}
+// The endpoint probe is the app's own (hfEndpoint.mjs): a build machine behind the Great Firewall gets hf-mirror.com
+// automatically, which is what the OSS bucket was there to provide.
+const endpoint = await resolveHfEndpoint((l) => console.log(`[download-mac] ${l}`));
+const url = `${endpoint}/${HF_REPO}/resolve/main/${key}`;
+console.log(`[download-mac] GET ${url}`);
+await fetchTo(url, zip);
 console.log(`[download-mac] downloaded ${(fs.statSync(zip).size / 1048576).toFixed(0)} MB`);
 
 // Extract into a temp directory, then copy each PAYLOADS subdirectory (qemu only) into its resources directory.

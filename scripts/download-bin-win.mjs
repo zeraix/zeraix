@@ -1,10 +1,10 @@
 #!/usr/bin/env node
 /**
- * DOWNLOAD the Windows binary bundle and lay it out under resources/bin/win32-<arch>/qemu/ for dist:win to embed.
+ * DOWNLOAD the Windows binary bundle from Hugging Face and lay it out under resources/bin/win32-<arch>/qemu/ for dist:win to embed.
  *   - qemu: the sandbox command-execution engine.
  * llama is NOT in here. It is installed at runtime from Hugging Face (electron/llm/llamaInstaller.mjs), which is why
  * PAYLOADS below has a single entry; an older zip may still carry a llama/ directory, and nothing lays it out.
- * Downloads one zip (bin/win32-<arch>.zip) and copies the qemu subdirectory out of it. CDN first, falling back to authenticated OSS on failure.
+ * Downloads one zip (qemu/win32-<arch>.zip) and copies the qemu subdirectory out of it. Public, so no credentials are needed.
  * Can run on any build host; only runs the --version self-test on Windows. For the matching upload see scripts/bundle-bin-win.mjs.
  *
  *   node scripts/download-bin-win.mjs
@@ -15,7 +15,7 @@ import os from "node:os";
 import path from "node:path";
 import https from "node:https";
 import AdmZip from "adm-zip";
-import OSS from "ali-oss";
+import { resolveHfEndpoint } from "../electron/llm/hfEndpoint.mjs";
 
 const REPO = process.cwd();
 const ARCH = process.arch;
@@ -33,10 +33,11 @@ function loadEnv() {
   return env;
 }
 const env = loadEnv();
-const bucket = env.OSS_BUCKET, endpoint = env.OSS_ENDPOINT;
-const cdn = (env.OSS_CDN || "https://docker.zeraix.com").replace(/\/+$/, "");
-const key = env.OSS_BIN_WIN_KEY || `${env.OSS_PREFIX || ""}bin/win32-${ARCH}.zip`;
-const encKey = key.split("/").map(encodeURIComponent).join("/");
+// Hugging Face, not the OSS bucket behind docker.zeraix.com. This one mattered most: the Windows object was uploaded
+// PRIVATE, so any build machine that missed the CDN needed OSS_ACCESS_KEY_ID/_SECRET just to fetch qemu. The HF copy is
+// public, and the endpoint probe hands a blocked network hf-mirror.com by itself.
+const HF_REPO = env.ZERAIX_LLAMA_BUILDS_REPO || "Zeraix/llama-builds";
+const key = env.ZERAIX_BIN_WIN_KEY || `qemu/win32-${ARCH}.zip`;
 
 const PAYLOADS = [
   { name: "qemu", selfTest: { exe: "qemu-system-x86_64.exe", hard: true } },
@@ -144,17 +145,11 @@ function fetchTo(url, dest, maxRedirs = 5) {
 
 const zip = path.join(os.tmpdir(), `bin-win32-${ARCH}.dl.zip`);
 fs.rmSync(zip, { force: true });
-const cdnUrl = `${cdn}/${encKey}`;
-console.log(`[download-win] GET ${cdnUrl}`);
-try {
-  await fetchTo(cdnUrl, zip);
-} catch (e) {
-  if (env.OSS_ACCESS_KEY_ID && env.OSS_ACCESS_KEY_SECRET && bucket && endpoint) {
-    console.warn(`[download-win] CDN GET failed (${e.statusCode || e.message}) — falling back to authenticated OSS`);
-    const client = new OSS({ accessKeyId: env.OSS_ACCESS_KEY_ID, accessKeySecret: env.OSS_ACCESS_KEY_SECRET, bucket, region: endpoint.replace(/\.aliyuncs\.com$/, ""), secure: true });
-    await client.get(key, zip);
-  } else throw e;
-}
+// The endpoint probe is the app's own (hfEndpoint.mjs), so a build machine behind the Great Firewall gets hf-mirror.com.
+const endpoint = await resolveHfEndpoint((l) => console.log(`[download-win] ${l}`));
+const url = `${endpoint}/${HF_REPO}/resolve/main/${key}`;
+console.log(`[download-win] GET ${url}`);
+await fetchTo(url, zip);
 console.log(`[download-win] downloaded ${(fs.statSync(zip).size / 1048576).toFixed(0)} MB`);
 
 const base = path.join(os.tmpdir(), `bin-win32-${ARCH}.x`);
