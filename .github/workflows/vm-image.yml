@@ -78,6 +78,13 @@ jobs:
             --load
             --cache-from=type=gha,scope=vm-${{ inputs.arch }}
             --cache-to=type=gha,mode=max,scope=vm-${{ inputs.arch }}
+          # The assembly image (mke2fs + qemu-img) gets its OWN scope: it changes only when
+          # Dockerfile.assembly does, while the toolbox above changes often, and sharing one scope would
+          # have each eviction take the other with it.
+          DOCKER_BUILD_FLAGS_ASM: >-
+            --load
+            --cache-from=type=gha,scope=vmasm-${{ inputs.arch }}
+            --cache-to=type=gha,mode=max,scope=vmasm-${{ inputs.arch }}
         run: |
           df -h / | tail -1   # the qcow2 is ~1 GB; fail loudly here rather than midway through docker build
           # A plain directory, not the app-data VM dir. Staging into <appdata>/vm/<version>/ is a

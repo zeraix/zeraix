@@ -1,6 +1,6 @@
 # QEMU sandbox VM — end-to-end (macOS/HVF · Windows/WHPX · Linux/KVM)
 
-One long-lived VM running the agent toolbox, with **path-isomorphic host binds** and
+One long-lived VM running the agent toolbox, with the working directory bound at **/workspace** and
 **dynamic port forward** driven live from the Electron main process — no reboot per task,
 one warm VM for the whole session. Same control code on every OS.
 
@@ -21,9 +21,9 @@ TCP sockets via `control.mjs`:
 | **guest-agent** (4445) | `qemu-guest-agent`: run the (bubblewrap-confined) workload, capture output |
 
 Mount model: share ONE broad 9p root (posix `/`, Windows drive) at `/mnt/hostfs`; every cwd
-is already covered. bubblewrap binds the mount set (session common-root ∪ explicitly-chosen
-folders) into the guest at the **same absolute path** (posix), so tool output paths match on
-both sides — no per-task remount, no VM rebuild.
+is already covered. bubblewrap then binds exactly ONE directory per command — that command's own
+cwd — at the fixed guest path `/workspace`, so the host path never appears inside the guest and no
+per-task remount or VM rebuild is needed.
 
 ## Files
 
@@ -35,7 +35,7 @@ both sides — no per-task remount, no VM rebuild.
 | `build-rootfs-local.sh` | build the image + convert → bootable `rootfs.qcow2` (+`Image`/`initrd.img`) via `mke2fs -d` — no d2vm/loop/registry |
 | `requirements.txt` / `rapidocr_v6_api.py` | toolbox python deps + the PP-OCRv6 adapter (baked into the image) |
 | `guest/firstboot.{sh,service}` | guest boot: bring up the NIC, then mount the 9p share (virtio on mac/Linux; skipped on Windows — host mounts over TCP) |
-| `.env` | OSS creds + config for the publish scripts (gitignored) |
+| `.env` | `HF_TOKEN` + config for the publish scripts (gitignored) |
 
 ## Size (Apple Silicon, QEMU 11)
 
@@ -45,9 +45,9 @@ both sides — no per-task remount, no VM rebuild.
 | firmware | none — direct **kernel boot** (`Image` + `initrd.img`); x86 uses bundled SeaBIOS |
 | toolbox rootfs | ~1 GB compressed qcow2 → **download on first run** |
 
-QEMU is fetched from the CDN into the app bundle at **build time** (`dist:*` → `download:bin:*`);
+QEMU is fetched from Hugging Face into the app bundle at **build time** (`dist:*` → `download:bin:*`);
 on macOS `afterSign` re-signs it with the `com.apple.security.hypervisor` entitlement. The rootfs
-is downloaded from the CDN at **first run** into the platform's local app-data dir (Win
+is downloaded at **first run** into the platform's local app-data dir (Win
 `%LOCALAPPDATA%\<App>\vm\<VM_VERSION>`, macOS `~/Library/Application Support/<App>/vm/<VM_VERSION>`, Linux
 `~/.local/share/<App>/vm/<VM_VERSION>`) — `rootfs.qcow2`, `Image`, `initrd.img`. `<VM_VERSION>` is the per-arch
 **docker image ID** short hash (`sha-<12hex>`), written into `electron/versions.json` by the vm-image workflow;
@@ -56,9 +56,9 @@ See **Distribution** below.
 
 ## Building the rootfs (CI / publisher, not the client)
 
-Builds the one image from `Dockerfile` and converts it to a bootable qcow2 **locally** — no d2vm,
-no loop device, no registry round-trip (works where HTTPS/registries are blocked but HTTP apt
-mirrors are reachable, and on a macOS host with no loop devices). Needs Docker.
+Builds the one image from `Dockerfile` and converts it to a bootable qcow2 — no d2vm, no loop
+device, no privilege, no registry round-trip. Runs on any host with Docker + bash; CI runs it on
+ubuntu.
 
 ```sh
 # Normally you do NOT run this: .github/workflows/vm-image.yml builds each guest arch natively (amd64 on
@@ -76,7 +76,7 @@ table) + `Image` (kernel) + `initrd.img` (initramfs), all in the local app-data 
 three; the compressed qcow2 boots as-is (QEMU decompresses the read-only base on read; a throwaway
 overlay holds writes).
 
-## Distribution — OSS/CDN & scripts
+## Distribution — Hugging Face & scripts
 
 Neither the qemu binaries nor the rootfs are committed. Both are published to the Hugging Face repo
 **`Zeraix/llama-builds`** — qemu under `qemu/<platform>-<arch>.zip`, the VM image under
@@ -93,12 +93,12 @@ are left in place: app versions that shipped before the move still resolve them.
 | `npm run bundle:bin:mac` | stage + relocate + ad-hoc-sign local qemu → zip → upload `qemu/darwin-arm64.zip` (macOS publisher) |
 | **vm-image workflow** | **build + publish the VM image for ONE guest arch** — manual dispatch, amd64 on the x64 runner, arm64 on the ARM one. Reports the new `VM_VERSION` to commit |
 | `sandbox/qemu/build-rootfs-local.sh` | build the disk + kernel locally, for iterating on the Dockerfile (needs Docker + bash). Publishing by hand is not supported |
-| `npm run download:bin:win` · `:mac` | fetch qemu from the CDN → `resources/qemu/<os>-<arch>/` (run automatically by `dist:*`) |
+| `npm run download:bin:win` · `:mac` | fetch qemu → `resources/bin/<os>-<arch>/qemu/` (run automatically by `dist:*`) |
 
 **How it's consumed:**
 
 - **qemu binaries** — `dist:win` / `dist:mac` / `dist:dir` run `download:bin:*` first, so the
-  installer bundles qemu pulled from the CDN (build machines need no local qemu). On macOS,
+  installer bundles qemu pulled from Hugging Face (build machines need no local qemu). On macOS,
   `afterSign` re-signs the downloaded qemu with the app's Developer ID + hypervisor entitlement.
 - **rootfs (VM disk)** — downloaded **at runtime on first launch** by `qemu.mjs` `ensureRootfs()`
   into the local app-data VM dir (`vmpaths.mjs`; `ZERAIX_VMDIR` overrides): if it lacks the disk/kernel,

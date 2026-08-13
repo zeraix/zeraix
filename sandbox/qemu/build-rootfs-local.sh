@@ -1,9 +1,8 @@
 #!/usr/bin/env bash
 # Bootable-rootfs builder for the QEMU sandbox — the single supported path.
 # Builds the one image (toolbox + VM bits, sandbox/qemu/Dockerfile) then converts it to a
-# bootable qcow2 locally with `mke2fs -d` + `qemu-img` — NO d2vm, NO loop device, NO
-# privilege, NO registry round-trip. Works where HTTPS/registries are blocked but HTTP apt
-# mirrors are reachable, and on a macOS host with no loop devices.
+# bootable qcow2 with `mke2fs -d` + `qemu-img` — NO d2vm, NO loop device, NO privilege, NO
+# registry round-trip. Runs on any host with Docker + bash; CI runs it on ubuntu.
 #
 # Output = a DIRECT-KERNEL-BOOT artifact set (the BOOT=kernel fast path, ~1s boot):
 #   rootfs.qcow2   whole-disk ext4 (no partition table) → /dev/vda root
@@ -16,15 +15,20 @@
 #   (.github/workflows/vm-image.yml passes an explicit OUTDIR; it is the supported way to build one)
 set -euo pipefail
 
-ARCH_DEB="${ARCH_DEB:-arm64}"                 # Debian arch (arm64 for Apple Silicon)
+# Follow the host unless told otherwise. It used to default to arm64 outright, which on an x64 host
+# silently produced an EMULATED arm64 build. CI passes ARCH_DEB explicitly either way.
+case "$(uname -m)" in
+  arm64 | aarch64) HOST_DEB=arm64 ;;
+  *)               HOST_DEB=amd64 ;;
+esac
+ARCH_DEB="${ARCH_DEB:-$HOST_DEB}"             # Debian arch of the guest to build
 PLATFORM="linux/${ARCH_DEB}"
 SUITE="${SUITE:-trixie}"                      # base debian suite (matches sandbox/qemu/Dockerfile default)
 SIZE="${SIZE:-6G}"                            # sparse; big enough for the ~2GB toolbox rootfs
-# HTTP (port 80) mirrors — 443/registry may be blocked; USTC is ~50x faster here than
-# deb.debian.org. Override for other regions.
-# Aliyun for both: apt over HTTP (Dockerfile's sed rewrites to http://$APT_MIRROR — no
-# ca-certificates needed on the first layer), pip/OCR-models over HTTPS (ca-certs are
-# installed by then). Override for other regions.
+# Aliyun for both, over HTTP (port 80) because 443/registries may be blocked where this is run by hand:
+# apt via the Dockerfile's sed to http://$APT_MIRROR (no ca-certificates on the first layer), pip and the
+# OCR models over HTTPS (ca-certs are installed by then). CI overrides both to the upstream defaults —
+# these are ~50x faster from China and slower from anywhere else.
 APT_MIRROR="${APT_MIRROR:-mirrors.aliyun.com}"
 PIP_INDEX_URL="${PIP_INDEX_URL:-https://mirrors.aliyun.com/pypi/simple/}"
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -37,6 +41,7 @@ esac
 OUT="${1:-$DEF_OUT}"
 BUILD="${BUILD:-${TMPDIR:-/tmp}/zx-vmbuild}"
 IMG_TAG="zx-vm-${ARCH_DEB}"
+ASM_TAG="zx-vmasm-${ARCH_DEB}"   # throwaway assembly host; cached as a layer, see Dockerfile.assembly
 
 echo ">> out: $OUT    build: $BUILD    suite: $SUITE"
 rm -rf "$BUILD"; mkdir -p "$BUILD" "$OUT"
@@ -60,17 +65,24 @@ docker export "$CID" -o "$BUILD/rootfs.tar"
 docker rm "$CID" >/dev/null
 
 # ── directory → bare ext4 qcow2 (no d2vm / no loop / no privilege) ──────────────────
-# Assembly runs in a throwaway debian container. NB: stage + mke2fs on the CONTAINER's own
-# fs (/stage, /var/tmp), NOT the host bind mount — llistxattr on symlinks over the OrbStack/
-# 9p host mount returns ENOENT and breaks `mke2fs -d`. Only finished artifacts go to /build.
-# The assembly container is just a throwaway host for mke2fs + qemu-img (NOT the VM's OS);
-# same suite as the rootfs only to avoid confusion — any debian with e2fsprogs works.
+# Assembly runs in a throwaway container (Dockerfile.assembly: mke2fs + qemu-img, NOT the VM's OS).
+# It is still a container on a Linux runner, where the tools are one apt away, for ONE reason: it runs
+# as root, so `tar -x` keeps the rootfs's uid/gid and `mke2fs -d` copies them in. Unpacked as an
+# ordinary CI user the whole guest filesystem would end up owned by that user. sudo would do as well,
+# at the price of root-owned artifacts to chown afterwards and a second code path.
+#
+# Stage on the CONTAINER's own fs (/stage, /var/tmp), never the /build bind mount: `mke2fs -d` reads
+# xattrs off every symlink, which a bind mount backed by a network/virtual filesystem can fail. Only
+# finished artifacts go to /build.
+echo ">> building the assembly image …"
+# shellcheck disable=SC2086
+${DOCKER_BUILD:-docker build} --platform "$PLATFORM" -f "$HERE/Dockerfile.assembly" \
+  --build-arg "DEBIAN_SUITE=$SUITE" --build-arg "APT_MIRROR=$APT_MIRROR" \
+  ${DOCKER_BUILD_FLAGS_ASM:-} \
+  -t "$ASM_TAG" "$HERE"
+
 echo ">> assembling ext4 → qcow2 (size $SIZE) …"
-docker run --rm --platform "$PLATFORM" -v "$BUILD:/build" "debian:${SUITE}-slim" bash -euc "
-  printf 'deb http://${APT_MIRROR}/debian ${SUITE} main\n' > /etc/apt/sources.list
-  rm -f /etc/apt/sources.list.d/debian.sources
-  apt-get -o Acquire::ForceIPv4=true update -qq
-  DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends e2fsprogs qemu-utils file >/dev/null
+docker run --rm --platform "$PLATFORM" -v "$BUILD:/build" "$ASM_TAG" bash -euc "
   rm -rf /stage; mkdir -p /stage
   tar -C /stage -xf /build/rootfs.tar
   # kernel + initrd (arm64 vmlinuz already boots via qemu -kernel; decompress only if gzip)
