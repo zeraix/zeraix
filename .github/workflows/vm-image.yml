@@ -57,6 +57,13 @@ jobs:
       # buildx is needed because only it can export a cache; the classic builder has nowhere to put one.
       - uses: docker/setup-buildx-action@v3
 
+      # Exports ACTIONS_RUNTIME_TOKEN / ACTIONS_CACHE_URL into the job environment. GitHub gives those to
+      # ACTIONS, not to plain `run:` steps — so `--cache-to=type=gha` from our shell script silently wrote
+      # nothing, and every run rebuilt from scratch. (docker/build-push-action injects them itself, which
+      # is why the same flags work there and not here.) Verified from run 31663627962: it logged
+      # "exporting layers" for --load and no cache export at all.
+      - uses: crazy-max/ghaction-github-runtime@v3
+
       # No `npm ci`: build-rootfs.mjs imports only node built-ins and two local modules (vmpaths.mjs,
       # vmVersion.mjs). Installing the app's full dependency tree here would add minutes and buy nothing.
       # No host toolchain to install: mke2fs and qemu-img run INSIDE the script's throwaway debian
