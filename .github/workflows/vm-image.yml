@@ -101,9 +101,19 @@ jobs:
           bash sandbox/qemu/build-rootfs-local.sh "$RUNNER_TEMP/vm-out"
           ls -la "$RUNNER_TEMP/vm-out"
 
-      # The version IS the built docker image id, which is what makes it change only when the image
-      # content does: shortImageId() = "sha-" + the first 12 hex of {{.Id}}. It has to match exactly, or
-      # every user downloads ~1 GB for a version the app never asks for.
+      # The version IS the built docker image id: shortImageId() = "sha-" + the first 12 hex of {{.Id}}.
+      #
+      # That is a BUILD identity, not a content identity. Rebuilding the same commit mints a new version
+      # whenever a layer misses the cache, and NOT because the packages moved: two amd64 runs installed
+      # the identical 884 packages at identical versions, yet produced different shas. Re-running the same
+      # apt simply does not produce the same bytes — mtimes, regenerated caches (fonts, ldconfig, .pyc)
+      # and dpkg metadata are all stamped with build time, and the image config records its own. Measured
+      # on those two runs: the kernel, copied out of the package, was byte-identical; the initrd, generated
+      # during the build, differed by 6 bytes.
+      #
+      # Every new version is a ~1 GB download for every user, so rebuild when the Dockerfile changes, not
+      # to "refresh" an image. A stable sha across rebuilds needs reproducible builds (pinned package
+      # versions + SOURCE_DATE_EPOCH), which is a project, not a flag.
       - name: Version from the built image
         id: ver
         run: |
