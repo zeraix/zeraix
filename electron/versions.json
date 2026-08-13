@@ -2,7 +2,7 @@
   "llama": "b10369",
   "vm": {
     "amd64": "sha-56012493f5e0",
-    "arm64": "sha-e45397068284"
+    "arm64": "sha-e1d67c55484e"
   },
   "seedPrefix": {
     "daily": "8010906316613bab",
