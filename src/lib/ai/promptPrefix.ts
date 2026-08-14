@@ -10,11 +10,13 @@
  */
 import { systemPromptFor, WORKDIR_RULES } from "@/app/agent/chat/constants";
 import { TASK_STATE_EXPLAINER } from "@/app/agent/chat/taskMemory";
+import { GOAL_EXPLAINER } from "@/app/agent/chat/goalState";
 import { skillSystemHint, loadSkillTool } from "@/lib/ai/skills/runtime";
 import { SANDBOX_TOOLBOX_SKILL } from "@/lib/ai/skills/builtin";
 import {
   askUserTool, updateTodosTool, setTaskStateTool, openBrowserTool, browserTool, imageGenerationTool,
   saveMemoryTool, deleteMemoryTool, searchMemoryTool, callToolTool,
+  setGoalTool, updatePlanTool,
 } from "@/app/agent/chat/agentTools";
 import { joinSubagentsTool, spawnSubagentsTool, subAgentTool } from "@/lib/ai/subagents";
 import { isMcpToolName, isRouted, ROUTED_TOOLS } from "@/lib/ai/toolRouter";
@@ -55,6 +57,10 @@ export function buildSystemPrompt(mode: PrefixMode, { toolsReady = true, memory 
         BUILTIN_SKILL_MENU,
       ].join("\n"),
     );
+  // Invariant explanation of the goal block, ahead of the task-state one because it outranks it: Task Memory is
+  // whatever the model decides is worth remembering, the goal is what it is not allowed to decide. Like every other
+  // explainer here it is fixed text; only the goal itself varies, and that arrives as a change event.
+  parts.push(GOAL_EXPLAINER);
   // Invariant explanation of the task-state block; the brief itself arrives as a change event.
   parts.push(TASK_STATE_EXPLAINER);
   // Unconditional: gating this on "are any skills enabled" would make messages[0] differ per install. It points at the
@@ -106,6 +112,14 @@ export function buildToolSet(mode: PrefixMode, native: unknown[], { memory = tru
     askUserTool(),
     updateTodosTool(),
     setTaskStateTool(),
+    // The goal pair travels together and is declared, never routed: their descriptions carry the rules the
+    // mechanism depends on (what an acceptance criterion is, that re-planning is expected, that the model does not
+    // judge its own completion), so reaching them through the catalog would delete the argument with the schema —
+    // the same reason set_task_state and run_subagent stay declared. See toolRouter.ts. There is deliberately no
+    // third tool for "declare the goal met": that verdict is the evaluator's, and giving the model a way to ask
+    // for it would be giving it a way to grant it.
+    setGoalTool(),
+    updatePlanTool(),
     openBrowserTool(mode),
     browserTool(),
     // Declared even with no image key configured. Gating it here used to be the earliest per-install difference in the array;

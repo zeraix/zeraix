@@ -17,7 +17,9 @@ import {
   AGENT_LLM_CUSTOM_MODEL_KEY,
   AGENT_LLM_PROVIDER_KEY,
   AGENT_LOCALE_KEY,
+  AGENT_GOAL_EVALUATOR_MODEL_KEY,
   AGENT_MAX_CONSECUTIVE_TIMEOUTS_KEY,
+  AGENT_MAX_GOAL_ROUNDS_KEY,
   AGENT_MAX_SAME_TOOL_CALLS_KEY,
   AGENT_MAX_SUBAGENT_ROUNDS_KEY,
   AGENT_MAX_TOOL_ROUNDS_KEY,
@@ -81,6 +83,8 @@ const STATIC: Array<[dot: string, section: string, key: string]> = [
   [AGENT_MAX_SAME_TOOL_CALLS_KEY, "limits", "max_same_tool_calls"],
   [AGENT_MAX_CONSECUTIVE_TIMEOUTS_KEY, "limits", "max_consecutive_timeouts"],
   [AGENT_MAX_SUBAGENT_ROUNDS_KEY, "limits", "max_subagent_rounds"],
+  [AGENT_MAX_GOAL_ROUNDS_KEY, "limits", "max_goal_rounds"],
+  [AGENT_GOAL_EVALUATOR_MODEL_KEY, "goal", "evaluator_model"],
   [AGENT_MODE_KEY, "ui", "mode"],
   [AGENT_LOCALE_KEY, "ui", "locale"],
 ];

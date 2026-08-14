@@ -124,6 +124,11 @@ export interface Conversation {
   /** Task Memory (optional): the pinned per-mission prose brief (internal, model-only). A runtime artifact
    *  like compaction; restored on reopen so the mission survives, and not part of the integrity hash. */
   taskMemory?: StoredTaskMemory;
+  /** Goal State (optional): objective, acceptance criteria, plan, blockers and the verification record (see
+   *  app/agent/chat/goalState.ts). Persisted for the same reason as taskMemory and one more: the wrap-up gate
+   *  refuses to end a turn on an unmet goal, so a goal that did not survive reopen would silently turn a
+   *  half-finished task into a finished one. A runtime artifact, not part of the integrity hash. */
+  goal?: StoredGoalState;
   /**
    * The composed system message (messages[0]) as this conversation first sent it.
    *
@@ -156,6 +161,16 @@ export interface StoredTaskMemory {
   /** Provenance: "model" (deliberate, immune) or "auto-extracted" (refreshable). Missing → treated as "model". */
   source?: "model" | "auto-extracted";
 }
+
+/**
+ * Persisted Goal State (see app/agent/chat/goalState.ts).
+ *
+ * Deliberately typed as an opaque JSON record rather than a structural copy of GoalState. StoredTaskMemory could
+ * mirror its two fields without cost; this shape has six nested arrays whose members carry their own status
+ * enums, and a duplicate here would be a second definition to keep in step — for no benefit, since everything
+ * read back goes through normalizeGoal(), which repairs partial and older records anyway.
+ */
+export type StoredGoalState = Record<string, unknown>;
 
 /** A project = working directory + mode. An empty workdir means the "default project" (daily mode with no folder chosen). */
 export interface Project {

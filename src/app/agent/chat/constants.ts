@@ -32,6 +32,8 @@ export const RENDERER_HANDLED_TOOLS = new Set([
   "ask_user",
   "update_todos",
   "set_task_state",
+  "set_goal",
+  "update_plan",
   "openBrowser",
   "browser",
   "image_generation",
@@ -39,6 +41,21 @@ export const RENDERER_HANDLED_TOOLS = new Set([
   "save_memory",
   "delete_memory",
   "search_memory",
+]);
+
+/**
+ * The tools that hand work to a sub-agent.
+ *
+ * A sub-agent runs in its own isolated context and its conversation is never persisted, so the ONLY durable
+ * trace of what it did is the one tool result it returns — which compaction is free to summarise away. These
+ * names are the choke point where that conclusion is written back into Goal State as evidence, so the goal
+ * still knows what was established after the messages that established it are gone.
+ */
+export const DELEGATION_TOOLS = new Set([
+  "run_subagent",
+  "spawn_subagents",
+  "join_subagents",
+  "spawn_sub_agent",
 ]);
 
 /** Tools exempt from capToolOutput. read_file bounds itself by line range (offset/limit), so its output is already

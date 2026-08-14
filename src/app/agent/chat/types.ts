@@ -30,6 +30,8 @@ export type ReminderState = {
   skills?: { id: string; description: string }[];
   disabledTools?: string[];
   task?: string;
+  /** The rendered Goal State block (objective + criteria + plan + progress); "" once a goal is cleared. See goalState.ts. */
+  goal?: string;
 };
 
 export type ApiMsg =

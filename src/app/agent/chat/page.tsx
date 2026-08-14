@@ -42,7 +42,14 @@ import {
   setWorkingDir,
 } from "@/lib/ai/toolkit";
 import { isLlmProxyAvailable } from "@/lib/ai/llm";
-import { onServiceEvent, type ServiceEvent } from "@/lib/ai/services";
+import {
+  onServiceEvent,
+  isJobCompletion,
+  describeJobEvent,
+  formatJobDelivery,
+  formatJobMessage,
+  type ServiceEvent,
+} from "@/lib/ai/services";
 import {
   isUsageLogEnabledSync,
   logContextDiag,
@@ -72,6 +79,8 @@ import { SkillSelectPanel } from "./SkillSelectPanel";
 import BrowserPanel from "./BrowserPanel";
 import { getStorage } from "@zzcpt/zztool";
 import {
+  AGENT_GOAL_EVALUATOR_MODEL_KEY,
+  AGENT_MAX_GOAL_ROUNDS_KEY,
   AGENT_MODE_KEY,
   AGENT_STORAGE_ROOT,
   AGENT_WORKDIR_KEY,
@@ -125,6 +134,31 @@ import {
   mergeExtracted,
   type TaskMemory,
 } from "./taskMemory";
+import {
+  emptyGoal,
+  isGoalEmpty,
+  isGoalActive,
+  restoreGoal,
+  toStoredGoal,
+  renderGoalState,
+  startGoal,
+  clearGoal,
+  achieveGoal,
+  recordEvaluation,
+  addTurnSpend,
+  setCriteria,
+  applyPlan,
+  recordEvidence,
+  todosFromGoal,
+  applyTodoStatuses,
+  decideNextRound,
+  MAX_GOAL_AUTO_ROUNDS,
+  type GoalState,
+} from "./goalState";
+import { parseGoalCommand, GOAL_CLEAR_ALIASES, type GoalCommand } from "./goalCommand";
+import { parseSlashCommand } from "./slashCommands";
+import { createGoalEvaluator, TRANSCRIPT_BUDGET_FRACTION } from "./goalEvaluator";
+import { GoalBar } from "./GoalBar";
 import type { StoredCompaction } from "@/lib/ai/conversation";
 import { countMessagesTokens, countTokens } from "@/lib/ai/tokenizer";
 // ── Extracted modules (data / types / constants / tool declarations / display components) ──────────────────────
@@ -149,6 +183,7 @@ import {
   RECORD_MEMORY_NUDGE,
   FORCE_REVIEW_NUDGE,
   PENDING_DELEGATION_NUDGE,
+  DELEGATION_TOOLS,
   MUTATING_FILE_TOOLS,
   PARALLEL_SAFE_TOOLS,
   RENDERER_HANDLED_TOOLS,
@@ -589,6 +624,82 @@ function ChatAgent() {
     }
   };
 
+  // Goal State: the condition this task must reach, plus the bookkeeping of the loop driving it there.
+  // Held per conversation and persisted exactly like Task Memory above, for the same reason and one more: the
+  // loop keeps running until an independent evaluator says the condition is met, so a goal that did not survive
+  // a reload would silently turn a half-finished task into a finished one. See goalState.ts.
+  //
+  // The authority is the ref: the send loop reads and writes it from closures that must see the current value
+  // synchronously, which is the same reason todos and Task Memory are refs. `displayedGoal` is the render-visible
+  // mirror of whichever conversation is on screen — exactly the todos/setTodos arrangement above, and for the
+  // same reason (a panel gated on a ref is invisible to React, so it only updated when something else happened
+  // to re-render).
+  const goalByConvRef = useRef(new Map<string, GoalState>());
+  const [displayedGoal, setDisplayedGoal] = useState<GoalState | null>(null);
+  const [goalExpanded, setGoalExpanded] = useState(false);
+  const goalFor = (convId: string | null): GoalState =>
+    (convId ? goalByConvRef.current.get(convId) : undefined) ?? emptyGoal();
+  /**
+   * Write a conversation's Goal State.
+   *
+   * Persists only what toStoredGoal admits — an ACTIVE goal. An achieved or cleared one stays in the ref for the
+   * rest of the session (so the bar can show the run that just finished) and is deliberately absent from disk,
+   * which is what stops a reopened conversation from resurrecting a goal whose run is over.
+   */
+  const setGoalFor = (convId: string | null, g: GoalState) => {
+    if (!convId) return;
+    if (isGoalEmpty(g)) goalByConvRef.current.delete(convId);
+    else goalByConvRef.current.set(convId, g);
+    useAgentChatStore.getState().setConversationGoal(convId, toStoredGoal(g));
+    // Mirror on screen only when this conversation is the one being viewed: a background conversation's goal
+    // persists silently and is picked up by the swap below when the user comes back to it.
+    if (convId === convIdRef.current) setDisplayedGoal(isGoalEmpty(g) ? null : g);
+  };
+
+  /**
+   * The model calls set_goal: record the end state this task must reach, and the criteria that decide it.
+   *
+   * The reducer decides what the update means — in particular that a condition the USER wrote with /goal is
+   * never overwritten here. All this handler does is hand the arguments over and report what came back.
+   */
+  const setGoal = (ctx: RunCtx, rawArgs: Record<string, unknown>): string => {
+    const { goal, ok, message } = setCriteria(
+      goalFor(ctx.convId),
+      {
+        objective: typeof rawArgs.objective === "string" ? rawArgs.objective : "",
+        acceptanceCriteria: Array.isArray(rawArgs.acceptanceCriteria)
+          ? (rawArgs.acceptanceCriteria as Array<string | { text?: string }>)
+          : [],
+      },
+      // eslint-disable-next-line react-hooks/purity -- a tool handler, reached from an event, never from render
+      { now: Date.now() },
+    );
+    if (ok) setGoalFor(ctx.convId, goal);
+    return message;
+  };
+
+  /**
+   * The model calls update_plan: install or revise the strategy for the current goal.
+   *
+   * The plan is also the user-facing checklist, so a new plan is mirrored into the todo panel here — one list
+   * seen from two sides (see todosFromGoal). Mirrored only when the call was accepted, so a rejected one never
+   * wipes a checklist the user is watching.
+   */
+  const updatePlan = (ctx: RunCtx, rawArgs: Record<string, unknown>): string => {
+    const { goal, ok, message } = applyPlan(goalFor(ctx.convId), {
+      steps: Array.isArray(rawArgs.steps)
+        ? (rawArgs.steps as Array<string | { title?: string; status?: string }>)
+        : [],
+      rationale: typeof rawArgs.rationale === "string" ? rawArgs.rationale : undefined,
+      blockers: Array.isArray(rawArgs.blockers) ? rawArgs.blockers.map((b) => String(b)) : undefined,
+    });
+    if (ok) {
+      setGoalFor(ctx.convId, goal);
+      setTodosFor(ctx.convId, todosFromGoal(goal));
+    }
+    return message;
+  };
+
   // The model calls set_task_state: record its internal mission brief into Task Memory (source "model"),
   // pinned into the wire every turn and preserved across compaction. Not shown to the user. When the brief
   // is unchanged, return a discouraging result so the model stops re-recording it every turn (it over-calls
@@ -622,8 +733,23 @@ function ChatAgent() {
       })
       .filter((t) => t.title);
     setTodosFor(ctx.convId, parsed);
+    // Fold the checklist back into the plan it came from, so the two do not drift: the plan is what the goal
+    // reminder shows every turn, and a step the model just ticked off here would otherwise still read as pending
+    // there. Matched by title, so a list the model rewrote in its own words simply does not match and the plan is
+    // left alone rather than corrupted. See applyTodoStatuses.
+    const goal = applyTodoStatuses(goalFor(ctx.convId), parsed);
+    if (goal !== goalFor(ctx.convId)) setGoalFor(ctx.convId, goal);
     const done = parsed.filter((t) => t.status === "completed").length;
-    return `Updated the todo list (${done}/${parsed.length} completed).`;
+    return (
+      `Updated the todo list (${done}/${parsed.length} completed).` +
+      // A ticked-off checklist is progress through the plan, never proof that the goal is met — the evaluator
+      // decides that, from the transcript. Said here because a fully ticked list is the moment the model is
+      // most likely to conclude otherwise and stop.
+      (isGoalActive(goal) && done === parsed.length && parsed.length > 0
+        ? " Every step is marked done, but that is not the same as the goal being met: the evaluator checks the" +
+          " goal condition against what this conversation actually shows. Make sure the evidence for it is here."
+        : "")
+    );
   };
 
   // Manual toggle: switch this item between "completed / not completed". Only ever acts on the viewed conversation's list.
@@ -632,6 +758,9 @@ function ChatAgent() {
       i === index ? { ...t, status: t.status === "completed" ? "pending" : "completed" } : t,
     );
     setTodosFor(convIdRef.current, next as Todo[]);
+    // The user ticking an item is a statement about the plan too — same fold as the model's own update_todos.
+    const goal = applyTodoStatuses(goalFor(convIdRef.current), next as Todo[]);
+    if (goal !== goalFor(convIdRef.current)) setGoalFor(convIdRef.current, goal);
   };
 
   // Discard all pending-answer ask_user prompts of a conversation (unblocking them with the given text as the result). Used to release by conversation on cancel / clear.
@@ -1122,6 +1251,7 @@ function ChatAgent() {
     setAttachments([]); // Clear unsent attachments
     setTodosFor(convIdRef.current, []); // Clear this conversation's task list
     setTaskMemoryFor(convIdRef.current, emptyTaskMemory()); // ...and its Task Memory brief
+    setGoalFor(convIdRef.current, emptyGoal()); // ...and its goal, so no loop survives into a new conversation
     turnUsageRef.current = { prompt: 0, completion: 0, total: 0, cached: 0, estimated: false };
     setSessionUsage({ prompt: 0, completion: 0, total: 0, cached: 0, estimated: false }); // Reset the session token stats
     setCtxTokens(0); // New conversation: context usage back to zero
@@ -1145,10 +1275,19 @@ function ChatAgent() {
       clearAll();
       return;
     }
+    // Stop the turn first if one is running. Clearing does not abort by itself, so the loop would carry on
+    // appending into the record that was just emptied — the messages come back one by one, out of a
+    // conversation the user believes they deleted. cancel() also drops the queue and releases any pending
+    // consent/choice waits, all of which belong to history that no longer exists.
+    if (useAgentChatStore.getState().generating[id]) cancel();
     dropConsentsFor(id);
     dropChoicesFor(id, "The user cleared the conversation.");
     allowedToolsRef.current.clear();
     interruptedRef.current = false;
+    // Jobs and goal-loop bookkeeping belong to the history being deleted; leaving them would let a build that
+    // started before the clear inject its result into an empty conversation.
+    pendingJobsRef.current.delete(id);
+    awaitingJobsRef.current.delete(id);
     useAgentChatStore.getState().truncateMessages(id, 0); // empty the messages, keep the conversation entry
     displayRef.current = [];
     setDisplay([]);
@@ -1160,6 +1299,9 @@ function ChatAgent() {
     setAttachments([]);
     setTodosFor(id, []);
     setTaskMemoryFor(id, emptyTaskMemory()); // clear this conversation's Task Memory brief too
+    // The goal goes with the messages it was pursued through: the evaluator judges from the transcript, and a
+    // goal left active over an emptied conversation would be judged against nothing.
+    setGoalFor(id, emptyGoal());
     turnUsageRef.current = { prompt: 0, completion: 0, total: 0, cached: 0, estimated: false };
     setSessionUsage({ prompt: 0, completion: 0, total: 0, cached: 0, estimated: false });
     setCtxTokens(0);
@@ -1272,9 +1414,19 @@ function ChatAgent() {
       const tm = normalizeTaskMemory(conv.taskMemory);
       if (!isTaskMemoryEmpty(tm)) taskMemoryByConvRef.current.set(id, tm);
     }
+    // Restore an ACTIVE goal from disk. restoreGoal zeroes the run counters on the way through: they describe an
+    // activation that is no longer happening, and "18 rounds, 240K tokens" shown against a loop that is not
+    // running reads as progress. The goal comes back active but idle — the next send re-arms the loop, so
+    // reopening the app never silently resumes spending on something nobody re-authorised. An achieved or
+    // cleared goal was never persisted, so there is nothing here that could resurrect one.
+    if (conv.goal && !goalByConvRef.current.has(id)) {
+      const g = restoreGoal(conv.goal);
+      if (isGoalActive(g)) goalByConvRef.current.set(id, g);
+    }
     // Swap the todo panel to this conversation's own list (empty unless it has one in flight). Without this the
     // previous conversation's todos stayed on screen, looking as though they belonged to the conversation just opened.
     setTodos(todosFor(id));
+    setDisplayedGoal(goalFor(id).condition ? goalFor(id) : null); // ...and the goal bar, for the same reason
     store.setActiveConversation(id);
     applyEffectiveModel(); // Loading a conversation → adopt its conversation-level bound model (global if none)
     // Restore this conversation's working directory: set the tools' working directory back to the directory used when the conversation was created (fall back to its owning project's directory if missing).
@@ -1552,6 +1704,56 @@ function ChatAgent() {
   // ── Context compaction ────────────────────────────────────────────────────────────────
   // History → summary, for the compaction plan below. See summarize.ts.
   const summarizeHistory = createSummarizeHistory(requestChat);
+
+  // ── Goal evaluation ───────────────────────────────────────────────────────────────────
+  /**
+   * The independent judge of whether a goal's condition has been met (goalEvaluator.ts).
+   *
+   * Which model it runs on: the conversation's own by default — the same choice the summariser makes, and the
+   * one that needs no configuration to work. When AGENT_GOAL_EVALUATOR_MODEL_KEY names a model, a SECOND
+   * request function is built for it instead. That matters most on local setups, where the evaluator runs after
+   * every round and asking a large model for a yes/no is a stall the user can feel; pointing it at a small fast
+   * model (or a cloud one, since the two need not share a provider) makes the loop usable.
+   *
+   * Built through createChatRequest either way, so the override inherits the proxy transport, the retry ladder,
+   * abort handling and usage-log attribution rather than reimplementing any of it.
+   */
+  const evaluatorModel = (() => {
+    const id = getStorage(AGENT_GOAL_EVALUATOR_MODEL_KEY);
+    if (!id) return null;
+    const m = resolveModelById(id);
+    // A model that has since been deleted must not silently disable evaluation — fall back to the
+    // conversation's own model, which is what an unset override already does.
+    return m && m.id !== activeModel?.id ? m : null;
+  })();
+  // eslint-disable-next-line react-hooks/refs -- same exemption as createChatRequest above: nothing here reads a ref
+  const { requestChat: requestEval } = createChatRequest({
+    activeModel: evaluatorModel ?? activeModel,
+    endpoint: evaluatorModel?.endpoint ?? endpoint,
+    modelName: evaluatorModel?.model ?? modelName,
+    apiKey: evaluatorModel?.apiKey ?? apiKey,
+    isLocalModel: evaluatorModel
+      ? evaluatorModel.providerId === LOCAL_PROVIDER_ID || isLocalEndpoint(evaluatorModel.endpoint ?? "")
+      : isLocalModel,
+    // The evaluator answers a yes/no from a transcript; a reasoning budget buys nothing and costs latency on
+    // every single round, so it is asked without one whatever the conversation is set to.
+    thinking: { ...thinking, enabled: false },
+    proxyReady,
+    turnUsage: () => turnUsageRef.current,
+    thinkingUnsupported: () => thinkingUnsupportedRef.current,
+    reasoningContextUnsupported: () => reasoningContextUnsupportedRef.current,
+    t,
+  });
+  // The transcript budget is taken from the EVALUATOR's window, not the session model's: the two need not be
+  // the same model, and pointing the check at a small fast one is the supported configuration — it would
+  // otherwise be handed a transcript sized for a 1M window and fail every round. ~4 chars per token is the
+  // usual rough conversion, and half the window leaves room for the condition, criteria and instructions.
+  const evalWindow =
+    (evaluatorModel ?? activeModel)?.contextWindow ??
+    resolveContextWindow((evaluatorModel ?? activeModel)?.model ?? "");
+  const evaluateGoal = createGoalEvaluator(requestEval, {
+    budgetChars: Math.floor(evalWindow * TRANSCRIPT_BUDGET_FRACTION * 4),
+  });
 
   /**
    * Plan and freeze compaction at the start of each round (or manually). force=true is the manual "compact now", which ignores the threshold and compacts as much as possible.
@@ -2264,6 +2466,20 @@ function ChatAgent() {
     return formatBrokeredSpawn(result);
   };
 
+  /**
+   * Background jobs that reported back during this turn, formatted to ride the next tool result.
+   *
+   * The counterpart to drainDelegations below, and it exists for the same reason: work that finishes while the
+   * model is mid-turn has no other way in. Keyed by conversation, so a job belonging to a background
+   * conversation is not handed to whichever turn happens to be running.
+   */
+  const drainJobEvents = (ctx: RunCtx): string => {
+    const held = pendingJobsRef.current.get(ctx.convId);
+    if (!held || held.length === 0) return "";
+    pendingJobsRef.current.delete(ctx.convId);
+    return formatJobDelivery(held);
+  };
+
   const drainDelegations = (ctx: RunCtx): string => {
     const held = schedulerRef.current;
     if (!held || held.turnId !== ctx.turnId) return "";
@@ -2604,6 +2820,24 @@ function ChatAgent() {
    * idle here → send now; busy → the FIFO queue drains it when this round ends; another conversation → the
    * queue holds it until that one is opened again. Nothing new has to be taught about concurrency.
    */
+  /**
+   * Job results that arrived mid-turn, per conversation, waiting for a tool result to ride back on.
+   *
+   * A ref rather than state: the tool loop reads it from closures that must see the current value the moment a
+   * job reports, and nothing about it is rendered.
+   */
+  const pendingJobsRef = useRef(new Map<string, string[]>());
+
+  /**
+   * Background jobs this conversation has been promised a result from, but has not received yet.
+   *
+   * Incremented when the model starts a `notify` job, decremented when one reports back. It exists for the goal
+   * loop: a turn that ends while a build is still running has nothing new to show, so evaluating it can only
+   * produce "not met", and auto-continuing would burn rounds racing a job that was always going to take
+   * minutes. Deferring instead costs nothing — the job's completion opens a turn of its own when it lands, and
+   * THAT turn is evaluated.
+   */
+  const awaitingJobsRef = useRef(new Map<string, number>());
   const jobFinishedRef = useRef<(evt: ServiceEvent) => void>(() => {});
   useEffect(() => onServiceEvent((evt) => jobFinishedRef.current(evt)), []);
 
@@ -2704,6 +2938,8 @@ function ChatAgent() {
     ask_user: askUserChoice,
     update_todos: updateTodos,
     set_task_state: setTaskState,
+    set_goal: setGoal,
+    update_plan: updatePlan,
     openBrowser: openBrowserAction,
     browser: browserControl,
     image_generation: generateImageAction,
@@ -2802,9 +3038,131 @@ function ChatAgent() {
   };
 
   // opts is used for programmatic sends (e.g. the home page's pending auto-send / queue resume); when omitted, the input box / attachment state is used.
+  /**
+   * A goal set before its conversation record exists.
+   *
+   * `/goal <condition>` on an empty chat runs before the first send has created the conversation, so there is no
+   * id to key the goal by yet. Stashed here and flushed the moment the record is created, exactly as the
+   * composed system prompt already is (pendingSystemPromptRef).
+   */
+  const pendingGoalRef = useRef<GoalState | null>(null);
+
+  /**
+   * The conversation whose goal loop just hit its round limit.
+   *
+   * The exhaustion path clears the goal so the final honest-report round cannot itself be evaluated and
+   * re-trigger the limit — but clearing it also makes the "is this conversation still under a goal" gate in
+   * `finally` false, which would swallow that very round. This carries the one-shot permission across.
+   */
+  const goalExhaustedRef = useRef<string | null>(null);
+
+  /** Elapsed wall-clock of a goal run, for the achievement toast. Mirrors GoalBar's own formatting. */
+  const formatGoalElapsed = (startedAt: number): string => {
+    if (!startedAt) return "—";
+    // eslint-disable-next-line react-hooks/purity -- called from the send loop, never from render
+    const total = Math.max(0, Math.floor((Date.now() - startedAt) / 1000));
+    const pad = (n: number) => String(n).padStart(2, "0");
+    const h = Math.floor(total / 3600);
+    return h > 0
+      ? `${h}:${pad(Math.floor(total / 60) % 60)}:${pad(total % 60)}`
+      : `${Math.floor(total / 60)}:${pad(total % 60)}`;
+  };
+
+  /**
+   * Execute a parsed `/goal` command.
+   *
+   * Returns the text the send should continue with, or null when the command is complete in itself. Setting a
+   * goal returns the condition, because the doc's contract is that `/goal <condition>` starts working on it
+   * immediately — the user should not have to type the same sentence again as a separate message.
+   *
+   * Feedback is a toast plus the goal bar rather than a chat message: the bar already shows the condition, the
+   * elapsed time, the round count, the spend and the last verdict continuously, so a bare `/goal` has nothing
+   * to print that is not already on screen — it just opens the bar.
+   */
+  const handleGoalCommand = (cmd: Exclude<GoalCommand, { kind: "none" }>): string | null => {
+    const convId = convIdRef.current;
+    const current = convId ? goalFor(convId) : (pendingGoalRef.current ?? emptyGoal());
+    /** Write to the conversation when there is one, otherwise stash for the record that is about to exist. */
+    const write = (g: GoalState) => {
+      if (convId) setGoalFor(convId, g);
+      else {
+        pendingGoalRef.current = isGoalEmpty(g) ? null : g;
+        setDisplayedGoal(isGoalEmpty(g) ? null : g);
+      }
+    };
+
+    if (cmd.kind === "error") {
+      toast.error(t("goal.unknownSub", { sub: cmd.detail, aliases: GOAL_CLEAR_ALIASES.join(" / ") }));
+      return null;
+    }
+
+    if (cmd.kind === "status") {
+      if (isGoalActive(current) || current.status === "achieved") setGoalExpanded(true);
+      else toast.info(t("goal.noneSet"));
+      return null;
+    }
+
+    if (cmd.kind === "clear") {
+      if (!isGoalActive(current)) {
+        toast.info(t("goal.noneSet"));
+        return null;
+      }
+      // Clearing takes effect immediately, mid-turn included: the end-of-turn check re-reads the goal and finds
+      // it inactive, so a loop running right now stops after the round it is in rather than at the next one.
+      write(clearGoal(current));
+      toast.success(t("goal.cleared", { condition: current.condition }));
+      return null;
+    }
+
+    // cmd.kind === "set" — replacing whatever was there, with no confirmation but with the displaced condition
+    // named, so a goal the user had forgotten about cannot vanish silently.
+    const replaced = isGoalActive(current) ? current.condition : "";
+    // eslint-disable-next-line react-hooks/purity -- an event handler; see the note on the first Date.now() in send()
+    write(startGoal(cmd.condition, { now: Date.now(), source: "user" }));
+    setGoalExpanded(false);
+    toast.success(replaced ? t("goal.replaced", { condition: replaced }) : t("goal.set"));
+    // Advisory only, and after the success: the goal IS set. A condition is not paid for once like an ordinary
+    // message — it is re-rendered into the wire every turn and handed to the evaluator every round — and that
+    // is the one thing about its length a user cannot see for themselves.
+    if (cmd.long) {
+      toast.info(t("goal.longCondition", { len: String(cmd.condition.length) }));
+    }
+    // The condition itself becomes this round's instruction.
+    return cmd.condition;
+  };
+
   const send = async (opts?: { text?: string; attachments?: Attachment[]; _fromQueue?: boolean }) => {
-    const text = (opts?.text ?? input).trim();
+    let text = (opts?.text ?? input).trim();
     const atts = opts?.attachments ?? attachments; // Snapshot: cleared later
+    // Commands are handled before the preflight, deliberately. They never reach a model, so a missing API key
+    // must not reject one — and `/goal clear` and `/clear` in particular have to work WHILE a turn is
+    // generating, which the preflight would otherwise turn into a queued message that only lands after the
+    // thing it was meant to stop.
+    //
+    // An unrecognised `/word` is NOT intercepted: it falls through and is sent as an ordinary message, because
+    // people type paths and dates and a strict reading would refuse messages they meant to send.
+    const slash = parseSlashCommand(text);
+    if (slash?.name === "clear") {
+      const count = displayRef.current.length;
+      setInput("");
+      // Same operation the header's "clear chat" performs, so the two cannot drift: the conversation keeps its
+      // sidebar entry and its title, and only the history inside it goes.
+      clearActiveConversationContent();
+      // Said out loud because the deletion is real and there is no undo. The header button at least sits under
+      // a menu the user opened on purpose; a typed command deserves an acknowledgement of what it just did.
+      if (count > 0) toast.success(t("chat.clearedCount", { count: String(count) }));
+      else toast.info(t("chat.clearedEmpty"));
+      return;
+    }
+    if (slash?.name === "goal") {
+      const cmd = parseGoalCommand(text);
+      if (cmd.kind !== "none") {
+        const proceed = handleGoalCommand(cmd);
+        setInput("");
+        if (!proceed) return;
+        text = proceed;
+      }
+    }
     if (!text && atts.length === 0) return;
     if (!passesSendPreflight(text, atts, !!opts?._fromQueue)) return;
 
@@ -2908,6 +3266,12 @@ function ChatAgent() {
         store.setConversationModel(convId, selectedModelId);
       }
       // Freeze messages[0] on the brand-new record (it was composed above, before this record existed).
+      // A goal set with /goal before this record existed (see pendingGoalRef) is attached here, so the loop it
+      // starts belongs to the conversation from its very first turn.
+      if (pendingGoalRef.current) {
+        setGoalFor(convId, pendingGoalRef.current);
+        pendingGoalRef.current = null;
+      }
       if (pendingSystemPromptRef.current) {
         store.setConversationSystemPrompt(convId, pendingSystemPromptRef.current);
         pendingSystemPromptRef.current = "";
@@ -2944,6 +3308,15 @@ function ChatAgent() {
       push: (m) => { if (active()) pushDisplay(m); },
       status: (s) => { if (active()) setStatus(s); },
     };
+
+    /**
+     * The instruction the goal loop wants to run next, decided by the end-of-turn check.
+     *
+     * Declared out here because it is written inside the try and read in `finally`: the next round must start
+     * only after this one's cleanup has run (spinner cleared, usage recorded, generating flag released), or the
+     * send it triggers would be enqueued behind a turn that is technically still in flight.
+     */
+    let goalContinuation: string | null = null;
 
     try {
       // Tool set = ask_user + update_todos + load_skill + (local tools + run_subagent, Electron only).
@@ -3010,6 +3383,10 @@ function ChatAgent() {
           skills: enabled,
           imageGenerationAvailable: capabilityAvailable("image_generation"),
           task: renderTaskMemory(taskMemoryFor(genConvId)),
+          // The goal rides the same road as the mission brief, and for the same reason: it is re-rendered from
+          // structured state every turn, so the model sees the current condition, criteria and plan even after
+          // compaction has discarded every message that produced them.
+          goal: renderGoalState(goalFor(genConvId)),
         });
         const delta = diffReminder(current, foldReminders(roundConvo));
         // The two one-shot nudges that fire on a turn's first request ride the same carrier. They are persisted like everything
@@ -3239,7 +3616,11 @@ function ChatAgent() {
             // cannot lose a conclusion by never calling join_subagents — and so it has no reason to poll
             // for one. Deliberately skipped on join_subagents itself, which already reported everything
             // it was owed and would otherwise print the same conclusions twice in one result.
-            const content = name === "join_subagents" ? base : base + drainDelegations(ctx);
+            // Background job results ride back the same way, and unconditionally — join_subagents is exempt
+            // from the delegation drain because it has already reported those, but it has said nothing about
+            // a build that finished while it was blocking.
+            const content =
+              (name === "join_subagents" ? base : base + drainDelegations(ctx)) + drainJobEvents(ctx);
             // Usage log: the branches above are the tools the renderer handles itself (a choice card,
             // the todo list, a skill's instructions, memory, the browser panel). They never reach
             // execToolCall, which is where every other tool is logged, so without this they would be
@@ -3290,6 +3671,18 @@ function ChatAgent() {
               // Recording anything at all satisfies the memory guard — the reminder exists to make the model
               // consider the question once per turn, not to demand a note per file touched.
               if (name === "remember_project") learnedWithoutRecording = false;
+              // A `notify` job promises a result later. Counted so the goal check can defer rather than judge
+              // a turn whose whole point was to start something and wait for it.
+              if (name === "run_command" && args.notify) {
+                awaitingJobsRef.current.set(genConvId, (awaitingJobsRef.current.get(genConvId) ?? 0) + 1);
+              }
+              // Sub-agent write-back. A delegation runs in its own isolated context and its conversation is
+              // never persisted, so the only durable trace is this one tool result — which compaction is free
+              // to summarise away. Copying the conclusion into Goal State keeps it as established fact, and it
+              // is handed to the evaluator separately from the transcript for exactly that reason.
+              if (DELEGATION_TOOLS.has(name) && isGoalActive(goalFor(genConvId))) {
+                setGoalFor(genConvId, recordEvidence(goalFor(genConvId), { source: name, summary: content }));
+              }
               // Risky-change detection: a tool that modifies source files hitting the risky-path signature (taking path-like args such as path/file/dest) → mark as pending review.
               if (MUTATING_FILE_TOOLS.has(name)) {
                 learnedWithoutRecording = true;
@@ -3427,12 +3820,108 @@ function ChatAgent() {
           continue;
         }
 
+        // ── Goal check ───────────────────────────────────────────────────────────────────────────────────────
+        // The turn is over and the model has answered. If a goal is in force, this is where an INDEPENDENT
+        // evaluator reads what just happened and decides whether the condition is met — the model does not get
+        // a vote, and there is no tool through which it could ask for one.
+        //
+        // Placed here, inside the try, rather than in `finally`: the wire view and the abort signal are both in
+        // scope, the user sees the check as part of the turn rather than as a pause after it, and cancelling
+        // stops it like anything else. The decision it produces is handed to `finally`, which fires the next
+        // round after the normal end-of-turn cleanup has run.
+        {
+          const before = goalFor(genConvId);
+          // Deferred while a `notify` job this conversation started has not reported yet. The turn ended
+          // because the model was told to end it and wait — there is nothing new for the evaluator to read,
+          // so a check now can only say "not met", and continuing would race a build that was always going to
+          // take minutes. The job's arrival opens its own turn, and that one is evaluated.
+          const awaitingJobs = (awaitingJobsRef.current.get(genConvId) ?? 0) > 0;
+          if (isGoalActive(before) && !ctrl.signal.aborted && !awaitingJobs) {
+            ctx.status(t("chat.goalChecking"));
+            // The turn's own spend is attributed to the goal before the evaluator's is added, so the figure in
+            // the bar is what this goal has cost in total, not what the evaluator alone cost.
+            const u = turnUsageRef.current;
+            const turnTokens = u.total || u.prompt + u.completion;
+            // `wire` is what the model was actually sent this round; the reply it produced arrived afterwards,
+            // so it is appended here — without it the evaluator would judge a transcript missing its conclusion.
+            const judged: ApiMsg[] = [...wire, { role: "assistant", content: msg.content ?? "" }];
+            const outcome = await evaluateGoal(
+              {
+                condition: before.condition,
+                criteria: before.criteria.map((c) => c.text),
+                // Sub-agent conclusions, which may pre-date compaction and so be absent from the transcript
+                // while still being the reason a criterion holds.
+                established: before.evidence.map((e) => `${e.source}: ${e.summary}`),
+                messages: judged,
+              },
+              ctrl.signal,
+              { actor: "goal", convId: genConvId, turnId },
+            );
+            const met = outcome.ok && outcome.verdict.met;
+            // A failed evaluation is NOT a verdict. It is recorded and flagged in the UI, but it neither
+            // completes the goal nor drives another round: with an evaluator that is down, continuing would
+            // work blind for every round the cap allows.
+            const reason = outcome.ok ? outcome.verdict.reason : outcome.error;
+            const scored = addTurnSpend(before, turnTokens);
+            const evaluated = recordEvaluation(scored, { reason, tokens: outcome.tokens, failed: !outcome.ok });
+            if (met) {
+              const done = achieveGoal(evaluated, reason);
+              setGoalFor(genConvId, done);
+              // The achievement record the doc asks for: condition, duration, rounds and spend. Display-only
+              // and deliberately not persisted — an achieved goal is session state, so nothing here can bring a
+              // finished run back after a reload.
+              if (active()) {
+                toast.success(
+                  t("goal.achieved", {
+                    rounds: String(done.run.turnCount),
+                    elapsed: formatGoalElapsed(done.run.startedAt),
+                    tokens: String(done.run.tokenSpend),
+                  }),
+                );
+              }
+            } else {
+              setGoalFor(genConvId, evaluated);
+              const maxRounds = Number(getStorage(AGENT_MAX_GOAL_ROUNDS_KEY)) || MAX_GOAL_AUTO_ROUNDS;
+              const decision = decideNextRound(evaluated, {
+                met: false,
+                reason,
+                maxRounds,
+                impossible: outcome.ok && outcome.verdict.impossible === true,
+                failed: !outcome.ok,
+              });
+              if (decision.action === "impossible" || decision.action === "exhausted") {
+                // Neither is an achievement, and neither may read as one. The goal is cleared FIRST so the
+                // final explaining round cannot itself be evaluated and re-trigger the same ending, then the
+                // instruction is queued. Re-issuing `/goal` is how the user asks for more.
+                setGoalFor(genConvId, clearGoal(evaluated));
+                if (active()) {
+                  toast.error(
+                    decision.action === "impossible"
+                      ? t("goal.impossible", { reason })
+                      : t("goal.stoppedAtLimit", { rounds: String(evaluated.run.turnCount) }),
+                  );
+                }
+                // One-shot permission for the report round, which the cleared goal would otherwise gate out.
+                goalExhaustedRef.current = genConvId;
+                goalContinuation = decision.prompt;
+              } else if (decision.action === "continue") {
+                goalContinuation = decision.prompt;
+              } else if (!outcome.ok && active()) {
+                // action "stop" with no verdict: say so, or the turn just ends and the goal appears ignored.
+                toast.warning(t("goal.checkFailed", { reason }));
+              }
+            }
+          }
+        }
+
         // Normal reply → end (the body was already finalized and displayed by renderTurn above, and archiving was done when the message was produced, so it is not repeated here).
         // A background conversation does not write the current view; when switched back to, its display is rebuilt from the store by loadConversation.
         // End of conversation: archive this conversation's task list into the chat record, and collapse the floating panel
         // above the input box. Keyed by genConvId, so a background conversation retires its own list rather than the
         // viewed conversation's; the archived bubble is only pushed when that conversation is the one on screen.
-        const finishedTodos = todosFor(genConvId);
+        // A goal round that is about to continue keeps its checklist: the plan is still in force, and retiring it
+        // here would clear the panel on every round of the loop only to have the next one rebuild it.
+        const finishedTodos = goalContinuation ? [] : todosFor(genConvId);
         if (finishedTodos.length > 0) {
           if (active()) pushDisplay({ kind: "todos", todos: finishedTodos });
           setTodosFor(genConvId, []);
@@ -3441,7 +3930,13 @@ function ChatAgent() {
         //  - Always on top (always-on-top, the window is certainly visible) → in-app hint (toast);
         //  - Not on top (may be obscured by other windows) → system notification (following the existing preference / unfocused gating, clicking jumps to that conversation).
         // Use the captured genConvId rather than the active conversation id, to ensure correct ownership (reserved for background concurrent generation).
-        if (await isWindowAlwaysOnTop()) {
+        //
+        // Skipped entirely mid-goal-loop: the round is finished but the TASK is not, and telling the user their
+        // reply is ready — once per round, up to the round limit — would be both wrong and unbearable. The goal
+        // announces itself once, when it is met or when the loop gives up.
+        if (goalContinuation) {
+          // nothing to announce yet; the loop continues below
+        } else if (await isWindowAlwaysOnTop()) {
           const title = store.getConversation(genConvId)?.title?.trim();
           toast.success(title ? t("chat.replyDoneNamed", { title }) : t("chat.replyDone"));
         } else {
@@ -3506,9 +4001,39 @@ function ChatAgent() {
       if (activeModel?.providerId === OFFICIAL_PROVIDER_ID) {
         void useAuthStore.getState().refreshWallet({ force: true });
       }
+      // Stranded job results: the turn ended before any tool result could carry them (the model was writing
+      // its final answer when the build finished, or it made no further tool call). They become their own turn
+      // instead, which is what the idle path would have done had the job landed a moment later. Drained BEFORE
+      // processQueue so that turn starts immediately rather than waiting for the next thing to happen.
+      const stranded = pendingJobsRef.current.get(genConvId) ?? [];
+      if (stranded.length > 0) {
+        pendingJobsRef.current.delete(genConvId);
+        // A cancelled turn drops them: cancel() clears this conversation's queue for the same reason, and
+        // waking the conversation back up is the opposite of what "stop" asked for.
+        if (!ctrl.signal.aborted) {
+          for (const notice of stranded) enqueueMessage(genConvId, formatJobMessage(notice), []);
+        }
+      }
       // Queue resume: after a normal end (not a user interruption), if this conversation still has queued messages and is still the current conversation, auto-send the next one.
       // Interruption (the user clicked "stop") does not resume — cancel() clears this conversation's queue at the same time.
       if (!ctrl.signal.aborted) processQueue(genConvId);
+      // ── Goal loop ────────────────────────────────────────────────────────────────────────────────────────
+      // The evaluator said the condition is not met, so run another round with its reason as the instruction —
+      // no user input, which is the entire point of the mechanism.
+      //
+      // Three things gate it, all of them cases where continuing would be wrong rather than merely unhelpful:
+      //  - a user interrupt (the loop is exactly what "stop" means to stop);
+      //  - the goal having been cleared since the check (`/goal clear` mid-turn, which must take effect now);
+      //  - a queued user message, which processQueue above has just started — a real instruction outranks an
+      //    automatic one, and the goal will be re-checked at the end of that turn anyway.
+      const queueBusy = (queueRef.current.get(genConvId)?.length ?? 0) > 0;
+      const stillGoverned = isGoalActive(goalFor(genConvId)) || goalExhaustedRef.current === genConvId;
+      goalExhaustedRef.current = null;
+      if (goalContinuation && !ctrl.signal.aborted && !queueBusy && stillGoverned) {
+        // Down the same road a queued message takes, so an automatic round is built exactly like any other turn
+        // — same compaction, same reminders, same consent gating. _fromQueue only marks it as not being typed.
+        void send({ text: goalContinuation, attachments: [], _fromQueue: true });
+      }
     }
   };
 
@@ -3519,24 +4044,30 @@ function ChatAgent() {
   // which closure the caller gets.
   useEffect(() => {
     jobFinishedRef.current = (evt) => {
-      // `reason` is absent on events from an older main process, so a missing one is never treated as a
-      // completion — and only jobs the model asked to be woken for get here. Everything else (a dev server the
-      // user stopped, a job nobody is waiting on) still just updates the running-services indicator.
-      if (evt.type !== "stopped" || evt.reason !== "exited" || !evt.notify) return;
+      if (!isJobCompletion(evt)) return;
       const convId = convIdRef.current;
       if (!convId) return;
-      const ok = evt.code == null ? null : evt.code === 0;
-      const outcome = ok === null ? "finished" : ok ? "finished successfully" : `failed with exit code ${evt.code}`;
-      const text =
-        `[Background job ${outcome}] \`${evt.command ?? "(unknown command)"}\`\n\n` +
-        (evt.tail ? `Its output ended with:\n${evt.tail}\n\n` : "There was no output.\n\n") +
-        "This is an automatic notification, not the user speaking — they may have asked about something else " +
-        "since. Pick the waiting task back up from here. If it failed, report what went wrong instead of " +
-        "re-running it blindly.";
-      // Idle → go now; mid-round → the queue sends it when this round ends. Deliberately the same road a user
-      // message takes, so an arriving job cannot interleave into a turn that is half-built.
-      if (useAgentChatStore.getState().generating[convId]) enqueueMessage(convId, text, []);
-      else void send({ text, attachments: [], _fromQueue: true });
+      const notice = describeJobEvent(evt);
+      // Two routes, and picking the wrong one is what left a finished build stranded in a visible queue while
+      // the turn that was waiting for it worked on blind.
+      //
+      // MID-TURN → the pending buffer, which the tool loop drains onto the very next tool result. The user
+      // queue cannot serve here: by construction it is not read until the turn ENDS, so a job that finishes
+      // during a turn is exactly the case it can never deliver. The model was told it may keep working after
+      // starting a `notify` job, so this is the normal case, not the edge one.
+      //
+      // IDLE → straight into a new turn, which is what wakes the conversation back up.
+      // One fewer job outstanding, whichever route delivers it. Floored at zero: an event for a job started
+      // before this counter existed (or in another conversation) must not push it negative and wedge the
+      // goal loop into deferring for ever.
+      const waiting = awaitingJobsRef.current.get(convId) ?? 0;
+      if (waiting > 0) awaitingJobsRef.current.set(convId, waiting - 1);
+      if (useAgentChatStore.getState().generating[convId]) {
+        const held = pendingJobsRef.current.get(convId) ?? [];
+        pendingJobsRef.current.set(convId, [...held, notice]);
+      } else {
+        void send({ text: formatJobMessage(notice), attachments: [], _fromQueue: true });
+      }
     };
 
     // On every render, refresh the "resend from a user message" implementation, capturing the latest send / state (see the note at the resendRef declaration).
@@ -3840,6 +4371,23 @@ function ChatAgent() {
           </motion.div>
         )}
       </AnimatePresence>
+
+      {/* Goal status, directly above the checklist — the order the layering actually runs in: goal, then the
+          plan's steps. Hidden alongside the todo panel when the confirmation panel needs the space. */}
+      {!(pending && pending.convId === viewConvId) && (
+        <GoalBar
+          goal={displayedGoal}
+          running={loading}
+          expanded={goalExpanded}
+          onExpandedChange={setGoalExpanded}
+          onClear={() => {
+            const g = goalFor(convIdRef.current);
+            if (!isGoalActive(g)) return;
+            setGoalFor(convIdRef.current, clearGoal(g));
+            toast.success(t("goal.cleared", { condition: g.condition }));
+          }}
+        />
+      )}
 
       {/* Task list: fixed above the input box, showing progress.
           Lowest priority — it yields and hides when the sensitive-operation confirmation panel is present, to avoid competing for space with it. */}

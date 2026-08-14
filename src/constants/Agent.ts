@@ -66,6 +66,21 @@ export const AGENT_MAX_CONSECUTIVE_TIMEOUTS_KEY = "agent.limits.maxConsecutiveTi
 export const AGENT_MAX_SUBAGENT_ROUNDS_KEY = "agent.limits.maxSubagentRounds";
 
 /**
+ * Dot path: how many automatic rounds one `/goal` activation may run (constants MAX_GOAL_AUTO_ROUNDS default).
+ * A safety limit on unattended spending, never a completion condition — see goalState.decideNextRound.
+ */
+export const AGENT_MAX_GOAL_ROUNDS_KEY = "agent.limits.maxGoalRounds";
+
+/**
+ * Dot path: the model id used for goal evaluation (AgentModel.id). Empty → the conversation's own model.
+ *
+ * Worth configuring on local setups in particular: the evaluator runs after EVERY round and answers a yes/no,
+ * so pointing it at a small fast model turns a visible stall into an imperceptible one. It is a separate model
+ * binding rather than a flag because the evaluation must be able to run on a different provider entirely.
+ */
+export const AGENT_GOAL_EVALUATOR_MODEL_KEY = "agent.goal.evaluatorModelId";
+
+/**
  * Paths of /agent sub-pages that require "fullscreen, hide the left main sidebar" (prefix match, including their sub-routes).
  * After AgentShell detects a page registered here, it does not render AgentSidebar, and the page provides its own back entry.
  * To add such a page, just add its path to this array.

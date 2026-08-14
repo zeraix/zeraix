@@ -218,6 +218,8 @@ export function buildReminderState(input: {
   skills: { id: string; description: string }[];
   imageGenerationAvailable: boolean;
   task: string;
+  /** The rendered Goal State block, or "" when no goal is in force (see goalState.renderGoalState). */
+  goal: string;
 }): ReminderState {
   const now = new Date();
   const pad = (n: number) => String(n).padStart(2, "0");
@@ -245,5 +247,6 @@ export function buildReminderState(input: {
     // cannot actually be called (see docs/cache-stable-prompt-context.md §"Tool declarations are static").
     disabledTools: input.imageGenerationAvailable ? [] : ["image_generation"],
     task: input.task,
+    goal: input.goal,
   };
 }

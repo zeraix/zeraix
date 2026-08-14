@@ -116,6 +116,12 @@ function renderBody(state: ReminderState, atCut: boolean): string {
   if (state.task !== undefined) {
     lines.push(state.task ? state.task : "The mission brief has been cleared.");
   }
+  // The goal sits after the brief because it is the more volatile of the two — a criterion flipping to satisfied or
+  // a plan step advancing rewrites it, while the brief is meant to be written once. Its own explainer is in
+  // messages[0] (GOAL_EXPLAINER), so only the state itself travels here.
+  if (state.goal !== undefined) {
+    lines.push(state.goal ? state.goal : "The goal has been cleared; no goal is in effect.");
+  }
   // Most volatile LAST: the workdir changes per project and the date changes daily, so anything placed
   // after them would lose its cached prefix every time either moves.
   if (state.workdir !== undefined) {

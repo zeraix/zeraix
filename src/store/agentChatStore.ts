@@ -13,6 +13,7 @@ import {
   type StoredCompaction,
   type StoredMessage,
   type StoredTaskMemory,
+  type StoredGoalState,
 } from "@/lib/ai/conversation";
 
 /** Temporary storage for the "initial message" to be sent when transitioning from Home to Chat page (passed in-memory via SPA client navigation). */
@@ -86,6 +87,8 @@ type AgentChatState = {
   setConversationCompaction: (id: string, compaction: StoredCompaction | null) => void;
   /** Saves or clears the Task Memory (prose brief + todos) for a conversation (persists to disk only). */
   setConversationTaskMemory: (id: string, taskMemory: StoredTaskMemory | null) => void;
+  /** Saves or clears the Goal State (objective / criteria / plan / verification) for a conversation (persists to disk only). */
+  setConversationGoal: (id: string, goal: StoredGoalState | null) => void;
   /** Freeze this conversation's composed system message, so reopening it replays the same prefix instead of recomputing one. */
   setConversationSystemPrompt: (id: string, systemPrompt: string) => void;
   /** Record a sub-agent's own conversation id, so deleting this conversation can forget its KV too (Conversation.subConvIds). */
@@ -396,6 +399,17 @@ export const useAgentChatStore = create<AgentChatState>((set, get) => {
         ),
       }));
       // Like compaction: a runtime artifact, flushed to disk only.
+      if (pid) markProjectDirty(pid);
+    },
+
+    setConversationGoal: (id, goal) => {
+      const conv = get().getConversation(id);
+      if (!conv) return;
+      const pid = conv.projectId;
+      set((s) => ({
+        conversations: s.conversations.map((c) => (c.id === id ? { ...c, goal: goal ?? undefined } : c)),
+      }));
+      // Like compaction and taskMemory: a runtime artifact, flushed to disk only.
       if (pid) markProjectDirty(pid);
     },
 
