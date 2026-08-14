@@ -520,15 +520,16 @@ function sandboxFailure(reason) {
 
 /** Foreground execution: inside the guest, bwrap confined to the mount set, bash -c cmd, with a timeout; never throws. */
 export async function run(cmd, opts = {}) {
-  const { cwd, timeoutMs, maxBuffer } = opts;
+  const { cwd, timeoutMs, maxBuffer, signal } = opts;
   try {
     if (!vm) throw new Error("vm not ready");
     const argv = ["/usr/bin/bwrap", ...bwrapFlags(cwd), "--", "/bin/bash", "-c", cmd];
-    const { out, err, code, killed } = await vm.guest.runStatus(argv, {
+    const { out, err, code, killed, canceled } = await vm.guest.runStatus(argv, {
       timeoutSec: Math.max(1, Math.round((timeoutMs ?? 60000) / 1000)),
+      signal,
     });
     const cap = (s) => (maxBuffer && s.length > maxBuffer ? s.slice(0, maxBuffer) : s);
-    return { stdout: cap(out), stderr: cap(err), code, killed };
+    return { stdout: cap(out), stderr: cap(err), code, killed, canceled: !!canceled };
   } catch (e) {
     return sandboxFailure(`exec failed: ${e?.message ?? e}`);
   }

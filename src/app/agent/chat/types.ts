@@ -167,3 +167,23 @@ export type DisplayMsg =
 /** To-do item (task list). */
 export type TodoStatus = "pending" | "in_progress" | "completed";
 export type Todo = { title: string; status: TodoStatus };
+
+/**
+ * The run context for a single send (generation). send() and the tool executions / subagents it invokes share it, to support "background concurrent generation":
+ *  - convId: the conversation this generation belongs to (captured stably, unchanged when switching conversations); always used for persistence;
+ *  - signal: this run's own independent abort signal (one per conversation, mutually isolated);
+ *  - push / status: view side effects that only actually affect the UI while convId is still the current active conversation, otherwise silent
+ *    (a background conversation only persists to disk and never pollutes the display or state of the currently viewed conversation; it is rebuilt from the store by loadConversation when switched back to).
+ */
+export type RunCtx = {
+  convId: string;
+  /**
+   * Identifies this one generation in the usage log. Every model call, tool call and delegation the
+   * turn produces carries it, which is what lets the log viewer's timeline group a turn's spending
+   * instead of showing a flat list of unrelated requests.
+   */
+  turnId: string;
+  signal: AbortSignal;
+  push: (m: DisplayMsg) => void;
+  status: (s: string) => void;
+};

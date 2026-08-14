@@ -189,8 +189,15 @@ export async function guestAgent({ port = +(process.env.GA_PORT || 4445) } = {})
      *  would keep the next one from being served. */
     close: () => { try { sock.destroy(); } catch { /* ignore */ } },
     /** Non-throwing, timed run (for the run_command engine). Wraps in coreutils
-     *  `timeout`; returns exit status instead of throwing. code 124 => timed out. */
-    async runStatus(argv, { timeoutSec = 60 } = {}) {
+     *  `timeout`; returns exit status instead of throwing. code 124 => timed out.
+     *
+     *  `signal` is the user pressing Stop. There is no way to cancel a guest-exec through qemu-ga, so the
+     *  kill is a second guest-exec: SIGTERM to the `timeout` process, which forwards it to the command.
+     *  bwrap runs the command as PID 1 of its own namespace (--unshare-pid), so the whole subtree dies with
+     *  it and nothing is left running in the guest. Polling stops immediately either way — the result is
+     *  read one last time so output produced before the stop is not thrown away. */
+    async runStatus(argv, { timeoutSec = 60, signal } = {}) {
+      if (signal?.aborted) return { out: '', err: '', code: 130, killed: false, canceled: true };
       const started = await c.send({ execute: 'guest-exec', arguments: {
         path: '/usr/bin/timeout', arg: ['-k', '2', String(timeoutSec), ...argv], 'capture-output': true } });
       const pid = started?.pid;
@@ -201,6 +208,7 @@ export async function guestAgent({ port = +(process.env.GA_PORT || 4445) } = {})
         await c.sync();
         throw new Error(`guest-exec returned no pid (got ${JSON.stringify(started)}); agent channel was out of sync, resynced`);
       }
+      let canceled = false;
       for (;;) {
         const st = await c.send({ execute: 'guest-exec-status', arguments: { pid } });
         if (st.exited) {
@@ -208,8 +216,23 @@ export async function guestAgent({ port = +(process.env.GA_PORT || 4445) } = {})
           return {
             out: Buffer.from(st['out-data'] || '', 'base64').toString(),
             err: Buffer.from(st['err-data'] || '', 'base64').toString(),
-            code, killed: code === 124,
+            // A canceled run exited because we killed it, so its code says SIGTERM, not what the command did.
+            code, killed: code === 124, canceled,
           };
+        }
+        // Kill once, then keep polling: the status read after the kill is what collects the output the
+        // command had already produced, so the loop exits through the branch above rather than abandoning
+        // a guest process whose exit nobody ever reaps.
+        if (signal?.aborted && !canceled) {
+          canceled = true;
+          try {
+            // Through bash's builtin rather than /bin/kill: bash is what run() already relies on being in
+            // the image, whereas a standalone kill(1) belongs to procps and need not be installed.
+            await c.send({ execute: 'guest-exec', arguments: {
+              path: '/bin/bash', arg: ['-c', `kill -TERM ${pid}`], 'capture-output': false } });
+          } catch {
+            /* The command may have exited between the poll and the kill; the next status read settles it. */
+          }
         }
         await sleep(50);
       }

@@ -225,7 +225,7 @@
   "tray.quit": "Esci da Zeraix",
   "tray.running": "In esecuzione in background",
   "auto.title": "Automazione",
-  "auto.desc": "Crea flussi di lavoro che eseguono attività per te: su richiesta e, a breve, pianificati.",
+  "auto.desc": "Crea flussi di lavoro che eseguono attività per te.",
   "auto.desktopOnly": "L'automazione funziona nell'app desktop. Apri Zeraix sul computer per creare ed eseguire i flussi di lavoro.",
   "auto.new": "Nuovo flusso di lavoro",
   "auto.empty": "Nessun flusso di lavoro",

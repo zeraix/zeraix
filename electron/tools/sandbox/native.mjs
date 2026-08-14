@@ -5,18 +5,16 @@
  * with behavior identical to the historical version.
  *
  * Engine contract (engine.mjs):
- *   run(cmd, { cwd, timeoutMs, maxBuffer })  → { stdout, stderr, code, killed } (does not throw)
+ *   run(cmd, { cwd, timeoutMs, maxBuffer, signal })
+ *                                            → { stdout, stderr, code, killed, canceled } (does not throw)
  *   startBackground(cmd, { cwd })            → Promise<string> (formatted startup result text;
  *                                               maintains its own process table and broadcasts start/stop via events.mjs)
  *   stopProcess(pid) / listProcesses() / stopAll()
  */
 
-import { exec, spawn } from "node:child_process";
-import { promisify } from "node:util";
+import { spawn } from "node:child_process";
 
 import { emitService } from "./events.mjs";
-
-const execAsync = promisify(exec);
 
 export const id = "native";
 
@@ -49,27 +47,137 @@ export function tailOf(buf, max = 4000) {
   return s.length > max ? `…\n${s.slice(-max)}` : s;
 }
 
-/** Foreground execution: exec + timeout + output cap, returns decoded { stdout, stderr, code, killed }, does not throw. */
-export async function run(cmd, { cwd, timeoutMs, maxBuffer } = {}) {
+/**
+ * Kill a command and everything it started.
+ *
+ * The tree, never the single pid: the command runs under a shell, and the work the user wants stopped is
+ * usually the shell's descendants — `npm install` is node spawning node, `cargo build` is cargo spawning
+ * rustc. Killing only the shell leaves those running with nobody waiting on them, which looks exactly like
+ * the bug this is here to fix.
+ *
+ * Same mechanism as stopProcess below: taskkill /T on Windows, the negative pid (process group) elsewhere,
+ * which is why the child is spawned detached on POSIX — a non-detached child shares THIS app's process
+ * group, and killing that group would take the app down with it.
+ */
+function killTree(child, sig = "SIGTERM") {
+  const pid = child?.pid;
+  if (!pid) return;
   try {
-    // Read as raw bytes then decode per code page, to avoid garbled Chinese console output (cp936/GBK).
-    const { stdout, stderr } = await execAsync(cmd, {
-      cwd,
-      timeout: timeoutMs,
-      maxBuffer,
-      windowsHide: true,
-      encoding: "buffer",
-    });
-    return { stdout: decodeConsole(stdout), stderr: decodeConsole(stderr), code: 0, killed: false };
-  } catch (e) {
-    // exec rejects on a non-zero exit code / timeout, but still carries stdout/stderr/code.
-    return {
-      stdout: decodeConsole(e.stdout),
-      stderr: decodeConsole(e.stderr),
-      code: e.code ?? "?",
-      killed: !!e.killed,
-    };
+    if (process.platform === "win32") {
+      spawn("taskkill", ["/pid", String(pid), "/T", "/F"], { windowsHide: true });
+    } else {
+      process.kill(-pid, sig);
+    }
+  } catch {
+    // The group may be gone already (normal exit racing the kill), or was never created. Fall back to the
+    // single pid so a command that did not fork is still stopped.
+    try {
+      child.kill(sig);
+    } catch {
+      /* already exited */
+    }
   }
+}
+
+/** Foreground children still running, so app shutdown can take them down too (they are detached — see killTree). */
+const fgChildren = new Set();
+
+/** How long a stopped command is given to exit on SIGTERM before it is killed outright. */
+const KILL_GRACE_MS = 2000;
+
+/**
+ * Foreground execution: exec + timeout + output cap, returns decoded { stdout, stderr, code, killed, canceled }, does not throw.
+ *
+ * `signal` is what makes the user's Stop button reach a running command. Node's own `signal` support on exec
+ * is not enough: it rejects the promise but the child survives (verified — see test/command-cancel.test.mjs),
+ * so a stopped `npm install` would carry on writing to node_modules while the UI claimed it had stopped.
+ * The timeout goes through the same kill for the same reason.
+ *
+ * Whatever the command printed before it was cut off is still returned: it is often the most useful part, and
+ * it is what the model needs to explain what happened. `canceled` distinguishes a user stop from the timeout,
+ * which the caller words very differently.
+ */
+export function run(cmd, { cwd, timeoutMs, maxBuffer, signal } = {}) {
+  // Nothing has been started yet, so there is nothing to kill and no output to report.
+  if (signal?.aborted) {
+    return Promise.resolve({ stdout: "", stderr: "", code: "?", killed: false, canceled: true });
+  }
+  return new Promise((resolve) => {
+    let canceled = false;
+    let timedOut = false;
+    let timer = null;
+    let hardTimer = null;
+    let exitTimer = null;
+    let done = false;
+    // spawn, not exec, for one reason: exec drops the `detached` option (it forwards only its own fixed
+    // option list to spawn), so its child stays in THIS app's process group. The whole-tree kill below
+    // needs a group of our own — and with exec, `kill(-pid)` either fails with ESRCH or, if some unrelated
+    // group happens to share the number, signals a process that has nothing to do with us.
+    const child = spawn(cmd, {
+      cwd,
+      shell: true, // same shell exec used: /bin/sh here, ComSpec on Windows
+      windowsHide: true,
+      detached: process.platform !== "win32", // Windows has no process groups here; taskkill /T walks by pid
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    fgChildren.add(child);
+
+    // Collected as raw bytes and decoded per code page at the end, to avoid garbled Chinese console output
+    // (cp936/GBK) — the same reason exec was given encoding:"buffer".
+    const chunks = { stdout: [], stderr: [] };
+    const size = { stdout: 0, stderr: 0 };
+    const collect = (which) => (d) => {
+      if (maxBuffer && size[which] >= maxBuffer) return; // cap reached: keep the head, drop the rest
+      size[which] += d.length;
+      chunks[which].push(d);
+    };
+    child.stdout?.on("data", collect("stdout"));
+    child.stderr?.on("data", collect("stderr"));
+
+    const settle = (code) => {
+      if (done) return;
+      done = true;
+      fgChildren.delete(child);
+      if (timer) clearTimeout(timer);
+      if (hardTimer) clearTimeout(hardTimer);
+      if (exitTimer) clearTimeout(exitTimer);
+      signal?.removeEventListener("abort", onAbort);
+      const join = (which) => {
+        const buf = Buffer.concat(chunks[which]);
+        return decodeConsole(maxBuffer && buf.length > maxBuffer ? buf.subarray(0, maxBuffer) : buf);
+      };
+      resolve({ stdout: join("stdout"), stderr: join("stderr"), code, killed: timedOut, canceled });
+    };
+
+    /** SIGTERM now, SIGKILL if it is still there after the grace — a process that ignores TERM must not hang the turn. */
+    const stop = () => {
+      killTree(child);
+      if (!hardTimer) hardTimer = setTimeout(() => killTree(child, "SIGKILL"), KILL_GRACE_MS);
+    };
+    function onAbort() {
+      canceled = true;
+      stop();
+    }
+    if (timeoutMs) {
+      timer = setTimeout(() => {
+        timedOut = true;
+        stop();
+      }, timeoutMs);
+    }
+    signal?.addEventListener("abort", onAbort, { once: true });
+
+    // `close` (stdio drained) is preferred over `exit`, so no output is lost. But the pipes are inherited,
+    // so a grandchild the command deliberately detached can hold them open after the shell is gone — and
+    // waiting forever for that is its own hang. Take the exit and a short drain window as the fallback.
+    child.on("close", (code, sig) => settle(code ?? (sig ? "?" : 0)));
+    child.on("exit", (code, sig) => {
+      if (!exitTimer && !done) exitTimer = setTimeout(() => settle(code ?? (sig ? "?" : 0)), 1000);
+    });
+    child.on("error", (e) => {
+      chunks.stderr.push(Buffer.from(String(e?.message ?? e)));
+      settle("?");
+    });
+  });
 }
 
 /**
@@ -196,6 +304,10 @@ export function listProcesses() {
 
 /** Terminate all background processes (for cleanup on app exit). Windows uses taskkill to kill the whole tree, other platforms use the process group. */
 export function stopAll() {
+  // Foreground commands too: they run detached (see killTree), so unlike before they would otherwise outlive
+  // the app that started them — a `sleep 600` still holding its working directory after the window is gone.
+  for (const child of fgChildren) killTree(child);
+  fgChildren.clear();
   for (const pid of bgProcs.keys()) {
     try {
       if (process.platform === "win32") {

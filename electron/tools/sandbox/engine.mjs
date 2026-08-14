@@ -9,7 +9,11 @@
  *
  * Engine contract (exported by every engine module):
  *   id
- *   run(cmd, { cwd, timeoutMs, maxBuffer })  → { stdout, stderr, code, killed } (does not throw)
+ *   run(cmd, { cwd, timeoutMs, maxBuffer, signal })
+ *                                            → { stdout, stderr, code, killed, canceled } (does not throw)
+ *                                              signal aborts = the user pressed Stop: the command is KILLED,
+ *                                              not merely abandoned, and canceled says so (killed stays for
+ *                                              the timeout, which the caller words differently).
  *   startBackground(cmd, { cwd })            → Promise<string> (formatted result text)
  *   stopProcess(pid) / listProcesses() / stopAll()
  *

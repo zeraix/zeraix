@@ -436,9 +436,34 @@ function registerTerminal() {
   ipcMain.on("terminal:kill-all", (e) => killByWebContents(e.sender));
 }
 
+/**
+ * AbortController per in-flight tool call, keyed by the id the renderer generated (see ai-tools:cancel).
+ *
+ * Same shape as llmStreamControllers below, and for the same reason: an ipcMain.handle promise cannot be
+ * cancelled from the renderer side, so interruption needs a second channel and an id to address.
+ */
+const toolCallControllers = new Map();
+
 function registerAiTools() {
   ipcMain.handle("ai-tools:list", (_e, format) => listTools(format));
-  ipcMain.handle("ai-tools:call", (_e, { name, args }) => runTool(name, args));
+  ipcMain.handle("ai-tools:call", async (_e, { name, args, callId }) => {
+    // No id means a caller that never cancels (the automation runtime, internal calls): run it plainly
+    // rather than filling the map with entries nobody can ever reach.
+    if (!callId) return runTool(name, args);
+    const controller = new AbortController();
+    toolCallControllers.set(callId, controller);
+    try {
+      return await runTool(name, args, { signal: controller.signal });
+    } finally {
+      toolCallControllers.delete(callId);
+    }
+  });
+  // One-way, like llm:chat:abort: the renderer is telling us to stop, not asking for a result. Aborting an
+  // id that has already finished is a no-op, which is what makes the race harmless — the call can complete
+  // between the user's click and this arriving.
+  ipcMain.on("ai-tools:cancel", (_e, callId) => {
+    toolCallControllers.get(callId)?.abort();
+  });
   ipcMain.handle("ai-tools:get-workdir", () => getWorkingDir());
   ipcMain.handle("ai-tools:set-workdir", (_e, dir) => setWorkingDir(dir));
   // Workspace file browsing (sidebar file tree + right-side editor): structured directory listing, file reading with openability detection, and file saving.

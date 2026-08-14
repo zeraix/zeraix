@@ -225,7 +225,7 @@
   "tray.quit": "結束 Zeraix",
   "tray.running": "正在背景執行",
   "auto.title": "自動化",
-  "auto.desc": "建立工作流程來自動執行任務——可手動觸發，排程觸發即將支援。",
+  "auto.desc": "建立工作流程來自動執行任務。",
   "auto.desktopOnly": "自動化功能僅在桌面應用程式中執行。請在電腦上開啟 Zeraix 來建立與執行工作流程。",
   "auto.new": "新增工作流程",
   "auto.empty": "還沒有工作流程",

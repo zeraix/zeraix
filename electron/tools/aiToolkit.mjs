@@ -158,6 +158,28 @@ const FETCH_COMMAND_PATTERNS = [
 const isFetchCommand = (cmd) => FETCH_COMMAND_PATTERNS.some((re) => re.test(cmd));
 
 /**
+ * What the model is told when the user stopped a running command.
+ *
+ * It has to be unmistakably different from a timeout, because the reasonable reaction to each is the
+ * opposite: a timeout invites one careful retry, whereas re-running something the user just stopped is
+ * the single worst thing to do here. The partial output is included — a stopped `npm install` or `pytest`
+ * has usually said something worth reading, and it is also the only evidence of how far the work got.
+ */
+function cancellationResult(r) {
+  const parts = [];
+  if (r.stdout) parts.push(String(r.stdout).trim());
+  if (r.stderr) parts.push(`[stderr]\n${String(r.stderr).trim()}`);
+  parts.push(
+    "[stopped by the user] The user interrupted this command, so it was terminated and did NOT finish. " +
+      "Any output above is partial, and whatever it was doing may be half-done (a partial install, a " +
+      "partially written file). Do NOT re-run it and do not start anything else: the user stopped you on " +
+      "purpose. Wait for their next instruction; if they ask what happened, say plainly that the command " +
+      "was stopped part-way and describe what had already been done.",
+  );
+  return parts.filter(Boolean).join("\n\n");
+}
+
+/**
  * Did this command fail only because the program it names is not installed? Returns the program, or "".
  *
  * Every shell says so differently, and the exit code alone is not enough — 127 is conventional on POSIX but
@@ -725,17 +747,19 @@ async function existsInWorkdir(relPath) {
   }
 }
 
-/** Run one command under WORKDIR, returning { ok, code, out, killed } (never throws). Goes through the current execution engine. */
-async function runShell(cmd) {
+/** Run one command under WORKDIR, returning { ok, code, out, killed, canceled } (never throws). Goes through the current execution engine. */
+async function runShell(cmd, signal) {
   const r = await getEngine().run(cmd, {
     cwd: WORKDIR,
     timeoutMs: CHECK_TIMEOUT_MS,
     maxBuffer: CMD_MAX_BUFFER,
+    signal,
   });
   return {
-    ok: r.code === 0 && !r.killed,
+    ok: r.code === 0 && !r.killed && !r.canceled,
     code: r.code,
     killed: !!r.killed,
+    canceled: !!r.canceled,
     out: `${r.stdout}${r.stderr ? `\n${r.stderr}` : ""}`.trim(),
   };
 }
@@ -1293,7 +1317,7 @@ const handlers = {
     );
   },
 
-  async run_command({ command, background, sandbox, notify }) {
+  async run_command({ command, background, sandbox, notify }, { signal } = {}) {
     await ensureWorkdir();
     const cmd = String(command ?? "").trim();
     if (!cmd) throw new Error("command must not be empty");
@@ -1354,7 +1378,12 @@ const handlers = {
       cwd: WORKDIR,
       timeoutMs,
       maxBuffer: CMD_MAX_BUFFER,
+      signal,
     });
+    // The user pressed Stop. Reported before every other branch below and without any of the retry
+    // machinery: the fallback-to-sandbox path treats a non-zero exit as "the host cannot do this" and would
+    // helpfully re-run, in the sandbox, the very command the user just interrupted.
+    if (r.canceled) return cancellationResult(r);
     /**
      * The host does not have that program, but the sandbox does — so use it, rather than reporting defeat.
      *
@@ -1460,7 +1489,7 @@ const handlers = {
     return `Stopped background service pid ${target}.`;
   },
 
-  async check_project({ skip_tests } = {}) {
+  async check_project({ skip_tests } = {}, { signal } = {}) {
     await ensureWorkdir();
     let steps = await detectCheckSteps();
     if (skip_tests) steps = steps.filter((s) => s.label !== "test");
@@ -1471,7 +1500,13 @@ const handlers = {
     const blocks = [];
     let allOk = true;
     for (const s of steps) {
-      const r = await runShell(s.cmd);
+      const r = await runShell(s.cmd, signal);
+      // Stopped part-way through a multi-step check: kill this step, run no further ones, and report what
+      // did complete. Continuing would run a test suite the user has just asked to stop.
+      if (r.canceled) {
+        blocks.push(`## ${s.label}: \`${s.cmd}\`\n⏹ Stopped by the user${r.out ? `\n${r.out}` : ""}`);
+        return `${blocks.join("\n\n")}\n\n${cancellationResult({})}`;
+      }
       if (!r.ok) allOk = false;
       const status = r.ok
         ? "✅ Passed"
@@ -1597,7 +1632,14 @@ const FILE_LIST_MUTATORS = new Set([
   "remember_project",
 ]);
 
-export async function runTool(name, args = {}) {
+/**
+ * `signal` is the caller's cancellation (the renderer's Stop button, relayed over IPC — see
+ * ai-tools:cancel in main.mjs). It is handed to the handler as a second argument rather than folded into
+ * `args`, because `args` is the model's own JSON and nothing from the model may be mistaken for a
+ * cancellation. Handlers that cannot be interrupted simply ignore it; today only run_command reads it,
+ * since it is the only one that can block for minutes.
+ */
+export async function runTool(name, args = {}, { signal } = {}) {
   // Before the native lookup: an MCP tool is namespaced (`mcp__<server>__<tool>`) so it can never
   // collide with a handler, and callMcpTool honours runTool's { ok, content } contract for every
   // failure mode -- an external server must not be able to abort a turn by throwing.
@@ -1606,7 +1648,7 @@ export async function runTool(name, args = {}) {
   if (!handler) return { ok: false, content: `Unknown tool: ${name}` };
   try {
     await ensureWorkdir();
-    const content = await handler(args ?? {});
+    const content = await handler(args ?? {}, { signal });
     if (FILE_LIST_MUTATORS.has(name)) invalidateWalkCache(); // the file list may have changed: the next search_* re-walks
     // Observe reads so project memory can learn from what was actually opened. This is the right
     // layer for it: sub-agent tool calls come through here too, and sub-agents do most of the

@@ -228,7 +228,7 @@
   "tray.quit": "退出 Zeraix",
   "tray.running": "正在后台运行",
   "auto.title": "自动化",
-  "auto.desc": "创建工作流来自动执行任务——可手动触发，定时触发即将支持。",
+  "auto.desc": "创建工作流来自动执行任务。",
   "auto.desktopOnly": "自动化功能仅在桌面应用中运行。请在电脑上打开 Zeraix 来创建和运行工作流。",
   "auto.new": "新建工作流",
   "auto.empty": "还没有工作流",

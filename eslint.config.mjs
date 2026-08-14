@@ -15,6 +15,14 @@ const eslintConfig = defineConfig([
     "next-env.d.ts",
   ]),
   {
+    // Dropping a key by destructuring it out (`const { rating: _rating, ...clean } = m`) is how this codebase
+    // builds the objects it puts on the wire — see stripWireMetadata. The binding is unused BY DESIGN: it exists
+    // so the rest object does not contain it. Without this the idiom reports as dead code every time it is used.
+    rules: {
+      "@typescript-eslint/no-unused-vars": ["warn", { ignoreRestSiblings: true }],
+    },
+  },
+  {
     // The main process and the build scripts are plain .mjs, so tsc never sees them and nothing catches a name that does not
     // resolve. `node --check` only parses. A real example: modelDir was declared in start() and read in launch() — a different
     // function that never received it — so every model launch threw "modelDir is not defined" at runtime, with the whole file

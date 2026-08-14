@@ -225,7 +225,7 @@
   "tray.quit": "Quit Zeraix",
   "tray.running": "Running in the background",
   "auto.title": "Automation",
-  "auto.desc": "Build workflows that run tasks for you — on demand, and soon on a schedule.",
+  "auto.desc": "Build workflows that run tasks for you.",
   "auto.desktopOnly": "Automation runs in the desktop app. Open Zeraix on your computer to create and run workflows.",
   "auto.new": "New workflow",
   "auto.empty": "No workflows yet",

@@ -225,7 +225,7 @@
   "tray.quit": "Zeraix beenden",
   "tray.running": "Läuft im Hintergrund",
   "auto.title": "Automatisierung",
-  "auto.desc": "Erstelle Workflows, die Aufgaben für dich ausführen — auf Abruf, bald auch zeitgesteuert.",
+  "auto.desc": "Erstelle Workflows, die Aufgaben für dich ausführen.",
   "auto.desktopOnly": "Automatisierung läuft in der Desktop-App. Öffne Zeraix auf deinem Computer, um Workflows zu erstellen und auszuführen.",
   "auto.new": "Neuer Workflow",
   "auto.empty": "Noch keine Workflows",

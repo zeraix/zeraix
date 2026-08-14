@@ -5,8 +5,12 @@ const { contextBridge, ipcRenderer, webUtils } = require("electron");
 contextBridge.exposeInMainWorld("aiTools", {
   /** List tool declarations. format: "raw" | "openai" | "anthropic" (default raw). */
   list: (format = "raw") => ipcRenderer.invoke("ai-tools:list", format),
-  /** Call a tool by name; returns { ok, content }. content is the result text ready to feed back to the model. */
-  call: (name, args = {}) => ipcRenderer.invoke("ai-tools:call", { name, args }),
+  /** Call a tool by name; returns { ok, content }. content is the result text ready to feed back to the model.
+   *  callId is optional and only needed by a caller that may want to cancel — pass the same id to cancelCall. */
+  call: (name, args = {}, callId) => ipcRenderer.invoke("ai-tools:call", { name, args, callId }),
+  /** Stop an in-flight tool call (the user's Stop button). A running command is killed, not just abandoned;
+   *  ids that already finished are ignored. One-way, matching abortChatStream. */
+  cancelCall: (callId) => ipcRenderer.send("ai-tools:cancel", callId),
   /** Read / set the working directory (all file operations are confined within it). */
   getWorkingDir: () => ipcRenderer.invoke("ai-tools:get-workdir"),
   setWorkingDir: (dir) => ipcRenderer.invoke("ai-tools:set-workdir", dir),

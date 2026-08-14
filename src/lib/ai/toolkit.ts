@@ -31,7 +31,8 @@ export interface ToolResult {
 
 interface AiToolsBridge {
   list(format?: ToolFormat): Promise<unknown[]>;
-  call(name: string, args?: Record<string, unknown>): Promise<ToolResult>;
+  call(name: string, args?: Record<string, unknown>, callId?: string): Promise<ToolResult>;
+  cancelCall?(callId: string): void;
   getWorkingDir(): Promise<string>;
   setWorkingDir(dir: string): Promise<string>;
   chooseWorkingDir(): Promise<string | null>;
@@ -86,15 +87,38 @@ export function listTools(format: ToolFormat = "raw"): Promise<unknown[]> {
   return bridge().list(format);
 }
 
-/** Call a tool by name. On error it does not throw; it uniformly returns { ok:false, content } for easy feeding back to the model. */
+/** Monotonic id per tool call, used only to address a cancellation at the other end of the IPC. */
+let toolCallSeq = 0;
+
+/**
+ * Call a tool by name. On error it does not throw; it uniformly returns { ok:false, content } for easy feeding back to the model.
+ *
+ * `signal` makes the call interruptible. The IPC promise itself cannot be cancelled, so aborting sends a
+ * separate ai-tools:cancel message carrying this call's id; the main process kills the work (for
+ * run_command, the child process itself) and this promise then resolves normally with whatever the command
+ * managed to produce. That is deliberate — the model still gets a tool result explaining that the user
+ * stopped it, rather than a dangling tool_call the next request would have to be repaired around.
+ */
 export async function callTool(
   name: string,
   args: Record<string, unknown> = {},
+  signal?: AbortSignal,
 ): Promise<ToolResult> {
   if (!isToolkitAvailable()) {
     return { ok: false, content: "AI toolkit is only available inside the Electron app" };
   }
-  return bridge().call(name, args);
+  const b = bridge();
+  if (!signal || !b.cancelCall) return b.call(name, args);
+  const callId = `t${++toolCallSeq}`;
+  // Already stopped before we got here: nothing has been started, so say so without touching the tool.
+  if (signal.aborted) return { ok: false, content: "The user stopped this operation before it started." };
+  const cancel = () => b.cancelCall?.(callId);
+  signal.addEventListener("abort", cancel, { once: true });
+  try {
+    return await b.call(name, args, callId);
+  } finally {
+    signal.removeEventListener("abort", cancel);
+  }
 }
 
 /** List the direct children of a workspace directory (relative to the working dir), for expanding the file tree level by level. Returns empty outside Electron. */
