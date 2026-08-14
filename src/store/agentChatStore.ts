@@ -88,6 +88,8 @@ type AgentChatState = {
   setConversationTaskMemory: (id: string, taskMemory: StoredTaskMemory | null) => void;
   /** Freeze this conversation's composed system message, so reopening it replays the same prefix instead of recomputing one. */
   setConversationSystemPrompt: (id: string, systemPrompt: string) => void;
+  /** Record a sub-agent's own conversation id, so deleting this conversation can forget its KV too (Conversation.subConvIds). */
+  addSubConvId: (id: string, subConvId: string) => void;
   renameConversation: (id: string, title: string) => void;
   deleteConversation: (id: string) => void;
   /** Renames a project (changes its display name). */
@@ -368,6 +370,22 @@ export const useAgentChatStore = create<AgentChatState>((set, get) => {
       if (pid) markProjectDirty(pid);
     },
 
+    addSubConvId: (id, subConvId) => {
+      const conv = get().getConversation(id);
+      if (!conv || !subConvId || conv.subConvIds?.includes(subConvId)) return;
+      const pid = conv.projectId;
+      set((s) => ({
+        conversations: s.conversations.map((c) =>
+          c.id === id ? { ...c, subConvIds: [...(c.subConvIds ?? []), subConvId] } : c,
+        ),
+      }));
+      // Called BEFORE the sub-agent's first request, so the id is known for the whole time KV can exist under it.
+      // Persistence is debounced like every other runtime artifact, so process death inside that window still loses
+      // the id and orphans its KV — bounded by the server's byte budget, and not worth a synchronous write per
+      // delegation to close.
+      if (pid) markProjectDirty(pid);
+    },
+
     setConversationTaskMemory: (id, taskMemory) => {
       const conv = get().getConversation(id);
       if (!conv) return;
@@ -404,9 +422,10 @@ export const useAgentChatStore = create<AgentChatState>((set, get) => {
       const conv = get().getConversation(id);
       if (!conv) return;
       // Drop this conversation's KV on the local server too. The server keeps it on disk for as long as its tip manifest
-      // exists and nothing else removes one, so without this the KV outlives the conversation permanently. Fire-and-forget:
-      // no local model running is the common case and must not block or fail the delete.
-      void localLlm()?.eraseConversationKv(id);
+      // exists and nothing else removes one, so without this the KV outlives the conversation permanently. Its sub-agents
+      // are named as well: each ran under its own conversation id, and this record is the only thing that knows which.
+      // Fire-and-forget: no local model running is the common case, and the ids are queued on disk until one is.
+      void localLlm()?.eraseConversationsKv([id, ...(conv.subConvIds ?? [])]);
       const pid = conv.projectId;
       const remaining = get().conversations.filter((c) => c.projectId === pid && c.id !== id);
       set((s) => ({
@@ -444,6 +463,9 @@ export const useAgentChatStore = create<AgentChatState>((set, get) => {
       // First, ensure that the conversation for the project has loaded.
       await get().ensureProjectLoaded(id);
       const convs = get().conversations.filter((c) => c.projectId === id);
+      // Same reason as deleteConversation, for every conversation in the project — this path used to erase nothing at
+      // all, so deleting a project left all of its KV on disk. ensureProjectLoaded above is what makes the list complete.
+      void localLlm()?.eraseConversationsKv(convs.flatMap((c) => [c.id, ...(c.subConvIds ?? [])]));
       dirtyProjects.delete(id);
       set((s) => {
         const loaded = new Set(s.loadedProjectIds);

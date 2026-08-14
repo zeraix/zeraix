@@ -309,6 +309,22 @@ const afterPaint = () =>
   });
 
 /**
+ * What a single model call is attributed to.
+ *
+ * `convId` and `subConvId` answer two different questions and must not be merged: convId is who SPENDS (the usage
+ * log groups by it, and a sub-agent's tokens are billed to the conversation that delegated), subConvId is which KV
+ * the request is FOR on the local server (a sub-agent is an isolated context, so it gets its own). Only the latter
+ * goes on the wire, and only to a local endpoint.
+ */
+type RequestLog = {
+  actor: string;
+  convId?: string;
+  /** Present only for a sub-agent request; see runDelegation, where it is minted and recorded. */
+  subConvId?: string;
+  turnId?: string;
+};
+
+/**
  * The run context for a single send (generation). send() and the tool executions / subagents it invokes share it, to support "background concurrent generation":
  *  - convId: the conversation this generation belongs to (captured stably, unchanged when switching conversations); always used for persistence;
  *  - signal: this run's own independent abort signal (one per conversation, mutually isolated);
@@ -1568,7 +1584,7 @@ function ChatAgent() {
     onDelta?: (d: { content: string; reasoning: string }) => void,
     // Usage-log attribution (who is spending these tokens). Undefined while logging is off, and the
     // proxy is what actually writes the entry — see src/lib/ai/usageLog.ts.
-    log?: { actor: string; convId?: string; turnId?: string },
+    log?: RequestLog,
   ): Promise<ChatResponse> => {
     const body = {
       model: modelName,
@@ -1673,8 +1689,14 @@ function ChatAgent() {
     // Tell llama-server which conversation this request belongs to, so its disk tier can restore that conversation's own KV by id
     // (T1) instead of re-prefilling, and can spill the tip back under the same id when the turn ends. Local only: it means nothing
     // to a cloud provider, and a non-standard header on a strict endpoint is a needless risk.
+    //
+    // A sub-agent sends its OWN id, never the parent's: the server keeps one conversation per slot, so the parent's id would
+    // route the sub-agent onto the parent's slot and overwrite the KV resident there — and, because the ids matched, without
+    // spilling it first. Its prefix is not lost by using a different id; the server's borrow is scored on shared tokens, not
+    // on the id, so a sub-agent still links the system prompt already resident in a sibling slot or a seed.
+    const wireConvId = log?.subConvId ?? log?.convId;
     const localHeaders =
-      log?.convId && isLocalEndpoint(endpoint) ? { "X-Conversation-Id": log.convId } : undefined;
+      wireConvId && isLocalEndpoint(endpoint) ? { "X-Conversation-Id": wireConvId } : undefined;
 
     // Browser fallback: connect directly to the provider endpoint.
     let data: ChatResponse;
@@ -1824,7 +1846,7 @@ function ChatAgent() {
     tools?: unknown[],
     signal?: AbortSignal,
     onDelta?: (d: { content: string; reasoning: string }) => void,
-    log?: { actor: string; convId?: string; turnId?: string },
+    log?: RequestLog,
   ): Promise<ChatResponse> => {
     const hasImages = messages.some(
       (m) => Array.isArray(m.content) && m.content.some((p) => p.type === "image_url"),
@@ -1945,7 +1967,7 @@ function ChatAgent() {
   const summarizeHistory = async (
     msgs: ApiMsg[],
     signal?: AbortSignal,
-    log?: { actor: string; convId?: string; turnId?: string },
+    log?: RequestLog,
     priorSummary?: string | null,
   ): Promise<{ summary: string; extracted: ExtractedTaskState | null }> => {
     const sys: ApiMsg = {
@@ -2070,7 +2092,7 @@ function ChatAgent() {
     opts: {
       force?: boolean;
       signal?: AbortSignal;
-      log?: { actor: string; convId?: string; turnId?: string };
+      log?: RequestLog;
       /** The round's own buffer and conversation, captured before any await. Omitted → the active view (manual "compact now"). */
       messages?: ApiMsg[];
       convId?: string | null;
@@ -2390,7 +2412,34 @@ function ChatAgent() {
     // `label`, not `agentId`: three concurrent `explore` delegations would otherwise share one actor and
     // the usage log could no longer say which of them spent what.
     const actor = `sub:${label}`;
-    const subLog = { actor, convId: ctx.convId, turnId: ctx.turnId };
+
+    // This sub-agent's own conversation id on the local server.
+    //
+    // One per delegation, because that is exactly how long a sub-agent lives here: runDelegation builds its
+    // messages from scratch every time ([system, task]) and keeps only the conclusion, so nothing is ever resumed.
+    // If resuming a sub-agent is added later, the id moves to that sub-agent's record and this line becomes the
+    // place it is minted, not the place it is derived — which is why the id belongs to the agent, not the call.
+    //
+    // Random, not a counter: a counter would have to survive reload to stay unique, and a reload that re-minted
+    // `#sub1` for a different agent would hand it a stranger's KV. `label` cannot serve either — it is `explore`
+    // for every blocking delegation, and its "s2 explore" form restarts at s1 each turn.
+    //
+    // randomUUID, not Math.random().toString(16): that yields a VARIABLE-width suffix — 0.5 gives "8", one character,
+    // which collides with any other one-character suffix at 1-in-16.
+    //
+    // Shaped `<parent>#<agent>-<rand>` purely so the server's slot logs are readable. NOTHING parses it: the server
+    // has no notion of a sub-conversation, and the app erases these ids from its own record (Conversation.subConvIds).
+    //
+    // Only for a local endpoint. The id exists to name KV on our own server, and a cloud provider neither receives it
+    // (the header is local-only) nor writes anything it could name — so minting one there would add a line to the
+    // user's stored conversation for nothing. Read per delegation, not per conversation: switching models mid-thread
+    // then decides each delegation on its own, which is right, because whether KV gets written is decided the same way.
+    const subConvId = isLocalEndpoint(endpoint)
+      ? `${ctx.convId}#${agentId}-${crypto.randomUUID().slice(0, 8)}`
+      : undefined;
+    // Recorded BEFORE the request, so a crash mid-delegation cannot leave KV on disk that nothing can name.
+    if (subConvId) useAgentChatStore.getState().addSubConvId(ctx.convId, subConvId);
+    const subLog: RequestLog = { actor, convId: ctx.convId, subConvId, turnId: ctx.turnId };
     const subUsage = { prompt: 0, completion: 0, total: 0 };
     let rounds = 0;
     let stepCount = 0;
