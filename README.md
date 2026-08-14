@@ -1,27 +1,30 @@
 <div align="center">
 
-<img src="assets/logo.png" alt="Zeraix Logo" width="120" height="120" />
+<img src="assets/brand/imparo-wordmark-black.png" alt="Imparo — the Zeraix model-systems engine" width="680" />
 
-# Zeraix
+### Local AI inference that learns, adapts, and keeps getting better.
 
-### Local AI, engineered from workspace to runtime.
+<p>
+  <a href="https://zeraix.com">Website</a> |
+  <a href="#-quick-start">Download</a> |
+  <a href="#-model-systems-research">Research</a> |
+  <a href="#latest-progress">Latest Progress</a> |
+  <a href="https://github.com/zeraix/zeraix/releases/latest">Releases</a> |
+  <a href="https://discord.gg/PcQ3jr3MfH">Discord</a> |
+  <a href="https://x.com/ZeraixAI">X</a>
+</p>
 
-Zeraix is an open-source desktop workspace for running private local models, tools, files, and AI agents on your own computer.
+**Imparo is the model-systems engine developed by Zeraix for efficient on-device AI.**
 
-Alongside the application, we continuously research how modern AI models can run more efficiently on personal hardware. **ExactFlux** is the runtime technology developed through this work, with a focus on real memory use, sustained generation speed, hardware adaptation, and verified output correctness.
+Zeraix Desktop is the open-source workspace people can use today. Imparo is under active research, with a focus on real memory use, sustained generation speed, hardware adaptation, self-improving execution, and verified output correctness. We intend to open-source Imparo after its architecture and validation baseline are stable.
 
-[Download](#-quick-start)
-· [Model Systems Research](#-model-systems-research)
-· [Current Research](#current-research-tracks)
-· [Developer Guide](#-developer-quick-start)
-
-[![Discord](https://img.shields.io/badge/Discord-Join%20us-5865F2?style=flat-square&logo=discord&logoColor=white)](https://discord.gg/PcQ3jr3MfH)
-[![X](https://img.shields.io/badge/X-@ZeraixAI-000000?style=flat-square&logo=x&logoColor=white)](https://x.com/ZeraixAI)
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache--2.0-blue?style=flat-square)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-macOS%20%7C%20Windows-lightgrey?style=flat-square)](#-quick-start)
-
+[![Latest release](https://img.shields.io/github/v/release/zeraix/zeraix?style=flat-square&label=release)](https://github.com/zeraix/zeraix/releases/latest)
 
 </div>
+
+> 🚀 **Latest release:** [Zeraix v1.11.0](https://github.com/zeraix/zeraix/releases/tag/v1.11.0) adds scheduled AI workflows, clearer approvals, Qwen Bonsai 27B, and new local model/runtime improvements.
 
 ---
 
@@ -63,7 +66,7 @@ Our ongoing research into how modern models run on consumer hardware:
 - architecture adaptation across MoE, dense, multimodal, long-context, and future model families;
 - correctness validation across long requests and multi-turn sessions.
 
-The public desktop release currently uses **llama.cpp** as its general-purpose compatibility runtime. ExactFlux is still under active research and is not yet included in the public source tree because its architecture, interfaces, and validation requirements are still changing rapidly. **We intend to open-source ExactFlux after the research reaches a stable and sufficiently validated stage.** Until then, we will publish progress and reproducible evidence progressively without presenting research prototypes as shipping features.
+The public desktop release currently uses **llama.cpp** as its general-purpose compatibility runtime. Imparo is still under active research and is not yet included in the public source tree because its architecture, interfaces, and validation requirements are still changing rapidly. **We intend to open-source Imparo after the research reaches a stable and sufficiently validated stage.** Until then, we will publish progress and reproducible evidence progressively without presenting research prototypes as shipping features.
 
 > We do not claim to train or own the underlying foundation models. Our work focuses on how supported models are prepared, configured, validated, and executed on-device.
 
@@ -166,7 +169,7 @@ Models keep evolving. Zeraix continuously profiles, adapts, and optimizes how th
 
 Our work is not limited to a single architecture or model family.
 
-> **Current research platform scope (August 2026):** ExactFlux model-systems research currently focuses on **Apple Silicon and macOS**. Zeraix Desktop is available on Windows and can use compatible general-purpose runtimes, but the ExactFlux optimization work described in this section has **not yet been researched or validated on Windows**. Windows model-systems research is planned and will begin as soon as the current Apple Silicon research baseline is sufficiently stable.
+> **Current research platform scope (August 2026):** Imparo model-systems research currently focuses on **Apple Silicon and macOS**. Zeraix Desktop is available on Windows and can use compatible general-purpose runtimes, but the Imparo optimization work described in this section has **not yet been researched or validated on Windows**. Windows model-systems research is planned and will begin as soon as the current Apple Silicon research baseline is sufficiently stable.
 
 ### Research areas
 
@@ -233,7 +236,7 @@ _Last updated: August 2026_
 
 These measurements describe the specific release-validation runs documented in [v1.8.0](https://github.com/zeraix/zeraix/releases/tag/v1.8.0) and [v1.11.0](https://github.com/zeraix/zeraix/releases/tag/v1.11.0). They are not universal performance guarantees. Results vary with the exact model, quantization, context, enabled capabilities, hardware, thermals, and workload. Earlier memory-planning, MoE-pooling, persistent-KV, and prefix-seed results remain documented in [v1.7.0](https://github.com/zeraix/zeraix/releases/tag/v1.7.0).
 
-> The optimizations above are shipping capabilities in Zeraix Desktop's supported runtime paths. **ExactFlux remains a broader active research runtime and is not yet included in this public source tree.**
+> The optimizations above are shipping capabilities in Zeraix Desktop's supported runtime paths. **Imparo remains a broader active research engine and is not yet included in this public source tree.**
 
 ### Research status definitions
 
@@ -313,7 +316,7 @@ Zeraix distinguishes between three model paths:
 
 - **Community GGUF models** — compatible models and quantizations from the broader open-model ecosystem.
 - **Zeraix-tested profiles** — model, quantization, context, and runtime configurations tested by the Zeraix team for specific hardware tiers. These profiles do not imply that Zeraix trained or owns the underlying model.
-- **ExactFlux research builds** — model-specific inference builds under active internal research. They are not part of the public release unless a future release explicitly states otherwise.
+- **Imparo research builds** — model-specific inference builds under active internal research. They are not part of the public release unless a future release explicitly states otherwise.
 
 Model availability, licensing, performance, and hardware requirements vary. Review the license of each model before using or redistributing it.
 
@@ -438,7 +441,7 @@ The interface includes translations for:
 | Custom OpenAI-compatible endpoints | ✅ | No | Depends on endpoint | Open source in this repository |
 | General local inference | ✅ | No | ✅ | Uses separately licensed upstream runtimes such as llama.cpp |
 | Zeraix-tested model profiles | ✅ | No | ✅ | Configuration and validation layer in this repository |
-| ExactFlux research runtime | Research | No | Intended | Currently focused on Apple Silicon/macOS; planned for open source after stabilization and validation |
+| Imparo research engine | Research | No | Intended | Currently focused on Apple Silicon/macOS; planned for open source after stabilization and validation |
 | Zeraix hosted models | Optional | Yes | No | Proprietary service; client integration only |
 | Zeraix account and cloud files | Optional | Yes | No | Proprietary service; client integration only |
 
@@ -605,7 +608,7 @@ Zeraix
     ├── Memory and runtime research
     ├── Decoding and hardware adaptation
     ├── Correctness and regression validation
-    └── ExactFlux research runtime
+    └── Imparo research engine
 ```
 
 Important source directories:
@@ -626,20 +629,20 @@ Important source directories:
 | `sandbox/qemu/` | Sandbox image build files and documentation |
 | `scripts/` | Build, packaging, and resource publication scripts |
 
-The ExactFlux research runtime is not currently part of the public source directories listed above. We intend to open-source it after the architecture and validation baseline are stable enough for external use and contribution.
+The Imparo research engine is not currently part of the public source directories listed above. We intend to open-source it after the architecture and validation baseline are stable enough for external use and contribution.
 
 ## Known limitations
 
 - macOS release builds currently target Apple Silicon.
 - Windows release builds currently target x64.
-- ExactFlux model-systems research currently focuses on Apple Silicon/macOS and has not yet been validated on Windows. Windows users should not assume that current research claims apply to their hardware.
+- Imparo model-systems research currently focuses on Apple Silicon/macOS and has not yet been validated on Windows. Windows users should not assume that current research claims apply to their hardware.
 - Local model quality and tool-calling reliability depend on the selected model.
 - Performance depends on memory, GPU support, model size, quantization, context length, and runtime configuration.
 - Initial model and sandbox downloads can be large.
 - The QEMU sandbox requires hardware virtualization and additional resources.
 - Some Agent operations may use native execution when the sandbox is unavailable or disabled.
 - Hosted services require network access and may require an account or separate payment.
-- ExactFlux research results are not shipping features unless a release explicitly states otherwise.
+- Imparo research results are not shipping features unless a release explicitly states otherwise.
 
 ## Troubleshooting
 
@@ -727,7 +730,7 @@ to run the full desktop application.
 - [ ] Expand validation across Apple Silicon memory tiers
 - [ ] Begin Windows model-systems profiling and establish the first Windows research baseline
 - [ ] Generalize model-specific research code into reusable architecture adapters
-- [ ] Prepare the first ExactFlux research preview
+- [ ] Prepare the first Imparo research preview
 - [ ] Extend research to additional architectures and hardware backends
 
 Roadmap items are directional and may change as model architectures, upstream runtimes, hardware, and validation results evolve.
@@ -774,7 +777,7 @@ This repository contains Zeraix Desktop and its local-first application runtime.
 
 The public local core is available under the permissive Apache License 2.0. Separately licensed third-party runtimes, models, and downloaded assets remain governed by their respective licenses.
 
-ExactFlux is an active research runtime and is not currently included in this public source tree. We intend to open-source it after the architecture, interfaces, and validation baseline are stable enough for external use and contribution. The exact release scope, timing, and license will be stated clearly before publication; no specific release date is promised while the research remains unstable.
+Imparo is an active research engine and is not currently included in this public source tree. We intend to open-source it after the architecture, interfaces, and validation baseline are stable enough for external use and contribution. The exact release scope, timing, and license will be stated clearly before publication; no specific release date is promised while the research remains unstable.
 
 Zeraix also operates optional proprietary services, which may include:
 
