@@ -169,6 +169,25 @@ export type TodoStatus = "pending" | "in_progress" | "completed";
 export type Todo = { title: string; status: TodoStatus };
 
 /**
+ * What a single model call is attributed to.
+ *
+ * `convId` and `subConvId` answer two different questions and must not be merged: convId is who SPENDS (the usage
+ * log groups by it, and a sub-agent's tokens are billed to the conversation that delegated), subConvId is which KV
+ * the request is FOR on the local server (a sub-agent is an isolated context, so it gets its own). Only the latter
+ * goes on the wire, and only to a local endpoint.
+ *
+ * Lives here rather than in chatRequest.ts because four modules now pass one of these along: the request layer,
+ * the summariser, the delegation loop and the page's own compaction call.
+ */
+export type RequestLog = {
+  actor: string;
+  convId?: string;
+  /** Present only for a sub-agent request; see runDelegation, where it is minted and recorded. */
+  subConvId?: string;
+  turnId?: string;
+};
+
+/**
  * The run context for a single send (generation). send() and the tool executions / subagents it invokes share it, to support "background concurrent generation":
  *  - convId: the conversation this generation belongs to (captured stably, unchanged when switching conversations); always used for persistence;
  *  - signal: this run's own independent abort signal (one per conversation, mutually isolated);

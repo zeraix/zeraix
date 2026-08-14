@@ -9,7 +9,7 @@ import { isUsageLogEnabledSync } from "@/lib/ai/usageLog";
 import { findUnverifiedFacts } from "./contextDiag";
 import { materializeReminders } from "./reminders";
 import { parseSummaryWithTaskState, type ExtractedTaskState } from "./taskMemory";
-import type { ApiMsg, ChatResponse } from "./types";
+import type { ApiMsg, ChatResponse, RequestLog } from "./types";
 
 /** Render a span of history messages into a plain-text transcript for the "summarizer model" (tool results truncated, to control the summary input size). */
 const renderTranscript = (msgs: ApiMsg[]): string => {
@@ -49,7 +49,7 @@ type RequestChat = (
   tools?: unknown[],
   signal?: AbortSignal,
   onDelta?: (d: { content: string; reasoning: string }) => void,
-  log?: { actor: string; convId?: string; turnId?: string },
+  log?: RequestLog,
 ) => Promise<ChatResponse>;
 
 export function createSummarizeHistory(requestChat: RequestChat) {
@@ -63,7 +63,7 @@ export function createSummarizeHistory(requestChat: RequestChat) {
   return async (
     msgs: ApiMsg[],
     signal?: AbortSignal,
-    log?: { actor: string; convId?: string; turnId?: string },
+    log?: RequestLog,
     priorSummary?: string | null,
   ): Promise<{ summary: string; extracted: ExtractedTaskState | null }> => {
     const sys: ApiMsg = {

@@ -248,9 +248,9 @@ export async function ensureInstalled(onProgress = () => {}, variant = llamaVari
   //
   // macOS still runs a DIFFERENT BUILD: the KV disk tier, the resident-seed path and the MoE expert pool exist only in the
   // fork, and only its mac build is published, so Windows keeps the stock binary until a fork build exists for it. That
-  // difference is now carried by the version alone (mac-v9.1 vs b10369), not by a second download host: the fork's release
-  // workflow publishes to the same Hugging Face repo, so mac gains the hf-mirror.com fallback that GitHub release assets
-  // never had. The GitHub release remains as the human-facing artefact.
+  // difference is now carried by the version alone (a mac-v* fork tag vs an upstream build number), not by a second
+  // download host: the fork's build workflow publishes to the same Hugging Face repo, so mac gains the hf-mirror.com
+  // fallback that GitHub release assets never had. It no longer cuts a GitHub release at all — HF is the only artefact.
   const version = llamaVersionDir();
   const url = `${await resolveHfEndpoint()}/${LLAMA_REPO}/resolve/main/llama/${version}/${variant}.tar.gz`;
   const tmp = path.join(app.getPath("temp"), `llama-${version}-${variant}.tar.gz`);

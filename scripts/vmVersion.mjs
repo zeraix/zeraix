@@ -1,6 +1,6 @@
 /**
  * Version file (electron/versions.json) write-back helper + docker image ID shortening. Pure node, imported by the publish/build scripts.
- *   build:rootfs   → take the image ID from `docker image inspect` and write it back to vm.<arch>;
+ *   vm-image CI   → take the image ID from `docker image inspect` and write it back to vm.<arch>;
  *   publish:llama  → write back llama after publishing.
  */
 import fs from "node:fs";

@@ -257,14 +257,10 @@ jobs:
           APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
           APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
 
-          # Aliyun OSS fallback for the bundled QEMU binaries (optional). The
-          # download scripts try the public CDN first, so these are only needed
-          # if the CDN is unavailable.
-          OSS_ACCESS_KEY_ID: ${{ secrets.OSS_ACCESS_KEY_ID }}
-          OSS_ACCESS_KEY_SECRET: ${{ secrets.OSS_ACCESS_KEY_SECRET }}
-          OSS_BUCKET: ${{ vars.OSS_BUCKET }}
-          OSS_ENDPOINT: ${{ vars.OSS_ENDPOINT }}
-          OSS_CDN: ${{ vars.OSS_CDN }}
+          # No credentials for the bundled QEMU binaries: download:bin:* fetches them from the public
+          # Hugging Face repo now. The OSS_* block that used to sit here was the authenticated fallback
+          # for when the CDN was unavailable — and it could never have worked anyway, since the Windows
+          # object was private and the runner had no way to know that.
 
           # Let electron-builder use a token if it ever needs GitHub (avoids anonymous rate limits).
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -32,6 +32,7 @@ import { emitService } from "./events.mjs";
 import { qmp, guestAgent } from "./control.mjs";
 import { startNinepServer } from "./ninep-server.mjs";
 import { vmDir, vmVersion, guestArch, localDataDir } from "./vmpaths.mjs";
+import { resolveHfEndpoint } from "../../llm/hfEndpoint.mjs";
 
 export const id = "qemu";
 
@@ -142,7 +143,32 @@ async function enableSwap(guest) {
 }
 const shq = (s) => `'${String(s).replace(/'/g, `'\\''`)}'`; // bash single-quote escaping inside the guest
 // VM disk/kernel are downloaded from a public CDN on first run (docker.zeraix.com fronts the public read-only entry of the zeraix-docker bucket).
-const VM_CDN = (process.env.ZERAIX_CDN || "https://docker.zeraix.com").replace(/\/+$/, "");
+// Not configurable, and no longer the download host: this is simply where images published before the
+// move to Hugging Face still live, so an override could not relocate them. Point HF_ENDPOINT or
+// ZERAIX_LLAMA_BUILDS_REPO instead — those steer the path that is actually used.
+const VM_CDN = "https://docker.zeraix.com";
+const VM_HF_REPO = process.env.ZERAIX_LLAMA_BUILDS_REPO || "Zeraix/llama-builds";
+
+/**
+ * Where to fetch this VM version from: Hugging Face, falling back to the old CDN.
+ *
+ * HF is where the vm-image workflow publishes, and it brings the hf-mirror.com fallback the CDN never
+ * had. The fallback is for versions published BEFORE the move — they exist only on the CDN, and an
+ * installed app whose pinned version predates it must still be able to fetch. Probed once per download
+ * with a HEAD on the first file, so all three files come from the same host.
+ *
+ * Drop the fallback once no shipped versions.json names a CDN-only image.
+ */
+async function vmBase(arch, version) {
+  const hf = `${await resolveHfEndpoint((l) => console.log(`[sandbox/qemu] ${l}`))}/${VM_HF_REPO}/resolve/main`;
+  try {
+    await headSize(`${hf}/vm/${arch}/${version}/${VM_FILES[0]}`);
+    return hf;
+  } catch {
+    console.log(`[sandbox/qemu] ${version} not on Hugging Face — falling back to ${VM_CDN}`);
+    return VM_CDN;
+  }
+}
 
 let vm = null; // { proc, ports, guest }
 let ninep = null; // Windows: in-process 9p-over-TCP server backing the host share
@@ -402,8 +428,9 @@ async function ensureRootfs(onProgress, forceConfigured = false) {
   if (!missing.length) { pruneOldVmVersions(version); onProgress?.(100, "Runtime environment ready (no download needed)"); return; } // already downloaded: prune stale then notify the UI
   // Download needed: only happens on "first run (no image at all)" or "user clicks update (forceConfigured)", where version === configured.
   fs.mkdirSync(vd, { recursive: true });
+  const base = await vmBase(arch, version);
   let total = 0;
-  for (const f of missing) total += await headSize(`${VM_CDN}/vm/${arch}/${version}/${f}`);
+  for (const f of missing) total += await headSize(`${base}/vm/${arch}/${version}/${f}`);
   // Resumable download: an existing .part counts toward completed progress (the server's 206 only returns the remaining bytes, no longer reported via onChunk).
   let done = 0;
   for (const f of missing) { const p = path.join(vd, f + ".part"); if (fs.existsSync(p)) done += fs.statSync(p).size; }
@@ -411,7 +438,7 @@ async function ensureRootfs(onProgress, forceConfigured = false) {
   report(); // initial progress (including any already-resumed part)
   for (const f of missing) {
     const tmp = path.join(vd, f + ".part");
-    await httpDownload(`${VM_CDN}/vm/${arch}/${version}/${f}`, tmp, (n) => { done += n; report(); });
+    await httpDownload(`${base}/vm/${arch}/${version}/${f}`, tmp, (n) => { done += n; report(); });
     fs.renameSync(tmp, path.join(vd, f));
   }
   pruneOldVmVersions(version); // prune old images after the download completes (on update version=configured -> delete the old version, free disk)

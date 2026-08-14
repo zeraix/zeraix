@@ -171,6 +171,7 @@ import type {
   Attachment,
   ContentPart,
   ReminderState,
+  RequestLog,
   RunCtx,
   DisplayMsg,
   SubAgentStep,
@@ -1607,7 +1608,7 @@ function ChatAgent() {
     opts: {
       force?: boolean;
       signal?: AbortSignal;
-      log?: { actor: string; convId?: string; turnId?: string };
+      log?: RequestLog;
       /** The round's own buffer and conversation, captured before any await. Omitted → the active view (manual "compact now"). */
       messages?: ApiMsg[];
       convId?: string | null;
@@ -1914,6 +1915,7 @@ function ChatAgent() {
     t,
     toolsReady,
     workdir,
+    endpoint,
     // Read when the delegation runs, not when this factory is built — see the note on the parameters.
     sandboxStatus: () => sandboxStatusRef.current,
     isLocalModel,

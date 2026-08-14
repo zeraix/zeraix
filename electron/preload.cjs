@@ -162,6 +162,7 @@ contextBridge.exposeInMainWorld("localLlm", {
   deleteModel: (opts) => ipcRenderer.invoke("llm:local:delete", opts),
   /** Forget a deleted conversation's KV on the local server. Best-effort; resolves even when no server is running. */
   eraseConversationKv: (id) => ipcRenderer.invoke("llm:local:eraseConversationKv", id),
+  eraseConversationsKv: (ids) => ipcRenderer.invoke("llm:local:eraseConversationsKv", ids),
   /** GGUF model download directory. */
   modelsDir: () => ipcRenderer.invoke("llm:local:models-dir"),
   /** Estimate memory usage based on options { totalGB, weightGB, kvGB }. opts: { modelId, quant, ctx, kvBits, vision }. */

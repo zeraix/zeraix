@@ -27,7 +27,6 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import AdmZip from "adm-zip";
-import OSS from "ali-oss";
 
 if (process.platform !== "darwin") { console.log("[bundle-bin] not macOS — skip"); process.exit(0); }
 
@@ -35,7 +34,7 @@ const REPO = process.cwd();
 const ARCH = process.arch; // arm64 on Apple Silicon
 const ENT = path.join(REPO, "resources", "qemu", "qemu-entitlements.plist");
 
-// OSS config loader (process.env wins, then sandbox/qemu/.env, then repo .env).
+// Env loader (process.env wins, then sandbox/qemu/.env, then repo .env): HF_TOKEN and the repo override live there.
 function loadEnv() {
   const e = { ...process.env };
   for (const p of [path.join(REPO, "sandbox", "qemu", ".env"), path.join(REPO, ".env")]) {
@@ -173,11 +172,14 @@ az.addLocalFolder(OUT, "qemu"); // qemu-system-aarch64 + qemu-img + libs/ → qe
 az.writeZip(zipPath);
 console.log(`[publish] zip: ${(fs.statSync(zipPath).size / 1048576).toFixed(0)} MB → ${zipPath}`);
 if (/^(1|true|yes)$/i.test(oss.SKIP_UPLOAD || "")) { console.log("[publish] SKIP_UPLOAD set — staged+zipped only."); process.exit(0); }
-const { OSS_BUCKET: bucket, OSS_ENDPOINT: endpoint, OSS_ACCESS_KEY_ID: keyId, OSS_ACCESS_KEY_SECRET: keySecret } = oss;
-if (!bucket || !endpoint || !keyId || !keySecret) { console.error("[publish] missing OSS config in sandbox/qemu/.env — staged+zipped only."); process.exit(1); }
-const ossKey = oss.OSS_BIN_MAC_KEY || `${oss.OSS_PREFIX || ""}bin/darwin-${ARCH}.zip`;
-const client = new OSS({ accessKeyId: keyId, accessKeySecret: keySecret, bucket, region: endpoint.replace(/\.aliyuncs\.com$/, ""), secure: true });
-console.log(`[publish] uploading ${(fs.statSync(zipPath).size / 1048576).toFixed(0)} MB → oss://${bucket}/${ossKey} …`);
-// Bucket blocks public object ACLs (download uses the CDN); set OSS_ACL only if the bucket permits.
-await client.put(ossKey, zipPath, oss.OSS_ACL ? { headers: { "x-oss-object-acl": oss.OSS_ACL } } : {});
-console.log(`[publish] OK — published (private): oss://${bucket}/${ossKey}`);
+// Hugging Face, not the OSS bucket: the bundle is public there, so scripts/download-bin-mac.mjs needs no credentials on
+// any build machine, and a blocked network gets hf-mirror.com from the same endpoint probe the app uses. Uploaded through
+// the huggingface CLI, which already speaks the LFS protocol these zips need.
+const HF_REPO = oss.ZERAIX_LLAMA_BUILDS_REPO || "Zeraix/llama-builds";
+const key = oss.ZERAIX_BIN_MAC_KEY || `qemu/darwin-${ARCH}.zip`;
+const cli = ["hf", "huggingface-cli"].find((b) => { try { execFileSync(b, ["--help"], { stdio: "ignore" }); return true; } catch { return false; } });
+if (!cli) { console.error("[publish] no huggingface CLI found (`pip install -U huggingface_hub`) — staged+zipped only."); process.exit(1); }
+console.log(`[publish] uploading ${(fs.statSync(zipPath).size / 1048576).toFixed(0)} MB → ${HF_REPO}/${key} …`);
+execFileSync(cli, ["upload", HF_REPO, zipPath, key, "--repo-type", "model", "--commit-message", `qemu bundle for darwin-${ARCH}`,
+  ...(oss.HF_TOKEN ? ["--token", oss.HF_TOKEN] : [])], { stdio: "inherit" });
+console.log(`[publish] OK — published: ${HF_REPO}/${key}`);

@@ -23,7 +23,7 @@ import { countMessagesTokens, countMessageTokens } from "@/lib/ai/tokenizer";
 import { buildLogMeta, logModelCall } from "@/lib/ai/usageLog";
 import type { TFunc } from "@/lib/i18n";
 import { useAuthStore } from "@/store/authStore";
-import type { ApiMsg, ChatResponse } from "./types";
+import type { ApiMsg, ChatResponse, RequestLog } from "./types";
 import { hostOfEndpoint, stripAllImagesForText, stripReasoningContent } from "./wireHelpers";
 
 /** This round's running token total (every request of every tool round and subagent adds to it). */
@@ -34,9 +34,6 @@ export type TurnUsage = {
   cached: number;
   estimated: boolean;
 };
-
-/** Who is spending these tokens — usage-log attribution, threaded through every request. */
-export type LogAttribution = { actor: string; convId?: string; turnId?: string };
 
 export function createChatRequest(cfg: {
   activeModel: ResolvedModel | null;
@@ -95,7 +92,7 @@ export function createChatRequest(cfg: {
     onDelta?: (d: { content: string; reasoning: string }) => void,
     // Usage-log attribution (who is spending these tokens). Undefined while logging is off, and the
     // proxy is what actually writes the entry — see src/lib/ai/usageLog.ts.
-    log?: { actor: string; convId?: string; turnId?: string },
+    log?: RequestLog,
   ): Promise<ChatResponse> => {
     const body = {
       model: modelName,
@@ -200,8 +197,14 @@ export function createChatRequest(cfg: {
     // Tell llama-server which conversation this request belongs to, so its disk tier can restore that conversation's own KV by id
     // (T1) instead of re-prefilling, and can spill the tip back under the same id when the turn ends. Local only: it means nothing
     // to a cloud provider, and a non-standard header on a strict endpoint is a needless risk.
+    //
+    // A sub-agent sends its OWN id, never the parent's: the server keeps one conversation per slot, so the parent's id would
+    // route the sub-agent onto the parent's slot and overwrite the KV resident there — and, because the ids matched, without
+    // spilling it first. Its prefix is not lost by using a different id; the server's borrow is scored on shared tokens, not
+    // on the id, so a sub-agent still links the system prompt already resident in a sibling slot or a seed.
+    const wireConvId = log?.subConvId ?? log?.convId;
     const localHeaders =
-      log?.convId && isLocalEndpoint(endpoint) ? { "X-Conversation-Id": log.convId } : undefined;
+      wireConvId && isLocalEndpoint(endpoint) ? { "X-Conversation-Id": wireConvId } : undefined;
 
     // Three transports, in order: local llama-server always via the proxy; a cloud endpoint via the proxy only
     // until the probe lands; otherwise a direct fetch from the renderer.
@@ -359,7 +362,7 @@ export function createChatRequest(cfg: {
     tools?: unknown[],
     signal?: AbortSignal,
     onDelta?: (d: { content: string; reasoning: string }) => void,
-    log?: { actor: string; convId?: string; turnId?: string },
+    log?: RequestLog,
   ): Promise<ChatResponse> => {
     const hasImages = messages.some(
       (m) => Array.isArray(m.content) && m.content.some((p) => p.type === "image_url"),

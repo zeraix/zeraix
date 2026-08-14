@@ -133,6 +133,17 @@ export interface Conversation {
    * A runtime artifact like compaction / taskMemory, and not part of the integrity hash.
    */
   systemPrompt?: string;
+  /**
+   * Conversation ids of the sub-agents this conversation has run.
+   *
+   * A sub-agent is an isolated context, so it gets its own conversation id on the local server rather than reusing
+   * this one — sharing an id would route it onto this conversation's slot and overwrite the KV it is resident in.
+   * The server has no notion of a sub-conversation, so this list is the only record that they belong together, and
+   * deleting this conversation has to name them all or their KV outlives it.
+   *
+   * A runtime artifact like compaction / taskMemory: persisted with the conversation, never sent to a model.
+   */
+  subConvIds?: string[];
   createdAt: number;
   updatedAt: number;
 }

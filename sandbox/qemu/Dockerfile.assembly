@@ -1,0 +1,23 @@
+# Throwaway host for the ext4 → qcow2 assembly step (see build-rootfs-local.sh). NOT the VM's OS, and
+# nothing from here ships: it only runs mke2fs + qemu-img over the exported rootfs.
+#
+# A Dockerfile rather than `apt-get install` inside a `docker run`, so the packages land in a LAYER. CI
+# exports layers to the GitHub Actions cache; a `docker run` is invisible to it, so that apt re-ran on
+# every single build.
+#
+# Same suite as the rootfs by default, only to avoid confusion — any debian with e2fsprogs works.
+ARG DEBIAN_SUITE=trixie
+FROM debian:${DEBIAN_SUITE}-slim
+
+ARG DEBIAN_SUITE
+ARG APT_MIRROR=deb.debian.org
+
+# Plain HTTP on purpose: matches the rootfs build, where the first layer has no ca-certificates yet and
+# the mirror may be reachable on 80 while 443 is not.
+RUN set -eux; \
+    printf 'deb http://%s/debian %s main\n' "$APT_MIRROR" "$DEBIAN_SUITE" > /etc/apt/sources.list; \
+    rm -f /etc/apt/sources.list.d/debian.sources; \
+    apt-get -o Acquire::ForceIPv4=true update -qq; \
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        e2fsprogs qemu-utils file; \
+    rm -rf /var/lib/apt/lists/*

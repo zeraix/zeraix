@@ -1,0 +1,223 @@
+name: VM Image
+
+# Manual only. Builds the sandbox VM image (rootfs.qcow2 + Image + initrd.img) for ONE guest arch and
+# publishes it to Hugging Face, where the app downloads it on first sandbox use (qemu.mjs → ensureRootfs).
+#
+# Built in CI rather than on a laptop for one measured reason: the image is ~1.1 GB per arch, and pushing
+# that to Hugging Face from a China-based connection ran at ~50 KB/s — a 2.7 GB seed upload took 16 hours
+# from the same machine. A runner uploads it in minutes.
+#
+# One arch per run, natively: amd64 on the x64 runner, arm64 on the ARM runner. No qemu-user emulation,
+# because the rootfs is a real Debian filesystem for the target arch and building it under emulation is
+# both slow and a different code path than the one that ships.
+#
+# Requires the HF_TOKEN secret (write access to Zeraix/llama-builds).
+
+on:
+  workflow_dispatch:
+    inputs:
+      arch:
+        description: 'Guest architecture to build'
+        type: choice
+        options: [amd64, arm64]
+        default: amd64
+      publish:
+        description: 'Upload to Hugging Face (off = build and inspect only)'
+        type: boolean
+        default: true
+      commit_version:
+        description: 'Commit the new VM_VERSION into electron/versions.json on this branch'
+        type: boolean
+        default: true
+
+concurrency:
+  group: vm-image-${{ inputs.arch }}
+  cancel-in-progress: false # a half-finished image upload is worse than waiting for the previous run
+
+env:
+  HF_REPO: Zeraix/llama-builds
+  HF_HUB_VERSION: "1.27.0" # pinned; the cache key carries it, so bumping it fetches rather than reusing
+
+permissions:
+  contents: write # the version bump is committed back; nothing else here writes to the repo
+
+jobs:
+  build:
+    # amd64 -> x64 runner, arm64 -> ARM runner. Both have Docker preinstalled, which build-rootfs needs.
+    runs-on: ${{ inputs.arch == 'arm64' && 'ubuntu-24.04-arm' || 'ubuntu-latest' }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      # Layer cache for the toolbox image. A runner starts with an empty layer store, so without this every
+      # run reinstalls LibreOffice, ffmpeg, poppler, the OCR models and the python stack from apt/pip.
+      # buildx is needed because only it can export a cache; the classic builder has nowhere to put one.
+      - uses: docker/setup-buildx-action@v3
+
+      # Exports ACTIONS_RUNTIME_TOKEN / ACTIONS_CACHE_URL into the job environment. GitHub gives those to
+      # ACTIONS, not to plain `run:` steps — so `--cache-to=type=gha` from our shell script silently wrote
+      # nothing, and every run rebuilt from scratch. (docker/build-push-action injects them itself, which
+      # is why the same flags work there and not here.) Verified from run 31663627962: it logged
+      # "exporting layers" for --load and no cache export at all.
+      - uses: crazy-max/ghaction-github-runtime@v3
+
+      # No `npm ci`: build-rootfs.mjs imports only node built-ins and two local modules (vmpaths.mjs,
+      # vmVersion.mjs). Installing the app's full dependency tree here would add minutes and buy nothing.
+      # No host toolchain to install: mke2fs and qemu-img run INSIDE the script's throwaway debian
+      # container (it apt-gets e2fsprogs + qemu-utils there), so the runner needs only docker and bash.
+      - name: Build the rootfs
+        env:
+          ARCH_DEB: ${{ inputs.arch }}
+          # The script defaults both mirrors to Aliyun, which is right on a China-based machine ("~50x
+          # faster here than deb.debian.org") and wrong here: this runner is not in China, and pointing a
+          # US/EU build at a China mirror is slow and needlessly fragile. Upstream defaults for CI.
+          APT_MIRROR: deb.debian.org
+          PIP_INDEX_URL: https://pypi.org/simple/
+          DOCKER_BUILD: docker buildx build
+          # --load: buildx keeps the result in its own store by default, and the next step does
+          #   `docker create` from the tag, which only sees the local docker images.
+          # scope per arch: amd64 and arm64 layers are different content; one shared scope would have them
+          #   evicting each other on every run.
+          DOCKER_BUILD_FLAGS: >-
+            --load
+            --cache-from=type=gha,scope=vm-${{ inputs.arch }}
+            --cache-to=type=gha,mode=max,scope=vm-${{ inputs.arch }}
+          # The assembly image (mke2fs + qemu-img) gets its OWN scope: it changes only when
+          # Dockerfile.assembly does, while the toolbox above changes often, and sharing one scope would
+          # have each eviction take the other with it.
+          DOCKER_BUILD_FLAGS_ASM: >-
+            --load
+            --cache-from=type=gha,scope=vmasm-${{ inputs.arch }}
+            --cache-to=type=gha,mode=max,scope=vmasm-${{ inputs.arch }}
+        run: |
+          df -h / | tail -1   # the qcow2 is ~1 GB; fail loudly here rather than midway through docker build
+          # A plain directory, not the app-data VM dir. Staging into <appdata>/vm/<version>/ is a
+          # local-dev convenience — it is where the dev runtime looks for a hand-built image — and on a
+          # runner it buys nothing but an indirection through vmpaths.
+          mkdir -p "$RUNNER_TEMP/vm-out"
+          bash sandbox/qemu/build-rootfs-local.sh "$RUNNER_TEMP/vm-out"
+          ls -la "$RUNNER_TEMP/vm-out"
+
+      # The version IS the built docker image id: shortImageId() = "sha-" + the first 12 hex of {{.Id}}.
+      #
+      # That is a BUILD identity, not a content identity. Rebuilding the same commit mints a new version
+      # whenever a layer misses the cache, and NOT because the packages moved: two amd64 runs installed
+      # the identical 884 packages at identical versions, yet produced different shas. Re-running the same
+      # apt simply does not produce the same bytes — mtimes, regenerated caches (fonts, ldconfig, .pyc)
+      # and dpkg metadata are all stamped with build time, and the image config records its own. Measured
+      # on those two runs: the kernel, copied out of the package, was byte-identical; the initrd, generated
+      # during the build, differed by 6 bytes.
+      #
+      # Every new version is a ~1 GB download for every user, so rebuild when the Dockerfile changes, not
+      # to "refresh" an image. A stable sha across rebuilds needs reproducible builds (pinned package
+      # versions + SOURCE_DATE_EPOCH), which is a project, not a flag.
+      - name: Version from the built image
+        id: ver
+        run: |
+          ID=$(docker image inspect --format '{{.Id}}' "zx-vm-${{ inputs.arch }}")
+          V="sha-$(printf '%s' "${ID#sha256:}" | cut -c1-12)"
+          [ "${#V}" = 16 ] || { echo "unexpected image id: $ID"; exit 1; }
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+          {
+            echo "### VM image \`${{ inputs.arch }}\` = \`$V\`"
+            echo ""
+            echo "The last step commits this to \`electron/versions.json\` once the upload is verified."
+            echo "If \`commit_version\` was off, apply it by hand — the app fetches the version named there:"
+            echo '```json'
+            echo "  \"vm\": { \"${{ inputs.arch }}\": \"$V\" }"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Python version (for the cache key)
+        id: py
+        if: ${{ inputs.publish }}
+        run: echo "v=$(python3 -c 'import platform; print(platform.python_version())')" >> "$GITHUB_OUTPUT"
+
+      # Same cache shape as the llama fork's mac-build workflow: pinned version in the key, python version
+      # in the key (a venv hardcodes absolute paths to the interpreter that built it).
+      - name: Cache the Hugging Face CLI
+        if: ${{ inputs.publish }}
+        uses: actions/cache@v4
+        with:
+          path: ~/hfenv
+          key: hfenv-${{ runner.os }}-${{ runner.arch }}-hub${{ env.HF_HUB_VERSION }}-py${{ steps.py.outputs.v }}
+
+      - name: Publish to Hugging Face
+        if: ${{ inputs.publish }}
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          VMARCH: ${{ inputs.arch }}
+          V: ${{ steps.ver.outputs.version }}
+        run: |
+          if [ -z "$HF_TOKEN" ]; then
+            echo "HF_TOKEN is not set — the app downloads the VM image from Hugging Face, so this build would ship nothing"
+            exit 1
+          fi
+          HFENV="$HOME/hfenv"
+          # Rebuild rather than trust: a cache can restore partially, and a venv whose interpreter moved
+          # still looks present while failing to run.
+          if ! "$HFENV/bin/hf" --version >/dev/null 2>&1; then
+            echo "building the CLI venv (cache miss or unusable)"
+            rm -rf "$HFENV"
+            python3 -m venv "$HFENV"   # the runner's python is externally managed (PEP 668)
+            "$HFENV/bin/pip" install --quiet "huggingface_hub==$HF_HUB_VERSION"
+          fi
+          DIR="$RUNNER_TEMP/vm-out"   # where the build step wrote it
+          for f in rootfs.qcow2 Image initrd.img; do
+            [ -s "$DIR/$f" ] || { echo "missing $f in $DIR — the build did not produce a complete image"; exit 1; }
+          done
+          du -sh "$DIR"
+          # ONE upload for the directory, not three for the files: the CLI batches them into a single
+          # commit, so the version either appears complete or not at all. A version that resolves while
+          # missing Image is the worst outcome — ensureRootfs would download it and boot a VM with no
+          # kernel. --include keeps a local run's run.qcow2 / console.log / qemu.log out of it.
+          "$HFENV/bin/hf" upload "$HF_REPO" "$DIR" "vm/$VMARCH/$V" --repo-type model \
+            --include rootfs.qcow2 --include Image --include initrd.img \
+            --commit-message "VM image $VMARCH $V"
+
+      - name: Verify what was published
+        if: ${{ inputs.publish }}
+        env:
+          V: ${{ steps.ver.outputs.version }}
+        run: |
+          # Fetch it back the way the app does — a successful upload that the runtime cannot resolve is
+          # the failure this catches (ensureRootfs HEADs each file for its size before downloading).
+          ok=1
+          for f in rootfs.qcow2 Image initrd.img; do
+            U="https://huggingface.co/$HF_REPO/resolve/main/vm/${{ inputs.arch }}/$V/$f"
+            SZ=$(curl -sIL --max-time 60 "$U" | awk 'BEGIN{IGNORECASE=1} /^content-length:/{v=$2} END{print v+0}')
+            if [ "$SZ" -gt 0 ]; then echo "  OK   $f  $((SZ/1048576)) MB"; else echo "  FAIL $f  (no content-length from $U)"; ok=0; fi
+          done
+          [ "$ok" = 1 ] || exit 1
+          echo "published: vm/${{ inputs.arch }}/$V/" >> "$GITHUB_STEP_SUMMARY"
+      # Committed LAST, after the upload and the fetch-back verified the image is actually there. A
+      # versions.json pointing at a version nobody can download is the one failure that reaches users as
+      # a broken sandbox rather than a failed run.
+      #
+      # Rebased onto the remote first and re-applied to the CURRENT file, rather than committing the copy
+      # this runner checked out: versions.json also carries llama, seedPrefix and macLlama, and any of
+      # those may have moved since checkout. Pushing a whole stale file would silently revert them.
+      - name: Commit the version bump
+        if: ${{ inputs.publish && inputs.commit_version }}
+        env:
+          V: ${{ steps.ver.outputs.version }}
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          BR="${GITHUB_REF_NAME}"
+          git fetch --quiet origin "$BR"
+          git checkout --quiet -B "$BR" "origin/$BR"
+          node -e 'import("./scripts/vmVersion.mjs").then((m) => { if (!m.writeVmVersion(process.argv[1], process.argv[2])) { console.log("unchanged"); } })' \
+            "${{ inputs.arch }}" "$V"
+          if git diff --quiet -- electron/versions.json; then
+            echo "vm.${{ inputs.arch }} was already $V — nothing to commit" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          git add electron/versions.json
+          git commit -m "vm: ${{ inputs.arch }} image $V" -m "Built and published by the vm-image workflow (run $GITHUB_RUN_ID)."
+          git push origin "$BR"
+          echo "committed vm.${{ inputs.arch }} = \`$V\` to \`$BR\`" >> "$GITHUB_STEP_SUMMARY"
+

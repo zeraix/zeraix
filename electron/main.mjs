@@ -605,8 +605,10 @@ function registerLocalLlm() {
   // Model library: downloaded model list / delete / directory / memory estimate / runtime info.
   ipcMain.handle("llm:local:models", () => localLlm.listDownloaded());
   ipcMain.handle("llm:local:delete", (_e, opts) => localLlm.deleteLocalModel(opts));
-  // The renderer deleted a conversation -> drop its persisted KV (see localServer.eraseConversationKv).
+  // The renderer deleted conversations -> drop their persisted KV (see localServer.eraseConversationsKv). A list,
+  // because deleting one conversation also deletes every sub-agent conversation it ran.
   ipcMain.handle("llm:local:eraseConversationKv", (_e, id) => localLlm.eraseConversationKv(id));
+  ipcMain.handle("llm:local:eraseConversationsKv", (_e, ids) => localLlm.eraseConversationsKv(ids));
   ipcMain.handle("llm:local:models-dir", () => localLlm.modelsDir());
   ipcMain.handle("llm:local:estimate", (_e, opts) => localLlm.estimate(opts));
   ipcMain.handle("llm:local:llama-info", () => localLlm.llamaInfo());
