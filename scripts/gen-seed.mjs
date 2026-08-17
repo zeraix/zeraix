@@ -1,18 +1,19 @@
 #!/usr/bin/env node
 /**
- * Generate resident KV seeds for every allowlisted model, in every mode.
+ * Generate resident KV seeds for every allowlisted model.
  *
  * A seed is pre-computed KV for the `[messages[0] + tools]` prefix. Ship it and a user's very first request skips prefilling that
  * whole region — measured at 99.8–99.9% of ~10k tokens served from the seed.
  *
- * One call does the whole matrix, because the matrix is the unit that has to stay consistent: every model needs a seed for BOTH
- * modes (daily and dev compose a different system prompt and a different open_browser description), and a half-published set means
- * some users silently get a cold prefill with nothing to indicate why.
+ * One call does the whole matrix, because the matrix is the unit that has to stay consistent: every model needs a seed for every
+ * KV quantisation the app offers, and a half-published set means some users silently get a cold prefill with nothing to indicate
+ * why. There used to be a second axis, the daily/dev mode; the tags merged into one, so "dev" is now simply the name the single
+ * prefix is published under.
  *
- *   npm run seed:capture -- --out /tmp/px     # writes prefix-daily.json + prefix-dev.json
+ *   npm run seed:capture -- --out /tmp/px     # writes prefix-dev.json
  *   npm run seed:gen -- --prefix-dir /tmp/px --server <llama-server> --out dist/seeds
  *
- *   --model <id>   restrict to one model      --mode <daily|dev>   restrict to one mode
+ *   --model <id>   restrict to one model      --mode <dev>   restrict to one mode
  *
  * Per model+mode:
  *   llama-server --kv-disk-path <tmp>  ->  POST with X-KV-Pin: 1  ->  tar <tmp>/<model_key>/
@@ -63,10 +64,10 @@ function findGguf(model) {
   return null;
 }
 
-const MODES = onlyMode ? [onlyMode] : ["daily", "dev"];
-for (const m of MODES) if (!["daily", "dev"].includes(m)) die(`--mode must be daily or dev (got ${m})`);
+const MODES = onlyMode ? [onlyMode] : ["dev"];
+for (const m of MODES) if (!["dev"].includes(m)) die(`--mode must be dev (got ${m})`);
 
-// Every KV quantisation the app offers needs its own seed, for the same reason each mode does: the server's model_key covers the
+// Every KV quantisation the app offers needs its own seed: the server's model_key covers the
 // KV cache types, so a machine running a quantisation we did not build for finds nothing and prefills cold. Taking the list from
 // localModels rather than a flag here is what keeps "what the app can select" and "what we published" from drifting apart.
 const KV_BITS = arg("kv-bits") ? [Number(arg("kv-bits"))] : KV_BITS_OFFERED;

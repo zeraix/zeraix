@@ -23,7 +23,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { spawn, execFileSync } from "node:child_process";
+import { spawn, spawnSync, execFileSync } from "node:child_process";
 import crypto from "node:crypto";
 import https from "node:https";
 import { app } from "electron";
@@ -47,6 +47,10 @@ const HOME = os.homedir();
 const isWin = process.platform === "win32";
 const QMP_PORT = 4444;
 const GA_PORT = 4445;
+/** How long the guest still gets to come up after qemu has called the disk image corrupt, before that report is treated
+ *  as the diagnosis (see boot). Well inside waitAgent's own 180s, but long enough that an image qemu grumbles about yet
+ *  boots from is never condemned — the cost of a false positive is deleting and re-downloading a multi-GB image. */
+const CORRUPT_GRACE_MS = 90000;
 const GUEST_MNT = "/mnt/hostfs"; // Mount point of the host root inside the guest (firstboot.sh mounts it via 9p; must match)
 // The one name the working directory has inside the sandbox. The bind used to be "isomorphic" (guest path == host path),
 // which put the user's real directory structure inside the VM: `pwd` printed it, every command could name it, and every
@@ -162,7 +166,9 @@ const VM_HF_REPO = process.env.ZERAIX_LLAMA_BUILDS_REPO || "Zeraix/llama-builds"
 async function vmBase(arch, version) {
   const hf = `${await resolveHfEndpoint((l) => console.log(`[sandbox/qemu] ${l}`))}/${VM_HF_REPO}/resolve/main`;
   try {
-    await headSize(`${hf}/vm/${arch}/${version}/${VM_FILES[0]}`);
+    // Short budget on purpose: this is a "is the version published on HF" probe with a working fallback right below, so
+    // spending the full HEAD timeout on it would just be dead time in front of a download that was going to the CDN anyway.
+    await headSize(`${hf}/vm/${arch}/${version}/${VM_FILES[0]}`, 5, 8000);
     return hf;
   } catch {
     console.log(`[sandbox/qemu] ${version} not on Hugging Face — falling back to ${VM_CDN}`);
@@ -233,6 +239,30 @@ export function sandboxVmInfo() {
     updatable: !!targetVersion && !complete && version !== targetVersion,
     otherVersions: installedVersions().filter((v) => v !== version),
   };
+}
+
+/** qemu-img, derived from the qemu-system path so both come from the same (possibly relocated, bundled) directory. */
+function qemuImgBin() {
+  return qemuBin().replace(/qemu-system-[^/\\]+(\.exe)?$/, isWin ? "qemu-img.exe" : "qemu-img");
+}
+
+/**
+ * Structural check of a qcow2 file. Returns null when it is sound, else a description of what is wrong.
+ *
+ * qemu-img exit codes: 0 = clean, 1 = check unsupported/could not run, 2 = corruption found, 3 = leaked clusters.
+ * Only 2 counts as broken. Leaks (3) waste space and boot fine, and 1 must not condemn an image just because the
+ * bundled qemu-img could not be run — a check that fails open is the right direction for a cache we would otherwise
+ * delete and re-download over a false positive.
+ */
+function qcow2Corruption(file) {
+  try {
+    const r = spawnSync(qemuImgBin(), ["check", "-f", "qcow2", file], { encoding: "utf8", timeout: 120000, windowsHide: true });
+    if (r.error || r.status === null) return null; // could not run / timed out: fail open
+    if (r.status !== 2) return null;
+    return (`${r.stdout ?? ""}${r.stderr ?? ""}`.trim().split("\n").slice(0, 4).join("; ") || "qemu-img reported corruption");
+  } catch {
+    return null;
+  }
 }
 
 function qemuBin() {
@@ -427,47 +457,132 @@ async function ensureRootfs(onProgress, forceConfigured = false) {
   const missing = VM_FILES.filter((f) => !fs.existsSync(path.join(vd, f)));
   if (!missing.length) { pruneOldVmVersions(version); onProgress?.(100, "Runtime environment ready (no download needed)"); return; } // already downloaded: prune stale then notify the UI
   // Download needed: only happens on "first run (no image at all)" or "user clicks update (forceConfigured)", where version === configured.
+  //
+  // Logged step by step, to the terminal, because this stretch is invisible in the UI: no progress is reported until the
+  // sizes are known, so the dialog shows its generic "checking runtime environment" for the whole of endpoint resolution
+  // and three HEAD requests. When any of that is slow or blocked, "stuck on checking" is the only symptom the user has,
+  // and it does not distinguish a hung probe from a 404 from a download that never started. These lines do.
   fs.mkdirSync(vd, { recursive: true });
+  console.log(`[sandbox/qemu] need ${missing.join(", ")} for ${version} (${arch}) — resolving download endpoint`);
   const base = await vmBase(arch, version);
+  console.log(`[sandbox/qemu] download base: ${base}`);
+  // Per-file, not just the sum: the size is the only integrity signal the CDN gives us (no checksum is published
+  // alongside these files), and it is needed per file to tell a finished download from a truncated one.
+  const expected = new Map();
   let total = 0;
-  for (const f of missing) total += await headSize(`${base}/vm/${arch}/${version}/${f}`);
+  for (const f of missing) {
+    const url = `${base}/vm/${arch}/${version}/${f}`;
+    let n;
+    try {
+      n = await headSize(url);
+    } catch (e) {
+      // Named rather than propagated bare: the two failures that land here need opposite responses — a timeout means the
+      // endpoint is unreachable from this network, a 404 means this version was never published where we are looking —
+      // and the raw error alone does not say which the user is looking at.
+      console.warn(`[sandbox/qemu] HEAD failed for ${url}: ${e?.message ?? e}`);
+      throw new Error(`cannot reach the runtime download for ${f} (${url}): ${e?.message ?? e}`);
+    }
+    console.log(`[sandbox/qemu] ${f}: ${(n / 1048576).toFixed(0)} MB`);
+    expected.set(f, n);
+    total += n;
+  }
   // Resumable download: an existing .part counts toward completed progress (the server's 206 only returns the remaining bytes, no longer reported via onChunk).
   let done = 0;
-  for (const f of missing) { const p = path.join(vd, f + ".part"); if (fs.existsSync(p)) done += fs.statSync(p).size; }
+  for (const f of missing) {
+    const p = path.join(vd, f + ".part");
+    if (!fs.existsSync(p)) continue;
+    // A .part at or beyond the full size cannot be resumed from — Range would ask for nothing, or for bytes past the
+    // end, and the rename would publish whatever the previous attempt left behind. It is a leftover from an earlier
+    // version or a botched write; start it again rather than weld onto it.
+    const size = fs.statSync(p).size;
+    const want = expected.get(f) || 0;
+    if (want && size >= want) { fs.rmSync(p, { force: true }); continue; }
+    done += size;
+  }
   const report = () => onProgress?.(total ? Math.min(99, Math.floor((done / total) * 100)) : null, `Downloading runtime environment ${(done / 1048576).toFixed(0)}/${(total / 1048576).toFixed(0)} MB`);
   report(); // initial progress (including any already-resumed part)
   for (const f of missing) {
     const tmp = path.join(vd, f + ".part");
+    console.log(`[sandbox/qemu] downloading ${f} -> ${tmp}`);
     await httpDownload(`${base}/vm/${arch}/${version}/${f}`, tmp, (n) => { done += n; report(); });
+    // Verify BEFORE publishing. `ws.on("finish")` fires when the response ends, and a connection dropped mid-body ends
+    // the response just the same — so a truncated file used to be renamed into place as if complete, and from then on
+    // `versionComplete()` (an existsSync test) called it downloaded for ever. That is how an unbootable image becomes
+    // permanent: every later start reuses it, and "Update" resolves to the same version directory and downloads nothing.
+    const want = expected.get(f) || 0;
+    const got = fs.existsSync(tmp) ? fs.statSync(tmp).size : 0;
+    if (want && got !== want) {
+      fs.rmSync(tmp, { force: true }); // the prefix is not trustworthy, so it must not seed the next resume either
+      throw new Error(
+        `download of ${f} is incomplete (${got} of ${want} bytes) — the connection dropped. Start the sandbox again to retry.`,
+      );
+    }
+    // Structural check for the disk image specifically: the right number of corrupt bytes is still the right SIZE, so
+    // the length test above cannot see a body that arrived damaged (or was resumed onto a damaged prefix). qemu-img
+    // reads the qcow2 metadata and says so directly — which is the failure this whole path exists to stop shipping.
+    if (f.endsWith(".qcow2")) {
+      const bad = qcow2Corruption(tmp);
+      if (bad) {
+        fs.rmSync(tmp, { force: true });
+        throw new Error(`downloaded ${f} is corrupt (${bad}) — discarded. Start the sandbox again to re-download it.`);
+      }
+    }
     fs.renameSync(tmp, path.join(vd, f));
   }
   pruneOldVmVersions(version); // prune old images after the download completes (on update version=configured -> delete the old version, free disk)
   onProgress?.(100, "Runtime environment ready");
 }
-function headSize(url, redirs = 5) {
+/**
+ * Size of a remote file, by HEAD.
+ *
+ * `timeout` is not optional detail. Without it this hangs for ever against a host that completes the TCP connection and
+ * then says nothing — the ordinary shape of a blackholing firewall or proxy, and the reason the sandbox dialog could sit
+ * on "checking runtime environment" indefinitely with no download, no progress and no error. `.on("error")` does not
+ * cover it: a silent stall is not a socket error. The option is a socket-INACTIVITY timeout, and the handler has to
+ * destroy the request itself — Node only emits the event. hfEndpoint.mjs's reachability probe already does exactly this.
+ */
+function headSize(url, redirs = 5, timeoutMs = 15000) {
   return new Promise((resolve, reject) => {
-    https.request(url, { method: "HEAD" }, (res) => {
-      if ([301, 302, 303, 307, 308].includes(res.statusCode) && res.headers.location && redirs > 0) { res.resume(); return resolve(headSize(res.headers.location, redirs - 1)); }
+    const req = https.request(url, { method: "HEAD", timeout: timeoutMs }, (res) => {
+      if ([301, 302, 303, 307, 308].includes(res.statusCode) && res.headers.location && redirs > 0) { res.resume(); return resolve(headSize(res.headers.location, redirs - 1, timeoutMs)); }
       if (res.statusCode !== 200) { res.resume(); return reject(new Error(`HEAD ${url} → ${res.statusCode}`)); }
       resolve(Number(res.headers["content-length"] || 0));
-    }).on("error", reject).end();
+    });
+    req.on("timeout", () => { req.destroy(new Error(`HEAD ${url} timed out after ${timeoutMs}ms`)); });
+    req.on("error", reject);
+    req.end();
   });
 }
 // Resumable download: existing .part -> send Range: bytes=<have>-; 206 appends, 200 (server ignores Range) overwrites from the start.
-function httpDownload(url, dest, onChunk, redirs = 5) {
+//
+// `timeoutMs` is an INACTIVITY timeout, not a deadline for the transfer: Node resets it on every socket read, so a slow
+// but progressing download of a multi-GB image is never cut off, while a connection that dies mid-body — which otherwise
+// leaves this promise pending for ever, the progress bar frozen and no error anywhere — fails in a minute. The partial
+// .part is deliberately left on disk: it is what the next attempt resumes from.
+function httpDownload(url, dest, onChunk, redirs = 5, timeoutMs = 60000) {
   return new Promise((resolve, reject) => {
     const have = fs.existsSync(dest) ? fs.statSync(dest).size : 0;
-    const opts = have > 0 ? { headers: { Range: `bytes=${have}-` } } : {};
-    https.get(url, opts, (res) => {
-      if ([301, 302, 303, 307, 308].includes(res.statusCode) && res.headers.location && redirs > 0) { res.resume(); return resolve(httpDownload(res.headers.location, dest, onChunk, redirs - 1)); }
-      if (res.statusCode !== 200 && res.statusCode !== 206) { res.resume(); return reject(new Error(`GET ${url} → ${res.statusCode}`)); }
+    const opts = have > 0 ? { timeout: timeoutMs, headers: { Range: `bytes=${have}-` } } : { timeout: timeoutMs };
+    let ws = null;
+    // One-shot, and it closes the write stream on the way out. Without that a failed download leaks the file handle,
+    // and on Windows an open handle is also what stops the retry from replacing the file it was writing.
+    const fail = (err) => {
+      if (ws) { try { ws.destroy(); } catch { /* ignore */ } ws = null; }
+      reject(err);
+    };
+    const req = https.get(url, opts, (res) => {
+      if ([301, 302, 303, 307, 308].includes(res.statusCode) && res.headers.location && redirs > 0) { res.resume(); return resolve(httpDownload(res.headers.location, dest, onChunk, redirs - 1, timeoutMs)); }
+      if (res.statusCode !== 200 && res.statusCode !== 206) { res.resume(); return fail(new Error(`GET ${url} → ${res.statusCode}`)); }
       const resuming = res.statusCode === 206; // server accepts resume; 200 means it ignored Range and overwrites from the start
-      const ws = fs.createWriteStream(dest, { flags: resuming ? "a" : "w" });
+      ws = fs.createWriteStream(dest, { flags: resuming ? "a" : "w" });
       res.on("data", (c) => onChunk?.(c.length));
+      res.on("error", fail); // a body that dies mid-stream is not reported on the request object
       res.pipe(ws);
-      ws.on("finish", () => ws.close(() => resolve()));
-      ws.on("error", reject);
-    }).on("error", reject);
+      ws.on("finish", () => ws?.close(() => resolve()));
+      ws.on("error", fail);
+    });
+    req.on("timeout", () => { req.destroy(new Error(`download of ${url} stalled for ${timeoutMs}ms`)); });
+    req.on("error", fail);
   });
 }
 
@@ -481,17 +596,44 @@ async function boot(onProgress, forceConfigured = false) {
   fs.mkdirSync(vd, { recursive: true });
   // Throwaway overlay: the base image stays clean, writes are discarded on shutdown.
   const overlay = path.join(vd, "run.qcow2");
-  const imgBin = qemuBin().replace(/qemu-system-[^/\\]+(\.exe)?$/, isWin ? "qemu-img.exe" : "qemu-img");
-  fs.rmSync(overlay, { force: true });
+  const imgBin = qemuImgBin();
+  // FIRST, before the overlay is deleted or recreated. An orphaned qemu from a crashed session holds an open handle to
+  // run.qcow2, and on Windows that makes the delete below fail outright — so reaping afterwards (where this used to sit)
+  // could never help: boot threw EPERM and returned before reaching it.
+  const reaped = reapOrphanVm(vd);
+  // Windows releases a handle asynchronously after the process dies, so the delete can still lose a race with a kill we
+  // just issued. maxRetries/retryDelay is Node's own backoff for exactly this class (EBUSY/EPERM/ENOTEMPTY); only paid
+  // when something was actually holding the file.
+  try {
+    fs.rmSync(overlay, { force: true, maxRetries: reaped ? 20 : 5, retryDelay: 100 });
+  } catch (e) {
+    // Rethrown with the cause named. The raw error is "EPERM: operation not permitted, unlink '\\?\C:\…\run.qcow2'",
+    // which reaches the user verbatim as the sandbox's failure reason (engine.mjs sets status.reason to e.message) and
+    // says nothing about what is wrong or what to do. On Windows this is essentially always an open handle, not a
+    // permissions problem — the app owns the folder it created — and the holder is a VM the reaper above could not stop.
+    if (isWin && (e?.code === "EPERM" || e?.code === "EACCES" || e?.code === "EBUSY")) {
+      throw new Error(
+        `the runtime disk (${overlay}) is locked by another process — usually a sandbox VM left running by a previous ` +
+          "session, or an antivirus scanning the file. Sign out and back in (or end any qemu-system-* task in Task " +
+          `Manager) and start the sandbox again. Original error: ${e.message}`,
+      );
+    }
+    throw e;
+  }
   await new Promise((res, rej) => {
     const p = spawn(imgBin, ["create", "-q", "-f", "qcow2", "-F", "qcow2", "-b", rootfs, overlay]);
     p.on("exit", (c) => (c ? rej(new Error(`qemu-img exit ${c}`)) : res()));
     p.on("error", rej);
   });
-  reapOrphanVm(vd, overlay);
   // Capture qemu's own stdout/stderr to vd/qemu.log (was stdio:"ignore", leaving no way to diagnose a process crash).
   // This is the "host-side" qemu output (HVF errors, assertions, sleep/wake failures, etc.); the guest kernel/systemd output is in console.log instead.
   let lastStderr = "";
+  // Set when qemu reports the backing image is structurally broken. It says this within about a second of starting and
+  // then carries on running a VM whose disk cannot be read, so without watching for it the only symptom is the guest
+  // agent never answering — a 180s wait ending in "guest agent did not come up", which points at the guest and is wrong.
+  let corruptReport = null;
+  let onCorrupt = () => {};
+  let corruptTimer = null;
   const qlog = fs.createWriteStream(path.join(vd, "qemu.log"), { flags: "a" });
   try { qlog.write(`\n===== qemu started ${new Date().toISOString()} =====\n`); } catch { /* ignore */ }
   const proc = spawn(qemuBin(), qemuArgs(vd, overlay), { stdio: ["ignore", "pipe", "pipe"] });
@@ -501,6 +643,10 @@ async function boot(onProgress, forceConfigured = false) {
   proc.stderr.on("data", (b) => {
     const t = String(b).trim();
     if (t) lastStderr = t.split("\n").pop();
+    if (!corruptReport && /Image is corrupt/i.test(t)) {
+      corruptReport = t.split("\n").find((l) => /Image is corrupt/i.test(l))?.trim() ?? t;
+      onCorrupt();
+    }
     try { qlog.write(b); } catch { /* ignore */ }
   });
   const exitCb = onExitCb; // bind the callback at the time this proc starts (after a restart, old and new procs each correspond to their own; see the engine.disposing guard)
@@ -509,15 +655,110 @@ async function boot(onProgress, forceConfigured = false) {
     vm = null; try { ninep?.close(); } catch {} ninep = null;
     try { exitCb?.(code, signal, lastStderr); } catch { /* ignore */ }
   });
-  const ports = await qmp({ port: QMP_PORT });
-  const guest = await guestAgent({ port: GA_PORT }); // includes waiting for the guest to be ready
-  // Backing store for the sandbox's /tmp (see GUEST_TMP / bwrapFlags). Created here rather than in the image so it needs no
-  // rootfs rebuild. 1777 = the mode /tmp is expected to have (world-writable, sticky).
-  try { await guest.exec("/bin/mkdir", ["-p", "-m", "1777", GUEST_TMP]); } catch { /* bwrap falls back to failing loudly if absent */ }
-  await enableSwap(guest);
-  vm = { proc, ports, guest };
-  if (isWin) await winShareMount(guest); // Windows host share: 9p-over-tcp (no virtio-9p)
-  return vm;
+  // Everything from here on runs with a live qemu process, so every exit from this block has to account for it.
+  //
+  // It previously did not: a boot that spawned qemu and then failed — the guest agent never answering, a corrupt image,
+  // a QMP handshake nobody served — threw straight out of boot(), and nothing upstream owned the process. initEngine's
+  // catch only writes a status string, and `sandbox` stays null there, so dispose() is never called on it either. The
+  // qemu just kept running. That is what turns one bad boot into an escalating series: the leaked VM holds QMP_PORT /
+  // GA_PORT, so the NEXT start cannot bind them, and its symptom ("another client holds the monitor") describes the
+  // wreckage of the previous failure rather than anything wrong with this one.
+  let ports;
+  let guest;
+  try {
+    try {
+      ports = await qmp({ port: QMP_PORT });
+    } catch (e) {
+      // Reaching here means a qemu we could not stop still owns the monitor: reapOrphanVm ran before this and either
+      // found nothing (a VM outside our tree, or one owned by another user account) or was refused the kill. The
+      // underlying message explains the socket state accurately and tells the user nothing they can act on.
+      throw new Error(
+        `${e?.message ?? e}. A sandbox VM from an earlier session is still running and owns port ${QMP_PORT}. ` +
+          (isWin
+            ? "End any qemu-system-x86_64.exe task in Task Manager (or sign out and back in) and start the sandbox again."
+            : "Kill the stray qemu-system-* process (pkill -f qemu-system) and start the sandbox again."),
+      );
+    }
+    try {
+      // Raced against the corruption report rather than simply awaited. A broken disk image cannot become a booted guest,
+      // so sitting out the full guest-agent timeout only delays the answer by three minutes and then gives the wrong one.
+      const agentReady = guestAgent({ port: GA_PORT }); // includes waiting for the guest to be ready
+      // Race does not cancel the loser: when corruption settles this first, the wait above still runs to its own 180s
+      // timeout and rejects with nobody left to receive it. Attaching a sink here — not replacing what the race sees,
+      // since .catch() returns a new promise — is what keeps that from surfacing as an unhandled rejection.
+      agentReady.catch(() => {});
+      guest = await Promise.race([
+        agentReady,
+        new Promise((_res, rej) => {
+          // Not an immediate verdict. qemu itself calls some of these events non-fatal ("further non-fatal corruption
+          // events will be suppressed"), and an image that still boots must not be deleted over a warning — so the
+          // report only shortens the deadline instead of ending the wait. Boot wins if it happens inside the grace
+          // period; failing to boot within it, having been told the disk is broken, is the actual diagnosis.
+          const arm = () => { corruptTimer = setTimeout(() => rej(new Error(corruptReport)), CORRUPT_GRACE_MS); };
+          if (corruptReport) return arm();
+          onCorrupt = arm;
+        }),
+      ]);
+    } catch (e) {
+      if (corruptReport) {
+        // Self-healing: drop the unusable image so the next start downloads it again. These files are a CDN cache the app
+        // already deletes on its own (pruneOldVmVersions), and versionComplete() is an existsSync test — so leaving a
+        // corrupt one in place is precisely what makes the failure permanent, with no button anywhere that repairs it
+        // ("Update" resolves to this same version directory and finds nothing missing to fetch).
+        //
+        // Only the managed copy. A rootfs pointed at by config or ZERAIX_ROOTFS is the user's own file, not ours to delete.
+        const managed = !cfg?.rootfs && !process.env.ZERAIX_ROOTFS && rootfs === path.join(vd, "rootfs.qcow2");
+        if (managed) {
+          // Kill qemu FIRST. It has the corrupt image open as its backing file, and Windows refuses to delete a file
+          // another process holds — so deleting before killing (which is what the outer cleanup would have meant) fails
+          // silently inside this catch, the image survives, and the self-heal quietly does nothing on the one platform
+          // it was written for. Same retry backoff as the overlay delete, for the same asynchronous handle release.
+          try { proc.kill(); } catch { /* ignore */ }
+          try { fs.rmSync(rootfs, { force: true, maxRetries: 20, retryDelay: 100 }); }
+          catch { /* still locked: the next start finds it corrupt again and says so */ }
+        }
+        throw new Error(
+          `the runtime disk image is corrupt (${corruptReport}). ` +
+            (managed
+              ? "It has been discarded — start the sandbox again to download a fresh copy."
+              : `Replace or remove ${rootfs} and start the sandbox again.`),
+        );
+      }
+      // "guest agent did not come up" on its own names a symptom and no cause, and the two files that DO hold the cause are
+      // written silently beside the disk image where nobody thinks to look. The distinction that matters is already in them:
+      // console.log empty / stuck at the first lines = the guest never booted (a host-side problem — acceleration, CPU model,
+      // firmware, and qemu.log will say so); console.log full of systemd output = it booted and qemu-guest-agent is what
+      // failed. Quote the tails so that distinction reaches the user in the dialog, instead of costing a support round trip.
+      throw new Error(
+        `${e?.message ?? e}\n` +
+          `The VM was started but never answered. Diagnostics are in ${vd}:\n` +
+          `--- console.log (guest kernel / systemd; empty means the guest never booted) ---\n${tailFile(path.join(vd, "console.log"))}\n` +
+          `--- qemu.log (host-side qemu errors) ---\n${tailFile(path.join(vd, "qemu.log"))}`,
+      );
+    } finally {
+      // Disarm the rejector once the race is decided. qemu reports non-fatal corruption during normal operation too, and
+      // the stderr handler outlives this block — so leaving it armed means a late report rejects a promise no one is
+      // awaiting any more, i.e. an unhandled rejection on a VM that is running perfectly well. The pending timer goes
+      // with it, or a healthy VM would still be holding the event loop open for the rest of the grace period.
+      onCorrupt = () => {};
+      if (corruptTimer) clearTimeout(corruptTimer);
+    }
+    // Backing store for the sandbox's /tmp (see GUEST_TMP / bwrapFlags). Created here rather than in the image so it needs no
+    // rootfs rebuild. 1777 = the mode /tmp is expected to have (world-writable, sticky).
+    try { await guest.exec("/bin/mkdir", ["-p", "-m", "1777", GUEST_TMP]); } catch { /* bwrap falls back to failing loudly if absent */ }
+    await enableSwap(guest);
+    vm = { proc, ports, guest };
+    if (isWin) await winShareMount(guest); // Windows host share: 9p-over-tcp (no virtio-9p)
+    return vm;
+  } catch (e) {
+    // The VM this boot started never became usable, so it must not outlive the attempt. Sockets first: both control
+    // channels serve exactly one client, and one left open is what makes the NEXT boot's handshake hang instead of
+    // failing cleanly. `vm` is cleared by the exit handler, so a half-assembled one cannot be left behind either.
+    try { ports?.close?.(); } catch { /* best effort */ }
+    try { guest?.close?.(); } catch { /* best effort */ }
+    try { proc.kill(); } catch { /* best effort */ }
+    throw e;
+  }
 }
 
 /** Called by engine.mjs: start the long-lived VM. onProgress(pct,msg): progress callback for downloading the VM disk/kernel on first run.
@@ -864,19 +1105,85 @@ export async function dispose({ waitMs = 10000 } = {}) {
  * "Failed to find an available port: Address already in use", exit code 1, and every command then fails until someone finds
  * the stray process by hand. Observed in the wild; qemu.log had five unmatched "qemu started" lines.
  *
- * Scoped to OUR VM: matched on the overlay path in the process's own -drive argument, so an unrelated qemu on this machine is
- * never touched. Best-effort — a failure here just means the spawn below reports the port conflict as it did before.
+ * On Windows the orphan does something worse than hold a port: it holds an open handle to run.qcow2. Windows refuses to
+ * delete a file another process has open (POSIX unlink succeeds regardless), so boot's `fs.rmSync(overlay)` fails with
+ * EPERM and initialization dies before qemu is ever spawned — surfacing as "EPERM, permission denied … run.qcow2" with no
+ * hint that a stray VM is the cause. That is why this must run BEFORE the overlay is touched, not just before the spawn.
+ *
+ * Scoped to OUR VM: matched on our app-data VM path in the process's own -drive argument, so an unrelated qemu on this machine
+ * is never touched. Best-effort — a failure here just means the caller reports the conflict as it did before.
+ *
+ * Returns true when something was actually killed, so the caller knows to wait for the handle to be released.
  */
-function reapOrphanVm(vd, overlay) {
-  try {
+/**
+ * PIDs of qemu processes running OUR VM, identified by the overlay path in their own command line.
+ *
+ * The matching happens where the command line already lives — in the shell on Windows, in JS on POSIX — rather than by
+ * shipping command lines back to be searched here. That is not a style choice: PowerShell renders pipeline output
+ * through its formatter, which WRAPS at the host buffer width (120 columns when stdout is redirected). A qemu command
+ * line runs to several hundred characters, so the overlay path lands past the wrap point and arrives split across two
+ * lines — and a substring test for it then fails against every line, silently finding no orphan to reap. Returning only
+ * PIDs keeps every output line far too short to wrap.
+ */
+function findOrphanPids(match) {
+  if (!isWin) {
     // -ax: other users' processes are not ours to kill, but they would still hold the port; listing them lets us say so.
     const out = execFileSync("ps", ["-axo", "pid=,command="], { encoding: "utf8", timeout: 5000 });
-    for (const line of out.split("\n")) {
-      if (!line.includes("qemu-system-") || !line.includes(overlay)) continue;
-      const pid = Number(line.trim().split(/\s+/)[0]);
-      if (!pid || pid === process.pid) continue;
+    return out
+      .split("\n")
+      .filter((l) => l.includes("qemu-system-") && l.includes(match))
+      .map((l) => Number(l.trim().split(/\s+/)[0]));
+  }
+  // Windows has no `ps`; the original implementation called it anyway and swallowed the ENOENT, so reaping silently never
+  // happened on the one platform where an orphan also blocks the overlay delete. CIM rather than the shorter `wmic`, which
+  // is deprecated and absent from current Windows 11 images. -NonInteractive/-NoProfile so a user's PowerShell profile
+  // cannot hang or pollute the output, matching the WHP probe in engine.mjs.
+  //
+  // The path travels in the environment, not interpolated into the script: it contains backslashes, and `-like` would
+  // additionally read any [ ] * ? in it as wildcards. .Contains() on an env var needs no escaping at all.
+  const script =
+    "Get-CimInstance Win32_Process -Filter \"Name LIKE 'qemu-system-%'\" | " +
+    "Where-Object { $_.CommandLine -and $_.CommandLine.Contains($env:ZERAIX_REAP_MATCH) } | " +
+    "ForEach-Object { $_.ProcessId }";
+  const out = execFileSync(
+    "powershell.exe",
+    ["-NoProfile", "-NonInteractive", "-Command", script],
+    { encoding: "utf8", timeout: 10000, windowsHide: true, env: { ...process.env, ZERAIX_REAP_MATCH: match } },
+  );
+  return out.split("\n").map((l) => Number(l.trim()));
+}
+
+/** Last few lines of a log file, for quoting into a boot failure. Bounded on both counts — this text ends up in a status
+ *  string that reaches the UI — and total: a missing or unreadable file is itself information worth reporting. */
+function tailFile(file, lines = 12, maxChars = 1200) {
+  try {
+    const text = fs.readFileSync(file, "utf8").trimEnd();
+    if (!text) return "(empty)";
+    return text.split("\n").slice(-lines).join("\n").slice(-maxChars);
+  } catch {
+    return "(not written)";
+  }
+}
+
+function reapOrphanVm(vd) {
+  let killed = false;
+  // Matched on the VM tree, not on this boot's exact overlay file. QMP_PORT / GA_PORT / the ssh forward are fixed, so an
+  // orphan started from ANY version directory holds the same ports and blocks this boot just as effectively — and after
+  // an update it is precisely the old version's overlay that is left running, which an exact-path match cannot see. Still
+  // narrow enough that an unrelated qemu is never touched: nobody else's VM has our app-data path on its command line.
+  const match = process.env.ZERAIX_VMDIR ? vd : vmRoot();
+  try {
+    for (const pid of findOrphanPids(match)) {
+      if (!Number.isInteger(pid) || pid <= 0 || pid === process.pid) continue;
       console.warn(`[sandbox] reaping orphaned VM (pid ${pid}) left by a previous session`);
-      try { process.kill(pid, "SIGTERM"); } catch { /* already gone */ }
+      try {
+        // taskkill /F rather than process.kill: Windows has no SIGTERM, so process.kill(pid, "SIGTERM") on a process we
+        // did not spawn is unreliable, and a half-killed qemu still holds the overlay. /T takes the process tree with it.
+        if (isWin) execFileSync("taskkill", ["/PID", String(pid), "/T", "/F"], { timeout: 5000, windowsHide: true });
+        else process.kill(pid, "SIGTERM");
+        killed = true;
+      } catch { /* already gone, or another user's process we may not touch */ }
     }
-  } catch { /* ps unavailable: fall through and let the spawn report the conflict */ }
+  } catch { /* process listing unavailable: fall through and let the caller report the conflict */ }
+  return killed;
 }

@@ -490,9 +490,9 @@ function registerAiTools() {
   // Stop a background service (by pid); list current background services (initial sync).
   ipcMain.handle("ai-tools:stop-process", (_e, pid) => stopProcess(pid));
   ipcMain.handle("ai-tools:list-processes", () => listProcesses());
-  // Sandbox status: initial sync + mode routing (only everyday mode uses the sandbox) + initialization progress broadcast to all windows.
+  // Sandbox status: initial sync + engine routing (the active session's secure-environment switch) + initialization progress broadcast to all windows.
   ipcMain.handle("sandbox:get-status", () => getSandboxStatus());
-  ipcMain.handle("sandbox:set-mode", (_e, mode) => setSandboxMode(mode));
+  ipcMain.handle("sandbox:set-mode", (_e, preference) => setSandboxMode(preference));
   // VM image directory (for the sandbox startup dialog to display / open the folder): dynamically load qemu.mjs on demand to compute the static path.
   ipcMain.handle("sandbox:vm-dir", async () => {
     try { const m = await import("./tools/sandbox/qemu.mjs"); return m.vmImageDir(); } catch { return null; }

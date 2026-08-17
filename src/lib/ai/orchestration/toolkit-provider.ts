@@ -8,7 +8,7 @@
  * ## Why there is a consent gate at all
  *
  * `callTool` does not ask anyone anything. In the main chat loop, consent is decided *before* the call:
- * `toolNeedsConsent(name, mode)` gates `SENSITIVE_TOOLS` and the user answers a prompt while watching.
+ * `toolNeedsConsent(name)` gates `SENSITIVE_TOOLS` and the user answers a prompt while watching.
  * A sub-agent driven by `sub-agent-runner.ts` bypasses that path entirely, so wrapping `callTool` naively
  * would hand sub-agents a strictly weaker posture than the agent the user is actually looking at: one "yes"
  * at grant time would authorise unlimited `run_command` invocations for the whole TTL, unattended.
@@ -76,7 +76,7 @@ export interface ToolkitProviderOptions {
    * Which tools require per-call consent.
    *
    * A parameter rather than an import: the list lives in `src/app/agent/chat/constants.ts` as
-   * `toolNeedsConsent(name, mode)`, and `lib/` importing from `app/` is the wrong direction. The host passes
+   * `toolNeedsConsent(name)`, and `lib/` importing from `app/` is the wrong direction. The host passes
    * the predicate it already uses for the main loop, so the two paths cannot drift.
    *
    * Defaults to "every tool classified medium or high", which is close to `SENSITIVE_TOOLS` and errs wider.

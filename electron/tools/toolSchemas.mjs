@@ -26,7 +26,7 @@ export const TOOLS = [
        limit: num(`How many lines to read from offset. Defaults to ${READ_DEFAULT_MAX_LINES}.`) },
      ["path"]),
   fn("open_path",
-     "Open a file or folder in the host's DEFAULT APPLICATION for the user to see (view an image, play a video/audio, open a document/PDF, reveal a folder). This runs on the host machine. Use THIS — not run_command — to open/show/play a file: run_command in daily mode runs inside an isolated headless Linux sandbox with no GUI, so it cannot launch the host's apps. Path is resolved inside the working directory.",
+     "Open a file or folder in the host's DEFAULT APPLICATION for the user to see (view an image, play a video/audio, open a document/PDF, reveal a folder). This runs on the host machine. Use THIS — not run_command — to open/show/play a file: run_command may be running inside an isolated headless Linux sandbox with no GUI, so it cannot launch the user's apps. Path is resolved inside the working directory.",
      { path: str("Path to the file or folder to open, relative to the working directory.") }, ["path"]),
   fn("write_file", "Write UTF-8 text to a file, overwriting it.",
      { path: str("File path."), content: str("Full text to write.") }, ["path", "content"]),

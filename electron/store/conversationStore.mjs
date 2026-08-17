@@ -57,7 +57,7 @@ function ensureInit() {
   migrateIfNeeded();
 }
 
-/** Legacy conversations.json -> new layout (regrouped by working directory + mode). */
+/** Legacy conversations.json -> new layout (regrouped by working directory). */
 function migrateIfNeeded() {
   if (existsSync(indexFile())) return;
   const oldFile = path.join(STORE_DIR, "conversations.json");
@@ -67,22 +67,23 @@ function migrateIfNeeded() {
     const oldProjects = Array.isArray(old?.projects) ? old.projects : [];
     const oldConvs = Array.isArray(old?.conversations) ? old.conversations : [];
     const projWorkdir = new Map(oldProjects.map((p) => [p.id, p.workdir ?? ""]));
-    const keyToProject = new Map(); // "<workdir>\0<mode>" -> project
+    // Keyed by working directory alone. It used to be "<workdir>\0<mode>", splitting one folder into a daily project and a
+    // dev project; the two mode tags merged into one, so a folder is one project and this migration must not manufacture the
+    // duplicate rows the sidebar would now show side by side.
+    const keyToProject = new Map(); // "<workdir>" -> project
     const byProject = new Map(); // projectId -> conversations[]
     for (const c of oldConvs) {
-      const mode = c?.mode === "dev" ? "dev" : "daily";
       const wd = (c?.workdir ?? projWorkdir.get(c?.projectId) ?? "") || "";
-      const key = `${wd}\x00${mode}`;
-      let proj = keyToProject.get(key);
+      let proj = keyToProject.get(wd);
       if (!proj) {
         proj = {
           id: randomUUID(),
           name: wd ? path.basename(wd) : "Default Project",
           workdir: wd,
-          mode,
+          mode: "dev",
           createdAt: Date.now(),
         };
-        keyToProject.set(key, proj);
+        keyToProject.set(wd, proj);
         byProject.set(proj.id, []);
       }
       byProject.get(proj.id).push({ ...c, projectId: proj.id });

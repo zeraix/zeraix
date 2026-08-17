@@ -18,7 +18,6 @@ import {
 } from "@/components/ui/dialog";
 import SandboxStartupDialog from "@/components/ai/SandboxStartupDialog";
 import type { SandboxStatus } from "@/lib/ai/sandbox";
-import type { AgentMode } from "@/constants/Agent";
 import { useImeGuard } from "@/lib/ime";
 import { useT } from "@/lib/i18n";
 import { selCls } from "./constants";
@@ -30,7 +29,8 @@ export function ChatDialogs(props: {
   /** Named in the dialog body so the user knows which model needs starting. */
   modelLabel: string | undefined;
   sandboxStatus: SandboxStatus | null;
-  mode: AgentMode;
+  /** The active session's secure-environment switch — gates the sandbox startup dialog's auto-open. */
+  secureEnv: boolean;
   /** Incremented to (re)open the sandbox dialog — clicking the header badge bumps it. */
   sandboxDialogTick: number;
   /** Rename draft: null when the dialog is closed, the pending title while it is open. */
@@ -81,10 +81,10 @@ export function ChatDialogs(props: {
         </DialogContent>
       </Dialog>
 
-      {/* Sandbox startup progress (daily mode): downloading the runtime environment image / downloaded + startup progress; can also be opened by clicking the top badge. */}
+      {/* Sandbox startup progress (sessions in the secure environment): downloading the runtime environment image / downloaded + startup progress; can also be opened from the header indicator. */}
       <SandboxStartupDialog
         status={props.sandboxStatus}
-        mode={props.mode}
+        secureEnv={props.secureEnv}
         openTick={props.sandboxDialogTick}
       />
 

@@ -58,13 +58,9 @@ import { clearAgentWorkdir, putStorage } from "@/lib/ai/agentStorage";
 import { useLocaleStore, useT, LOCALES } from "@/lib/i18n";
 import { useImeGuard } from "@/lib/ime";
 import {
-  AGENT_MODE_KEY,
-  AGENT_MODE_SELECTION_KEY,
-  AGENT_STORAGE_ROOT,
+  AGENT_SELECTION_KEY,
   AGENT_WORKDIR_KEY,
-  MODE_CHANGE_EVENT,
   WORKDIR_SET_EVENT,
-  type AgentMode,
 } from "@/constants/Agent";
 import { PLUGINS_UI_ENABLED } from "@/constants/App";
 import { cn } from "@/lib/utils";
@@ -72,7 +68,6 @@ import { formatWallet, isCnEdition } from "@/lib/edition";
 import { openPathInShell } from "@/lib/electron/shell";
 import { isToolkitAvailable, setWorkingDir } from "@/lib/ai/toolkit";
 import { Spinner } from "@/components/ui/spinner";
-import AgentModeTab from "./AgentModeTab";
 import {
   minimizeWindow,
   toggleMaximizeWindow,
@@ -118,15 +113,16 @@ const THEME_MODES = [
   { key: "system", labelKey: "theme.system" },
 ] as const;
 
-/** The "last selected" project / conversation remembered per mode (used to restore when switching modes, persisted in localStorage across restarts). */
-type ModeSelection = { projectId: string | null; conversationId: string | null };
-const readModeSelections = (): Partial<Record<AgentMode, ModeSelection>> => {
-  const v = getStorage(AGENT_MODE_SELECTION_KEY);
-  return v && typeof v === "object" ? (v as Partial<Record<AgentMode, ModeSelection>>) : {};
+/** The "last selected" project / conversation (persisted in localStorage across restarts). Was a record keyed by the
+ *  daily/dev mode, so switching modes restored that mode's selection; with one mode there is one selection. */
+type Selection = { projectId: string | null; conversationId: string | null };
+const readSelection = (): Partial<Selection> => {
+  const v = getStorage(AGENT_SELECTION_KEY);
+  return v && typeof v === "object" ? (v as Partial<Selection>) : {};
 };
-const saveModeSelection = (mode: AgentMode, sel: ModeSelection) => {
+const saveSelection = (sel: Selection) => {
   // Object value: use setStorage directly (putStorage only accepts strings), consistent with agent.skills / agent.llm.models.
-  setStorage(AGENT_MODE_SELECTION_KEY, { ...readModeSelections(), [mode]: sel });
+  setStorage(AGENT_SELECTION_KEY, sel);
 };
 
 const EASE = [0.4, 0, 0.2, 1] as const;
@@ -319,59 +315,17 @@ export default function AgentSidebar({
     void initStore();
   }, [initStore]);
 
-  // Current mode (daily / dev): synced with the sidebar's AgentModeTab (custom event + cross-tab storage).
-  const [mode, setMode] = useState<AgentMode>("daily");
-  // Mirror of the applied mode: used in event handlers to determine "whether a real switch occurred" (the backfill on mount doesn't count as a switch).
-  const modeRef = useRef<AgentMode>("daily");
-  // "Skip default selection for this mode change": right-click "New chat in project" switches mode but wants to start a new conversation, and shouldn't be interrupted by the default selection.
-  const skipRestoreRef = useRef(false);
   // Mirror of the current route (so event handlers can read the latest value, avoiding stale closures): only auto-navigate to the selected conversation on conversation-related routes.
   const pathnameRef = useRef(pathname);
   pathnameRef.current = pathname;
 
-  useEffect(() => {
-    // Backfill on mount: only sync the mode mirror and state, don't trigger the default selection (to avoid overriding a conversation reached directly via URL).
-    const read = () => {
-      const v = getStorage(AGENT_MODE_KEY);
-      if (v === "daily" || v === "dev") {
-        modeRef.current = v;
-        setMode(v);
-      }
-    };
-    read();
-    const onCustom = (e: Event) => {
-      const v = (e as CustomEvent).detail;
-      if (v !== "daily" && v !== "dev") return;
-      const changed = v !== modeRef.current;
-      modeRef.current = v;
-      setMode(v);
-      const skip = skipRestoreRef.current;
-      skipRestoreRef.current = false;
-      // After switching modes, no longer auto-load that mode's conversation (the last remembered one / the first project's); instead return to the "New chat" home page,
-      // letting the user start fresh in the target mode. skip = right-click "New chat in project", which already navigates home itself, so don't navigate again.
-      if (changed && !skip) {
-        useAgentChatStore.getState().setActiveConversation(null); // clear the conversation highlight
-        const path = pathnameRef.current;
-        if (path === "/agent" || path.startsWith("/agent/chat")) router.push("/agent");
-      }
-    };
-    const onStorage = (e: StorageEvent) => {
-      if (e.key === AGENT_STORAGE_ROOT) read();
-    };
-    window.addEventListener(MODE_CHANGE_EVENT, onCustom);
-    window.addEventListener("storage", onStorage);
-    return () => {
-      window.removeEventListener(MODE_CHANGE_EVENT, onCustom);
-      window.removeEventListener("storage", onStorage);
-    };
-  }, [router]);
-
-  // Project = folder + mode: filter by the current mode; history of different modes is mutually independent.
-  const projectsInMode = projects.filter((p) => p.mode === mode);
+  // Every project, in one list. This used to be filtered to the current mode — a folder was a daily project and a dev
+  // project with separate histories, and switching the sidebar toggle swapped which half was visible. The two mode tags
+  // merged into one, so there is one history per folder and nothing to filter by.
   const currentProjectId =
-    activeProjectId && projectsInMode.some((p) => p.id === activeProjectId)
+    activeProjectId && projects.some((p) => p.id === activeProjectId)
       ? activeProjectId
-      : (projectsInMode[0]?.id ?? null);
+      : (projects[0]?.id ?? null);
   // Lazy-load the current project's conversations.
   useEffect(() => {
     if (currentProjectId) void ensureProjectLoaded(currentProjectId);
@@ -382,11 +336,11 @@ export default function AgentSidebar({
 
   const openConversation = (id: string, projectId: string) => {
     setActiveConversation(id);
-    saveModeSelection(mode, { projectId, conversationId: id }); // remember the current mode's selection, to restore after switching modes
+    saveSelection({ projectId, conversationId: id }); // remember the selection, to restore on the next launch
     router.push(`/agent/chat?c=${id}&p=${projectId}`);
   };
 
-  // The project's actual folder: an explicit project = its workdir; the "default project" (daily mode with no folder selected, projectWorkdir empty,
+  // The project's actual folder: an explicit project = its workdir; the "default project" (no folder selected, projectWorkdir empty,
   // so project.workdir="") has no directory of its own — its real directory lives on each conversation (conv.workdir); take the most recent conversation that has a directory.
   const projectFolder = (p: { id: string; workdir?: string }) =>
     p.workdir ||
@@ -394,14 +348,14 @@ export default function AgentSidebar({
     "";
 
   // Click a project: set it as the current project and set that project's directory as the working directory (persist + broadcast, so the conversation page updates immediately).
-  // When the project directory is empty (e.g. a daily-mode project), clear the selected directory.
+  // When the project directory is empty (the default project), clear the selected directory.
   const selectProject = (p: { id: string; workdir?: string }) => {
     setActiveProject(p.id);
-    // Remember the project selected in the current mode; when switching projects, clear its conversation memory, so on restore it defaults back to the project's first conversation.
-    const prev = readModeSelections()[mode];
-    saveModeSelection(mode, {
+    // Remember the selected project; when switching projects, clear its conversation memory, so on restore it defaults back to the project's first conversation.
+    const prev = readSelection();
+    saveSelection({
       projectId: p.id,
-      conversationId: prev?.projectId === p.id ? prev.conversationId : null,
+      conversationId: prev?.projectId === p.id ? (prev.conversationId ?? null) : null,
     });
     if (p.workdir) {
       putStorage(AGENT_WORKDIR_KEY, p.workdir);
@@ -412,15 +366,15 @@ export default function AgentSidebar({
   };
 
   // Click "Files": before opening, always land the "target project" directory as the main-process working directory, so the file tree shows that project's contents.
-  //  - Target project = the active project (if it belongs to the current mode); otherwise fall back to the first project of the current mode (e.g. right after switching modes).
+  //  - Target project = the active project, otherwise the first project in the list.
   // Why it must be landed explicitly here: the file tree reads the main-process cwd, but clicking a project's selectProject only dispatches
   // WORKDIR_SET_EVENT (which only the conversation page listens to and calls setWorkingDir); on other pages the cwd isn't updated, causing
   // "clicked a project then clicked Files, but the file tree didn't switch over". Here we call setWorkingDir directly and await it before opening,
   // ensuring that when the file tree mounts, the cwd already points at the target project — regardless of the current page.
   const handleOpenFiles = async () => {
     const target =
-      (activeProjectId ? projectsInMode.find((p) => p.id === activeProjectId) : undefined) ??
-      projectsInMode[0] ??
+      (activeProjectId ? projects.find((p) => p.id === activeProjectId) : undefined) ??
+      projects[0] ??
       null;
     if (target) {
       if (target.id !== activeProjectId) setActiveProject(target.id);
@@ -436,10 +390,10 @@ export default function AgentSidebar({
     onOpenFiles?.();
   };
 
-  // Right-click "New chat": take that project's path and mode, and start a new conversation belonging to that project.
-  // Follow the existing "New chat" flow — preset the working directory + mode, clear the current conversation, and return to the home page to start;
-  // when the first message is sent, createConversation groups it into that project by "path + mode".
-  const newChatInProject = (projectWorkdir: string, projectMode: AgentMode) => {
+  // Right-click "New chat": take that project's path and start a new conversation belonging to that project.
+  // Follow the existing "New chat" flow — preset the working directory, clear the current conversation, and return to the home page to start;
+  // when the first message is sent, createConversation groups it into that project by path.
+  const newChatInProject = (projectWorkdir: string) => {
     if (projectWorkdir) {
       putStorage(AGENT_WORKDIR_KEY, projectWorkdir);
       // Broadcast the selected directory: the persistently mounted conversation page uses this to sync its working directory to the project directory. Without this event, even though storage is changed here,
@@ -448,10 +402,6 @@ export default function AgentSidebar({
     } else {
       clearAgentWorkdir(); // internally dispatches WORKDIR_CLEAR_EVENT, so the conversation page clears its directory -> the new conversation is grouped into the default project
     }
-    putStorage(AGENT_MODE_KEY, projectMode);
-    // This mode switch is to open a new conversation within the project, so it shouldn't be interrupted by "default-select the last conversation".
-    skipRestoreRef.current = true;
-    window.dispatchEvent(new CustomEvent(MODE_CHANGE_EVENT, { detail: projectMode }));
     setActiveConversation(null);
     router.push("/agent");
   };
@@ -536,10 +486,9 @@ export default function AgentSidebar({
         </div>
       </div>
 
-      {/* Mode switch: daily mode / dev mode */}
-      <div className="mt-4 px-3">
-        <AgentModeTab />
-      </div>
+      {/* The daily / dev mode switch used to sit here. Both tags merged into "Developer Mode", so there is nothing to
+          choose; what the toggle really controlled — sandbox or host execution — is now a per-session switch in the chat
+          page's header, where it can differ from one conversation to the next. */}
 
       {/* Main nav */}
       <motion.nav
@@ -608,19 +557,19 @@ export default function AgentSidebar({
         })}
       </motion.nav>
 
-      {/* Project group (= folders, filtered by the current mode): click to switch the current project. When there are too many, scroll within this section (max 30vh),
+      {/* Project group (= folders): click to switch the current project. When there are too many, scroll within this section (max 30vh),
           taking only the height needed, without crowding out the conversation list space */}
       <CollapsibleSection title={t("section.projects")} className="mt-7 max-h-[30vh] px-3" scroll>
-        {projectsInMode.length === 0 ? (
+        {projects.length === 0 ? (
           <p className="px-2 py-1 text-xs text-muted-foreground">{t("sidebar.autoCreated")}</p>
         ) : (
-          projectsInMode.map((p) => (
+          projects.map((p) => (
             <SidebarLeaf
               key={p.id}
               label={p.name}
               active={p.id === currentProjectId}
               onClick={() => selectProject(p)}
-              onNewChat={() => newChatInProject(p.workdir, p.mode)}
+              onNewChat={() => newChatInProject(p.workdir)}
               onOpenFolder={(() => {
                 const dir = projectFolder(p);
                 return dir ? () => void openPathInShell(dir) : undefined;
@@ -648,7 +597,7 @@ export default function AgentSidebar({
               onClick={() => openConversation(c.id, c.projectId)}
               onNewChat={() => {
                 const proj = projects.find((pp) => pp.id === c.projectId);
-                newChatInProject(proj?.workdir ?? "", proj?.mode ?? c.mode);
+                newChatInProject(proj?.workdir ?? "");
               }}
               onOpenFolder={(() => {
                 // A conversation prefers its own actual directory (under the default project each conversation has its own real directory); if missing, fall back to the project directory.

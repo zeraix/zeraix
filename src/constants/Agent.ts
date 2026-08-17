@@ -1,23 +1,31 @@
 /**
- * Constants for the Agent (/agent module): modes, event names, and the localStorage "categorized storage" dot paths.
+ * Constants for the Agent (/agent module): the mode tag, event names, and the localStorage "categorized storage" dot paths.
  *
  * Storage strategy: all of this module's localStorage data is consolidated under a top-level `agent` object,
  * read/written by "dot path" via @zzcpt/zztool's getStorage / setStorage / removeStorage,
  * avoiding a scattering of flat keys (such as llm_provider / llm_key_xxx / agent_mode …).
  *
  *   agent: {
- *     mode: "daily" | "dev",
  *     skills: InstalledSkill[],
  *     llm: { provider, customEndpoint, customModel, keys: {<id>:key}, models: {<id>:model} },
  *   }
  */
 
-/** Conversation mode: daily mode / dev mode. */
-export type AgentMode = "daily" | "dev";
+/**
+ * Conversation mode — one value, because daily mode was merged into developer mode.
+ *
+ * The tag survives on stored Project / Conversation records so older files still parse (theirs may say
+ * "daily"), but nothing branches on it any more: every session composes the developer prompt and the
+ * developer tool set. What used to be the mode's real consequence — whether commands run in the sandbox
+ * VM or on the host — is now the per-session secure-environment switch (Conversation.secureEnv), which is
+ * chosen per conversation rather than inherited from a sidebar-global toggle.
+ */
+export type AgentMode = "dev";
 
-/** Custom event name for broadcasting a mode change within the same tab (storage events don't fire in the originating tab, so this notifies the chat page). */
-export const MODE_CHANGE_EVENT = "agent-mode-change";
-/** Custom event name for broadcasting "the selected working directory has been cleared" within the same tab (fired on mode switch / new conversation). */
+/** The only mode. Named so call sites read as a deliberate constant rather than a magic string. */
+export const AGENT_MODE: AgentMode = "dev";
+
+/** Custom event name for broadcasting "the selected working directory has been cleared" within the same tab (fired when a new conversation starts). */
 export const WORKDIR_CLEAR_EVENT = "agent-workdir-clear";
 /** Custom event name for broadcasting "the working directory has been set" within the same tab (clicking a project sets its directory as the working directory; detail is the path). */
 export const WORKDIR_SET_EVENT = "agent-workdir-set";
@@ -25,10 +33,8 @@ export const WORKDIR_SET_EVENT = "agent-workdir-set";
 /** Top-level storage key: all of this module's data hangs under it (this value is the e.key of cross-tab storage events). */
 export const AGENT_STORAGE_ROOT = "agent";
 
-/** Dot path: current conversation mode (daily / dev). */
-export const AGENT_MODE_KEY = "agent.mode";
-/** Dot path: the most recently selected project and conversation per mode (daily / dev), used to restore the previous selection when switching modes. */
-export const AGENT_MODE_SELECTION_KEY = "agent.modeSelection";
+/** Dot path: the most recently selected project and conversation, restored on the next launch. */
+export const AGENT_SELECTION_KEY = "agent.selection";
 /** Dot path: list of installed skills (shared by /agent/skills download management and /agent/chat enablement). */
 export const AGENT_SKILLS_KEY = "agent.skills";
 /** Dot path: the working directory the user explicitly selected (chosen on the /agent home page, then carried over by the /agent/chat page). */

@@ -1,13 +1,13 @@
 "use client";
 
 /**
- * The chat page's top bar: conversation title (with the token-usage / rename / clear dropdown), the sandbox
- * status badge, the current-model chip, and the skills button.
+ * The chat page's top bar: conversation title (with the token-usage / rename / clear dropdown), the secure-environment
+ * switch, the current-model chip, and the skills button.
  *
  * Purely presentational — every action is a callback and every value a prop, so nothing here reaches into the
  * page's state. It reads translations and the router itself, because those are ambient rather than page state.
  */
-import { ChevronDown, Eraser, Pencil } from "lucide-react";
+import { ChevronDown, Eraser, Monitor, Pencil, ShieldCheck } from "lucide-react";
 import { useRouter } from "next/navigation";
 import {
   DropdownMenu,
@@ -41,6 +41,9 @@ export function ChatHeader(props: {
   toolsReady: boolean;
   sandboxStatus: SandboxStatus | null;
   onSandboxBadgeClick: () => void;
+  /** This session's secure-environment switch: true = run commands in the sandbox VM, false = on the host. */
+  secureEnv: boolean;
+  onSecureEnvChange: (next: boolean) => void;
   /** The runtime environment has a newer image available. */
   vmUpdatable: boolean;
   activeModel: ResolvedModel | null;
@@ -54,13 +57,77 @@ export function ChatHeader(props: {
 }) {
   const t = useT();
   const router = useRouter();
-  const { sandboxStatus: sbx, activeModel, sessionUsage } = props;
+  const { sandboxStatus: sbx, activeModel, sessionUsage, secureEnv } = props;
   const usageArgs = {
     approx: sessionUsage.estimated ? "≈" : "",
     total: sessionUsage.total,
     prompt: sessionUsage.prompt,
     completion: sessionUsage.completion,
   };
+
+  // Where commands ACTUALLY go right now, which is not the same question as what the switch asks for: the VM may still be
+  // downloading, still booting, or have crashed back to native, and in every one of those the honest answer is "the host".
+  // The label reports this; the switch reports the request. Showing the request in both places is what would let the header
+  // claim "Sandbox Execution" while a command ran on the user's machine.
+  const inSandbox = isSandboxEngine(sbx?.active);
+  const phase = sbx?.phase ?? "idle";
+  const sandboxUnavailable = phase === "unsupported" || phase === "disabled";
+  // Asked for the sandbox but not in it yet — the transitional state the label has to explain rather than silently deny.
+  const pending = secureEnv && !inSandbox && !sandboxUnavailable;
+  // Every transitional label is gated on `secureEnv`, not just the error one. This half of the pill answers exactly one
+  // question — where do THIS session's commands run — and the VM downloads and boots in the background whether or not
+  // the session asked for it. So "Sandbox image 42%" on a host-execution session would answer a question nobody asked
+  // with a state that misdescribes where its commands are going. Such a session reads "Host Execution" throughout,
+  // because that is the truth for it the whole time.
+  const envLabel = inSandbox
+    ? t("sbx.env.sandbox")
+    : !secureEnv
+      ? t("sbx.env.host")
+      : phase === "pulling-image"
+        ? t("sbx.badge.pulling", { pct: sbx?.pct ?? 0 })
+        : phase === "installing-runtime" || phase === "starting"
+          ? t("sbx.badge.starting")
+          : phase === "error"
+            ? t("sbx.badge.error")
+            : t("sbx.env.host");
+  /**
+   * The pill's colour, as a WIPE rather than a cross-fade.
+   *
+   * Both directions are anchored at the LEFT edge: turning safe mode on grows the fill rightward, turning it off lets its
+   * right edge retreat back leftward until it is gone. One anchor for both, so this is a plain `scale-x` toggle on a
+   * fixed `origin-left` — the browser animates only `transform`, which it does on the compositor. The layer is separate
+   * from the container so the text and icon are not scaled along with it.
+   *
+   * Colour and visibility are deliberately SEPARATE values. Deriving the colour as "" for the inactive state broke the
+   * way out: the class was dropped in the same frame the collapse began, so the layer turned transparent instantly and
+   * there was nothing left to watch retract — it simply disappeared. The colour therefore always resolves to something
+   * (emerald is the resting choice, since safe mode is the state that has a fill) and only `envFilled` decides whether it
+   * is scaled in. At rest with the switch off the layer is scale-x-0, so carrying a colour costs nothing visually.
+   */
+  const envFill = pending
+    ? "bg-sky-500/15"
+    : phase === "error" && secureEnv
+      ? "bg-amber-500/15"
+      : "bg-emerald-500/15";
+  // Follows the switch, not the engine: `pending` is derived from `secureEnv` (local state), so this flips on the click
+  // rather than waiting for the main process to confirm the engine change — the wipe starts under the user's finger.
+  const envFilled = inSandbox || pending || (phase === "error" && secureEnv);
+  const envText = inSandbox
+    ? "text-emerald-600"
+    : phase === "error" && secureEnv
+      ? "text-amber-600 dark:text-amber-400"
+      : pending
+        ? "text-sky-600"
+        : "text-ink-muted";
+  const envTitle = inSandbox
+    ? t("sbx.env.onTip")
+    : sandboxUnavailable
+      ? sbx?.reason || t("sbx.env.unsupported")
+      : phase === "error"
+        ? t("sbx.title.error", { reason: sbx?.reason ?? "" })
+        : pending
+          ? t("sbx.env.pendingTip")
+          : t("sbx.env.offTip");
 
   return (
     <div className="border-b border-line bg-surface/90 backdrop-blur">
@@ -96,49 +163,72 @@ export function ChatHeader(props: {
               </DropdownMenuItem>
             </DropdownMenuContent>
           </DropdownMenu>
-          {/* Sandbox status badge: where commands actually execute (sandbox VM / host machine) + initialization progress and failure reason. */}
-          {props.toolsReady && sbx && sbx.phase !== "idle" && (
+          {/* Secure environment: the switch that decides where THIS session's commands run, plus an indicator of where they
+              actually run right now. Two controls in one pill because they answer two different questions and users conflate
+              them — the left half states the live engine (and opens the runtime dialog for progress / failure / update), the
+              right half is the request. Bound to the conversation, not the project: see Conversation.secureEnv. */}
+          {props.toolsReady && (
+            // Never hidden at narrow widths, unlike the status badge it replaces and the model chip beside it: this is the
+            // only place the environment can be changed, and a control with no other entry point cannot responsively
+            // disappear. The LABEL collapses instead — the icon and the switch still say which environment is live.
             <span
-              onClick={props.onSandboxBadgeClick}
-              role="button"
-              className={`hidden cursor-pointer rounded-full px-2 py-0.5 text-[11px] font-medium transition hover:brightness-95 sm:inline ${
-                isSandboxEngine(sbx.active)
-                  ? "bg-emerald-500/15 text-emerald-600"
-                  : sbx.phase === "error"
-                    ? "bg-amber-500/15 text-amber-600 dark:text-amber-400"
-                    : sbx.phase === "installing-runtime" ||
-                        sbx.phase === "pulling-image" ||
-                        sbx.phase === "starting"
-                      ? "bg-sky-500/15 text-sky-600"
-                      : "bg-surface-muted text-ink-muted"
-              }`}
-              title={
-                isSandboxEngine(sbx.active)
-                  ? t("sbx.title.sandbox", { engine: sbx.active })
-                  : sbx.phase === "ready"
-                    ? t("sbx.title.ready")
-                    : sbx.phase === "error"
-                      ? t("sbx.title.error", { reason: sbx.reason })
-                      : sbx.phase === "pulling-image"
-                        ? t("sbx.title.pulling")
-                        : sbx.phase === "installing-runtime" || sbx.phase === "starting"
-                          ? t("sbx.title.starting")
-                          : sbx.reason || t("sbx.title.unsupported")
-              }
+              className={`relative inline-flex items-center gap-1.5 overflow-hidden rounded-full bg-surface-muted py-0.5 pl-2 pr-1 text-[11px] font-medium transition-colors duration-300 ${envText}`}
             >
-              {isSandboxEngine(sbx.active)
-                ? t("sbx.badge.sandbox")
-                : sbx.phase === "pulling-image"
-                  ? t("sbx.badge.pulling", { pct: sbx.pct ?? 0 })
-                  : sbx.phase === "installing-runtime" || sbx.phase === "starting"
-                    ? t("sbx.badge.starting")
-                    : sbx.phase === "error"
-                      ? t("sbx.badge.error")
-                      : t("sbx.badge.host")}
-              {/* The runtime environment has an updatable version: the badge appends a hint (click the badge to open the dialog and update). */}
-              {props.vmUpdatable && (
-                <span className="ml-1 text-amber-600 dark:text-amber-400">{t("sbx.badge.updatable")}</span>
-              )}
+              {/* The wiping fill. Sits under the content (which is why the content is z-10) and is inert to the pointer,
+                  so it changes nothing about hit-testing on either button. */}
+              <span
+                aria-hidden
+                className={`pointer-events-none absolute inset-0 origin-left transition-transform duration-300 ease-in ${envFill} ${
+                  envFilled ? "scale-x-100" : "scale-x-0"
+                }`}
+              />
+              <button
+                type="button"
+                onClick={props.onSandboxBadgeClick}
+                className="relative z-10 flex items-center gap-1 rounded-full transition hover:brightness-95"
+                title={envTitle}
+              >
+                {inSandbox ? <ShieldCheck className="size-3" /> : <Monitor className="size-3" />}
+                <span className="hidden sm:inline">{envLabel}</span>
+                {/* The runtime has a newer image: appended here rather than beside the switch, because updating is
+                    something you do to the runtime, and this half is what opens the runtime dialog. */}
+                {props.vmUpdatable && (
+                  <span className="text-amber-600 dark:text-amber-400">{t("sbx.badge.updatable")}</span>
+                )}
+              </button>
+              {/* The switch proper. Disabled when this machine cannot run the VM at all — offering a control that silently
+                  does nothing is worse than showing why it is unavailable. */}
+              <button
+                type="button"
+                role="switch"
+                aria-checked={secureEnv}
+                aria-label={t("sbx.env.label")}
+                disabled={sandboxUnavailable}
+                onClick={() => props.onSecureEnvChange(!secureEnv)}
+                title={
+                  sandboxUnavailable
+                    ? sbx?.reason || t("sbx.env.unsupported")
+                    : `${secureEnv ? t("sbx.env.onTip") : t("sbx.env.offTip")}\n${t("sbx.env.sessionNote")}`
+                }
+                className={`relative z-10 h-3.5 w-7 shrink-0 overflow-hidden rounded-full bg-line-strong ${
+                  sandboxUnavailable ? "cursor-not-allowed opacity-50" : ""
+                }`}
+              >
+                {/* The track fills by the same wipe, anchored the same way and over the same duration as the pill, so one
+                    state change reads as one gesture rather than two effects that happen to coincide. The knob's slide is
+                    matched to it too — it used to run at the default duration and arrived ahead of the colour. */}
+                <span
+                  aria-hidden
+                  className={`absolute inset-0 origin-left bg-emerald-500 transition-transform duration-300 ease-in ${
+                    secureEnv ? "scale-x-100" : "scale-x-0"
+                  }`}
+                />
+                <span
+                  className={`absolute top-0.5 z-10 size-2.5 rounded-full bg-white shadow-sm transition-[left] duration-300 ease-in ${
+                    secureEnv ? "left-[15px]" : "left-0.5"
+                  }`}
+                />
+              </button>
             </span>
           )}
           {/* The current model (read-only; chosen in settings / home page). Green dot = available (cloud has a key configured / the local service is running);

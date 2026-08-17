@@ -1,9 +1,15 @@
 /**
- * Renderer-layer bridge for the sandbox (QEMU VM command-execution engine): status queries / mode sync / init-progress subscription.
+ * Renderer-layer bridge for the sandbox (QEMU VM command-execution engine): status queries / engine sync / init-progress subscription.
  * Goes through window.sandbox (exposed by preload, Electron only); on non-Electron everything degrades to no-ops.
  *
- * The main process starts and validates the VM in the background without ever blocking command execution; when phase=ready and the mode is "daily",
- * commands automatically switch to running inside the sandbox, while dev mode always runs directly on the host.
+ * The main process starts and validates the VM in the background without ever blocking command execution. Which engine actually
+ * runs a command is the SESSION's choice: each conversation carries a secure-environment switch (Conversation.secureEnv), and the
+ * chat page mirrors the active session's setting down here. With it on and phase=ready, commands run inside the VM; with it off —
+ * or before the VM is ready — they run directly on the host.
+ *
+ * The switch used to be the daily/dev mode, a sidebar-global toggle. Binding it to the session instead is deliberate: a project
+ * spans many conversations, and instructions given while one environment was live ("the binary is at /workspace/bin", "use the
+ * host's node") are wrong for the other, so a project-level setting propagated stale context into every later chat.
  */
 
 export interface SandboxStatus {
@@ -15,14 +21,15 @@ export interface SandboxStatus {
   image: string;
   /** Progress percentage (0-99) during the pulling-image phase, null in other phases. */
   pct: number | null;
-  /** Current mode (daily / dev). */
-  mode: string;
+  /** Whether the active session asked for the secure environment ("sandbox") or host execution ("host"). */
+  preference: string;
   /** The execution engine id currently in effect (native / qemu). */
   active: string;
   /**
    * Whether the VM is up at all, independent of whether it is the active engine. Differs from
-   * `active === "qemu"` only in dev mode, which runs commands on the host but can still reach the guest
-   * per-command via `run_command({ sandbox: true })` — which is what `sandbox_tools` tells the model about.
+   * `active === "qemu"` only when the session chose host execution: commands run on the host but can still
+   * reach the guest per-command via `run_command({ sandbox: true })` — which is what `sandbox_tools` tells
+   * the model about.
    */
   available?: boolean;
   /** Host platform (process.platform: win32 / darwin / linux), used to describe the native environment in hint text. */
@@ -87,9 +94,21 @@ export interface SandboxVmInfo {
   updatable: boolean;
 }
 
+/**
+ * What a brand-new session falls back to when nothing can be inherited.
+ *
+ * Only reached for the FIRST session in a project — every later one inherits the project's most recent session (see
+ * agentChatStore.secureEnvDefaultFor), so this is the value a user meets once and then steers with the toggle.
+ *
+ * False (host execution) because the one surviving mode is the developer one: its working directory is one of the user's real
+ * projects, and that project's toolchain — git, node_modules, installed SDKs, native builds — is the host's. Booting a first
+ * session into the VM would hand the model a /workspace where none of that resolves.
+ */
+export const DEFAULT_SECURE_ENV = false;
+
 interface SandboxBridge {
   getStatus?(): Promise<SandboxStatus>;
-  setMode?(mode: "daily" | "dev"): Promise<SandboxStatus>;
+  setMode?(preference: "sandbox" | "host"): Promise<SandboxStatus>;
   onStatus?(cb: (st: SandboxStatus) => void): () => void;
   vmDir?(): Promise<string | null>;
   vmInfo?(): Promise<SandboxVmInfo | null>;
@@ -111,10 +130,16 @@ export async function getSandboxStatus(): Promise<SandboxStatus | null> {
   }
 }
 
-/** Sync the current mode: the sandbox only serves "daily" mode, dev mode always runs directly on the host. */
-export async function setSandboxMode(mode: "daily" | "dev"): Promise<void> {
+/**
+ * Mirror the active session's secure-environment switch to the main process.
+ *
+ * `secure` true makes the VM the default engine once it is ready; false runs every command directly on the host. Called on
+ * every session switch as well as on every toggle — the setting belongs to the conversation, so opening an older one has to
+ * re-point the engine at whatever THAT conversation was using.
+ */
+export async function setSecureEnv(secure: boolean): Promise<void> {
   try {
-    await bridge()?.setMode?.(mode);
+    await bridge()?.setMode?.(secure ? "sandbox" : "host");
   } catch {
     /* ignore */
   }

@@ -1,18 +1,21 @@
 #!/usr/bin/env node
 /**
- * Compute the seed prefix for every mode and record the hashes in versions.json.
+ * Compute the seed prefix and record its hash in versions.json.
  *
  * SEED_PREFIX must match the bytes the app sends, or every seed download 404s and users silently get a cold prefill with no error
  * anywhere. Keeping that right by hand is a checklist item nobody remembers on the one release where the prompt changed.
  *
- * Needs no app, no Electron, no model — the prefix is a pure function of mode (src/lib/ai/promptPrefix.ts), and the native tool
+ * Needs no app, no Electron, no model — the prefix is static text (src/lib/ai/promptPrefix.ts), and the native tool
  * schemas are static data (electron/tools/toolSchemas.mjs). Run under tsx so the TypeScript modules load directly, which is what
  * keeps this on the SAME code path send() uses; a script with its own copy of the composition would drift and publish a seed that
  * never matches.
  *
+ * There used to be one prefix per daily/dev mode. The tags merged into one, so there is a single prefix — still filed under the
+ * key "dev" so the already-published asset names (seed-<model>-dev-<hash>.tar.gz) and the markers on users' disks stay valid.
+ *
  *   npm run seed:capture          write versions.json
  *   npm run seed:check            exit 1 if stale, write nothing (pre-release gate)
- *   --out <dir>                   also dump prefix-<mode>.json for gen-seed
+ *   --out <dir>                   also dump prefix-dev.json for gen-seed
  */
 import fs from "node:fs";
 import crypto from "node:crypto";
@@ -27,23 +30,17 @@ const check = process.argv.includes("--check");
 const root = fileURLToPath(new URL("../", import.meta.url));
 const versionsPath = path.join(root, "electron", "versions.json");
 
-const MODES = ["daily", "dev"];
+// The name the single prefix is filed under, in versions.json and in every published asset path.
+const MODES = ["dev"];
 const native = TOOLS.map((t) => ({ type: "function", function: t })); // the shape listTools("openai") returns
 
 const prefixes = {};
 for (const mode of MODES) {
-  const system = buildSystemPrompt(mode);
-  const tools = buildToolSet(mode, native);
+  const system = buildSystemPrompt();
+  const tools = buildToolSet(native);
   const hash = crypto.createHash("sha256").update(JSON.stringify({ system, tools })).digest("hex").slice(0, 16);
   prefixes[mode] = { system, tools, hash };
   console.error(`capture-prefix: ${mode.padEnd(5)} ${system.length} chars, ${tools.length} tools -> ${hash}`);
-}
-
-// Both modes must differ. They select a different system prompt and a different open_browser description, so identical hashes mean
-// the mode argument is not reaching the composition and one mode's seed would be published for both.
-if (prefixes.daily.hash === prefixes.dev.hash) {
-  console.error("capture-prefix: daily and dev produced the SAME hash — mode is not affecting the prefix; refusing to write");
-  process.exit(1);
 }
 
 const versions = JSON.parse(fs.readFileSync(versionsPath, "utf8"));

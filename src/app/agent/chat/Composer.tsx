@@ -302,6 +302,7 @@ export function Composer({
                     pill bleeding evenly past the text on both sides. That bleed is the only way this layer
                     can add breathing room at all — the visible text belongs to the textarea underneath and
                     its spacing is not ours to change. */}
+                
                 <span className="-mx-1 rounded-md bg-primary/[0.12] px-1 py-[3px] ring-1 ring-inset ring-primary/20">
                   {input.slice(0, tokenLen)}
                 </span>

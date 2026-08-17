@@ -23,7 +23,6 @@ import {
   AGENT_MAX_SAME_TOOL_CALLS_KEY,
   AGENT_MAX_SUBAGENT_ROUNDS_KEY,
   AGENT_MAX_TOOL_ROUNDS_KEY,
-  AGENT_MODE_KEY,
 } from "@/constants/Agent";
 
 interface AppConfigBridge {
@@ -85,7 +84,8 @@ const STATIC: Array<[dot: string, section: string, key: string]> = [
   [AGENT_MAX_SUBAGENT_ROUNDS_KEY, "limits", "max_subagent_rounds"],
   [AGENT_MAX_GOAL_ROUNDS_KEY, "limits", "max_goal_rounds"],
   [AGENT_GOAL_EVALUATOR_MODEL_KEY, "goal", "evaluator_model"],
-  [AGENT_MODE_KEY, "ui", "mode"],
+  // `ui.mode` is deliberately absent: daily / dev merged into one mode, so there is nothing to persist.
+  // A stale `ui.mode` left in an existing config file is simply never read.
   [AGENT_LOCALE_KEY, "ui", "locale"],
 ];
 

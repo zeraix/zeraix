@@ -1,3 +1,4 @@
+import { deepRenameKey } from '@zzcpt/zztool';
 /**
  * The slash-command registry, and the rule for when the composer should offer it.
  *
@@ -66,7 +67,7 @@ export const SLASH_COMMANDS: SlashCommand[] = [
     insert: "/clear",
     name: "/clear",
     descriptionKey: "slash.clear",
-  },
+  }
 ];
 
 /**
@@ -102,7 +103,7 @@ const wordOf = (c: SlashCommand): string => c.name.slice(1).split(/\s+/)[0].toLo
 export function commandTokenLength(input: string): number {
   if (!input.startsWith("/")) return 0;
   // The word runs to the first whitespace, or to the end when nothing has been typed after it yet.
-  const token = input.split(/\s/, 1)[0];
+  const token = input.split(/\s/, 1)[0] ?? "";
   const word = token.slice(1).toLowerCase();
   return SLASH_COMMANDS.some((c) => wordOf(c) === word) ? token.length : 0;
 }

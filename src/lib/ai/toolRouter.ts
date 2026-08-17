@@ -21,83 +21,70 @@
 export const DISPATCHER_NAME = "call_tool";
 
 /**
- * Tools reached through the dispatcher rather than declared, by mode.
+ * Tools reached through the dispatcher rather than declared.
  *
- * The two lists are currently IDENTICAL, and are still written out separately on purpose. Routing changes how a tool is CALLED,
- * not whether it is available or how the prompt talks about it, so the modes' genuine disagreement about what is central —
- * `daily.mode.md` builds its whole web-research workflow on `openBrowser` / `browser`, `development.mode.md` declares them
- * off-limits — turned out not to affect which tools can be routed. But each mode's set travels with its own markdown catalog, and
- * pointing both names at one Set would mean an edit made for one mode silently changing the other. Duplication is the cheaper
- * mistake here: adding a tool in two places is a chore, changing a mode you did not mean to touch is a bug.
+ * This was a Record keyed by the daily/dev mode, holding two sets that had ended up IDENTICAL — routing changes how a tool is
+ * CALLED, not whether it is available or how the prompt talks about it, so even the modes' genuine disagreement about what was
+ * central (daily built its web-research workflow on `openBrowser` / `browser`; development declares them off-limits) never
+ * reached this set. The two tags merged into one, so there is now one set and the duplication is gone with them.
  *
- * What is left DECLARED, and why — the rule that survived several rounds of widening this set:
+ * What is left DECLARED, and why:
  *  1. NOT "anything contextCompress.ts keys on". That was the original rule and it dissolved: `indexCalls` and `describeCall`
  *     resolve the wrapper on the read side, and `releaseCallArguments` rewrites the elided payload back INSIDE the envelope on the
  *     write side, so even `read_file` and `edit_file` — 76% of all tool calls — are routed with the compression layer intact.
- *  2. A tool stays declared when its own DESCRIPTION is what prompts its use. `set_task_state`, `load_skill` and `web_search`
- *     argue for themselves in their descriptions, so routing them would delete the argument along with the schema; `run_subagent`
- *     carries the explore/plan/coder/reviewer roster the model needs in order to pick one. The memory family looks like this class
- *     but is not — the [Long-term memory] block and How-to-work #8 do that work and both survive — so it is routed.
- *  3. `run_command`, `ask_user` and `update_todos` stay declared as the unbounded / interactive core.
+ *  2. `run_command`, `ask_user`, `update_todos` and `update_plan` stay declared as the unbounded / interactive core — the
+ *     things the model reaches for constantly, or that drive UI the user is watching.
+ *  3. `web_search`, `sandbox_tools` and `load_skill` stay declared because their descriptions are what prompt their use at
+ *     all: each argues for being called in situations where the model's default is not to call anything.
+ *
+ * The delegation family (`run_subagent`, `spawn_subagents`, `join_subagents`, `spawn_sub_agent`), the goal/brief pair's
+ * `set_goal` and `set_task_state`, and `mcp_tools` used to be declared under an earlier version of rule 3 — their
+ * descriptions carry real argument (the explore/plan/coder/reviewer roster, that an evaluator and not the model judges
+ * completion, never-poll). They are routed now by an explicit product decision, and that argument does NOT simply vanish
+ * with the schema: it has been moved into the tool catalog in `development.mode.md`, which is where a routed tool's case
+ * has to be made. Routing them without moving it would have deleted the reasoning along with the JSON — the failure mode
+ * this comment previously existed to prevent. If you route anything else here, move its argument the same way.
  */
-export const ROUTED_TOOLS: Record<"daily" | "dev", ReadonlySet<string>> = {
-  dev: new Set([
-    "browser",
-    "openBrowser",
-    "image_generation",
-    "open_path",
-    "stop_service",
-    "refine_question",
-    "file_info",
-    "copy_file",
-    "move_file",
-    "delete_file",
-    "create_directory",
-    "save_memory",
-    "delete_memory",
-    "search_memory",
-    "remember_project",
-    "read_file",
-    "edit_file",
-    "write_file",
-    "append_file",
-    "list_directory",
-    "search_files",
-    "search_in_files",
-    "check_project",
-    "init_command",
-    "mcp_discover",
-    "mcp_connect",
-  ]),
-  daily: new Set([
-    "browser",
-    "openBrowser",
-    "image_generation",
-    "open_path",
-    "stop_service",
-    "refine_question",
-    "file_info",
-    "copy_file",
-    "move_file",
-    "delete_file",
-    "create_directory",
-    "save_memory",
-    "delete_memory",
-    "search_memory",
-    "remember_project",
-    "read_file",
-    "edit_file",
-    "write_file",
-    "append_file",
-    "list_directory",
-    "search_files",
-    "search_in_files",
-    "check_project",
-    "init_command",
-    "mcp_discover",
-    "mcp_connect",
-  ]),
-};
+export const ROUTED_TOOLS: ReadonlySet<string> = new Set([
+  "browser",
+  "openBrowser",
+  "image_generation",
+  "open_path",
+  "stop_service",
+  "refine_question",
+  "file_info",
+  "copy_file",
+  "move_file",
+  "delete_file",
+  "create_directory",
+  "save_memory",
+  "delete_memory",
+  "search_memory",
+  "remember_project",
+  "read_file",
+  "edit_file",
+  "write_file",
+  "append_file",
+  "list_directory",
+  "search_files",
+  "search_in_files",
+  "check_project",
+  "init_command",
+  "mcp_discover",
+  "mcp_connect",
+  // MCP discovery. Its own comment below explains why it was the last MCP tool to stay declared; the catalog's
+  // "MCP servers" section now carries that job.
+  "mcp_tools",
+  // Delegation. Four overlapping entries were the single largest block of schema in the prefix.
+  "run_subagent",
+  "spawn_subagents",
+  "join_subagents",
+  "spawn_sub_agent",
+  // Goal + mission brief. `update_plan` deliberately stays declared: it drives the checklist the user watches, and it is
+  // called far more often than the goal is set.
+  "set_goal",
+  "set_task_state",
+]);
 
 /**
  * Tools exposed by connected MCP servers, which are always routed and never declared.
@@ -117,8 +104,8 @@ export const ROUTED_TOOLS: Record<"daily" | "dev", ReadonlySet<string>> = {
 export const MCP_TOOL_PREFIX = "mcp__";
 export const isMcpToolName = (name: string): boolean => name.startsWith(MCP_TOOL_PREFIX);
 
-export const isRouted = (mode: "daily" | "dev", name: string): boolean =>
-  ROUTED_TOOLS[mode].has(name) || isMcpToolName(name);
+export const isRouted = (name: string): boolean =>
+  ROUTED_TOOLS.has(name) || isMcpToolName(name);
 
 /**
  * Resolve what the model emitted into the call to actually run.

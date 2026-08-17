@@ -2,7 +2,6 @@
 
 // The system prompt body is now maintained in Markdown, imported as a string via the Turbopack raw-loader (see systemPromptFor below).
 import baseSystemMd from "./system/base.system.md";
-import dailyModeMd from "./system/daily.mode.md";
 import developmentModeMd from "./system/development.mode.md";
 
 export const MAX_TOOL_ROUNDS = 100; // Prevent infinite tool-call loops
@@ -163,19 +162,23 @@ export const SENSITIVE_TOOLS = new Set([
 ]);
 
 /**
- * Consent policy: whether a tool call must be confirmed by the user before it runs, for the given mode. Centralized
- * here (rather than inline in the run loop) so future rules have one obvious place to grow:
- *   - per-tool always-confirm entries (e.g. keep delete_file / move_file gated even in daily mode),
- *   - a user setting to opt back into prompting,
- *   - additional modes.
- * Current policy:
- *   - dev mode: confirm every sensitive tool (it operates on the user's real project files on the host).
- *   - daily mode: run sensitive tools directly (run_command is sandboxed; the default workdir is app-managed), so
- *     everyday file/command work stays friction-free.
- * A tool not in SENSITIVE_TOOLS never needs consent in any mode.
+ * Consent policy: whether a tool call must be confirmed by the user before it runs. Centralized here (rather than inline in
+ * the run loop) so future rules have one obvious place to grow:
+ *   - per-tool exemptions,
+ *   - a user setting to opt out of prompting.
+ *
+ * Current policy: confirm every sensitive tool, because it operates on the user's real project files.
+ *
+ * This used to depend on the mode — dev confirmed, daily did not, on the grounds that daily's run_command was sandboxed and
+ * its working directory app-managed. Neither half of that survives the merge. The surviving mode's directory is a real
+ * project, and the secure-environment switch does NOT make it safe to skip: the sandbox mounts the session's working
+ * directory at /workspace, so a delete inside the VM deletes the user's actual file. Sandboxing bounds what a command can
+ * reach, not what it can destroy within the folder it was pointed at.
+ *
+ * A tool not in SENSITIVE_TOOLS never needs consent.
  */
 /**
- * Gated in every mode, daily included.
+ * Gated even if it were ever exempted from the rule above.
  *
  * `mcp_connect` is here because it is the one tool that turns a chat message into a third-party
  * process running as the user: it writes an MCP server into the app's configuration, marks it
@@ -188,10 +191,8 @@ export const SENSITIVE_TOOLS = new Set([
  */
 export const ALWAYS_CONFIRM_TOOLS = new Set<string>(["mcp_connect"]);
 
-export function toolNeedsConsent(name: string, mode: "daily" | "dev"): boolean {
-  if (ALWAYS_CONFIRM_TOOLS.has(name)) return true;
-  if (!SENSITIVE_TOOLS.has(name)) return false;
-  return mode === "dev";
+export function toolNeedsConsent(name: string): boolean {
+  return ALWAYS_CONFIRM_TOOLS.has(name) || SENSITIVE_TOOLS.has(name);
 }
 
 /** Human-friendly tool labels, used in the progress status text. */
@@ -251,28 +252,36 @@ export const CONSENT_OPTIONS: { key: ConsentDecision; labelKey: string }[] = [
 ];
 
 /**
- * System prompts (two sets, by mode): tell the model it runs locally, which tools are available, plus the working principles and execution loop.
- * The prompt bodies are now maintained in Markdown files (see system/*.md, imported as strings via the Turbopack raw-loader):
- *  - development.mode.md: development mode, for writing code / changing the project (read-change-verify; always run check_project after changes).
- *  - daily.mode.md: daily mode, for non-developers' everyday tasks (organizing files, handling documents, searching online).
- *  - base.system.md: general principles shared by both modes (tool discipline / failure handling / safety / attachments / communication / execution loop).
- * Each prompt = the corresponding mode body + the shared base body; selected via systemPromptFor(mode).
+ * The system prompt: tells the model it runs locally, which tools are available, plus the working principles and execution loop.
+ *
+ * TWO maintained bodies, composed at build time (see system/*.md, imported as strings via the Turbopack raw-loader):
+ *  - base.system.md: principles that hold for any model and any task — tool discipline, failure handling, safety,
+ *    attachments, communication, the execution loop.
+ *  - development.mode.md: the variable half — writing code / changing the project (read-change-verify; always run
+ *    check_project after changes).
+ *
+ * The split is KEPT ON PURPOSE, not left over. It used to carry the daily/dev mode selection, and that selection is gone
+ * — the two tags merged into one, so `composePrompt` now has exactly one caller and could be collapsed into a single
+ * file. It is not, because the seam is the intended place for model-specific prompts: the invariant half stays in
+ * base.system.md while the variable half is swapped per model. Inlining it would have to be undone to do that.
+ * (daily.mode.md, the third body this once selected between, is deleted — git history has it.)
+ *
+ * The bytes are unchanged from the old dev branch, deliberately: they are the front of the cached prefix and the
+ * published KV seed (electron/versions.json seedPrefix) is keyed by their hash, so a cosmetic edit here retires every
+ * seed on disk. Run `npm run seed:capture` after any real change and republish.
+ *
  * See page.tsx for the actual injection (which also appends the working-directory constraint and the sandbox-environment hint).
  */
 
-/** Combine the mode body and the shared base body into a complete prompt. */
+/**
+ * Combine the variable body with the shared base body.
+ *
+ * Takes its body as a parameter despite having one caller: that parameter IS the extension point described above, and a
+ * function that reads its input from a module-level import would have to be rewritten rather than simply called again.
+ */
 const composePrompt = (modeBody: string) => `${modeBody.trim()}\n\n${baseSystemMd.trim()}`;
 
-export const DEV_SYSTEM_PROMPT = composePrompt(developmentModeMd);
-
-export const DAILY_SYSTEM_PROMPT = composePrompt(dailyModeMd);
-
-/** Kept for backward compatibility: defaults to the development-mode prompt. New code should use systemPromptFor(mode) instead. */
-export const SYSTEM_PROMPT = DEV_SYSTEM_PROMPT;
-
-/** Get the system prompt for the current mode: dev → development mode, otherwise (daily) → daily mode. */
-export const systemPromptFor = (mode: "daily" | "dev") =>
-  mode === "dev" ? DEV_SYSTEM_PROMPT : DAILY_SYSTEM_PROMPT;
+export const SYSTEM_PROMPT = composePrompt(developmentModeMd);
 
 /**
  * The "working directory" constraint, split into the one dynamic sentence and the invariant rules.

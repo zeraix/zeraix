@@ -9,7 +9,8 @@
  *  - Browser: falls back to localStorage (@zzcpt/zztool, keys agent.store.*).
  * A failed read always falls back to empty and never throws.
  *
- * A project's "identity" = working directory + mode: the same folder is two independent projects (separate files) in daily vs. dev mode.
+ * A project's "identity" = its working directory. It used to be "working directory + mode", so one folder was two independent
+ * projects (separate files) in daily vs. dev mode; the two mode tags merged into one, so a folder is now exactly one project.
  */
 import { getStorage, removeStorage, setStorage } from "@zzcpt/zztool";
 import { AGENT_STORE_KEY } from "@/constants/Agent";
@@ -113,11 +114,23 @@ export interface Conversation {
   mode: AgentMode;
   workdir?: string;
   /**
-   * Session-level bound model id (AgentModel.id). Dev mode: each session binds its own model;
-   * Daily mode: left empty by default and uses the globally selected model, but the field is kept to support a future "daily mode also binds per session".
+   * Session-level bound model id (AgentModel.id): each session binds its own model.
    * When absent / pointing to a deleted model, falls back to the globally selected model.
    */
   modelId?: string;
+  /**
+   * Secure environment: whether THIS session's commands run inside the sandbox VM (true) or directly on the host (false).
+   *
+   * Bound to the conversation, never to the project. A project spans many sessions, and the instructions accumulated in one
+   * ("the binary is at /workspace/bin", "use the host's node", a path the model was told to reuse) are wrong under the other
+   * environment — a project-level setting propagated that stale context into every later chat, which is the confusion this
+   * replaces. Undefined on records written before the switch existed, and on any session that never had one resolved; readers
+   * fall back to the project's most recent session and then to DEFAULT_SECURE_ENV (see agentChatStore.secureEnvDefaultFor).
+   *
+   * A runtime artifact like compaction / taskMemory: it steers execution, and its consequences reach the model as the
+   * command-environment change event (reminders.ts), not as a persisted field. Not part of the integrity hash.
+   */
+  secureEnv?: boolean;
   messages: StoredMessage[];
   /** Context-compaction snapshot (optional): restores the compaction state after close/reopen. Not part of the integrity hash. */
   compaction?: StoredCompaction;
@@ -132,7 +145,7 @@ export interface Conversation {
   /**
    * The composed system message (messages[0]) as this conversation first sent it.
    *
-   * It has to be frozen, not recomputed: it is the very front of the prefix, so re-deriving it against the current mode, workdir,
+   * It has to be frozen, not recomputed: it is the very front of the prefix, so re-deriving it against the current workdir,
    * sandbox status and skill set would invalidate the whole conversation's cache with no user-visible trigger — which is what
    * happened on every reload, because the rebuilt buffer contains no system message and the compose step ran again.
    * A runtime artifact like compaction / taskMemory, and not part of the integrity hash.
@@ -172,7 +185,7 @@ export interface StoredTaskMemory {
  */
 export type StoredGoalState = Record<string, unknown>;
 
-/** A project = working directory + mode. An empty workdir means the "default project" (daily mode with no folder chosen). */
+/** A project = a working directory. An empty workdir means the "default project" (no folder chosen). */
 export interface Project {
   id: string;
   name: string;

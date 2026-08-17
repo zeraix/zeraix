@@ -25,8 +25,6 @@ import { resolveHfEndpoint as resolveHfEndpointShared } from "./hfEndpoint.mjs";
 import { SUPPORTED_ARCHS, SEED_PREFIX, SEED_KVD, MAC_LLAMA_TAG } from "../versions.mjs";
 import { getAppConfig, setAppConfig } from "../appConfig.mjs";
 import { ensureSeed, seedSize, seedInstalled, seedKey } from "./seeds.mjs";
-// The renderer mirrors daily/dev into the sandbox engine, which is the main process's only view of the current mode.
-import { getSandboxStatus } from "../tools/sandbox/engine.mjs";
 
 const DEFAULT_PORT = Number(process.env.LLAMA_PORT || 8080);
 // KV disk tier + resident seeds. Deliberately NOT under tmpdir: the point of the tier is to survive a restart,
@@ -804,7 +802,9 @@ export function sweepStaleSeeds({ dryRun = false } = {}) {
   // quantisation and back must not have the first seed swept while the second is in use.
   for (const m of MODELS) {
     if (!seedAvailable(m.id)) continue;
-    for (const mode of ["daily", "dev"]) {
+    // Driven by whatever versions.json publishes rather than a literal list. It used to be ["daily", "dev"]; daily merged
+    // into dev, and a hardcoded list would have kept the retired seed in liveKeys forever — never swept, never used.
+    for (const mode of Object.keys(SEED_PREFIX ?? {})) {
       if (!SEED_PREFIX?.[mode]) continue;
       for (const kvBits of KV_BITS_OFFERED) {
         liveKeys.add(`.seed-${m.id}-${mode}-${seedKey({ prefixHash: SEED_PREFIX[mode], revision: m.revision, kvdVersion: SEED_KVD, kvBits })}`);
@@ -1299,7 +1299,7 @@ async function launch(variant, cfg) {
     // Seeds are optional. The disk tier runs for every model on mac with or without one — a model with no published seed just
     // starts cold and warms up as the user talks. seedAvailable is therefore only about whether there is an asset to fetch.
     const seedPlan = [];
-    for (const sm of seedAvailable(r.id) ? ["daily", "dev"] : []) {
+    for (const sm of seedAvailable(r.id) ? Object.keys(SEED_PREFIX ?? {}) : []) {
       if (!SEED_PREFIX?.[sm]) continue;
       // kvBits is part of the seed's identity, so the seed fetched is the one for the quantisation THIS launch will run at.
       const spec = { endpoint: hfEnd, modelId: r.id, mode: sm, prefixHash: SEED_PREFIX[sm],

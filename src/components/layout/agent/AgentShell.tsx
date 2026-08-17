@@ -119,7 +119,6 @@ export default function AgentShell({ children }: { children: React.ReactNode }) 
           </motion.button>
         )}
       </AnimatePresence>
-
       {/* Windows / Linux: top-right window controls (not rendered on macOS, which uses the sidebar traffic lights) */}
       <WindowControls />
     </div>

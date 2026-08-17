@@ -1,26 +1,23 @@
 /** ask_user / update_todos / openBrowser tool declarations (OpenAI-compatible, handled by the render layer). */
 /** Tool declaration for opening the built-in browser (OpenAI-compatible). Handled by the render layer; expands the browser panel on the right.
- *  The description is mode-specific: in dev mode the browser is off-limits unless the user asks for it, because opening it to
- *  investigate or to show off a fix is pure latency — the model cannot see the page, so it learns nothing the code wouldn't tell it.
- *  In daily mode it stays available for pages that genuinely cannot be read headlessly (login / interaction / JS rendering). */
-export function openBrowserTool(mode: "daily" | "dev" = "daily") {
+ *  The browser is off-limits unless the user asks for it: opening it to investigate or to show off a fix is pure latency — the
+ *  model cannot see the page, so it learns nothing the code wouldn't tell it.
+ *
+ *  There used to be a second, permissive description for daily mode, where the browser was the centre of the web-research
+ *  workflow. Daily merged into developer mode, so only the restrictive one survives. This string is part of the cached
+ *  prefix the published KV seed is keyed by (see promptPrefix.ts), so any edit here requires `npm run seed:capture` and a
+ *  republish — never reword it casually. */
+export function openBrowserTool() {
   const description =
-    mode === "dev"
-      ? "Open the app's built-in browser panel and (optionally) visit a given URL. " +
-        "IN THIS MODE THIS TOOL IS OFF-LIMITS. Do not call it unless the user explicitly asked you to open a browser " +
-        "or to show them a page — that request is the ONLY thing that permits it. " +
-        "It is not permitted for investigating a problem, reproducing a bug, checking your progress, confirming a fix " +
-        "looks right, or presenting a finished result. None of those are reasons: you cannot see the page, so it tells " +
-        "you nothing, while the user waits. The code, the file, the error message and check_project give you the real " +
-        "answer, faster. If you believe the user would want to look at the page, finish the work, say so, and let them ask. " +
-        "For looking anything up, use web_search (results come back directly, no browser) and fetch_url to read a result. " +
-        "Under no circumstances use run_command to launch the system browser."
-      : "Open the app's built-in browser panel and (optionally) visit a given URL. " +
-        "Only call this when the user explicitly wants to watch you work in a browser, or when a page genuinely cannot be " +
-        "read any other way (it needs interaction, a login, or JavaScript rendering). " +
-        "Looking something up is NOT a reason to open it: use web_search (results come back directly, no browser), " +
-        "then fetch_url to read a result — that is faster and needs no browser. " +
-        "Under no circumstances use run_command to launch the system browser.";
+    "Open the app's built-in browser panel and (optionally) visit a given URL. " +
+    "THIS TOOL IS OFF-LIMITS. Do not call it unless the user explicitly asked you to open a browser " +
+    "or to show them a page — that request is the ONLY thing that permits it. " +
+    "It is not permitted for investigating a problem, reproducing a bug, checking your progress, confirming a fix " +
+    "looks right, or presenting a finished result. None of those are reasons: you cannot see the page, so it tells " +
+    "you nothing, while the user waits. The code, the file, the error message and check_project give you the real " +
+    "answer, faster. If you believe the user would want to look at the page, finish the work, say so, and let them ask. " +
+    "For looking anything up, use web_search (results come back directly, no browser) and fetch_url to read a result. " +
+    "Under no circumstances use run_command to launch the system browser.";
   return {
     type: "function" as const,
     function: {

@@ -181,14 +181,14 @@ contextBridge.exposeInMainWorld("localLlm", {
   },
 });
 
-// Sandbox (QEMU VM command execution engine): status query / mode sync / initialization progress subscription.
+// Sandbox (QEMU VM command execution engine): status query / preference sync / initialization progress subscription.
 // The sandbox initializes in the background of the main process (install runtime → pull image → verify startup), never blocking command execution;
-// when ready and in "daily" mode, commands automatically switch into the sandbox, otherwise they keep running directly on the host.
+// when ready and the active session asked for the secure environment, commands run inside the VM, otherwise directly on the host.
 contextBridge.exposeInMainWorld("sandbox", {
-  /** Current status { phase, reason, image, pct, mode, active }. */
+  /** Current status { phase, reason, image, pct, preference, active }. */
   getStatus: () => ipcRenderer.invoke("sandbox:get-status"),
-  /** Sync the current mode ("daily" | "dev"): the sandbox only serves daily mode. */
-  setMode: (mode) => ipcRenderer.invoke("sandbox:set-mode", mode),
+  /** Mirror the active session's secure-environment switch ("sandbox" | "host"). Per conversation, not global. */
+  setMode: (preference) => ipcRenderer.invoke("sandbox:set-mode", preference),
   /** VM image directory (where rootfs.qcow2 etc. live): for the startup dialog to display / open the folder. */
   vmDir: () => ipcRenderer.invoke("sandbox:vm-dir"),
   /** VM image version / installation info (version / complete / updatable / otherVersions / dir). */

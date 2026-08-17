@@ -2,9 +2,9 @@
 
 /**
  * Working-directory selector row (used on the /agent home page): runtime environment (local) + choose folder.
- * Pick the working directory in the stage "before" entering the conversation:
- *   - Dev mode: a folder must be chosen, otherwise report blocking=true upward (the home page disables sending accordingly);
- *   - Daily mode: optional; if none is chosen, the conversation page falls back to the default directory (under userData/agent, matching where data is stored).
+ * Pick the working directory in the stage "before" entering the conversation — OPTIONAL. With no folder chosen the
+ * conversation page falls back to the app-managed default under userData/agent (see resolveEffectiveWorkdir), which is
+ * what a new session in a fresh workspace gets. Nothing here ever blocks sending.
  * Once chosen, it is set as the Electron working directory and persisted (AGENT_WORKDIR_KEY); the conversation page /agent/chat reuses it.
  */
 import { useEffect, useRef, useState } from "react";
@@ -25,13 +25,10 @@ import {
   setWorkingDir,
 } from "@/lib/ai/toolkit";
 import {
-  AGENT_MODE_KEY,
   AGENT_WORKDIR_KEY,
   AGENT_WORKDIR_RECENTS_KEY,
-  MODE_CHANGE_EVENT,
   WORKDIR_CLEAR_EVENT,
   WORKDIR_SET_EVENT,
-  type AgentMode,
 } from "@/constants/Agent";
 import { clearAgentWorkdir, putStorage } from "@/lib/ai/agentStorage";
 import { useT } from "@/lib/i18n";
@@ -54,14 +51,13 @@ export default function WorkdirSelector({
   onBlockingChange,
   nudge = 0,
 }: {
-  /** blocking=true means "dev mode with no directory chosen"; the caller disables sending accordingly. */
+  /** Reported as a constant false now that a folder is optional; kept so an existing caller keeps compiling and gets cleared. */
   onBlockingChange?: (blocking: boolean) => void;
   /** Bump this to replay the "you skipped this" animation — the caller increments it when a send is attempted while blocking. */
   nudge?: number;
 }) {
   const t = useT();
   const [toolsReady, setToolsReady] = useState(false);
-  const [mode, setMode] = useState<AgentMode>("daily");
   const [workdir, setWorkdir] = useState("");
   const [chosen, setChosen] = useState(false);
   const [msg, setMsg] = useState<string | null>(null);
@@ -86,18 +82,8 @@ export default function WorkdirSelector({
     }
   }, []);
 
-  // Sync the sidebar's "daily / dev" mode (same-tab custom event).
   useEffect(() => {
-    const read = () => {
-      const v = getStorage(AGENT_MODE_KEY);
-      if (v === "daily" || v === "dev") setMode(v);
-    };
-    read();
-    const onCustom = (e: Event) => {
-      const v = (e as CustomEvent).detail;
-      if (v === "daily" || v === "dev") setMode(v);
-    };
-    // Switching mode / starting a new conversation clears the chosen directory -> reset this component's selection state.
+    // Starting a new conversation clears the chosen directory -> reset this component's selection state.
     const onClear = () => {
       setChosen(false);
       setWorkdir("");
@@ -105,11 +91,10 @@ export default function WorkdirSelector({
       setNudged(false);
     };
     // The sidebar's "click a project" / right-click "new conversation in project" broadcasts the chosen directory ->
-    // this component restores it and lifts the dev-mode block. Key point: switching from daily to dev (no project
-    // chosen) first goes through onClear, which clears and blocks; then, on right-click project "new conversation",
-    // if already on the /agent home page, router.push("/agent") is a no-op navigation and this component won't
-    // remount to re-read storage. Without listening for this event it would stay stuck in the "must choose a folder
-    // first" blocked state, disabling the input and preventing sending.
+    // this component restores it and lifts the block. Key point: onClear runs first and blocks; then, on right-click
+    // project "new conversation", if already on the /agent home page, router.push("/agent") is a no-op navigation and
+    // this component won't remount to re-read storage. Without listening for this event it would stay stuck in the
+    // "must choose a folder first" blocked state, disabling the input and preventing sending.
     const onSet = (e: Event) => {
       const dir = (e as CustomEvent).detail;
       if (typeof dir !== "string" || !dir) return;
@@ -123,18 +108,18 @@ export default function WorkdirSelector({
       setRecents(next);
       if (isToolkitAvailable()) void setWorkingDir(dir).catch(() => {});
     };
-    window.addEventListener(MODE_CHANGE_EVENT, onCustom);
     window.addEventListener(WORKDIR_CLEAR_EVENT, onClear);
     window.addEventListener(WORKDIR_SET_EVENT, onSet);
     return () => {
-      window.removeEventListener(MODE_CHANGE_EVENT, onCustom);
       window.removeEventListener(WORKDIR_CLEAR_EVENT, onClear);
       window.removeEventListener(WORKDIR_SET_EVENT, onSet);
     };
   }, []);
 
-  // Report "whether sending is blocked" upward (hold the callback in a ref so its reference changes don't trigger extra effects).
-  const blocking = toolsReady && mode === "dev" && !chosen;
+  // Nothing here blocks sending: choosing a folder is optional, and a session without one runs in the default workspace
+  // directory instead. The report is still made — as a constant false — so a caller that latched `blocked` from an
+  // earlier build is cleared rather than left disabling its own composer for ever.
+  const blocking = false;
   const cbRef = useRef(onBlockingChange);
   cbRef.current = onBlockingChange;
   useEffect(() => {
@@ -216,17 +201,13 @@ export default function WorkdirSelector({
                 chosen ? "text-foreground" : blocking && nudged ? "" : "text-muted-foreground"
               }`}
             >
-              {chosen
-                ? folderName(workdir)
-                : mode === "dev"
-                  ? t("workdir.required")
-                  : t("workdir.optional")}
+              {chosen ? folderName(workdir) : t("workdir.optional")}
             </span>
           </button>
 
           {/* Clear, inline: only meaningful once a folder is set, so it appears with the selection rather
-              than hiding in the panel. Daily mode then falls back to the default directory; dev mode blocks
-              sending again (clearAgentWorkdir broadcasts WORKDIR_CLEAR_EVENT, which resets this component). */}
+              than hiding in the panel. Clearing blocks sending again (clearAgentWorkdir broadcasts
+              WORKDIR_CLEAR_EVENT, which resets this component). */}
           {chosen && (
             <button
               type="button"

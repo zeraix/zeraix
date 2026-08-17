@@ -33,9 +33,9 @@ import { ChevronDown } from "lucide-react";
 import { cn } from "@/lib/utils";
 import {
   callTool,
-  defaultWorkingDir,
   getWorkingDir,
   getPathForFile,
+  defaultWorkingDir,
   isToolkitAvailable,
   listTools,
   saveAttachment,
@@ -64,7 +64,7 @@ import {
   formatSimulation,
 } from "./contextDiag";
 import { isLocalEndpoint, localLlm, LOCAL_PROVIDER_ID } from "@/lib/ai/localModel";
-import { setSandboxMode, onSandboxStatus, getSandboxStatus, getSandboxVmInfo, isSandboxEngine, type SandboxStatus } from "@/lib/ai/sandbox";
+import { setSecureEnv as syncSecureEnv, onSandboxStatus, getSandboxStatus, getSandboxVmInfo, isSandboxEngine, DEFAULT_SECURE_ENV, type SandboxStatus } from "@/lib/ai/sandbox";
 import { useT } from "@/lib/i18n";
 import { toast } from "sonner";
 import {
@@ -81,13 +81,9 @@ import { getStorage } from "@zzcpt/zztool";
 import {
   AGENT_GOAL_EVALUATOR_MODEL_KEY,
   AGENT_MAX_GOAL_ROUNDS_KEY,
-  AGENT_MODE_KEY,
-  AGENT_STORAGE_ROOT,
   AGENT_WORKDIR_KEY,
-  MODE_CHANGE_EVENT,
   WORKDIR_CLEAR_EVENT,
   WORKDIR_SET_EVENT,
-  type AgentMode,
 } from "@/constants/Agent";
 import { migrateLegacyAgentStorage, putStorage } from "@/lib/ai/agentStorage";
 import { hydrateAppConfig } from "@/lib/ai/appConfig";
@@ -376,6 +372,10 @@ function ChatAgent() {
     return id ? (s.conversations.find((c) => c.id === id)?.title ?? "") : "";
   });
   const renameConversation = useAgentChatStore((s) => s.renameConversation);
+  // The project a not-yet-created session would belong to. Subscribed reactively because the secure-environment switch a
+  // fresh session shows is inherited from THIS project's last session, and clicking a different project in the sidebar has
+  // to move that answer before the user sends anything.
+  const activeProjectId = useAgentChatStore((s) => s.activeProjectId);
   // Header "Rename" dialog: null = closed; a string is the draft title being edited.
   const [renameDraft, setRenameDraft] = useState<string | null>(null);
   // Side-channel for image_generation: the tool returns only a text note (the artifact must not enter the wire), but
@@ -432,11 +432,23 @@ function ChatAgent() {
   const [workdir, setWorkdir] = useState("");
   const [workdirInput, setWorkdirInput] = useState("");
   // Whether the user has "explicitly chosen" the working directory (tools always have a WORKDIR by default, so this needs a separate flag).
-  // Dev mode requires an explicit choice; in daily mode, if not chosen, it falls back to the default working directory (under userData/agent).
+  // An explicit choice is expected; without one it falls back to the default working directory (under userData/agent).
   const [workdirChosen, setWorkdirChosen] = useState(false);
-  const defaultAppliedRef = useRef(false); // The daily-mode default directory is applied only once, to avoid picking a new random directory for every message
-  // The current mode (daily / dev): comes from the sidebar AgentModeTab, synced via localStorage + a custom event.
-  const [mode, setMode] = useState<AgentMode>("daily");
+  // The default workspace is minted once per session: defaultWorkingDir returns a NEW directory each call, so re-applying
+  // it per message would spread one conversation's files over a different folder every turn.
+  const defaultAppliedRef = useRef(false);
+  /**
+   * Secure environment: does THIS session run commands inside the sandbox VM, or directly on the host?
+   *
+   * Per session, not per project — see Conversation.secureEnv. A new session inherits the project's most recent one, an
+   * existing session adopts whatever it recorded, and either way this state is the single source of truth that the header
+   * toggle renders, the main process is synced to, and createConversation stamps onto a brand-new record.
+   *
+   * The ref exists for the same reason every other one on this page does: the send loop is async and outlives the render
+   * that started it, so it must read the value that is live now rather than the one captured when the turn began.
+   */
+  const [secureEnv, setSecureEnvState] = useState<boolean>(DEFAULT_SECURE_ENV);
+  const secureEnvRef = useRef<boolean>(DEFAULT_SECURE_ENV);
   // Skills: the installed list (including enabled state) + the panel toggle. installedRef lets the async send loop read the latest value.
   const [installedSkills, setInstalledSkills] = useState<InstalledSkill[]>([]);
   const installedSkillsRef = useRef<InstalledSkill[]>([]);
@@ -851,10 +863,10 @@ function ChatAgent() {
    * __seedPrefix harness below closes over them, and a `const` arrow is not hoisted.
    */
   const composeSystemPrompt = (): string =>
-    buildSystemPrompt(mode, { toolsReady: toolsReadyRef.current, memory: isMemoryFilesAvailable() });
+    buildSystemPrompt({ toolsReady: toolsReadyRef.current, memory: isMemoryFilesAvailable() });
 
   const buildToolSet = async () =>
-    buildToolSet_(mode, toolsReadyRef.current ? await listTools("openai") : [], { memory: isMemoryFilesAvailable() });
+    buildToolSet_(toolsReadyRef.current ? await listTools("openai") : [], { memory: isMemoryFilesAvailable() });
 
   // Expose the offline budget-replay harness on the window so a real heavy task can be simulated from
   // the console: `__ctxSim()` (default budget spread) or `__ctxSim(40, 60, 80)` (custom K-token budgets).
@@ -869,7 +881,7 @@ function ChatAgent() {
       __seedPrefix?: () => Promise<unknown>;
     };
     // Kept for inspecting a live install ("what is this app actually sending?"). Seed generation no longer needs it: the prefix
-    // is a pure function of mode in promptPrefix.ts, so scripts/capture-prefix.mjs computes it without an app at all.
+    // is static text in promptPrefix.ts, so scripts/capture-prefix.mjs computes it without an app at all.
     w.__seedPrefix = async () => ({ system: composeSystemPrompt(), tools: await buildToolSet() });
     const K = (n: number) => `${(n / 1000).toFixed(1)}K`;
     w.__ctxSim = (...budgetsK: number[]) => {
@@ -975,7 +987,7 @@ function ChatAgent() {
     })();
   }, []);
 
-  // Compute the "effective model for the current conversation": the conversation-level binding takes priority (dev mode binds per conversation; daily mode leaves it empty by default and uses the global one),
+  // Compute the "effective model for the current conversation": the conversation-level binding takes priority,
   // falling back to the globally selected model when the binding is missing / points to a deleted model. Synced to the input-box picker and the resolved model used for sending.
   const applyEffectiveModel = useCallback(() => {
     const store = useAgentChatStore.getState();
@@ -1016,21 +1028,14 @@ function ChatAgent() {
     el.style.overflowY = el.scrollHeight > max ? "auto" : "hidden";
   }, [input, onChatRoute]);
 
-  // Switch models within the input box:
-  //  - Dev mode: bind to the current conversation (if the conversation is not yet created, bind when it is created on the first send); does not change the global one.
-  //  - Daily mode: by default update the globally selected model (and clear any residual conversation-level binding on this conversation, keeping "daily = global" consistent).
+  // Switch models within the input box: bind to the current conversation (if the conversation is not yet created, bind when it
+  // is created on the first send); does not change the global one. This used to be conditional — dev mode bound per session,
+  // daily mode wrote the global selection — and with the two modes merged, per-session binding is what survives, because that
+  // is the behaviour the model picker sits next to a specific conversation to provide.
   const selectModel = (id: string) => {
     setSelectedModelIdState(id);
     setActiveModel(resolveModelById(id));
-    const store = useAgentChatStore.getState();
-    if (mode === "dev") {
-      if (convIdRef.current) store.setConversationModel(convIdRef.current, id);
-    } else {
-      setSelectedModelId(id);
-      if (convIdRef.current && store.getConversation(convIdRef.current)?.modelId) {
-        store.setConversationModel(convIdRef.current, null);
-      }
-    }
+    if (convIdRef.current) useAgentChatStore.getState().setConversationModel(convIdRef.current, id);
   };
   const selectedLabel = models.find((m) => m.id === selectedModelId)?.label ?? null;
   // Group by category: official / local models / third-party / custom.
@@ -1163,10 +1168,33 @@ function ChatAgent() {
   const [sandboxDialogTick, setSandboxDialogTick] = useState(0); // Incrementing it opens the sandbox startup dialog (clicking the top badge)
   const [vmUpdatable, setVmUpdatable] = useState(false); // The runtime environment has an updatable version (versions.json target ≠ downloaded) → badge hint
 
-  // Sandbox: sync the current mode to the main process — the sandbox only serves "daily" mode; dev mode always runs directly on the host.
-  // After syncing, read the status back (mode/active change accordingly), keeping the hint text and title-row badge immediately accurate.
-  useEffect(() => {
-    setSandboxMode(mode)
+  /**
+   * Apply this session's secure-environment switch: remember it, mirror it to the main process, and read the status back.
+   *
+   * The read-back is what makes the change visible immediately — `active` flips to qemu/native as the main process re-routes,
+   * and that value is what the header indicator shows and what buildReminderState turns into the command-environment change
+   * event on the next turn. Without it the UI would keep showing the previous engine until some unrelated status push arrived.
+   *
+   * `persist` is false only for the initial adoption of a session's own setting: writing it straight back would dirty every
+   * conversation merely by opening it. A real toggle, and a new session's inherited value, both persist.
+   *
+   * Idempotent by design. The inheritance effect below re-runs whenever the active project or a lazily loaded project's
+   * conversations change, and most of those re-runs land on the value already in force; doing the work anyway would mean a
+   * setState (and a render) per sidebar click for a switch that did not move. `syncedRef` — rather than just comparing to
+   * `secureEnvRef` — is what still guarantees the FIRST call reaches the main process, even when the session's answer
+   * happens to equal the initial state and the comparison alone would skip it.
+   */
+  const syncedRef = useRef(false);
+  const applySecureEnv = (next: boolean, { persist = true }: { persist?: boolean } = {}) => {
+    const persisting = persist && !!convIdRef.current;
+    if (syncedRef.current && next === secureEnvRef.current && !persisting) return;
+    syncedRef.current = true;
+    secureEnvRef.current = next;
+    setSecureEnvState(next);
+    if (persisting) {
+      useAgentChatStore.getState().setConversationSecureEnv(convIdRef.current!, next);
+    }
+    void syncSecureEnv(next)
       .then(() => getSandboxStatus())
       .then((st) => {
         if (st) {
@@ -1174,10 +1202,10 @@ function ChatAgent() {
           setSandboxStatus(st);
         }
       });
-  }, [mode]);
+  };
 
   // Sandbox: subscribe to the main process's background initialization status (download runtime environment → start), writing to ref/state.
-  // Presentation is handled by the startup progress dialog SandboxStartupDialog (daily mode only); the status also feeds environment-hint injection and the title badge.
+  // Presentation is handled by the startup progress dialog SandboxStartupDialog; the status also feeds environment-hint injection and the title badge.
   useEffect(() => {
     const apply = (st: SandboxStatus) => {
       sandboxStatusRef.current = st;
@@ -1192,27 +1220,35 @@ function ChatAgent() {
     getSandboxVmInfo().then((i) => setVmUpdatable(!!i?.updatable));
   }, [sandboxStatus?.phase]);
 
-  // Sync the sidebar's "daily / dev" mode: restore on mount + listen to the custom event (same tab) and storage (cross-tab).
+  /**
+   * Smart default for a session that does not exist yet: inherit the secure-environment switch from the project's most
+   * recent session.
+   *
+   * Only ever runs with no active conversation — an existing session's own setting wins, and swapInConversation applies it.
+   * Keyed on the active project as well, because "New chat" leaves the conversation null while the user goes on clicking
+   * through projects in the sidebar, and each click changes which project's answer applies. Projects load lazily, so
+   * secureEnvDefaultFor answers undefined until this one's conversations arrive and the app default stands in the meantime;
+   * `loadedProjectIds` is in the dependency list so the answer is revised the moment it can be. That set, rather than
+   * `conversations` itself, because the latter is a fresh array on every appended message — subscribing to it would
+   * re-render this page on every streamed turn to re-decide something that cannot have changed.
+   *
+   * persist:false throughout — there is no record to write to yet. The value is stamped onto the record at createConversation.
+   */
+  const loadedProjectIds = useAgentChatStore((s) => s.loadedProjectIds);
   useEffect(() => {
-    const read = () => {
-      const v = getStorage(AGENT_MODE_KEY);
-      if (v === "daily" || v === "dev") setMode(v);
-    };
-    read();
-    const onCustom = (e: Event) => {
-      const v = (e as CustomEvent).detail;
-      if (v === "daily" || v === "dev") setMode(v);
-    };
-    // Under categorized storage, the mode is written in the top-level `agent` object, so the e.key of a cross-tab storage event is that root key.
-    const onStorage = (e: StorageEvent) => {
-      if (e.key === AGENT_STORAGE_ROOT) read();
-    };
-    // Switching mode / creating a new conversation cleared the chosen directory → reset this page's working-directory selection state.
+    if (activeConvId) return;
+    const store = useAgentChatStore.getState();
+    applySecureEnv(store.secureEnvDefaultFor(activeProjectId) ?? DEFAULT_SECURE_ENV, { persist: false });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeConvId, activeProjectId, loadedProjectIds]);
+
+  useEffect(() => {
+    // Creating a new conversation cleared the chosen directory → reset this page's working-directory selection state.
     const onWorkdirClear = () => {
       setWorkdirChosen(false);
       setWorkdir("");
       setWorkdirInput("");
-      defaultAppliedRef.current = false;
+      defaultAppliedRef.current = false; // a new conversation gets its own default workspace
     };
     // Clicking a project set the working directory → sync it to this page's working-directory input and apply it to the tool sandbox.
     const onWorkdirSet = (e: Event) => {
@@ -1223,13 +1259,9 @@ function ChatAgent() {
       setWorkdirChosen(true);
       if (isToolkitAvailable()) void setWorkingDir(dir).catch(() => {});
     };
-    window.addEventListener(MODE_CHANGE_EVENT, onCustom);
-    window.addEventListener("storage", onStorage);
     window.addEventListener(WORKDIR_CLEAR_EVENT, onWorkdirClear);
     window.addEventListener(WORKDIR_SET_EVENT, onWorkdirSet);
     return () => {
-      window.removeEventListener(MODE_CHANGE_EVENT, onCustom);
-      window.removeEventListener("storage", onStorage);
       window.removeEventListener(WORKDIR_CLEAR_EVENT, onWorkdirClear);
       window.removeEventListener(WORKDIR_SET_EVENT, onWorkdirSet);
     };
@@ -1399,15 +1431,18 @@ function ChatAgent() {
     snapshotCompaction(convIdRef.current); // Save the old conversation's compaction state before switching away
     interruptedRef.current = false; // Switching conversations: the interrupt-resume flag does not carry across conversations
     setConvId(id);
-    // Mode is a sidebar-global toggle, but messages[0] and openBrowserTool(mode) are both mode-determined — so opening a stored
-    // dev conversation while the sidebar reads "daily" silently rebuilt the prompt and the tool block with the wrong mode. Adopt
-    // the conversation's own mode and persist it the way every other writer does (putStorage also mirrors to app.config; a raw
-    // setStorage would be reverted by the file-wins hydration on the next launch). Deliberately no MODE_CHANGE_EVENT: the
-    // sidebar's handler treats that as a user toggle and navigates back to the home page, away from the conversation just opened.
-    if (conv.mode === "daily" || conv.mode === "dev") {
-      setMode(conv.mode);
-      putStorage(AGENT_MODE_KEY, conv.mode);
-    }
+    // Adopt the secure-environment switch this conversation ran under, and re-point the main process at it. This is the whole
+    // point of binding it to the session: the engine follows whichever conversation is open, so reading an old sandboxed
+    // session does not silently start executing its commands on the host (or the reverse).
+    //
+    // A conversation with no recorded value predates the switch. It falls back to its own project's most recent session, then
+    // to the app default — the same ladder a brand-new session climbs — rather than to whatever the previous conversation
+    // happened to leave the engine set to. persist:false because merely opening a conversation must not write to it; the
+    // value is stamped when the user toggles, or when a new record is created.
+    applySecureEnv(
+      conv.secureEnv ?? store.secureEnvDefaultFor(conv.projectId) ?? DEFAULT_SECURE_ENV,
+      { persist: false },
+    );
     // Restore this conversation's internal Task Memory brief from disk into the ref, so the mission survives
     // app reopen. Seed only if the ref doesn't already hold a live in-session copy.
     if (conv.taskMemory && !taskMemoryByConvRef.current.has(id)) {
@@ -1539,15 +1574,16 @@ function ChatAgent() {
       } else if (m.role === "assistant") {
         // The deep-thinking block is restored before this round's content / tool trace (consistent with the real-time order).
         if (m.reasoning) disp.push({ kind: "reasoning", content: m.reasoning });
-        // Final reply with no tool calls: the body is shown as-is. For the round that issues tool calls, its body —
-        //  - Dev mode (phased streaming): shown as that phase's summary (phaseSummaryText strips the chain of thought / leftover </think>),
-        //    consistent with the real-time display;
-        //  - Daily mode: skipped (reasoning models often put the chain of thought / a stray </think> here; the real-time display already skips it, and the rebuild must skip it too).
+        // Final reply with no tool calls: the body is shown as-is. For the round that issues tool calls, its body is shown as
+        // that phase's summary (phaseSummaryText strips the chain of thought / leftover </think>), consistent with the
+        // real-time display. Daily-mode conversations used to skip it here, because their live view skipped it too; with the
+        // modes merged the live view is always phased, so the rebuild is unconditional and old records now render the same
+        // way a new one would — phaseSummaryText is what keeps the reasoning remnants out either way.
         // storedIndex=mi + rating feed the action-bar rating: clicking persists it to that StoredMessage and highlights the chosen rating.
         if (m.content) {
           if (!m.tool_calls?.length) {
             disp.push({ kind: "assistant", content: m.content, rating: m.rating, storedIndex: mi });
-          } else if (conv.mode === "dev") {
+          } else {
             // The phase summary of a tool-call round: rebuilt as a "thinking process" timeline entry (phase), consistent with the real-time display —
             // collected into the same card, not a standalone block, with no action bar (rating only belongs to the final reply).
             const summary = phaseSummaryText(m.content);
@@ -1795,12 +1831,12 @@ function ChatAgent() {
    * already answer with a description of what they wanted.
    */
   const explainToolFailure = async (name: string, content: string): Promise<string> => {
-    if (!ROUTED_TOOLS[mode].has(name) && !content.startsWith("Unknown tool")) return content;
+    if (!ROUTED_TOOLS.has(name) && !content.startsWith("Unknown tool")) return content;
     try {
       const all = (await listTools("openai")) as Array<{ function?: { name?: string; parameters?: unknown } }>;
       const hit = all.find((t) => t.function?.name === name);
       if (!hit) return `${content}\n\n${unknownToolResult(name, all.flatMap((t) => (t.function?.name ? [t.function.name] : [])))}`;
-      return ROUTED_TOOLS[mode].has(name) ? content + routedFailureHint(name, hit.function?.parameters) : content;
+      return ROUTED_TOOLS.has(name) ? content + routedFailureHint(name, hit.function?.parameters) : content;
     } catch {
       return content; // The hint is an optimisation; never let looking it up turn a tool error into a broken turn.
     }
@@ -1999,13 +2035,13 @@ function ChatAgent() {
         convId: ctx.convId,
         turnId: ctx.turnId,
       });
-    // Consent policy lives in toolNeedsConsent (constants.ts) so mode rules can grow in one place. Currently: dev mode
-    // confirms sensitive tools, daily mode runs them directly. The "always" allowance still short-circuits repeat prompts.
+    // Consent policy lives in toolNeedsConsent (constants.ts) so the rules can grow in one place. Currently every sensitive
+    // tool is confirmed. The "always" allowance still short-circuits repeat prompts.
     // A sub-agent's call always asks, even for a tool the user allowed with "don't ask again": that answer
     // was given about work the user had themselves requested and was watching. An autonomous delegation
     // deciding to write a file is a different question, and inheriting the earlier yes would silently make
     // sub-agents more powerful than the agent the user is actually looking at.
-    if (toolNeedsConsent(name, mode) && (requester !== null || !allowedToolsRef.current.has(name))) {
+    if (toolNeedsConsent(name) && (requester !== null || !allowedToolsRef.current.has(name))) {
       const previewDiff = await buildPreviewDiff(name, args);
       // §A1: warn when this mutation targets a file the model only "knows" from compressed history — its
       // latest read/write was folded into the summary and never re-verified at the tail. Pure lookup, no cost.
@@ -2954,26 +2990,27 @@ function ChatAgent() {
   };
 
   /**
-   * Working-directory policy, applied on every send (only when Electron tools are available):
-   *  - Dev mode: a folder must be explicitly chosen first, otherwise the send is rejected and the settings area is expanded to guide the choice;
-   *  - Daily mode: optional; if not chosen, it falls back to the default working directory (under userData/agent, created once on the first message only).
+   * Working-directory policy, applied on every send (only when Electron tools are available). Choosing a folder is
+   * OPTIONAL: a session without one runs in the app-managed default workspace under userData/agent, which is what a new
+   * session in a fresh workspace gets. Nothing here refuses a send for want of a folder.
+   *
+   * Order matters. An explicit choice is looked for FIRST, including one this page may not have heard about, and only a
+   * genuine absence falls through to the default. Reversed, a folder picked on the home page would be silently ignored in
+   * favour of a scratch directory whenever the event announcing it did not arrive — the session would run somewhere the
+   * user did not choose, which is worse than either policy on its own.
    *
    * Returns the directory this round should use, or null when the send must be abandoned — in which case the
    * reason is already on screen.
    */
   const resolveEffectiveWorkdir = async (): Promise<string | null> => {
     if (!toolsReady) return workdir;
-    if (mode === "dev" && !workdirChosen) {
-      // If the input box already has a path (e.g. a default prefill) → adopt and apply it directly, without first clicking "apply" manually; only intercept when it is truly empty.
-      // Fall back to reading the persisted AGENT_WORKDIR_KEY: after the home page WorkdirSelector chooses a directory it is already persisted, but the permanently-mounted chat page may
-      // still have workdirChosen false and workdirInput empty because it did not receive WORKDIR_SET_EVENT — in that case recover it from storage, to avoid a false interception.
-      const savedDir = getStorage(AGENT_WORKDIR_KEY);
-      const dir = workdirInput.trim() || (typeof savedDir === "string" ? savedDir.trim() : "");
-      if (!dir) {
-        setError(t("chat.devNeedWorkdir"));
-        setSettingsOpen(true);
-        return null;
-      }
+    if (workdirChosen) return workdir;
+    // If the input box already has a path (e.g. a default prefill) → adopt and apply it directly, without first clicking "apply" manually.
+    // Fall back to reading the persisted AGENT_WORKDIR_KEY: after the home page WorkdirSelector chooses a directory it is already persisted, but the permanently-mounted chat page may
+    // still have workdirChosen false and workdirInput empty because it did not receive WORKDIR_SET_EVENT — in that case recover it from storage, so an explicit choice is not lost.
+    const savedDir = getStorage(AGENT_WORKDIR_KEY);
+    const dir = workdirInput.trim() || (typeof savedDir === "string" ? savedDir.trim() : "");
+    if (dir) {
       try {
         const resolved = await setWorkingDir(dir);
         setWorkdir(resolved);
@@ -2987,13 +3024,15 @@ function ChatAgent() {
         return null;
       }
     }
-    if (mode === "daily" && !workdirChosen && !defaultAppliedRef.current) {
+    // No folder anywhere: the default workspace. Applied ONCE per session — defaultWorkingDir mints a fresh directory per
+    // call, so re-resolving it on every message would scatter one conversation's files across a new folder each turn.
+    if (!defaultAppliedRef.current) {
       try {
-        const dir = await defaultWorkingDir();
+        const d = await defaultWorkingDir();
         defaultAppliedRef.current = true;
-        setWorkdir(dir);
-        setWorkdirInput(dir);
-        return dir;
+        setWorkdir(d);
+        setWorkdirInput(d);
+        return d;
       } catch (e) {
         setError(t("chat.workdirDefaultFail", { err: e instanceof Error ? e.message : String(e) }));
         return null;
@@ -3163,6 +3202,9 @@ function ChatAgent() {
         text = proceed;
       }
     }
+    if (slash?.name === "shell") {
+      return
+    }
     if (!text && atts.length === 0) return;
     if (!passesSendPreflight(text, atts, !!opts?._fromQueue)) return;
 
@@ -3248,21 +3290,24 @@ function ChatAgent() {
     const userImages = imageParts.map((p) => p.image_url.url);
     pushDisplay({ kind: "user", content: text, images: userImages, files: userFiles });
 
-    // Persistence: the conversation record is created as soon as the user starts chatting (regardless of daily / dev mode), then appended to one by one.
+    // Persistence: the conversation record is created as soon as the user starts chatting, then appended to one by one.
     const store = useAgentChatStore.getState();
     // The conversation id this round of generation belongs to (captured as a stable local value, unaffected by switching conversations): drives the spinner on that conversation's sidebar row,
     // and lays the groundwork for later "background concurrent generation" — always record / clear by genConvId, rather than relying on the current active conversation.
     let convId = convIdRef.current;
     if (!convId) {
-      // Projects are grouped by folder: an explicitly chosen folder → that folder's project; not chosen in daily mode → the default project.
+      // Projects are grouped by folder: an explicitly chosen folder → that folder's project, otherwise the default project.
       convId = store.createConversation({
-        mode,
         workdir: effectiveWorkdir || undefined,
         projectWorkdir: workdirChosen ? effectiveWorkdir : undefined,
+        // Stamp the environment this session is starting in — the value the page already resolved (inherited from the
+        // project's last session, or the app default). Recorded even when the user never touched the toggle, because it is
+        // what the NEXT session in this project inherits.
+        secureEnv: secureEnvRef.current,
       });
       setConvId(convId);
-      // Dev mode: firmly bind the new conversation to the currently selected model (conversation-level binding). Daily mode uses the global one by default, with no binding.
-      if (mode === "dev" && selectedModelId) {
+      // Firmly bind the new conversation to the currently selected model (conversation-level binding).
+      if (selectedModelId) {
         store.setConversationModel(convId, selectedModelId);
       }
       // Freeze messages[0] on the brand-new record (it was composed above, before this record existed).
@@ -3510,16 +3555,16 @@ function ChatAgent() {
             });
           }
         }
-        // Two kinds of streaming:
-        //  - Daily mode: incrementally render the final reply's content / reasoning chunk by chunk; discard the body of a tool-call round (often containing reasoning remnants).
-        //  - Dev-mode "phased streaming": likewise streaming, but show each "tool-call round" body as that phase's summary
-        //    (phaseSummaryText strips the chain-of-thought remnants), presenting the process of "phase summary → execute → next phase summary …".
+        // Phased streaming: the final reply's content / reasoning renders chunk by chunk, and each "tool-call round" body is
+        // shown as that phase's summary (phaseSummaryText strips the chain-of-thought remnants), presenting the process of
+        // "phase summary → execute → next phase summary …". Daily mode used to discard tool-round bodies instead; with the
+        // modes merged, the phased presentation is the only one.
         const wantIncremental = true;
-        const showPhaseSummary = mode === "dev";
+        const showPhaseSummary = true;
         // This round's display baseline = the display array before this round started (only meaningful in the active view; a background conversation does not touch the active view).
         const liveBase = active() ? displayRef.current : [];
         // Shared by finalization / increments: rebuild this round's display as [baseline, deep-thinking?, body?] (only effective in the active view).
-        // asPhase: the body is "the phase summary of a tool-call round" (dev mode) — collected into the card as a "thinking process" timeline entry,
+        // asPhase: the body is "the phase summary of a tool-call round" — collected into the card as a "thinking process" timeline entry,
         // rather than a standalone final reply; a final reply with no tool calls goes to assistant (a standalone bubble + action bar).
         const renderTurn = (reasoning: string, content: string, asPhase = false) => {
           if (!active()) return;
@@ -3549,8 +3594,8 @@ function ChatAgent() {
         if (active()) setCtxTokens(data.usage?.prompt_tokens ?? countMessagesTokens(wire));
         // Deep thinking (a reasoning model's reasoning_content): kept on the buffer; whether it is fed back is applyReasoningPolicy's call.
         const reasoningText = (msg.reasoning_content ?? msg.reasoning ?? "").trim();
-        // Finalize this round's display: the deep-thinking block + body. A final reply with no tool calls always shows the body; the body of a tool-call round —
-        // shown as a "phase summary" in dev mode (after cleanup), discarded in daily mode (consistent with non-streaming).
+        // Finalize this round's display: the deep-thinking block + body. A final reply with no tool calls always shows the body;
+        // the body of a tool-call round is shown as a "phase summary" (after cleanup), consistent with the streaming path.
         const finalContent = msg.tool_calls?.length
           ? showPhaseSummary
             ? phaseSummaryText(msg.content ?? "")
@@ -3776,11 +3821,11 @@ function ChatAgent() {
           // after one nudge anyway ("if the model still insists, let it through, to avoid a deadlock"), so this is the same
           // single nudge, delivered early enough to be preventive. They stay able to fire again on a later turn — the review
           // guard is a safety check, so a risky change at turn 40 must be caught even though turn 5 was.
-          if (mode === "dev" && riskyChangePending && !reviewForced) {
+          if (riskyChangePending && !reviewForced) {
             reviewForced = true;
             nudgeIntoLastTool(FORCE_REVIEW_NUDGE);
           }
-          if (mode === "dev" && learnedWithoutRecording && !memoryNudged) {
+          if (learnedWithoutRecording && !memoryNudged) {
             memoryNudged = true;
             nudgeIntoLastTool(RECORD_MEMORY_NUDGE);
           }
@@ -4181,6 +4226,8 @@ function ChatAgent() {
         toolsReady={toolsReady}
         sandboxStatus={sandboxStatus}
         onSandboxBadgeClick={() => setSandboxDialogTick((n) => n + 1)}
+        secureEnv={secureEnv}
+        onSecureEnvChange={applySecureEnv}
         vmUpdatable={vmUpdatable}
         activeModel={activeModel}
         isLocalModel={isLocalModel}
@@ -4304,7 +4351,7 @@ function ChatAgent() {
             onLocalStartOpenChange={setLocalStartDialog}
             modelLabel={activeModel?.label}
             sandboxStatus={sandboxStatus}
-            mode={mode}
+            secureEnv={secureEnv}
             sandboxDialogTick={sandboxDialogTick}
             renameDraft={renameDraft}
             onRenameDraftChange={setRenameDraft}

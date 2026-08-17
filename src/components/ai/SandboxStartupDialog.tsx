@@ -1,7 +1,7 @@
 "use client";
 
 /**
- * Sandbox startup progress dialog (daily mode only). Replaces the old "Starting sandbox…" toast:
+ * Sandbox startup progress dialog, for sessions running in the secure environment. Replaces the old "Starting sandbox…" toast:
  *   Step 1 · Runtime environment (QEMU VM image): first run downloads from the CDN → progress bar + MB; already present → "Downloaded";
  *            version differs from the versions.json target (a stale old version left over) → shows "New version available" + update button.
  *            This step shows the folder the image lives in below it (click to open).
@@ -75,11 +75,13 @@ function StepRow({
 
 export default function SandboxStartupDialog({
   status,
-  mode,
+  secureEnv,
   openTick = 0,
 }: {
   status: SandboxStatus | null;
-  mode: string;
+  /** Whether the ACTIVE session asked for the secure environment. Startup progress only auto-pops for a session that
+   *  actually wants the VM; one running on the host is not waiting for it and must not be interrupted by its boot. */
+  secureEnv: boolean;
   /** Externally triggered open (e.g. clicking the top "sandbox execution" badge): each increment opens the current status view. */
   openTick?: number;
 }) {
@@ -95,7 +97,7 @@ export default function SandboxStartupDialog({
 
   const phase = status?.phase ?? "idle";
   const reason = status?.reason ?? "";
-  const isDaily = mode === "daily";
+  const wantsSandbox = secureEnv;
   const vmDir = vmInfo?.dir ?? null;
 
   // Badge click: open the dialog (manual state).
@@ -112,7 +114,14 @@ export default function SandboxStartupDialog({
   }, [open, phase]);
 
   useEffect(() => {
-    if (!isDaily) { if (!manualRef.current) setOpen(false); return; } // Manual open (badge) is not restricted by mode
+    // ── Status tracking: UNCONDITIONAL ────────────────────────────────────────────────────────────────────────────
+    // The secure-environment switch decides whether this dialog may POP UP on its own, and nothing else. It must not
+    // gate reading the status, which is what it used to do: `setSawDownload` / `setDl` sat behind an early return, so a
+    // session with the switch off (now the default) left `sawDownload` false and `dl.text` empty for ever — and
+    // `downloading` below is derived from `sawDownload`. The dialog then showed its fallback "checking runtime
+    // environment" spinner with no progress bar for the whole download, however healthy the download was. The VM boots
+    // in the main process regardless of which session is in front of it, so whenever this dialog is on screen it has to
+    // report what is actually happening.
     if (phase !== "error") setRestarting(false); // Already left the error state (restart started / ready) → reset button
     if (ACTIVE.has(phase)) {
       if (reason.startsWith("Downloading runtime environment")) {
@@ -121,17 +130,20 @@ export default function SandboxStartupDialog({
       } else if (reason.includes("Runtime environment ready") || status?.pct === 100) {
         setDl({ pct: 100, text: reason });
       }
-      if (!dismissedRef.current) setOpen(true);
-    } else if (phase === "error") {
-      if (!dismissedRef.current) setOpen(true);
-    } else {
+    } else if (phase !== "error") {
       // ready / idle / disabled / unsupported → this round is over, reset for next time
       dismissedRef.current = false;
       setSawDownload(false);
       setDl({ pct: null, text: "" });
       setUpdating(false);
     }
-  }, [phase, reason, status?.pct, isDaily]);
+    // ── Visibility: this is the part the switch governs ───────────────────────────────────────────────────────────
+    // A host-execution session is not waiting for the VM, so its boot must not interrupt them — but a dialog the user
+    // opened themselves from the header indicator stays open either way, which is the only way to watch or repair the
+    // runtime from such a session.
+    if (!wantsSandbox && !manualRef.current) { setOpen(false); return; }
+    if ((ACTIVE.has(phase) || phase === "error") && !dismissedRef.current) setOpen(true);
+  }, [phase, reason, status?.pct, wantsSandbox]);
 
   // After ready, briefly show "ready" then auto-close — only when auto-popped (not manually opened via the badge).
   useEffect(() => {

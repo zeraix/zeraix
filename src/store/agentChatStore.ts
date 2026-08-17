@@ -1,6 +1,6 @@
 import { create } from "zustand";
 import { localLlm } from "@/lib/ai/localModel";
-import type { AgentMode } from "@/constants/Agent";
+import { AGENT_MODE } from "@/constants/Agent";
 import type { Attachment } from "@/lib/ai/attachments";
 import {
   deleteProjectFile,
@@ -55,10 +55,10 @@ type AgentChatState = {
   ensureProjectLoaded: (projectId: string) => Promise<void>;
   setPendingSend: (p: PendingSend | null) => void;
   consumePendingSend: () => PendingSend | null;
-  /** Finds or creates a project based on "working directory + mode" and returns its ID. */
-  ensureProject: (workdir: string | undefined, mode: AgentMode) => string;
-  /** Creates a new conversation (assigned to the project matching projectWorkdir + mode), sets it as the active conversation, and returns its ID. */
-  createConversation: (opts: { mode: AgentMode; workdir?: string; projectWorkdir?: string }) => string;
+  /** Finds or creates a project for a working directory and returns its ID. */
+  ensureProject: (workdir: string | undefined) => string;
+  /** Creates a new conversation (assigned to the project matching projectWorkdir), sets it as the active conversation, and returns its ID. */
+  createConversation: (opts: { workdir?: string; projectWorkdir?: string; secureEnv?: boolean }) => string;
   /** Appends a message to a conversation (the first user message will automatically generate a title). */
   appendMessage: (convId: string, msg: StoredMessage) => void;
   /** Truncates a conversation to retain only the first `count` messages (used to resend from a specific point during "edit user message / regenerate"). */
@@ -83,6 +83,18 @@ type AgentChatState = {
   getConversation: (id: string) => Conversation | undefined;
   /** Binds or clears the model for a conversation (conversation-level model binding; null falls back to global configuration). */
   setConversationModel: (id: string, modelId: string | null) => void;
+  /** Records this session's secure-environment switch (sandbox VM vs. host execution). Persists to disk only. */
+  setConversationSecureEnv: (id: string, secureEnv: boolean) => void;
+  /**
+   * The secure-environment setting a NEW session in this project should start from: the project's most recently updated
+   * session that recorded one. Undefined when the project is unknown, not yet loaded, or has no such session — the caller
+   * then falls back to DEFAULT_SECURE_ENV.
+   *
+   * Inheritance rather than a fixed default because a project tends to want one environment throughout: someone working on a
+   * host-toolchain repo would otherwise re-flip the switch on every new chat, and someone who deliberately sandboxes a
+   * project would silently lose that on the next one.
+   */
+  secureEnvDefaultFor: (projectId: string | null | undefined) => boolean | undefined;
   /** Saves or clears the context compaction snapshot for a conversation (persists to disk only). */
   setConversationCompaction: (id: string, compaction: StoredCompaction | null) => void;
   /** Saves or clears the Task Memory (prose brief + todos) for a conversation (persists to disk only). */
@@ -182,9 +194,12 @@ export const useAgentChatStore = create<AgentChatState>((set, get) => {
       });
     },
 
-    ensureProject: (workdir, mode) => {
-      const key = workdir ?? ""; // Empty string = default project (daily mode without selected folder)
-      const found = get().projects.find((p) => (p.workdir ?? "") === key && p.mode === mode);
+    ensureProject: (workdir) => {
+      const key = workdir ?? ""; // Empty string = default project (no folder selected)
+      // Matched on the working directory alone. It used to also require `p.mode === mode`, which split one folder into a
+      // daily project and a dev project; with a single mode that test would only ever have stranded the pre-merge records —
+      // an old "daily" project would never be found again and a duplicate row would appear for the same folder.
+      const found = get().projects.find((p) => (p.workdir ?? "") === key);
       if (found) {
         set({ activeProjectId: found.id });
         return found.id;
@@ -193,7 +208,7 @@ export const useAgentChatStore = create<AgentChatState>((set, get) => {
         id: uid(),
         name: key ? basename(key) : DEFAULT_PROJECT_NAME,
         workdir: key,
-        mode,
+        mode: AGENT_MODE,
         createdAt: Date.now(),
       };
       set((s) => {
@@ -205,15 +220,19 @@ export const useAgentChatStore = create<AgentChatState>((set, get) => {
       return project.id;
     },
 
-    createConversation: ({ mode, workdir, projectWorkdir }) => {
-      const pid = get().ensureProject(projectWorkdir, mode);
+    createConversation: ({ workdir, projectWorkdir, secureEnv }) => {
+      const pid = get().ensureProject(projectWorkdir);
       const now = Date.now();
       const conv: Conversation = {
         id: uid(),
         projectId: pid,
         title: DEFAULT_TITLE,
-        mode,
+        mode: AGENT_MODE,
         workdir,
+        // Written at creation, from whatever the page had resolved for this not-yet-persisted session (inherited from the
+        // project's last session, or the app default). Recording it here rather than on the first toggle is what lets the
+        // NEXT session inherit it — a session that was never toggled still states which environment it ran under.
+        ...(typeof secureEnv === "boolean" ? { secureEnv } : {}),
         messages: [],
         createdAt: now,
         updatedAt: now,
@@ -358,6 +377,25 @@ export const useAgentChatStore = create<AgentChatState>((set, get) => {
         ),
       }));
       if (pid) markProjectDirty(pid);
+    },
+
+    setConversationSecureEnv: (id, secureEnv) => {
+      const pid = get().getConversation(id)?.projectId;
+      set((s) => ({
+        conversations: s.conversations.map((c) => (c.id === id ? { ...c, secureEnv } : c)),
+      }));
+      if (pid) markProjectDirty(pid);
+    },
+
+    secureEnvDefaultFor: (projectId) => {
+      if (!projectId) return undefined;
+      // Most recently touched first, then the first session that actually recorded a setting. `updatedAt` rather than
+      // `createdAt`: the session the user last worked in is the better statement of what this project wants, even when an
+      // older one was created after it. Sessions predating the switch have no `secureEnv` and are simply skipped, so one
+      // untouched legacy conversation cannot mask the answer.
+      return get()
+        .conversations.filter((c) => c.projectId === projectId && typeof c.secureEnv === "boolean")
+        .sort((a, b) => b.updatedAt - a.updatedAt)[0]?.secureEnv;
     },
 
     setConversationCompaction: (id, compaction) => {

@@ -22,12 +22,12 @@
  *   unsupported(reason) | disabled | starting → ready | error(reason)
  * Initialization directly creates the single long-lived VM (mounting the shared root ∪ folders explicitly
  * chosen in the past) —— startup itself is the availability check, so the first command waits nothing extra.
- * The sandbox is only switched in as the DEFAULT engine when ready and in "daily" mode; dev mode keeps
- * running commands on the host, because a dev-mode working directory is one of the user's real projects
- * and its toolchain (git, node_modules, installed SDKs) is the host's. Dev mode can still reach the VM
- * per-command via getSandboxEngine() — that is what `run_command({ sandbox: true })` uses to get at the
- * image's document/media toolchain, which exists nowhere on the host. The VM
- * binaries ship with the app and the rootfs is downloaded on first run (see sandbox/qemu/README).
+ * The sandbox is only switched in as the DEFAULT engine when ready AND the active session asked for it (its
+ * secure-environment switch, mirrored here by the renderer). A session that chose host execution keeps running commands on
+ * this machine, because its working directory is one of the user's real projects and that project's toolchain (git,
+ * node_modules, installed SDKs) is the host's. Either way the VM stays reachable per-command via getSandboxEngine() — that is
+ * what `run_command({ sandbox: true })` uses to get at the image's document/media toolchain, which exists nowhere on the host.
+ * The VM binaries ship with the app and the rootfs is downloaded on first run (see sandbox/qemu/README).
  *
  * Configuration (the [sandbox] section of app.config, all optional):
  *   engine = auto | native      auto (default): enable qemu in the background if hardware virtualization exists; native: fully disabled
@@ -69,7 +69,10 @@ const DEFAULTS = {
 
 let sandbox = null; // qemu engine module loaded once ready
 let ready = false;
-let mode = "daily"; // synced from the renderer via setSandboxMode; only "daily" gets the sandbox as its DEFAULT engine
+// The active session's secure-environment switch, mirrored down by the renderer (setSecureEnv). "sandbox" gets the VM as the
+// DEFAULT engine once it is ready; "host" runs commands directly on this machine. It used to be the daily/dev mode, a global
+// toggle; it is now per-conversation, so this changes whenever the user switches session as well as when they flip the switch.
+let preference = "host";
 let initPromise = null;
 let disposing = false; // during intentional shutdown/restart: ignore the ensuing VM exit callback (not treated as a crash)
 const loaded = [native]; // loaded engine instances (iterated in full on stop/cleanup)
@@ -86,7 +89,7 @@ export function onSandboxStatus(fn) {
 
 /** Current sandbox status (for the renderer's initial sync + building the system prompt). */
 export function getSandboxStatus() {
-  return { ...status, mode, active: getEngine().id, available: !!(ready && sandbox), hostPlatform: process.platform };
+  return { ...status, preference, active: getEngine().id, available: !!(ready && sandbox), hostPlatform: process.platform };
 }
 
 function setStatus(phase, extra = {}) {
@@ -123,10 +126,11 @@ function handleVmExit(code, signal, stderr = "") {
   console.warn(`[sandbox] VM exited unexpectedly (${how}): ${why}; falling back to native`);
 }
 
-/** The renderer syncs the current mode (daily / dev). dev mode routes the DEFAULT engine back to native
- *  immediately; the VM stays up and reachable through getSandboxEngine(). */
-export function setSandboxMode(m) {
-  mode = m === "dev" ? "dev" : "daily";
+/** The renderer syncs the active session's secure-environment switch. "host" routes the DEFAULT engine back to native
+ *  immediately; the VM stays up and reachable through getSandboxEngine(). Anything unrecognised means host, so a stale
+ *  renderer (or a replayed "dev") lands on the safe-for-the-toolchain side rather than silently entering the VM. */
+export function setSandboxMode(p) {
+  preference = p === "sandbox" ? "sandbox" : "host";
   return getSandboxStatus();
 }
 
@@ -186,7 +190,7 @@ async function hypervisorPresent() {
 }
 
 /**
- * The shared root: userData/agent/ai-agent, the parent of every session workdir in daily mode.
+ * The shared root: userData/agent/ai-agent, the parent of every session workdir that has no project folder of its own.
  *
  * This is NOT a mount set. Each command mounts its own cwd at /workspace and nothing else (see bwrapFlags), so no
  * directory has to be declared up front — the root is only the fallback for a command that arrives without a cwd.
@@ -291,20 +295,20 @@ export async function sandboxVmInfo() {
   try { const m = await import("./qemu.mjs"); return m.sandboxVmInfo(); } catch { return null; }
 }
 
-/** Current DEFAULT engine (synchronous). qemu only when ready and in "daily" mode, otherwise always native. */
+/** Current DEFAULT engine (synchronous). qemu only when ready and the active session asked for the secure environment. */
 export function getEngine() {
-  return ready && sandbox && mode === "daily" ? sandbox : native;
+  return ready && sandbox && preference === "sandbox" ? sandbox : native;
 }
 
 /**
- * The sandbox engine itself, regardless of mode — null when the VM is not up.
+ * The sandbox engine itself, regardless of the session's preference — null when the VM is not up.
  *
- * Separate from getEngine() on purpose. getEngine answers "where does a command go by default", and in dev
- * mode that must stay native: the working directory is one of the user's real projects, built against the
- * host's git / node_modules / SDKs, and silently running its build inside a Debian guest would break it.
- * This answers the different question "is the VM there if a caller explicitly wants it", which is what lets
- * dev mode use the image's document/media toolchain (imagemagick, ffmpeg, pandoc, OCR) — software that is
- * only ever installed in the guest, so there is no host fallback to prefer.
+ * Separate from getEngine() on purpose. getEngine answers "where does a command go by default", and for a session that chose
+ * host execution that must stay native: the working directory is one of the user's real projects, built against the host's
+ * git / node_modules / SDKs, and silently running its build inside a Debian guest would break it. This answers the different
+ * question "is the VM there if a caller explicitly wants it", which is what lets a host-execution session still use the
+ * image's document/media toolchain (imagemagick, ffmpeg, pandoc, OCR) — software that is only ever installed in the guest,
+ * so there is no host fallback to prefer.
  */
 export function getSandboxEngine() {
   return ready && sandbox ? sandbox : null;
