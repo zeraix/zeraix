@@ -136,7 +136,7 @@ export default function AgentSettingsPage() {
         ) : effectiveSection === "mcp" ? (
           <McpSection t={t} />
         ) : effectiveSection === "memory" ? (
-          <div className="max-w-2xl">
+          <div className="max-w-2xl mx-auto">
             <MemorySection t={t} />
             <ProjectMemorySection t={t} />
           </div>
@@ -149,7 +149,7 @@ export default function AgentSettingsPage() {
         ) : effectiveSection === "about" ? (
           <AboutSection t={t} />
         ) : (
-          <p className="text-sm text-ink-subtle">{t("settings.noResults")}</p>
+          <p className="text-sm text-ink-subtle mx-auto">{t("settings.noResults")}</p>
         )}
       </CustomScrollbar>
     </div>

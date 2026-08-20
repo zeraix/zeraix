@@ -71,7 +71,7 @@ export function NotifySoundSection({ t }: { t: TFunc }) {
   };
 
   return (
-    <div className="max-w-2xl">
+    <div className="max-w-2xl mx-auto">
       <h2 className="mb-1 text-xl font-bold text-ink">{t("settings.notify")}</h2>
       <p className="mb-5 text-sm text-ink-subtle">{t("notify.desc")}</p>
 

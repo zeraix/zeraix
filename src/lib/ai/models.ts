@@ -53,6 +53,9 @@ export interface AgentModel {
   /** Set when the provider actually rejected a request carrying an image (see markVisionUnsupported).
    *  Learned at runtime rather than guessed, and the only thing that stops images being sent. */
   visionUnsupported?: boolean;
+  /** When that verdict was learned (epoch ms). It EXPIRES — see visionBlocked. An entry carrying the flag
+   *  with no timestamp was written by a build that had no expiry and is treated as already expired. */
+  visionUnsupportedAt?: number;
   /** The entry's real context window (tokens). For a local model = the -c passed when llama-server starts;
    *  when set, it takes precedence over resolveContextWindow's registry / naming heuristics / 1M default. */
   contextWindow?: number;
@@ -107,8 +110,8 @@ export { resolveContextWindow, DEFAULT_CONTEXT_WINDOW } from "./modelRegistry";
  */
 export function modelAcceptsImages(m: AgentModel): boolean {
   // Learned from an actual provider rejection — the only source that is ever certain a model is
-  // text-only, so it wins over everything else.
-  if (m.visionUnsupported) return false;
+  // text-only, so it wins over everything else. Only while the verdict is still fresh: see visionBlocked.
+  if (visionBlocked(m)) return false;
   // Local llama-server: whether an mmproj projector was loaded is a hard local fact, known before the
   // request, and sending an image without one fails every time. Worth gating on.
   if (m.providerId === "local") return !!m.multimodal;
@@ -240,22 +243,69 @@ export function addCustomModel(input: {
  * an explicit flag, a recognised model id, or a local build with an mmproj projector.
  */
 export function modelLikelyVision(m: AgentModel): boolean {
-  if (m.visionUnsupported) return false;
+  if (visionBlocked(m)) return false;
   if (m.providerId === "local") return !!m.multimodal;
   return m.multimodal === true || resolveVision(m.model);
 }
 
 /**
+ * How long a learned "this provider rejected images" verdict is trusted before images are tried again.
+ *
+ * The verdict is an inference from a single confounded experiment — the request carrying images failed and
+ * the one without them succeeded — and the images are the largest, slowest part of that request, so plenty
+ * of failures that have nothing to do with vision reproduce the same pattern. isVisionRejection now keeps
+ * the obvious impostors out (rate limits, timeouts, oversized payloads, context overflow, 5xx), but no error
+ * classifier is exhaustive across every gateway's wording, so the verdict also expires: a wrong one costs a
+ * day of stripped images instead of forever, and a right one costs one extra request a day.
+ */
+export const VISION_RECHECK_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * Is this entry currently held to be image-blind?
+ *
+ * The flag alone is not enough — it has to be FRESH. An entry carrying `visionUnsupported` with no
+ * `visionUnsupportedAt` came from a build where the verdict was permanent and the only escape was deleting
+ * and re-adding the model; those are treated as expired, which is what un-blinds the models already stuck
+ * that way in the field on first launch after this upgrade.
+ */
+export function visionBlocked(m: AgentModel): boolean {
+  if (!m.visionUnsupported) return false;
+  if (!m.visionUnsupportedAt) return false;
+  return Date.now() - m.visionUnsupportedAt < VISION_RECHECK_MS;
+}
+
+/**
  * Record that this model's provider rejected a request containing an image, so later sends strip images
- * up front instead of paying a failed round trip every turn. Idempotent; a no-op for a model that is no
- * longer in the list. Clearing it is a matter of removing and re-adding the model — deliberately not a
- * toggle, because the flag means "the provider said no", not "the user thinks so".
+ * up front instead of paying a failed round trip every turn. A no-op for a model that is no longer in the
+ * list, and for one whose verdict is still live — but an EXPIRED verdict is re-armed rather than ignored,
+ * so a model that keeps rejecting images keeps being remembered without ever writing in between.
+ *
+ * The no-op on a live verdict is what keeps a multi-round turn quiet. The strip happens against the model
+ * resolved when the turn started, so once a rejection lands mid-turn the remaining rounds still send their
+ * images and still fail; without the guard each of those would rewrite the model list and broadcast a
+ * change event, re-rendering the page mid-turn for a verdict that has not moved.
+ *
+ * Only ever call this for a failure that isVisionRejection accepted: it is a claim about the MODEL, and the
+ * user sees its consequence as "the AI says it cannot see my picture" with nothing on screen explaining why.
  */
 export function markVisionUnsupported(id: string): void {
   const list = loadModelList();
   const entry = list.find((m) => m.id === id);
-  if (!entry || entry.visionUnsupported) return;
-  saveModelList(list.map((m) => (m.id === id ? { ...m, visionUnsupported: true } : m)));
+  if (!entry || visionBlocked(entry)) return;
+  saveModelList(
+    list.map((m) => (m.id === id ? { ...m, visionUnsupported: true, visionUnsupportedAt: Date.now() } : m)),
+  );
+}
+
+/** Drop a learned image-rejection verdict (settings "send images again"). Returns the updated list. */
+export function clearVisionUnsupported(id: string): AgentModel[] {
+  const list = loadModelList();
+  if (!list.some((m) => m.id === id && m.visionUnsupported)) return list;
+  const next = list.map((m) =>
+    m.id === id ? { ...m, visionUnsupported: undefined, visionUnsupportedAt: undefined } : m,
+  );
+  saveModelList(next);
+  return next;
 }
 
 /** Remove a model; if the removed one was the current selection, select the first entry in the list instead. Returns the list after removal. */

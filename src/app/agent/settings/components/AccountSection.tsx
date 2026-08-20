@@ -24,7 +24,7 @@ export function AccountSection({
 }) {
   const [privacy, setPrivacy] = useState(false);
   return (
-    <div className="max-w-2xl">
+    <div className="max-w-2xl mx-auto">
       <h2 className="mb-5 text-xl font-bold text-ink">{t("settings.account")}</h2>
 
       {/* <p className="mb-2 text-sm font-semibold text-ink">{t("account.info")}</p>

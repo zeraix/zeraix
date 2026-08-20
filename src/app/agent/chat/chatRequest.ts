@@ -24,7 +24,7 @@ import { buildLogMeta, logModelCall } from "@/lib/ai/usageLog";
 import type { TFunc } from "@/lib/i18n";
 import { useAuthStore } from "@/store/authStore";
 import type { ApiMsg, ChatResponse, RequestLog } from "./types";
-import { hostOfEndpoint, stripAllImagesForText, stripReasoningContent } from "./wireHelpers";
+import { hostOfEndpoint, isVisionRejection, stripAllImagesForText, stripReasoningContent } from "./wireHelpers";
 
 /** This round's running token total (every request of every tool round and subagent adds to it). */
 export type TurnUsage = {
@@ -356,6 +356,11 @@ export function createChatRequest(cfg: {
    * support image input", a bare 400), and a signature that misses one puts us back to a hard failure on
    * a picture the user can see on screen. The cost of guessing wrong here is one request that was
    * already failing.
+   *
+   * The MARKING is the opposite — narrow (isVisionRejection), because its cost is not one request but every
+   * later turn: the model is remembered as text-only and the user's images are stripped before sending. A
+   * broad retry paired with a broad verdict is what turned transient failures into permanently image-blind
+   * models, curable only by deleting and re-adding the model.
    */
   const requestChat = async (
     messages: ApiMsg[],
@@ -435,7 +440,21 @@ export function createChatRequest(cfg: {
         logFailure(retryErr);
         throw retryErr;
       }
-      if (activeModel?.id) markVisionUnsupported(activeModel.id);
+      // The retry succeeded, but that alone does NOT mean the model is image-blind: images are the bulk of
+      // the request, so a rate limit, a timeout, an oversized body or a context overflow all "recover" the
+      // same way. Only a failure that actually reads as an image rejection is allowed to brand the model —
+      // anything else stays a one-off, because the verdict silently strips the user's pictures from every
+      // later turn and reads to them as "the AI cannot see images".
+      if (activeModel?.id && isVisionRejection(e)) {
+        console.warn(`[vision] ${modelName} rejected image input; images will be stripped for it`, e);
+        markVisionUnsupported(activeModel.id);
+      } else {
+        console.warn(
+          `[vision] a request carrying images failed and succeeded without them, but the error does not read ` +
+            `as an image rejection — ${modelName} keeps image support`,
+          e,
+        );
+      }
       return data;
     }
   };

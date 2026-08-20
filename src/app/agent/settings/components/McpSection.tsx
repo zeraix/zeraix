@@ -195,7 +195,7 @@ export function McpSection({ t }: { t: TFunc }) {
   };
 
   return (
-    <div className="max-w-2xl">
+    <div className="max-w-2xl mx-auto">
       <h2 className="mb-2 text-xl font-bold text-ink">{t("settings.mcp")}</h2>
       <p className="mb-5 text-xs text-ink-subtle">{t("mcp.desc")}</p>
 

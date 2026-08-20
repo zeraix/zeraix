@@ -471,10 +471,16 @@ function ChatAgent() {
   // The settings area (working directory / run parameters) is collapsed by default; it expands on demand in dev mode when a working directory is missing.
   const [settingsOpen, setSettingsOpen] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
+  // The header's root element. Nothing reads it yet — it exists so measurements against the top bar (its height,
+  // its bottom edge) have a handle that does not depend on a querySelector or a magic pixel constant.
+  const headerRef = useRef<HTMLDivElement>(null);
+
   // Auto-scroll follow: pinned to the bottom by default. If the user manually scrolls up while generating → pause auto-scroll and surface a "back to bottom" button; scrolling back to the bottom resumes it.
   // atBottomRef is for the synchronous read of "whether to follow when new content arrives" (avoiding reliance on async state); atBottom drives the button's visibility.
   const atBottomRef = useRef(true);
   const [atBottom, setAtBottom] = useState(true);
+  // For the scroll bar's thumb position
+  const [scrollTopNum, setScrollTopNum] = useState(0); 
   // Transcript window: how far back into `display` the DOM currently reaches. An absolute index rather than a
   // "how many turns" count, so that appending to the tail (streaming, a new send) does not push already-revealed
   // history back out of view — indices of earlier entries are stable, every write to `display` is tail-only.
@@ -1088,7 +1094,18 @@ function ChatAgent() {
     return el.scrollHeight - el.scrollTop - el.clientHeight <= SCROLL_BOTTOM_THRESHOLD;
   };
   // Scroll listener: update "whether pinned to the bottom". Manual scroll-up while generating → pause auto-scroll, show the button; scroll back to the bottom → resume.
-  const onScroll = () => {
+  const onScroll = (e: React.UIEvent<HTMLDivElement>) => {
+    // currentTarget, not target: the typed one is the scroller itself, while `target` is whatever descendant
+    // the event passed through and is only an EventTarget — it has no scrollTop to read.
+    const el = e.currentTarget;
+    if (el) {
+      if (scrollTopNum < el.scrollTop) {
+        headerRef.current?.classList.add("hidden");
+      } else {
+        headerRef.current?.classList.remove("hidden");
+      }
+      setScrollTopNum(el.scrollTop);
+    }
     const near = isAtBottom();
     atBottomRef.current = near;
     setAtBottom((prev) => (prev === near ? prev : near));
@@ -3517,7 +3534,19 @@ function ChatAgent() {
         //    history, even one sent turns ago to a different model).
         //  - Multimodal local model: keep inline base64 images, but downgrade remote http images (llama can't fetch them).
         //  - Multimodal cloud model: leave images as-is.
-        if (!activeModel?.multimodal) wire = stripAllImagesForText(wire);
+        if (!activeModel?.multimodal) {
+          // Logged because this is otherwise invisible: the request goes out with the pictures replaced by
+          // "N image(s) omitted", the model answers that it cannot see images, and nothing on screen says the
+          // app removed them. If this fires for a model that DOES support vision, the verdict behind it is in
+          // the model list (visionUnsupported) and settings offers a reset.
+          if (wire.some((m) => Array.isArray(m.content) && m.content.some((p) => p.type === "image_url"))) {
+            console.warn(
+              `[vision] stripping images for ${activeModel?.model ?? "(no model)"} — it is a local build without ` +
+                "an mmproj projector, or a provider rejected image input for it within the last day",
+            );
+          }
+          wire = stripAllImagesForText(wire);
+        }
         else if (isLocalModel) wire = stripRemoteImagesForLocal(wire);
         // The interrupt-resume hint and the rating-feedback hint used to be appended here, wire-only, on the first request of the
         // round. Both are now written into the user turn itself before the loop starts (see the change-events block above), so
@@ -4215,8 +4244,9 @@ function ChatAgent() {
 
   return (
     <div className="relative flex h-full">
-    <div className="relative flex h-full min-w-0 flex-1 flex-col overflow-hidden bg-surface-muted text-ink">
+    <div className="relative flex h-full minonSecureEnvChange-w-0 flex-1 flex-col overflow-hidden bg-surface-muted text-ink">
       <ChatHeader
+        ref={headerRef}
         title={activeConvTitle}
         hasConversation={!!activeConvId}
         messageCount={display.length}

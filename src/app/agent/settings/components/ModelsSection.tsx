@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { Plus, Trash2 } from "lucide-react";
+import { ImageOff, Plus, Trash2 } from "lucide-react";
 import { useLoginModalStore } from "@/store/loginModalStore";
 import {
   addCustomModel,
@@ -9,6 +9,7 @@ import {
   addOfficialModelFromCatalog,
   type AgentModel,
   apiFormatSuffix,
+  clearVisionUnsupported,
   getApiKeyByRef,
   getSelectedModelId,
   loadModelList,
@@ -18,6 +19,7 @@ import {
   removeModel,
   setApiKeyByRef,
   setSelectedModelId,
+  visionBlocked,
 } from "@/lib/ai/models";
 import { isOpenAIError, listModels, type Model } from "@/lib/api/agent";
 import { type TFunc } from "@/lib/i18n";
@@ -154,7 +156,7 @@ export function ModelsSection({ t }: { t: TFunc }) {
         : (PROVIDERS.find((p) => p.id === m.providerId)?.label ?? m.providerId);
 
   return (
-    <div className="max-w-2xl">
+    <div className="max-w-2xl mx-auto">
       <h2 className="mb-2 text-xl font-bold text-ink">{t("settings.models")}</h2>
       <p className="mb-5 text-xs text-ink-subtle">{t("models.desc")}</p>
 
@@ -194,12 +196,35 @@ export function ModelsSection({ t }: { t: TFunc }) {
                       {t("models.multimodal")}
                     </span>
                   )}
+                  {/* The app decided this model rejects images and is stripping them before every send. Shown
+                      because the only other evidence the user gets is the model answering "I cannot see
+                      images" — which reads as a broken model rather than an app-side verdict. */}
+                  {visionBlocked(m) && (
+                    <span
+                      title={t("models.visionBlockedHint")}
+                      className="flex shrink-0 items-center gap-1 rounded-full bg-amber-500/15 px-1.5 py-0.5 text-[10px] font-medium text-amber-600 dark:text-amber-400"
+                    >
+                      <ImageOff className="size-3" />
+                      {t("models.visionBlocked")}
+                    </span>
+                  )}
                 </p>
                 <p className="truncate text-xs text-ink-subtle">
                   {providerLabel(m)} · {m.model}
                   {m.custom && m.endpoint ? ` · ${m.endpoint}` : ""}
                 </p>
               </div>
+              {/* Undo the verdict without deleting the model — which used to be the only way back, taking the
+                  API key and the default selection with it. */}
+              {visionBlocked(m) && (
+                <button
+                  type="button"
+                  onClick={() => setList(clearVisionUnsupported(m.id))}
+                  className="shrink-0 rounded-md border border-line px-2 py-1 text-[11px] text-ink-subtle transition hover:bg-surface hover:text-ink"
+                >
+                  {t("models.visionReset")}
+                </button>
+              )}
               <button
                 type="button"
                 onClick={() => {

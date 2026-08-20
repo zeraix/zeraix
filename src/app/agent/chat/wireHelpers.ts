@@ -84,6 +84,111 @@ export function stripAllImagesForText(messages: ApiMsg[]): ApiMsg[] {
 }
 
 /**
+ * Wording that names the image input itself.
+ *
+ * Only consulted AFTER the status gate below, and deliberately does NOT include the bare words "vision" or
+ * "multimodal": those are what vision models are NAMED (gpt-4-vision-preview, qwen-vl, *-multimodal), and
+ * providers echo the model name back in unrelated errors — "rate limit reached for gpt-4-vision-preview"
+ * would otherwise read as a vision rejection and blind the one class of model that certainly is not blind.
+ * Every entry here names the image as INPUT, which a model name never does.
+ */
+const VISION_REJECTION_WORDS = [
+  "image_url",
+  "invalid_image",
+  "image input",
+  "image content",
+  "not support image",
+  "support images",
+  "image is not supported",
+  "images are not supported",
+  "cannot process image",
+];
+
+/** Wording that explains a failure WITHOUT the model being image-blind — the images were merely the bulk. */
+const NOT_VISION_WORDS = [
+  // Size / context: images are by far the biggest part of the body, so stripping them "fixes" these every time.
+  "context length",
+  "context_length",
+  "maximum context",
+  "too many tokens",
+  "token limit",
+  "reduce the length",
+  "too large",
+  "entity too large",
+  "payload",
+  "body limit",
+  // Load / quota / billing.
+  "rate limit",
+  "rate_limit",
+  "quota",
+  "overload",
+  "capacity",
+  "insufficient",
+  "balance",
+  "billing",
+  "try again",
+  // Transport: no status at all, so the retry succeeding says nothing about the model.
+  "timeout",
+  "timed out",
+  "network",
+  "failed to fetch",
+  "fetch failed",
+  "socket",
+  "econnreset",
+  "etimedout",
+  "enotfound",
+  "aborted",
+];
+
+/**
+ * Does this failure mean "this model cannot accept images", as opposed to "this request failed and happened
+ * to be carrying images"?
+ *
+ * The distinction is the whole point. requestChat retries any failed image request without its images, and a
+ * retry that succeeds used to be taken as proof the model is text-only — a verdict then persisted against the
+ * model forever. But images are the largest and slowest part of a request, so a rate limit, a timeout on a
+ * multi-megabyte upload, an oversized body, or a context overflow ALL produce exactly the same evidence, and
+ * each one permanently blinded a perfectly capable vision model. That is the bug behind "the AI says it can't
+ * see images, and the only cure is deleting and re-adding the model".
+ *
+ * So: retry broadly (a failed request is worth a second chance whatever the cause), but learn narrowly. A
+ * status the provider only returns for a malformed/unsupported request body counts; a transient one, an
+ * oversized one, and a request that never got a status at all do not.
+ *
+ * The gates run in this order on purpose — status first, wording second. Wording alone cannot be trusted
+ * ahead of the status because provider errors quote the MODEL NAME, and vision models are named for their
+ * vision; matching text first turned "429 rate limit reached for gpt-4-vision-preview" into a verdict that
+ * the model cannot see. Every gate fails safe: when in doubt the model KEEPS image support, because being
+ * wrong that way costs one retried request while the other way silently deletes the user's picture.
+ *
+ * A bare 400 with no explanation is still enough. That matters for the common mid-conversation switch — a
+ * vision model to a text-only one like DeepSeek, with images already in the history — where the rejection
+ * arrives as a deserialization complaint that never mentions images. Without it, every later turn in that
+ * conversation would pay a doomed request plus a retry, forever.
+ */
+export function isVisionRejection(err: unknown): boolean {
+  const msg = (err instanceof Error ? err.message : String(err ?? "")).toLowerCase();
+  if (!msg) return false;
+  // Gate 1 — the status. Our own errors are "HTTP <status> — <body>"; the body is searched only as a
+  // fallback, and only for 4xx/5xx, so a model name like gpt-4o-2024-11-20 or a port number cannot pose
+  // as one. No status at all means the request never reached the provider (a thrown fetch, an abort), and
+  // a retry succeeding after that says nothing whatever about the model.
+  const status = Number(/\bhttp\s+(\d{3})\b/.exec(msg)?.[1] ?? /\b([45]\d{2})\b/.exec(msg)?.[1] ?? 0);
+  // Only the statuses that mean "I will not process this body as sent". 5xx is the provider failing at its
+  // own end, and 408/409/413/429 are load, conflict and size — every one of which the stripped retry
+  // "fixes" simply by being smaller.
+  if (status !== 400 && status !== 415 && status !== 422) return false;
+  // Gate 2 — the provider named the image input. Checked ahead of the exclusions, and safe to, now that the
+  // status gate has already removed the errors that merely quote a model's name: a 400 that says "image_url"
+  // is telling us the answer, even if the body also says something like "please try again".
+  if (VISION_REJECTION_WORDS.some((w) => msg.includes(w))) return true;
+  // Gate 3 — a client error that explains itself as something other than image support.
+  if (NOT_VISION_WORDS.some((w) => msg.includes(w))) return false;
+  // An unexplained rejection of the body we sent. The images were the only unusual thing in it.
+  return true;
+}
+
+/**
  * Local-model only: downgrade the image_url parts of "remote http images" in history to textual XML references (keeping
  * the URL), while inline data:base64 images are still kept as image_url. llama-server cannot fetch remote URLs (400
  * Failed to load image), but most history images are OSS links uploaded by cloud models with no original bytes to

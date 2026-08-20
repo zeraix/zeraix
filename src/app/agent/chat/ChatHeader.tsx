@@ -54,10 +54,18 @@ export function ChatHeader(props: {
   enabledSkillCount: number;
   /** The settings strip below the title row is only rendered while the settings area is expanded. */
   settingsOpen: boolean;
+  /**
+   * The header's own root element, for a caller that needs to measure or position against it.
+   *
+   * Declared as an ordinary prop rather than through forwardRef: React 19 passes `ref` to a function component
+   * like any other prop, and the wrapper only ever existed to work around that. Optional, so the component is
+   * still usable — as it is everywhere else — without one.
+   */
+  ref?: React.Ref<HTMLDivElement>;
 }) {
   const t = useT();
   const router = useRouter();
-  const { sandboxStatus: sbx, activeModel, sessionUsage, secureEnv } = props;
+  const { sandboxStatus: sbx, activeModel, sessionUsage, secureEnv, ref: rootRef } = props;
   const usageArgs = {
     approx: sessionUsage.estimated ? "≈" : "",
     total: sessionUsage.total,
@@ -130,7 +138,7 @@ export function ChatHeader(props: {
           : t("sbx.env.offTip");
 
   return (
-    <div className="border-b border-line bg-surface/90 backdrop-blur">
+    <div ref={rootRef} className="border-b border-line bg-surface/90 backdrop-blur">
       <div className="mx-auto w-full px-4 py-3">
         {/* Title row */}
         <div className="flex min-w-0 items-center gap-2">

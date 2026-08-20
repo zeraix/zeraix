@@ -62,7 +62,7 @@ export function AboutSection({ t }: { t: TFunc }) {
   const openGithub = () => window.open(GITHUB_URL, "_blank", "noopener,noreferrer");
 
   return (
-    <div className="max-w-2xl">
+    <div className="max-w-2xl mx-auto">
       <h2 className="mb-5 text-xl font-bold text-ink">{t("about.title")}</h2>
 
       {/* Identity */}
