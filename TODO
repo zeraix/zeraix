@@ -1,1 +1,67 @@
-Refactor the existing Agent Runtime module by rewriting its underlying engine in Rust. Redesign core capabilities—including Agent task scheduling, tool execution, sub-agent orchestration, MCP management, process lifecycle management, task cancellation and timeouts, permission control, and sandboxed execution—to resolve the current Runtime's shortcomings in concurrent scheduling, execution efficiency, stability, and extensibility. The goal is to build a more efficient, stable, secure, and sustainably scalable local Agent execution Runtime.
+# Refactor the existing Agent Runtime module by rewriting its underlying engine in Rust. Redesign core capabilities—including Agent task scheduling, tool execution, sub-agent orchestration, MCP management, process lifecycle management, task cancellation and timeouts, permission control, and sandboxed execution—to resolve the current Runtime's shortcomings in concurrent scheduling, execution efficiency, stability, and extensibility. The goal is to build a more efficient, stable, secure, and sustainably scalable local Agent execution Runtime.
+
+# Agent Runtime Refactor TODO (Rust Engine)
+
+> Goal: Rewrite the Agent Runtime's underlying engine in Rust to resolve current shortcomings in concurrent scheduling, execution efficiency, stability, and extensibility.
+
+## 0. Preparation
+- [ ] Map out the existing Runtime architecture and identify module boundaries/dependencies
+- [ ] Decide migration strategy: full rewrite vs. incremental replacement (recommend isolating process lifecycle + sandboxing first, validate independently, then tackle scheduling/orchestration)
+- [ ] Define an API compatibility layer to avoid breaking the existing tool/plugin ecosystem
+- [ ] Confirm tech stack: async runtime (tokio), logging (tracing), concurrency testing (loom)
+
+## 1. Task Scheduling
+- [ ] Build the base scheduler on tokio's multi-threaded work-stealing runtime
+- [ ] Design task state machine: Pending → Running → Waiting(ToolCall) → Done/Cancelled/Failed
+- [ ] Persist state transitions (at minimum an in-memory snapshot) to support crash recovery
+- [ ] Implement priority queues / resource quota bucketing
+
+## 2. Tool Execution
+- [ ] Define a unified `Tool` trait
+- [ ] Validate inputs/outputs against schema (serde + JSON schema)
+- [ ] Wrap execution with `tokio::select!` for timeout and cancellation signals so tool calls can be forcibly interrupted
+- [ ] Fallback mechanism for tools (external processes / network calls) that don't natively respond to cancellation
+
+## 3. Sub-agent Orchestration
+- [ ] Adopt an actor model; parent/child agents communicate via channels
+- [ ] Hierarchical cancellation propagation (`tokio_util::sync::CancellationToken` parent/child derivation)
+- [ ] Sub-agent lifecycle management and fault isolation (prevent a crashed sub-agent from taking down the parent task)
+
+## 4. MCP Management
+- [ ] One supervisor task per MCP connection: handles reconnection, heartbeats, and failure recovery
+- [ ] Backpressure handling for stdio transport to prevent large responses from stalling the scheduler
+- [ ] Connection pooling design for remote MCP servers (SSE/HTTP)
+- [ ] Degradation strategy for MCP timeouts/failures (must not block overall scheduling)
+
+## 5. Process Lifecycle Management
+- [ ] Wrap child process management using tokio's `Command`
+- [ ] Graceful shutdown: send signal first, SIGKILL after timeout
+- [ ] Resource limits: Linux cgroups v2 (CPU / memory quotas)
+- [ ] Zombie process reaping (reaper task)
+
+## 6. Cancellation & Timeouts
+- [ ] Use `CancellationToken` consistently across the entire call chain
+- [ ] Standardize timeout handling via `tokio::time::timeout`; ban ad-hoc timers scattered in business logic
+- [ ] Verify cancellation semantics are consistent across the task tree (parent cancellation → all child tasks/tool calls converge)
+
+## 7. Permission Control
+- [ ] Design a capability-based permission model (rather than a simple ACL)
+- [ ] Each tool call carries a capability token declaring accessible resource scope (file paths / network domains / process spawning rights, etc.)
+- [ ] Consolidate permission checks at the sandbox boundary instead of scattering them across individual tool implementations
+
+## 8. Sandboxed Execution
+- [ ] Evaluate technical approaches: namespaces + seccomp-bpf / landlock vs. WASM (wasmtime)
+- [ ] Filesystem access allowlist mechanism
+- [ ] Network access allowlist mechanism
+- [ ] Resource quota limits (memory / CPU / process count caps)
+- [ ] Security testing for sandbox escape scenarios
+
+## 9. Observability
+- [ ] Integrate `tracing` with structured logging
+- [ ] Instrument key paths: scheduling latency, tool execution duration, MCP connection status, cancellation propagation latency
+
+## 10. Testing & Validation
+- [ ] Concurrency correctness testing (`loom`) covering critical scheduler and cancellation logic paths
+- [ ] Fault injection testing: kill -9, network partitions, unresponsive MCP servers, hung processes, etc.
+- [ ] Performance benchmarking: compare concurrent throughput, latency, and resource usage against the existing Runtime
+- [ ] Compatibility regression testing: ensure existing tools/plugins run correctly on the new Runtime
