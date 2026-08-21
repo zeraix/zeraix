@@ -1097,15 +1097,15 @@ function ChatAgent() {
   const onScroll = (e: React.UIEvent<HTMLDivElement>) => {
     // currentTarget, not target: the typed one is the scroller itself, while `target` is whatever descendant
     // the event passed through and is only an EventTarget — it has no scrollTop to read.
-    const el = e.currentTarget;
-    if (el) {
-      if (scrollTopNum < el.scrollTop) {
-        headerRef.current?.classList.add("hidden");
-      } else {
-        headerRef.current?.classList.remove("hidden");
-      }
-      setScrollTopNum(el.scrollTop);
-    }
+    // const el = e.currentTarget;
+    // if (el) {
+    //   if (scrollTopNum < el.scrollTop) {
+    //     headerRef.current?.classList.add("hidden");
+    //   } else {
+    //     headerRef.current?.classList.remove("hidden");
+    //   }
+    //   setScrollTopNum(el.scrollTop);
+    // }
     const near = isAtBottom();
     atBottomRef.current = near;
     setAtBottom((prev) => (prev === near ? prev : near));

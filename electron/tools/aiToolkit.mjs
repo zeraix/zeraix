@@ -36,6 +36,7 @@ import { noteUserMessage, resetConversationCapture } from "./projectMemory/conve
 // loop (agent/turn.mjs) and the automation dispatcher (automation/paths.mjs) all already go through
 // listTools/runTool, so one merge lights MCP up in all three. See docs/mcp-integration.md.
 import { callMcpTool, isMcpTool, listMcpTools } from "../mcp/client.mjs";
+import { callPluginTool, describePluginTools, isPluginTool, listPluginTools } from "../plugins/tools.mjs";
 // The other direction: tools for MANAGING MCP servers, so a user can connect one by asking in chat
 // instead of filling in the settings form. Kept in its own module because it is the only part of the
 // toolkit that writes app configuration and grants trust -- see its header for the two-gate model.
@@ -120,6 +121,7 @@ const MAX_READ_BYTES = 2 * 1024 * 1024; // read_file per-file cap: 2MB
 export const READ_DEFAULT_MAX_LINES = 2000; // read_file: lines returned when no explicit limit is given
 const READ_MAX_CHARS = 200_000; // read_file per-call ceiling; a line cap cannot bound a minified single-line file
 const MAX_MATCHES = 200; // search_* result cap
+const MAX_ENTRIES = 300; // list_directory result cap; a bare listing is cheaper per row than a search hit, so it runs higher
 const MAX_LINE_LEN = 400; // search_in_files per-line echo cap
 const CMD_TIMEOUT_MS = 60_000; // run_command timeout
 /**
@@ -1223,7 +1225,18 @@ const handlers = {
       .slice()
       .sort((a, b) => Number(b.isDirectory()) - Number(a.isDirectory()) || a.name.localeCompare(b.name))
       .map((e) => `${e.isDirectory() ? "[dir] " : "      "}${e.name}`);
-    return `${rel(abs)}:\n${lines.join("\n")}`;
+    // Capped like the search tools. An uncapped listing was not actually uncapped: a node_modules-sized directory blew
+    // past capToolOutput's 8000-character limit and came back head+tail with the middle silently eaten, which is the
+    // worst shape a list can have — the entries that vanish are unnamed and the notice talks about characters, not files.
+    // Cutting it here instead means the count is honest and the omission is stated in entries.
+    const shown = lines.slice(0, MAX_ENTRIES);
+    const capped =
+      lines.length > shown.length
+        ? `\n\n[…TRUNCATED — showing the first ${shown.length} of ${lines.length} entries; ${lines.length - shown.length} not listed. ` +
+          `Use search_files with a glob to find specific names in here.]`
+        : "";
+    const header = lines.length > shown.length ? `${rel(abs)} (${lines.length} entries, showing ${shown.length}):` : `${rel(abs)}:`;
+    return `${header}\n${shown.join("\n")}${capped}`;
   },
 
   async create_directory({ path: p }) {
@@ -1238,8 +1251,15 @@ const handlers = {
     const hits = files.filter((f) => re.test(path.basename(f))).map(rel);
     if (hits.length === 0) return `No files match "${pattern}".`;
     const shown = hits.slice(0, MAX_MATCHES);
-    const more = hits.length > shown.length ? `\n… and ${hits.length - shown.length} more` : "";
-    return `${hits.length} match(es):\n${shown.join("\n")}${more}`;
+    // The count line states shown-of-total, and the notice says TRUNCATED in as many words. "… and N more" reads as a
+    // footnote; a model skimming it acts on the first page as if it were the set. Naming the cap and the way past it
+    // (a tighter glob) is what turns a partial list into a next step instead of a wrong conclusion.
+    const more =
+      hits.length > shown.length
+        ? `\n\n[…TRUNCATED — showing the first ${shown.length} of ${hits.length} matches; ${hits.length - shown.length} not listed. ` +
+          `This list is incomplete: narrow the glob to see the rest, and do not act on it as if it were every match.]`
+        : "";
+    return `${hits.length} match(es)${hits.length > shown.length ? `, showing ${shown.length}` : ""}:\n${shown.join("\n")}${more}`;
   },
 
   async search_in_files({ query, pattern, regex, ignore_case, context }) {
@@ -1306,9 +1326,12 @@ const handlers = {
     if (blocks.length === 0) {
       return `No matches for ${regex ? `/${needle}/` : `"${needle}"`}${ignore_case ? " (case-insensitive)" : ""}.`;
     }
+    // When the cap is hit, `total` is the cap, not the number of matches in the tree — the walk stops there, so the real
+    // total is unknown and unknowable from this call. Say that rather than printing a count that reads as complete.
     const capped =
       total >= MAX_MATCHES
-        ? `\n\n[…capped at ${MAX_MATCHES} matches — narrow the query or add a name pattern]`
+        ? `\n\n[…TRUNCATED — stopped at the ${MAX_MATCHES}-match cap. There are more matches than shown and the true ` +
+          `total is unknown. Narrow the query or add a name pattern; do not treat these as every match.]`
         : "";
     return (
       `${total} match(es) with ±${ctx} context lines ` +
@@ -1613,6 +1636,15 @@ const handlers = {
   // mcp_discover / mcp_connect. Spread rather than written inline: they operate on app configuration
   // and the MCP connection pool, not on the working directory like everything above them.
   ...mcpAdminHandlers,
+
+  /**
+   * Discovery for installed plugin tools. The counterpart of mcp_tools, and declared for the same
+   * reason: the tools themselves are routed, so without this the model has no way to learn that the
+   * user has installed anything at all.
+   */
+  plugin_tools({ name, plugin } = {}) {
+    return describePluginTools({ name: String(name ?? ""), plugin: String(plugin ?? "") });
+  },
 };
 
 /**
@@ -1644,6 +1676,9 @@ export async function runTool(name, args = {}, { signal } = {}) {
   // collide with a handler, and callMcpTool honours runTool's { ok, content } contract for every
   // failure mode -- an external server must not be able to abort a turn by throwing.
   if (isMcpTool(name)) return callMcpTool(name, args ?? {});
+  // Same arrangement for installed plugins: `plugin__<publisher>_<name>__<capability>` cannot collide
+  // with a handler, and callPluginTool honours the { ok, content } contract for every failure mode.
+  if (isPluginTool(name)) return callPluginTool(name, args ?? {});
   const handler = handlers[name];
   if (!handler) return { ok: false, content: `Unknown tool: ${name}` };
   try {
@@ -1682,7 +1717,7 @@ export function listTools(format = "raw") {
   // Native tools first, then whatever the connected MCP servers currently expose. listMcpTools() is
   // synchronous and cache-backed: this runs once per turn, and a server that is still connecting
   // simply contributes nothing this time round rather than delaying the request.
-  const all = [...TOOLS, ...listMcpTools()];
+  const all = [...TOOLS, ...listMcpTools(), ...listPluginTools()];
   if (format === "openai") {
     return all.map((t) => ({ type: "function", function: t }));
   }

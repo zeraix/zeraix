@@ -107,6 +107,88 @@ export function readCapabilityFile(id, capabilityId) {
   return { ok: true, content: buf.toString("utf8"), error: null };
 }
 
+/**
+ * The oauth providers an installed plugin declares, as `[{ providerId, oauth, tier }]`.
+ *
+ * Reads the installed copy, never the catalogue. Records written before providers were persisted
+ * simply have none, which reads as "nothing to authorize" -- the honest answer for an install whose
+ * manifest we no longer hold.
+ */
+export function oauthProviders(id) {
+  const p = getInstalled(id);
+  const out = [];
+  for (const [providerId, provider] of Object.entries(p?.providers ?? {})) {
+    if (provider?.kind === "oauth" && provider.oauth) out.push({ providerId, oauth: provider.oauth, tier: provider.tier });
+  }
+  return out;
+}
+
+/**
+ * Which oauth providers one capability needs before it can run.
+ *
+ * Two hops, because a capability rarely names the authorizer directly: it binds to a provider that
+ * DOES the work (gmail_api), and that provider names the one that mints the credential (google_auth).
+ * A capability bound to nothing is static content -- a skill file -- and needs no grant, which is why
+ * reading one must never trigger a browser window.
+ */
+export function authProvidersForCapability(id, capabilityId) {
+  const p = getInstalled(id);
+  const cap = p?.capabilities?.find((c) => c.id === capabilityId);
+  // Null, not empty: "this capability needs no grant" and "there is no such capability" must not be
+  // the same answer, or a typo'd id would sail through the gate as authorized.
+  if (!cap) return null;
+  const providers = p?.providers ?? {};
+  const needed = new Set();
+  for (const pid of cap.providers ?? []) {
+    const provider = providers[pid];
+    if (!provider) continue;
+    if (provider.kind === "oauth") needed.add(pid);
+    // `auth` names the provider that mints this one's credential.
+    if (provider.auth && providers[provider.auth]?.kind === "oauth") needed.add(provider.auth);
+  }
+  return [...needed]
+    .map((providerId) => ({ providerId, oauth: providers[providerId].oauth, tier: providers[providerId].tier }))
+    .filter((x) => x.oauth);
+}
+
+/**
+ * Record how the last authorization attempt for one provider ended. `error` null means it succeeded.
+ *
+ * Kept next to the install rather than next to the token because it outlives the token: after a
+ * failure there IS no token, and "we tried and this is what went wrong" is the whole of what the
+ * user needs to see.
+ */
+export function recordAuthAttempt(id, providerId, error = null) {
+  const existing = load().plugins[id];
+  if (!existing) return { ok: false, error: `${id} is not installed` };
+  existing.auth = { ...(existing.auth ?? {}), [providerId]: { at: new Date().toISOString(), error: error ?? null } };
+  persist();
+  return { ok: true, error: null };
+}
+
+/**
+ * The installed form of one capability.
+ *
+ * Carries everything needed to OFFER and RUN it without the catalogue: a tool's name, description,
+ * parameters and request template all come from here. The manifest is not consulted at call time —
+ * the feed can change, and what a user consented to install is what should run.
+ */
+function installedCapability(cap, { path, sha512 }) {
+  return {
+    id: cap.id,
+    type: cap.type,
+    module: cap.module ?? null,
+    name: cap.name ?? null,
+    description: cap.description ?? null,
+    providers: cap.providers ?? [],
+    input_schema: cap.input_schema ?? null,
+    request: cap.request ?? null,
+    path,
+    sha512,
+    revoked: null,
+  };
+}
+
 /* ------------------------------------------------------------------ install */
 
 /**
@@ -168,7 +250,7 @@ export async function installPlugin(entry, { fetchFile }) {
   try {
     for (const cap of usable) {
       if (!cap.path) {
-        capabilities.push({ id: cap.id, type: cap.type, module: cap.module ?? null, path: null, sha512: null, revoked: null });
+        capabilities.push(installedCapability(cap, { path: null, sha512: null }));
         continue;
       }
       const url = new URL(cap.path, dist.baseUrl);
@@ -185,7 +267,7 @@ export async function installPlugin(entry, { fetchFile }) {
       const dest = path.join(staging, cap.path);
       fs.mkdirSync(path.dirname(dest), { recursive: true });
       fs.writeFileSync(dest, buf);
-      capabilities.push({ id: cap.id, type: cap.type, module: cap.module ?? null, path: cap.path, sha512: cap.sha512, revoked: null });
+      capabilities.push(installedCapability(cap, { path: cap.path, sha512: cap.sha512 }));
     }
 
     // Everything verified: publish the directory in one move.
@@ -207,6 +289,16 @@ export async function installPlugin(entry, { fetchFile }) {
     enabled: true,
     revoked: null,
     capabilities,
+    // The providers AS INSTALLED. Re-authorizing must not depend on the catalogue being reachable --
+    // a grant that lapses on a plane is exactly when the endpoints and scopes are needed -- and it
+    // must not silently follow a manifest that changed in the registry after the user consented.
+    // Versions are immutable (§5.3), so this copy cannot drift from what was reviewed.
+    providers: manifest.providers ?? {},
+    // Outcome of the last authorization ATTEMPT per provider: { at, error }. Whether a grant exists
+    // is not recorded here -- oauth.mjs owns that, and a second copy would be the one that goes
+    // stale after a revoke. This records only what a status read cannot reconstruct: why the last
+    // attempt failed.
+    auth: {},
   };
 
   // Replacing an older version: drop its directory once the new one is live.

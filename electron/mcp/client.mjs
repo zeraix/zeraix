@@ -16,6 +16,7 @@
  * so a server whose tool names contain characters providers reject can still be addressed.
  */
 import { CONNECT_TIMEOUT_DOWNLOAD_MS, CONNECT_TIMEOUT_MS, getServer, listServers, usesPackageRunner } from "./config.mjs";
+import { pluginAuthHeaders } from "../plugins/auth.mjs";
 
 /**
  * The SDK is loaded on first connect, not at import time. aiToolkit imports this module, and
@@ -155,10 +156,33 @@ function flattenContent(result) {
 
 // ── Connecting ────────────────────────────────────────────────────────────────
 
+/**
+ * A fetch that attaches the plugin's credential to every request.
+ *
+ * Failures are surfaced as a thrown error rather than an unauthenticated request: sending the call
+ * anyway would reach the server as an anonymous 401, and the user would be told their server is
+ * broken when what actually happened is that their account is not connected.
+ */
+function pluginAuthedFetch(auth) {
+  return async (url, init = {}) => {
+    const headers = await pluginAuthHeaders(Object.fromEntries(new Headers(init.headers ?? {}).entries()), {
+      pluginId: auth.plugin,
+      providerId: auth.provider,
+    });
+    return fetch(url, { ...init, headers });
+  };
+}
+
 function buildTransport(sdk, cfg, e) {
   if (cfg.kind === "http") {
     return new sdk.StreamableHTTPClientTransport(new URL(cfg.url), {
       requestInit: Object.keys(cfg.headers).length ? { headers: { ...cfg.headers } } : undefined,
+      // A server backed by an installed plugin spends that plugin's OAuth grant. Resolved PER
+      // REQUEST rather than folded into requestInit once: an access token outlives neither the
+      // connection nor the turn, so a header fixed at connect time would work until the first
+      // refresh and then 401 for the rest of the session. This also means a revoked grant stops
+      // working on the next call instead of whenever the transport is next rebuilt.
+      ...(cfg.auth ? { fetch: pluginAuthedFetch(cfg.auth) } : {}),
     });
   }
   const transport = new sdk.StdioClientTransport({

@@ -283,7 +283,7 @@ async function postForm(url, form, { basicAuth = null } = {}) {
 }
 
 /** Normalize a token response into what the store keeps. `expires_in` is seconds, and often absent. */
-function toRecord(body, previous = null) {
+function toRecord(body, previous = null, requested = null) {
   const expiresAt = Number.isFinite(Number(body.expires_in))
     ? Date.now() + Number(body.expires_in) * 1000
     : null;
@@ -294,6 +294,14 @@ function toRecord(body, previous = null) {
     refresh_token: body.refresh_token ?? previous?.refresh_token ?? null,
     token_type: body.token_type ?? "Bearer",
     scope: body.scope ?? previous?.scope ?? null,
+    // What THIS grant was asked for, as opposed to what the provider says it gave.
+    //
+    // The two are not reliably comparable: providers return granted scopes in their own vocabulary,
+    // add ones you did not request (Google appends openid/email/profile), and sometimes omit the field
+    // entirely. Comparing a manifest against that string produces false "insufficient" verdicts, and a
+    // false verdict here costs a consent screen on every single call. What we asked for is exact, and
+    // it is the thing that changes when a plugin updates — which is the case this exists for.
+    requested_scopes: requested ?? previous?.requested_scopes ?? null,
     expires_at: expiresAt,
     obtained_at: Date.now(),
   };
@@ -342,6 +350,7 @@ export function credentialStatus(key) {
     authorized: true,
     expiresAt: rec.expires_at,
     scope: rec.scope,
+    requestedScopes: rec.requested_scopes ?? null,
     canRefresh: !!rec.refresh_token,
   };
 }
@@ -360,6 +369,11 @@ export function revokeCredential(key) {
 function resolveClient(oauth, resolveNeed) {
   const c = oauth.client;
   if (c.type === "host") {
+    if (!oauth.known_provider) {
+      // validateManifest refuses `host` without a preset, so reaching this means the block was built
+      // or mutated outside validation. Worth a sentence rather than a TypeError three frames deeper.
+      throw new Error('oauth: client type "host" requires known_provider — there is no key to look credentials up under');
+    }
     const cred = hostCredentials(oauth.known_provider);
     if (!cred?.client_id) {
       throw new Error(
@@ -450,7 +464,7 @@ export async function authorize({ pluginId, providerId, oauth, resolveNeed, sign
         },
         { basicAuth: endpoints.token_auth === "basic" && clientSecret ? { id: clientId, secret: clientSecret } : null },
       );
-      writeRecord(key, toRecord(body));
+      writeRecord(key, toRecord(body, null, [...oauth.scopes]));
       return credentialStatus(key);
     } finally {
       listener.close();

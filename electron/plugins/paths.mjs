@@ -6,13 +6,14 @@
  * registryClient.mjs would make that module, and everything importing it, impossible to cover with
  * `npm test`.
  */
-import { app } from "electron";
+import { app, safeStorage, shell } from "electron";
 import path from "node:path";
 
 import { setPluginRoot } from "./storage.mjs";
 import { feedFile, readJson } from "./storage.mjs";
 import { parseKillList } from "./feed.mjs";
 import { applyKillList } from "./store.mjs";
+import { configureOAuthHost } from "./oauth.mjs";
 import { configureRegistry, isRegistryConfigured, refreshRegistry } from "./registryClient.mjs";
 
 /** Top-level under userData, alongside mcp/ -- plugins are app-wide, not scoped to one agent. */
@@ -36,6 +37,22 @@ let timers = null;
  */
 export function initPlugins() {
   setPluginRoot(defaultPluginDir());
+
+  // The two host capabilities oauth.mjs deliberately does not import for itself, so that module (and
+  // everything importing it) stays loadable in a plain Node process for `npm test`. Wired here
+  // because this is the one file in the subsystem that owns the `electron` import.
+  //
+  // Safe at this point and not before: initPlugins() is called from app.whenReady(), and safeStorage
+  // has no key until then — asking earlier returns a false `isEncryptionAvailable()`, which would
+  // silently write every token to disk in plaintext rather than failing.
+  configureOAuthHost({
+    openExternal: (url) => shell.openExternal(url),
+    secretBox: {
+      available: () => safeStorage.isEncryptionAvailable(),
+      encrypt: (s) => safeStorage.encryptString(s).toString("base64"),
+      decrypt: (s) => safeStorage.decryptString(Buffer.from(s, "base64")),
+    },
+  });
 
   const cached = readJson(feedFile("killlist"));
   if (cached) {

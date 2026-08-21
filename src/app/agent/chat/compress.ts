@@ -11,8 +11,16 @@
  * actively harmful — it cannot distinguish elided code from code that isn't there, so it reasons about a file with
  * a hole in it and reports conclusions that don't match the real source.
  *
+ * The notice states the shown and total character counts rather than only the elided amount. A model that is told
+ * "roughly N characters elided" knows something is missing but not how much of the whole it is holding, which is the
+ * one number that decides whether the retrieved part answers the question or the rest has to be fetched. It also says
+ * plainly that repeating the identical call returns the identical truncation — the failure mode that costs a round
+ * trip and changes nothing.
+ *
  * Determinism: trimming uses only plain string slicing + a fixed template + raw numbers (no localization / time / randomness),
  * guaranteeing that the same input produces exactly the same result on any device — because the compressed text participates in the integrity hash.
+ * Editing the template is safe for existing conversations: capping happens once, at write time, and the capped string is what
+ * is persisted and hashed — old messages keep the text (and hash) they were stored with.
  */
 
 /** Only compress when the output exceeds this character count (output within roughly 2–3K tokens is kept as-is). */
@@ -30,9 +38,11 @@ export function capToolOutput(content: string): string {
   const elided = content.length - HEAD_CHARS - TAIL_CHARS;
   return (
     `${head}\n\n` +
-    `[…… Elided roughly ${elided} characters in the middle. ` +
-    `If you need the elided content, call the tool again with narrower parameters — e.g. a more specific ` +
-    `search_in_files query, or a command that prints less ……]\n\n` +
+    `[…… TRUNCATED — this result is incomplete. Showing ${HEAD_CHARS} characters from the start and ` +
+    `${TAIL_CHARS} from the end of ${content.length} total; ${elided} characters elided from the middle. ` +
+    `Repeating this call unchanged returns the same truncation. To reach the elided part, call the tool again ` +
+    `with NARROWER parameters — a more specific search_in_files query, a name pattern to scope it, or a command ` +
+    `that prints less. If what you already have answers the question, use it and say the output was truncated ……]\n\n` +
     `${tail}`
   );
 }

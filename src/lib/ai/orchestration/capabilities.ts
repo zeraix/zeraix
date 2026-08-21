@@ -57,6 +57,10 @@ const RISK: ReadonlyArray<readonly [string, RiskLevel]> = [
   ["refine_question", "low"],
   ["mcp_tools", "low"],
   ["mcp_discover", "low"],
+  // Reads the installed-plugin inventory and its parameter schemas. Discovery only: the tools it
+  // describes carry their own risk and are dispatched by name like any other, so classifying this
+  // one high would price the catalogue at the cost of its most dangerous entry.
+  ["plugin_tools", "low"],
   // Runs a command in the guest, but a fixed read-only one (`command -v` and an import check) that the caller
   // cannot influence — `query` only filters the reply. Discovery, like the two above.
   ["sandbox_tools", "low"],

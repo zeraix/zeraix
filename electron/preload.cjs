@@ -402,8 +402,16 @@ contextBridge.exposeInMainWorld("plugins", {
   refresh: () => ipcRenderer.invoke("plugins:refresh"),
   /** Catalogue entry plus installed record for one plugin. */
   detail: (id) => ipcRenderer.invoke("plugins:detail", id),
-  /** Install from the verified catalogue. Returns { ok, error }. */
+  /**
+   * Install from the verified catalogue, then connect any account the plugin needs.
+   * Returns { ok, error, auth: [{ providerId, authorized, error }] } — `ok` is the install; a plugin
+   * can install successfully and still come back with an unauthorized provider.
+   */
   install: (id) => ipcRenderer.invoke("plugins:install", id),
+  /** Per-provider grant state: authorized, when it lapses, and why the last attempt failed. */
+  authStatus: (id) => ipcRenderer.invoke("plugins:auth-status", id),
+  /** Re-run the authorization flow. Omit providerId to do every oauth provider the plugin has. */
+  authorize: (id, providerId = null) => ipcRenderer.invoke("plugins:authorize", { id, providerId }),
   uninstall: (id) => ipcRenderer.invoke("plugins:uninstall", id),
   /** Enable/disable without uninstalling. Refused for a revoked plugin. */
   setEnabled: (id, enabled) => ipcRenderer.invoke("plugins:set-enabled", { id, enabled }),

@@ -148,9 +148,11 @@ export function buildToolSet(native: unknown[], { memory = true } = {}): unknown
   // that moved with the memory flag, or appeared only under Electron, would be exactly the kind of per-install difference the
   // rest of this function exists to avoid.
   //
-  // isRouted, not ROUTED_TOOLS directly: it also carries the `mcp__` prefix rule, so any MCP tool that
-  // reached this point despite nativeCore above is still dropped. Belt and braces on purpose — a declared
-  // set that varies per install is the one failure here that is invisible locally and expensive in
-  // production. MCP tools are reached through `mcp_tools` (inventory + schemas) and then `call_tool`.
+  // isRouted, not ROUTED_TOOLS directly: it also carries the `mcp__` and `plugin__` prefix rules, so any
+  // MCP or plugin tool that reached this point despite nativeCore above is still dropped. Belt and
+  // braces on purpose — a declared set that varies per install is the one failure here that is invisible
+  // locally and expensive in production. Both are reached the same way: an inventory-plus-schemas call
+  // (`mcp_tools`, `plugin_tools`) and then `call_tool`. A single Gmail plugin is 79 tools, which is the
+  // scale that makes keeping them out of the declared block matter rather than merely tidy.
   return [...declared.filter((t) => !isRouted(nameOf(t))), callToolTool()];
 }

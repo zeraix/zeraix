@@ -56,7 +56,7 @@ export const CAPABILITY_TYPES = [
  * Phase 1 is text-tier only (design doc §9). Filtered by installableCapabilities(), not by
  * validateManifest(): see the header on why unimplemented is not a validation outcome.
  */
-export const IMPLEMENTED_CAPABILITY_TYPES = ["skill", "prompt", "subagent"];
+export const IMPLEMENTED_CAPABILITY_TYPES = ["skill", "prompt", "subagent", "tool"];
 
 /**
  * Capability types that may be satisfied by static content (`path` + `sha512`) instead of a
@@ -83,7 +83,7 @@ export const PROVIDER_KINDS = ["builtin", "mcp-stdio", "mcp-http", "http", "proc
  * only suppresses the "not implemented yet" warning, which would be false once the host module ships.
  * What still gates a Gmail plugin from installing is its CONSUMER's kind -- `http` is not in this list.
  */
-export const IMPLEMENTED_PROVIDER_KINDS = ["text", "oauth"];
+export const IMPLEMENTED_PROVIDER_KINDS = ["text", "oauth", "http"];
 
 /** Trust tiers (design doc §4.1). Declared per provider in the reviewed manifest, enforced here. */
 export const TIERS = ["text", "sandboxed", "host"];
@@ -333,6 +333,9 @@ const KNOWN_TOP_LEVEL = new Set([
   "publisher", // emitted by normalization
 ]);
 
+/** Methods a manifest may declare. TRACE/CONNECT are absent: nothing an API client needs. */
+const HTTP_METHODS = ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD"];
+
 const KNOWN_PROVIDER_FIELDS = new Set([
   "kind",
   "tier",
@@ -358,6 +361,8 @@ const KNOWN_CAPABILITY_FIELDS = new Set([
   "bind",
   "path",
   "sha512",
+  "input_schema", // a tool's parameters, as the model sees them
+  "request",      // how those parameters become an HTTP call
   "providers", // emitted by normalization
 ]);
 
@@ -400,7 +405,11 @@ export function installableCapabilities(manifest) {
     if (!IMPLEMENTED_CAPABILITY_TYPES.includes(c.type)) return false;
     const bound = c.providers ?? [];
     if (bound.length === 0) return true; // static content
-    return bound.some((pid) => IMPLEMENTED_PROVIDER_KINDS.includes(providers[pid]?.kind));
+    if (!bound.some((pid) => IMPLEMENTED_PROVIDER_KINDS.includes(providers[pid]?.kind))) return false;
+    // A tool is only callable once it says what call it makes. Published tools predating `request`
+    // stay in the catalogue and out of the install, which is the same treatment a reserved type gets.
+    if (c.type === "tool" && bound.some((pid) => providers[pid]?.kind === "http") && !c.request) return false;
+    return true;
   });
 }
 
@@ -535,13 +544,19 @@ export function validateManifest(raw, { mode = "client" } = {}) {
       const bound = resolveBinding(at, c, providers, { strict, err, drop });
       if (!bound) return;
 
+      // A tool on an http provider must say what it accepts and what call that becomes. Without both
+      // there is nothing to advertise to the model and nothing to send, and the capability would
+      // install as an entry that can never run.
+      const request = validateRequest(at, c, providers, bound, { err, warn });
+      if (request === false) return;
+
       if (!IMPLEMENTED_CAPABILITY_TYPES.includes(c.type)) {
         // Publishable, not yet installable. Reserving the type is the point, so neither mode
         // rejects it; installableCapabilities() is what keeps it out of an install.
         warn(`${at}: capability type "${c.type}" is not implemented yet`);
       }
 
-      capabilities.push({ ...c, ...bound });
+      capabilities.push({ ...c, ...bound, ...(request ? { request } : {}) });
     });
   }
 
@@ -1174,6 +1189,92 @@ function resolveBinding(at, c, providers, { strict, err, drop }) {
 }
 
 /** A tool cannot come from a provider that executes nothing, and content types cannot come from one that does. */
+/**
+ * A tool's request template: how the model's arguments become one HTTP call.
+ *
+ * Only meaningful for `type: "tool"` bound to an executing http provider. The shape is deliberately
+ * small — method, path, query, body — because everything it does NOT allow is a thing a manifest
+ * cannot make the host do: no arbitrary headers (the Authorization header is the host's to set, and
+ * letting a manifest add its own is how a token reaches a second destination), no absolute URL (the
+ * provider's `url` is the only origin, so `permissions.network` cannot be sidestepped by a path), and
+ * no scheme, host or port anywhere in the template.
+ *
+ * `{name}` placeholders interpolate arguments. They are substituted at call time by the executor,
+ * which percent-encodes every value — the template says WHERE a value goes, never what it is.
+ *
+ * @returns the normalized request, `null` when the capability needs none, or `false` on error.
+ */
+function validateRequest(at, c, providers, bound, { err, warn }) {
+  const kinds = (bound.providers ?? []).map((pid) => providers[pid]?.kind);
+  const needsRequest = c.type === "tool" && kinds.includes("http");
+
+  if (!needsRequest) {
+    if (has(c, "request")) warn(`${at}: "request" is only meaningful for a tool on an http provider`);
+    if (has(c, "input_schema") && c.type !== "tool") warn(`${at}: "input_schema" is only meaningful for a tool`);
+    return null;
+  }
+
+  if (!has(c, "request")) {
+    // NOT an error. `zeraix/gmail-send` and every other tool published before this field existed are
+    // valid manifests, and versions are immutable (§5.3) — rejecting them now would retroactively
+    // un-publish work that passed review. Same posture as an unimplemented type: publishable, not
+    // installable, and installableCapabilities() is what keeps it out of an install.
+    warn(`${at}: a tool on an http provider needs a "request" to be callable; this one cannot run yet`);
+    return null;
+  }
+  if (!isPlainObject(c.request)) {
+    err(`${at}.request must be an object ({ method, path })`);
+    return false;
+  }
+  const method = String(c.request.method ?? "").toUpperCase();
+  if (!HTTP_METHODS.includes(method)) {
+    err(`${at}.request.method must be one of ${HTTP_METHODS.join("|")}`);
+    return false;
+  }
+  const path = c.request.path;
+  if (!isNonEmptyString(path) || !path.startsWith("/")) {
+    err(`${at}.request.path must be a path beginning with "/" — the provider's url is the only origin`);
+    return false;
+  }
+  if (/^\/\//.test(path) || /[a-zA-Z][a-zA-Z0-9+.-]*:/.test(path.split("?")[0])) {
+    // "//host/x" is protocol-relative and "https://host" is absolute; both would leave the origin the
+    // user consented to while still looking like a path.
+    err(`${at}.request.path must not contain a scheme or authority`);
+    return false;
+  }
+  if (has(c.request, "query") && !isPlainObject(c.request.query)) {
+    err(`${at}.request.query must be an object of name -> value template`);
+    return false;
+  }
+  if (has(c.request, "body") && !isNonEmptyString(c.request.body) && !isPlainObject(c.request.body)) {
+    err(`${at}.request.body must be a "{placeholder}" or an object template`);
+    return false;
+  }
+  for (const field of ["headers", "url", "origin", "host"]) {
+    if (has(c.request, field)) {
+      err(`${at}.request.${field} is not permitted — the host owns the origin and the Authorization header`);
+      return false;
+    }
+  }
+  if (has(c, "input_schema") && !isPlainObject(c.input_schema)) {
+    err(`${at}.input_schema must be a JSON Schema object`);
+    return false;
+  }
+  if (!isNonEmptyString(c.description)) {
+    // The description IS the interface: a tool the model cannot tell apart from its siblings is one
+    // it calls wrongly, and with 79 of them on one API that stops being a nicety. Required only for a
+    // capability that declares a request, so this cannot reject anything published earlier.
+    err(`${at}: a callable tool requires a description — it is what the model selects on`);
+    return false;
+  }
+  return {
+    method,
+    path,
+    query: isPlainObject(c.request.query) ? { ...c.request.query } : {},
+    body: has(c.request, "body") ? c.request.body : null,
+  };
+}
+
 function checkKindFit(at, type, kind, err) {
   if (NON_BINDABLE_KINDS.includes(kind)) {
     // The whole point of the split (oauth design §2): bind to the provider that makes the call, and

@@ -42,6 +42,7 @@ export interface ProviderSummary {
 export interface CatalogueEntry {
   id: string;
   version: string;
+  icon?: string | null;
   name: string;
   description: string;
   publisher: string;
@@ -62,9 +63,36 @@ export interface InstalledCapability {
   id: string;
   type: CapabilityType | string;
   module: string | null;
+  /** Providers this capability binds to, which is how a use is traced to the grant it needs. */
+  providers?: string[];
   path: string | null;
   sha512: string | null;
   revoked: Revocation | null;
+}
+
+/**
+ * One provider's authorization state. Never a token, and never anything that would let the renderer
+ * reconstruct one — `authorized` and `expiresAt` say whether a grant exists and when it lapses.
+ */
+export interface ProviderAuthStatus {
+  providerId: string;
+  tier: PluginTier | string | null;
+  /** The preset this grant is against ("google"), or null for a literal endpoint pair. */
+  provider: string | null;
+  scopes: string[];
+  authorized: boolean;
+  expiresAt: number | null;
+  canRefresh: boolean;
+  /** When the last attempt ran, and why it failed. Null error means it succeeded. */
+  lastAttemptAt: string | null;
+  lastError: string | null;
+}
+
+/** Outcome of one authorization attempt, as install and re-authorize both report it. */
+export interface AuthAttempt {
+  providerId: string;
+  authorized: boolean;
+  error: string | null;
 }
 
 export interface InstalledPlugin {
@@ -77,6 +105,8 @@ export interface InstalledPlugin {
   enabled: boolean;
   revoked: Revocation | null;
   capabilities: InstalledCapability[];
+  /** Last authorization attempt per provider. Absent on records written before this shipped. */
+  auth?: Record<string, { at: string; error: string | null }>;
 }
 
 export interface RefreshResult {
@@ -96,7 +126,11 @@ export interface PluginBridge {
   catalogue: () => Promise<{ entries: CatalogueEntry[]; dropped: { at: string; reason: string }[] }>;
   refresh: () => Promise<RefreshResult>;
   detail: (id: string) => Promise<{ catalogue: CatalogueEntry | null; installed: InstalledPlugin | null }>;
-  install: (id: string) => Promise<{ ok: boolean; error: string | null }>;
+  /** `ok` is the install; a plugin can install and still come back with an unauthorized provider. */
+  install: (id: string) => Promise<{ ok: boolean; error: string | null; auth?: AuthAttempt[] }>;
+  authStatus: (id: string) => Promise<ProviderAuthStatus[]>;
+  /** Re-run the flow. Omit providerId for every oauth provider the plugin declares. */
+  authorize: (id: string, providerId?: string | null) => Promise<{ ok: boolean; error: string | null; results: AuthAttempt[] }>;
   uninstall: (id: string) => Promise<{ ok: boolean; error: string | null }>;
   setEnabled: (id: string, enabled: boolean) => Promise<{ ok: boolean; error: string | null }>;
   read: (id: string, capabilityId: string) => Promise<{ ok: boolean; content: string | null; error: string | null }>;

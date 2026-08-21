@@ -27,7 +27,9 @@ import {
   ChevronDown,
   Download,
   FileCode,
+  KeyRound,
   Loader2,
+  LinkIcon,
   PackageOpen,
   RefreshCw,
   Search,
@@ -48,10 +50,10 @@ import {
   isPluginsAvailable,
   pluginBridge,
 } from "@/lib/plugins/bridge";
-import type { CatalogueEntry, InstalledPlugin, PluginTier } from "@/lib/plugins/types";
+import type { CatalogueEntry, InstalledPlugin, PluginTier, ProviderAuthStatus } from "@/lib/plugins/types";
 
 type T = (key: string, vars?: Record<string, string | number>) => string;
-type Busy = { id: string; action: "install" | "remove" } | null;
+type Busy = { id: string; action: "install" | "remove" | "connect" } | null;
 
 const PRIMARY_BTN =
   "flex shrink-0 items-center gap-1 rounded-lg bg-gradient-to-br from-primary to-primary/85 px-3 py-1.5 text-xs font-semibold text-white shadow-sm transition hover:brightness-105 disabled:opacity-50";
@@ -97,7 +99,7 @@ function monogram(name: string): string {
   return (words[0][0] + words[1][0]).toUpperCase();
 }
 
-function PluginAvatar({ id, name }: { id: string; name: string }) {
+function PluginAvatar({ id, name, icon }: { id: string; name: string; icon: string | null }) {
   return (
     <div
       aria-hidden
@@ -106,7 +108,11 @@ function PluginAvatar({ id, name }: { id: string; name: string }) {
         tintFor(id),
       )}
     >
-      {monogram(name)}
+      {icon ? (
+        <img src={icon} alt={name} className="size-full rounded-xl" />
+      ) : (
+        monogram(name)
+      )}
     </div>
   );
 }
@@ -136,6 +142,10 @@ export default function AgentPluginsPage() {
   const [error, setError] = useState<string | null>(null);
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState<"all" | "installed" | "available">("all");
+  /** Per-plugin grant state. Kept beside `installed` rather than inside it: the tokens live in a
+   *  separate store in the main process, and folding them together here would imply they move as
+   *  one. A grant can lapse with nothing about the install changing. */
+  const [auth, setAuth] = useState<Record<string, ProviderAuthStatus[]>>({});
 
   useEffect(() => {
     if (!available) return;
@@ -157,6 +167,25 @@ export default function AgentPluginsPage() {
       off?.();
     };
   }, [available]);
+
+
+  /**
+   * Follow the grants of whatever is installed.
+   *
+   * Re-reads on every change to the installed set, which is also what an install broadcasts once it
+   * has finished authorizing — so the card shows the account state without the page polling for it.
+   */
+  useEffect(() => {
+    const bridge = pluginBridge();
+    if (!bridge || installed.length === 0) return;
+    let active = true;
+    void Promise.all(installed.map(async (p) => [p.id, await bridge.authStatus(p.id)] as const)).then((rows) => {
+      if (active) setAuth(Object.fromEntries(rows.filter(([, list]) => list.length > 0)));
+    });
+    return () => {
+      active = false;
+    };
+  }, [installed]);
 
   const onRefresh = useCallback(async () => {
     const bridge = pluginBridge();
@@ -184,8 +213,15 @@ export default function AgentPluginsPage() {
       setError(null);
       try {
         const r = await bridge.install(id);
-        if (!r.ok) setError(r.error ?? t("plugins.error.install"));
-        else setInstalled(await bridge.installed());
+        if (!r.ok) {
+          setError(r.error ?? t("plugins.error.install"));
+        } else {
+          setInstalled(await bridge.installed());
+          // The install succeeded; connecting the account may not have. Say so here rather than
+          // letting the first use be where the user finds out.
+          const failed = (r.auth ?? []).find((a) => !a.authorized);
+          if (failed) setError(t("plugins.auth.installFailed", { error: failed.error ?? "" }));
+        }
       } finally {
         setBusy(null);
       }
@@ -200,6 +236,22 @@ export default function AgentPluginsPage() {
     try {
       await bridge.uninstall(id);
       setInstalled(await bridge.installed());
+    } finally {
+      setBusy(null);
+    }
+  }, []);
+
+  /** Re-run authorization from a click: the recovery path when install-time consent did not stick. */
+  const onConnect = useCallback(async (id: string) => {
+    const bridge = pluginBridge();
+    if (!bridge) return;
+    setBusy({ id, action: "connect" });
+    setError(null);
+    try {
+      const r = await bridge.authorize(id);
+      if (!r.ok) setError(r.error ?? null);
+      const next = await bridge.authStatus(id);
+      setAuth((prev) => ({ ...prev, [id]: next }));
     } finally {
       setBusy(null);
     }
@@ -364,9 +416,11 @@ export default function AgentPluginsPage() {
                             record={state.record}
                             outdated={state.outdated}
                             busy={busy?.id === entry.id ? busy.action : null}
+                            auth={auth[entry.id] ?? []}
                             onInstall={() => void onInstall(entry.id)}
                             onRemove={() => void onRemove(entry.id)}
                             onToggle={(next) => void onToggle(entry.id, next)}
+                            onConnect={() => void onConnect(entry.id)}
                           />
                         );
                       })}
@@ -398,9 +452,11 @@ export default function AgentPluginsPage() {
                             record={state.record}
                             outdated={state.outdated}
                             busy={busy?.id === entry.id ? busy.action : null}
+                            auth={auth[entry.id] ?? []}
                             onInstall={() => void onInstall(entry.id)}
                             onRemove={() => void onRemove(entry.id)}
                             onToggle={(next) => void onToggle(entry.id, next)}
+                            onConnect={() => void onConnect(entry.id)}
                           />
                         );
                       })}
@@ -429,24 +485,84 @@ function RevokedNotice({ t, reason }: { t: T; reason: string }) {
   );
 }
 
+/**
+ * Account state for a plugin that authorizes against something.
+ *
+ * Shown only when there is something to say: a plugin with no oauth provider renders nothing, which
+ * is every plugin in the catalogue but one. The disconnected case carries the reason the last attempt
+ * failed, because "not connected" alone sends people to the wrong place — a declined consent screen
+ * and a build with no credentials need opposite responses.
+ */
+function AccountNotice({
+  t,
+  status,
+  busy,
+  onConnect,
+}: {
+  t: T;
+  status: ProviderAuthStatus[];
+  busy: boolean;
+  onConnect: () => void;
+}) {
+  if (status.length === 0) return null;
+  const disconnected = status.filter((p) => !p.authorized);
+
+  if (disconnected.length === 0) {
+    return (
+      <p className="mt-2 flex items-center gap-1.5 text-[11px] text-emerald-600 dark:text-emerald-400">
+        <ShieldCheck className="size-3 shrink-0" />
+        {t("plugins.auth.connected", { provider: status.map((p) => p.provider ?? p.providerId).join(", ") })}
+      </p>
+    );
+  }
+
+  return (
+    <div className="mt-2 rounded-lg border border-amber-500/30 bg-amber-500/5 px-3 py-2">
+      <p className="flex items-start gap-2 text-[11px] text-amber-700 dark:text-amber-400">
+        <KeyRound className="mt-px size-3 shrink-0" />
+        <span className="break-words">
+          <span className="font-semibold">{t("plugins.auth.disconnected")}</span>{" "}
+          {t("plugins.auth.disconnectedHint")}
+          {disconnected[0].lastError ? (
+            <span className="mt-1 block text-ink-muted">{disconnected[0].lastError}</span>
+          ) : null}
+        </span>
+      </p>
+      <button
+        type="button"
+        onClick={onConnect}
+        disabled={busy}
+        className={cn(GHOST_BTN, "mt-2 border-amber-500/40 text-amber-700 dark:text-amber-400")}
+      >
+        {busy ? <Loader2 className="size-3 animate-spin" /> : <LinkIcon className="size-3" />}
+        {t("plugins.auth.connect")}
+      </button>
+    </div>
+  );
+}
+
 function PluginCard({
   t,
   entry,
   record,
   outdated,
   busy,
+  auth,
   onInstall,
   onRemove,
   onToggle,
+  onConnect,
 }: {
   t: T;
   entry: CatalogueEntry;
   record: InstalledPlugin | null;
   outdated: boolean;
-  busy: "install" | "remove" | null;
+  busy: "install" | "remove" | "connect" | null;
+  auth: ProviderAuthStatus[];
   onInstall: () => void;
   onRemove: () => void;
   onToggle: (next: boolean) => void;
+  onConnect: () => void;
 }) {
   const tier = highestTier(entry);
   const permissions = collectPermissions(entry);
@@ -467,7 +583,7 @@ function PluginCard({
     >
       <div className="flex items-start gap-3.5">
         <div className={cn("transition", muted && "opacity-45")}>
-          <PluginAvatar id={entry.id} name={entry.name} />
+          <PluginAvatar id={entry.id} name={entry.name} icon={entry.icon ?? null} />
         </div>
 
         {/* The info column is the disclosure control. It is a sibling of the action rail, never a
@@ -548,6 +664,14 @@ function PluginCard({
           )}
         </div>
       </div>
+
+      {/* Outside the disclosure button, for the reason stated above it: this notice carries its own
+          Connect control, and a <button> inside a <button> is invalid HTML that React reports as a
+          hydration error. Full width under the header rather than in the info column, because the
+          action belongs to the card, not to the title. */}
+      {record && !revoked ? (
+        <AccountNotice t={t} status={auth} busy={busy === "connect"} onConnect={onConnect} />
+      ) : null}
 
       <AnimatePresence initial={false}>
         {expanded ? (
@@ -744,7 +868,7 @@ function OrphanCard({
 }: {
   t: T;
   record: InstalledPlugin;
-  busy: "install" | "remove" | null;
+  busy: "install" | "remove" | "connect" | null;
   onRemove: () => void;
   onToggle: (next: boolean) => void;
 }) {
@@ -760,7 +884,8 @@ function OrphanCard({
     >
       <div className="flex items-start gap-3.5">
         <div className={cn("transition", muted && "opacity-45")}>
-          <PluginAvatar id={record.id} name={record.name} />
+          {/* An orphan is an installed record with no catalogue entry behind it, so there is no icon to show. */}
+          <PluginAvatar id={record.id} name={record.name} icon={null} />
         </div>
         <button
           type="button"

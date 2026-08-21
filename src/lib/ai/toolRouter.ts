@@ -104,8 +104,19 @@ export const ROUTED_TOOLS: ReadonlySet<string> = new Set([
 export const MCP_TOOL_PREFIX = "mcp__";
 export const isMcpToolName = (name: string): boolean => name.startsWith(MCP_TOOL_PREFIX);
 
+/**
+ * Installed plugin tools, routed for exactly the reasons above and one more of their own.
+ *
+ * A plugin can carry a whole HTTP API — the Gmail one is 79 methods from a single install — so
+ * declaring them would dwarf the native block. They also change mid-conversation, since installing a
+ * plugin is a click the user can make while a conversation is open, and every such change would
+ * re-prefill from token 0. Discovery lives in `plugin_tools`, which stays declared.
+ */
+export const PLUGIN_TOOL_PREFIX = "plugin__";
+export const isPluginToolName = (name: string): boolean => name.startsWith(PLUGIN_TOOL_PREFIX);
+
 export const isRouted = (name: string): boolean =>
-  ROUTED_TOOLS.has(name) || isMcpToolName(name);
+  ROUTED_TOOLS.has(name) || isMcpToolName(name) || isPluginToolName(name);
 
 /**
  * Resolve what the model emitted into the call to actually run.

@@ -11,6 +11,7 @@
  */
 import { BrowserWindow, ipcMain } from "electron";
 
+import { authStatus, authorizeAfterInstall, ensureAuthorized, reauthorize } from "../plugins/auth.mjs";
 import { configurePluginRegistry } from "../plugins/paths.mjs";
 import { cachedCatalogue, fetchPluginFile, refreshRegistry } from "../plugins/registryClient.mjs";
 import {
@@ -60,8 +61,28 @@ export function registerPlugins() {
     if (!entry) return { ok: false, error: `${id} is not in the registry catalogue` };
 
     const r = await installPlugin(entry, { fetchFile: fetchPluginFile });
-    if (r.ok) broadcast();
-    return { ok: r.ok, error: r.error };
+    if (!r.ok) return { ok: false, error: r.error, auth: [] };
+
+    // Connect the accounts the plugin needs, now, while the user is still looking at the thing they
+    // just chose to install. A failure here does NOT fail the install: the bytes are on disk and
+    // verified, and everything that needs no grant works. It is reported so the card can say so, and
+    // ensureAuthorized picks it up again at first use.
+    const { results } = await authorizeAfterInstall(id);
+    broadcast();
+    return { ok: true, error: null, auth: results };
+  });
+
+  /** Per-provider grant state for the installed plugin. Read-only; never opens a browser. */
+  ipcMain.handle("plugins:auth-status", (_e, id) => authStatus(id));
+
+  /**
+   * Re-run the flow from a click — the recovery path when install-time authorization was declined,
+   * interrupted, or has since been revoked at the provider.
+   */
+  ipcMain.handle("plugins:authorize", async (_e, { id, providerId = null } = {}) => {
+    const r = await reauthorize(id, providerId);
+    broadcast();
+    return r;
   });
 
   ipcMain.handle("plugins:uninstall", (_e, id) => {
@@ -76,8 +97,19 @@ export function registerPlugins() {
     return r;
   });
 
-  /** Read one installed capability's content, re-verified against its pinned hash. */
-  ipcMain.handle("plugins:read", (_e, { id, capabilityId }) => readCapabilityFile(id, capabilityId));
+  /**
+   * Read one installed capability's content, re-verified against its pinned hash.
+   *
+   * Gated on the grants that capability needs, which is the "before use" half of the lifecycle. For
+   * every capability this build can install today the gate is a no-op — skills bind to no provider —
+   * but the gate belongs on the path rather than in the executor that will later call it, so there
+   * is one place that decides, not two.
+   */
+  ipcMain.handle("plugins:read", async (_e, { id, capabilityId }) => {
+    const gate = await ensureAuthorized(id, capabilityId);
+    if (!gate.ok) return { ok: false, content: null, error: gate.error };
+    return readCapabilityFile(id, capabilityId);
+  });
 
   ipcMain.handle("plugins:detail", (_e, id) => {
     const entry = cachedCatalogue().entries.find((x) => x.manifest.id === id);

@@ -265,10 +265,15 @@ test(
     });
     srv.close();
 
-    // This is the shape the renderer is allowed to see (§5).
+    // This is the shape the renderer is allowed to see (§5). An allowlist, so a field added to the
+    // record has to be considered here before it can reach the renderer — which is the point.
+    // `requestedScopes` is what we ASKED this grant for: it is in the manifest the user consented to,
+    // and it is what the plugins page needs to explain that an update wants more than the grant covers.
     const status = credentialStatus(KEY);
-    assert.deepEqual(Object.keys(status).sort(), ["authorized", "canRefresh", "expiresAt", "scope"]);
+    assert.deepEqual(Object.keys(status).sort(), ["authorized", "canRefresh", "expiresAt", "requestedScopes", "scope"]);
     assert.ok(!JSON.stringify(status).includes("at-1"));
+    assert.ok(!JSON.stringify(status).includes("rt-1"), "nor the refresh token");
+    assert.deepEqual(status.requestedScopes, ["https://www.googleapis.com/auth/gmail.send"]);
 
     revokeCredential(KEY);
     assert.equal(credentialStatus(KEY).authorized, false);
