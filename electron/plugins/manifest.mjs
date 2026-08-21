@@ -129,6 +129,8 @@ export const OAUTH_PRESETS = {
   google: {
     authorize_url: "https://accounts.google.com/o/oauth2/v2/auth",
     token_url: "https://oauth2.googleapis.com/token",
+    refresh_url: null, // same endpoint, distinguished by grant_type
+    refresh_grant_type: true,
     scope_separator: " ",
     // Google issues a refresh token ONLY with these, and re-consent is needed to get one again.
     // Sending them to a provider that does not know them is at best noise and at worst a 400, which
@@ -148,6 +150,8 @@ export const OAUTH_PRESETS = {
   github: {
     authorize_url: "https://github.com/login/oauth/authorize",
     token_url: "https://github.com/login/oauth/access_token",
+    refresh_url: null,
+    refresh_grant_type: true,
     scope_separator: " ",
     extra_authorize_params: {},
     token_auth: "post",
@@ -158,6 +162,8 @@ export const OAUTH_PRESETS = {
   slack: {
     authorize_url: "https://slack.com/oauth/v2/authorize",
     token_url: "https://slack.com/api/oauth.v2.access",
+    refresh_url: null,
+    refresh_grant_type: true,
     scope_separator: ",",
     extra_authorize_params: {},
     token_auth: "post",
@@ -166,18 +172,26 @@ export const OAUTH_PRESETS = {
     verified: false,
   },
   figma: {
+    // Values below read from developers.figma.com/docs/rest-api/oauth-apps on 2026-08-20. `verified`
+    // still means a round trip we have made, which this is not.
     authorize_url: "https://www.figma.com/oauth",
     token_url: "https://api.figma.com/v1/oauth/token",
+    // A SEPARATE endpoint, not the token endpoint with a different grant_type. Assuming otherwise
+    // would have posted the refresh to the wrong URL -- and only failed 90 days after authorization.
+    refresh_url: "https://api.figma.com/v1/oauth/refresh",
+    refresh_grant_type: false, // the body carries refresh_token and nothing else
     scope_separator: " ",
     extra_authorize_params: {},
-    token_auth: "basic", // client_id:client_secret in the Authorization header, not the body
-    pkce: "supported",
-    refresh: "rotating", // each refresh invalidates the previous refresh token
+    token_auth: "basic", // client_id:client_secret, base64, in the Authorization header
+    pkce: "supported", // optional per the docs, S256 only; we always send it
+    refresh: "static", // the refresh response returns access_token/token_type/expires_in only
     verified: false,
   },
   microsoft: {
     authorize_url: "https://login.microsoftonline.com/common/oauth2/v2.0/authorize",
     token_url: "https://login.microsoftonline.com/common/oauth2/v2.0/token",
+    refresh_url: null,
+    refresh_grant_type: true,
     scope_separator: " ",
     extra_authorize_params: {},
     token_auth: "post",
@@ -189,6 +203,8 @@ export const OAUTH_PRESETS = {
 
 /** Defaults for a literal (non-preset) endpoint pair: the RFC's answers, not any vendor's. */
 export const OAUTH_PROFILE_DEFAULTS = {
+  refresh_url: null, // null = refresh at token_url, the RFC 6749 arrangement
+  refresh_grant_type: true,
   scope_separator: " ",
   extra_authorize_params: {},
   token_auth: "post",
@@ -248,6 +264,8 @@ const KNOWN_OAUTH_FIELDS = new Set([
   "known_provider",
   "authorize_url",
   "token_url",
+  "refresh_url",
+  "refresh_grant_type",
   "scopes",
   "client",
   "redirect",
@@ -747,6 +765,13 @@ function validateOAuth(at, o, { strict, err, warn, needKeys = new Set() }) {
   /* endpoints: a preset, or a literal pair -- never both, never neither */
   const preset = has(o, "known_provider") ? o.known_provider : null;
   const literal = has(o, "authorize_url") || has(o, "token_url");
+  if (preset && (has(o, "refresh_url") || has(o, "refresh_grant_type"))) {
+    // Overriding a preset's refresh endpoint is the exfiltration case with none of the sideloading
+    // caveats: the manifest keeps a trusted `known_provider` while redirecting where the client secret
+    // and refresh token are posted. There is no legitimate reason to do it.
+    err(`${at}: refresh_url/refresh_grant_type belong to the provider preset and cannot be overridden`);
+    bad = true;
+  }
   if (preset && literal) {
     err(`${at}: declare either known_provider or authorize_url+token_url, not both`);
     bad = true;
@@ -762,13 +787,26 @@ function validateOAuth(at, o, { strict, err, warn, needKeys = new Set() }) {
         bad = true;
       }
     }
+    // Optional: providers that refresh somewhere other than where they issued (Figma). Held to the
+    // same bar as the other two, and refused for publication with them -- see below for why this one
+    // is if anything the more dangerous of the three.
+    if (has(o, "refresh_url") && !isAcceptableOAuthEndpoint(o.refresh_url)) {
+      err(`${at}.refresh_url must be an https URL (or http on loopback) without embedded credentials`);
+      bad = true;
+    }
+    if (has(o, "refresh_grant_type") && typeof o.refresh_grant_type !== "boolean") {
+      err(`${at}.refresh_grant_type must be a boolean (false = the body carries refresh_token alone)`);
+      bad = true;
+    }
     if (strict) {
       // §3.1: the host is about to open the user's browser at a URL this document chose, in the one
       // flow designed to make them type a password. A look-alike domain delivered by the trusted app
       // beats any phishing link. Reserved in the schema so Phase 4 needs no bump; refused at review
       // until per-publisher identity exists to hold accountable.
       err(
-        `${at}: literal authorize_url/token_url are not accepted for publication — use known_provider ` +
+        `${at}: literal endpoints are not accepted for publication — the token/refresh endpoint receives ` +
+          `the client secret and refresh token, so a manifest naming it can redirect credentials. ` +
+          `Use known_provider ` +
           `(${Object.keys(OAUTH_PRESETS).join(", ")}). See oauth design §3.1`,
       );
       bad = true;
@@ -791,6 +829,23 @@ function validateOAuth(at, o, { strict, err, warn, needKeys = new Set() }) {
   if (!isPlainObject(c)) {
     err(`${at}.client must be an object`);
     bad = true;
+  } else if (c.type === "host") {
+    // Credentials come from the BUILD -- the same arrangement as the preset URLs, and the same one
+    // electron/services/google-defaults.json already uses for sign-in. The manifest names no id, no
+    // secret and no needs[] entry, which is what removes every credential mistake this shape can make:
+    // there is nothing in a published document to paste a secret into, and nothing for a user to fill.
+    for (const field of ["id", "need", "secret_need", "secret", "client_secret"]) {
+      if (has(c, field)) {
+        err(`${at}.client: type "host" takes no ${field} — the build supplies the credentials`);
+        bad = true;
+      }
+    }
+    if (!preset) {
+      // We can only bundle credentials for providers this build knows by name. A literal endpoint pair
+      // has no key to look them up under.
+      err(`${at}.client: type "host" requires known_provider — the build has no credentials for a literal endpoint`);
+      bad = true;
+    }
   } else if (c.type === "public") {
     if (!isNonEmptyString(c.id)) {
       err(`${at}.client.id is required for type "public"`);
@@ -820,7 +875,7 @@ function validateOAuth(at, o, { strict, err, warn, needKeys = new Set() }) {
       bad = true;
     }
   } else {
-    err(`${at}.client.type must be "public" or "user_supplied"`);
+    err(`${at}.client.type must be "host", "public" or "user_supplied"`);
     bad = true;
   }
 
@@ -866,6 +921,8 @@ function validateOAuth(at, o, { strict, err, warn, needKeys = new Set() }) {
     }
   }
   if (providerPkce === "unsupported" && isPlainObject(c) && c.type === "public") {
+    // "host" is deliberately absent: it carries a client secret, so it is a confidential client and
+    // GitHub/Slack are declarable with it.
     // No verifier AND no client authentication: an intercepted loopback callback is then a complete
     // takeover, with nothing in the exchange that an interceptor lacks. Such a provider needs a
     // confidential client -- user_supplied with a secret today, a broker once that exists.
@@ -885,10 +942,12 @@ function validateOAuth(at, o, { strict, err, warn, needKeys = new Set() }) {
     known_provider: preset ?? null,
     authorize_url: preset ? null : o.authorize_url,
     token_url: preset ? null : o.token_url,
+    refresh_url: preset || !has(o, "refresh_url") ? null : o.refresh_url,
+    refresh_grant_type: preset || !has(o, "refresh_grant_type") ? null : o.refresh_grant_type,
     scopes: [...o.scopes],
     client: {
       type: c.type,
-      id: c.type === "public" ? c.id : null,
+      id: c.type === "public" ? c.id : null, // host: resolved at run time, never stored in the manifest
       need: c.type === "user_supplied" ? c.need : null,
       // Carried for both types -- see the note above on Google's Desktop clients.
       secret_need: has(c, "secret_need") ? c.secret_need : null,

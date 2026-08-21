@@ -20,6 +20,7 @@
  *   - The listener binds 127.0.0.1 explicitly, never 0.0.0.0, and never outlives its attempt.
  */
 import crypto from "node:crypto";
+import fs from "node:fs";
 import http from "node:http";
 import path from "node:path";
 import { OAUTH_PRESETS, OAUTH_PROFILE_DEFAULTS, isAcceptableOAuthEndpoint } from "./manifest.mjs";
@@ -92,11 +93,21 @@ export function resolveEndpoints(oauth) {
   // on the four other presets the table already advertises.
   const ep = oauth.known_provider
     ? { ...OAUTH_PROFILE_DEFAULTS, ...OAUTH_PRESETS[oauth.known_provider] }
-    : { ...OAUTH_PROFILE_DEFAULTS, authorize_url: oauth.authorize_url, token_url: oauth.token_url };
+    : {
+        ...OAUTH_PROFILE_DEFAULTS,
+        authorize_url: oauth.authorize_url,
+        token_url: oauth.token_url,
+        // A literal manifest may describe a provider that refreshes elsewhere, or with a bare body.
+        // Null means "same endpoint, RFC 6749 shape", which is what the defaults already say.
+        ...(oauth.refresh_url ? { refresh_url: oauth.refresh_url } : {}),
+        ...(oauth.refresh_grant_type !== null && oauth.refresh_grant_type !== undefined
+          ? { refresh_grant_type: oauth.refresh_grant_type }
+          : {}),
+      };
   if (!ep?.authorize_url || !ep?.token_url) {
     throw new Error(`oauth: no endpoints for provider "${oauth.known_provider ?? "(literal)"}"`);
   }
-  for (const url of [ep.authorize_url, ep.token_url]) {
+  for (const url of [ep.authorize_url, ep.token_url, ep.refresh_url].filter(Boolean)) {
     // Same predicate the validator uses, imported rather than restated: the last gate before a browser
     // opens must not be able to disagree with the gate that let the manifest in.
     if (!isAcceptableOAuthEndpoint(url)) throw new Error(`oauth: refusing an unacceptable endpoint (${url})`);
@@ -123,6 +134,36 @@ export function buildAuthorizeUrl({ profile, clientId, scopes, redirectUri, stat
   // issues a refresh token at all, and means nothing to Figma.
   for (const [k, v] of Object.entries(profile.extra_authorize_params ?? {})) q.set(k, v);
   return u.toString();
+}
+
+/* ------------------------------------------------------------------ host credentials */
+
+/**
+ * Credentials this build ships for `client: { "type": "host" }`.
+ *
+ * Resolution order mirrors googleAuth.mjs's documented one: environment first (a developer overriding
+ * locally), then the generated bundle (what a packaged build has). Read once.
+ *
+ * This is what removes the backend. The credential lives where the preset URLs live -- in the build --
+ * so a plugin manifest names no client, a user is never asked for a secret, and adding a provider is
+ * two environment variables rather than a deploy.
+ */
+let hostCredCache = null;
+function hostCredentials(provider) {
+  const upper = provider.toUpperCase();
+  const envId = process.env[`PLUGIN_OAUTH_${upper}_CLIENT_ID`];
+  const envSecret = process.env[`PLUGIN_OAUTH_${upper}_CLIENT_SECRET`];
+  if (envId) return { client_id: envId, client_secret: envSecret ?? "" };
+
+  if (!hostCredCache) {
+    try {
+      hostCredCache = JSON.parse(fs.readFileSync(new URL("./oauth-credentials.json", import.meta.url), "utf8"));
+    } catch {
+      // Absent is normal in a checkout that has never run the generator; the caller reports it.
+      hostCredCache = {};
+    }
+  }
+  return hostCredCache[provider] ?? null;
 }
 
 /* ------------------------------------------------------------------ loopback listener */
@@ -309,6 +350,31 @@ export function revokeCredential(key) {
   writeRecord(key, null);
 }
 
+/**
+ * The client id/secret for a validated oauth block, whichever of the three shapes it declares.
+ *
+ *   host          from this build (see hostCredentials) -- the manifest names nothing
+ *   public        an id embedded in the manifest, protected by PKCE
+ *   user_supplied the user's own project, via needs[]
+ */
+function resolveClient(oauth, resolveNeed) {
+  const c = oauth.client;
+  if (c.type === "host") {
+    const cred = hostCredentials(oauth.known_provider);
+    if (!cred?.client_id) {
+      throw new Error(
+        `oauth: this build ships no credentials for "${oauth.known_provider}" — set ` +
+          `PLUGIN_OAUTH_${oauth.known_provider.toUpperCase()}_CLIENT_ID/_SECRET and re-run ` +
+          `scripts/gen-plugin-oauth-credentials.mjs`,
+      );
+    }
+    return { clientId: cred.client_id, clientSecret: cred.client_secret || null };
+  }
+  const clientId = c.type === "public" ? c.id : resolveNeed(c.need);
+  if (!clientId) throw new Error(`oauth: no client id (needs "${c.need}" to be set)`);
+  return { clientId, clientSecret: c.secret_need ? resolveNeed(c.secret_need) : null };
+}
+
 /* ------------------------------------------------------------------ the flow */
 
 /**
@@ -333,10 +399,7 @@ export async function authorize({ pluginId, providerId, oauth, resolveNeed, sign
   }
 
   const endpoints = resolveEndpoints(oauth);
-  const clientId =
-    oauth.client.type === "public" ? oauth.client.id : resolveNeed(oauth.client.need);
-  if (!clientId) throw new Error(`oauth: no client id (needs "${oauth.client.need}" to be set)`);
-  const clientSecret = oauth.client.secret_need ? resolveNeed(oauth.client.secret_need) : null;
+  const { clientId, clientSecret } = resolveClient(oauth, resolveNeed);
 
   if (oauth.redirect.method !== "loopback") {
     // Reserved in the schema, not built. Saying so beats a half-registered scheme that fails on one OS.
@@ -418,15 +481,17 @@ async function accessToken(key, { oauth, resolveNeed }) {
   if (inFlight.has(key)) return inFlight.get(key);
 
   const endpoints = resolveEndpoints(oauth);
-  const clientId = oauth.client.type === "public" ? oauth.client.id : resolveNeed(oauth.client.need);
-  const clientSecret = oauth.client.secret_need ? resolveNeed(oauth.client.secret_need) : null;
+  const { clientId, clientSecret } = resolveClient(oauth, resolveNeed);
 
   const promise = (async () => {
     try {
       const body = await postForm(
-        endpoints.token_url,
+        // Figma refreshes at a DIFFERENT endpoint from the one that issued the token, and its body
+        // carries refresh_token alone -- no grant_type. Both are provider facts, so both come from
+        // the profile rather than being assumed to follow Google.
+        endpoints.refresh_url ?? endpoints.token_url,
         {
-          grant_type: "refresh_token",
+          ...(endpoints.refresh_grant_type !== false ? { grant_type: "refresh_token" } : {}),
           refresh_token: rec.refresh_token,
           client_id: clientId,
           ...(clientSecret ? { client_secret: clientSecret } : {}),

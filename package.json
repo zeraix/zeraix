@@ -23,7 +23,7 @@
     "test": "node --test \"test/**/*.test.mjs\"",
     "electron": "electron .",
     "gen:google": "node scripts/gen-google-defaults.mjs",
-    "preelectron:dev": "node scripts/gen-google-defaults.mjs",
+    "preelectron:dev": "node scripts/gen-google-defaults.mjs && node scripts/gen-plugin-oauth-credentials.mjs",
     "electron:dev": "concurrently -k \"next dev\" \"wait-on tcp:3000 && electron .\"",
     "electron:dev:webpack": "concurrently -k \"next dev --webpack\" \"wait-on tcp:3000 && electron .\"",
     "rebuild:native": "electron-rebuild -f -w node-pty",
@@ -40,7 +40,9 @@
     "registry:export": "node scripts/export-builtin-skills.mjs --out registry",
     "seed:gen": "node scripts/gen-seed.mjs",
     "seed:capture": "tsx --import ./scripts/md-loader.mjs scripts/capture-prefix.mjs",
-    "seed:check": "tsx --import ./scripts/md-loader.mjs scripts/capture-prefix.mjs --check"
+    "seed:check": "tsx --import ./scripts/md-loader.mjs scripts/capture-prefix.mjs --check",
+    "gen:plugin-oauth": "node scripts/gen-plugin-oauth-credentials.mjs",
+    "validate:plugins": "node scripts/validate-plugin.mjs plugins registry"
   },
   "dependencies": {
     "@hookform/resolvers": "^5.2.2",

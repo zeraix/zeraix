@@ -171,7 +171,13 @@ console.log(`provider  ${providerId} (${oauth.known_provider ?? "literal endpoin
 console.log(`authorize ${endpoints.authorize_url}`);
 console.log(`token     ${endpoints.token_url}`);
 console.log(`scopes    ${oauth.scopes.join("\n          ")}`);
-console.log(`client    ${oauth.client.type === "public" ? oauth.client.id : `needs ${oauth.client.need}`}`);
+const clientDesc =
+  oauth.client.type === "host"
+    ? `from this build (PLUGIN_OAUTH_${(oauth.known_provider ?? "").toUpperCase()}_CLIENT_ID or the generated bundle)`
+    : oauth.client.type === "public"
+      ? oauth.client.id
+      : `needs ${oauth.client.need}`;
+console.log(`client    ${oauth.client.type} — ${clientDesc}`);
 
 try {
   const status = await authorize({

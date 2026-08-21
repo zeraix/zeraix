@@ -20,6 +20,7 @@
 /.vscode
 /.agents
 /plugins
+/registry
 
 # electron-builder output
 /dist-electron
@@ -68,3 +69,5 @@ resources/qemu/*/
 electron/services/google-defaults.json
 
 build-mac.sh
+# Plugin OAuth client credentials (generated locally from .env during build; do not commit)
+electron/plugins/oauth-credentials.json

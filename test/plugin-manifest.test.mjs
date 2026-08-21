@@ -11,6 +11,7 @@
  */
 import test from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 
 import {
   SCHEMA_VERSION,
@@ -687,7 +688,7 @@ test("literal endpoints are refused for publication but usable when sideloaded",
 
   const registry = validateManifest(m, { mode: "registry" });
   assert.equal(registry.ok, false);
-  assert.match(registry.errors.join(" "), /use known_provider/);
+  assert.match(registry.errors.join(" "), /known_provider/i);
 
   const client = validateManifest(m, { mode: "client" });
   assert.equal(client.ok, true, client.errors.join("; "));
@@ -828,11 +829,125 @@ test("each preset carries the behaviour the runtime needs, not just URLs", () =>
   // Guards against a preset being added with only its two URLs, which would silently inherit Google's
   // scope delimiter and auth method.
   for (const [name, p] of Object.entries(OAUTH_PRESETS)) {
-    for (const key of ["authorize_url", "token_url", "scope_separator", "token_auth", "pkce", "refresh"]) {
+    for (const key of ["authorize_url", "token_url", "scope_separator", "token_auth", "pkce", "refresh",
+                       "refresh_grant_type"]) {
       assert.ok(p[key] !== undefined, `preset ${name} is missing ${key}`);
     }
     assert.ok(["post", "basic"].includes(p.token_auth), `${name}.token_auth`);
     assert.ok(["required", "supported", "unsupported"].includes(p.pkce), `${name}.pkce`);
     assert.ok(["static", "rotating", "none"].includes(p.refresh), `${name}.refresh`);
+    // null means "refresh at token_url"; a string must be a real endpoint, not a path fragment.
+    assert.ok(p.refresh_url === null || /^https:\/\//.test(p.refresh_url), `${name}.refresh_url`);
   }
+});
+
+/* -------------------------------------------------- host client type (no backend, no credentials) */
+
+test("a host client declares no credentials at all", () => {
+  const m = oauthPlugin({ authorizer: { oauth: { client: { type: "host" } } } });
+  for (const res of bothModes(m)) {
+    assert.equal(res.ok, true, res.errors.join("; "));
+    assert.deepEqual(res.manifest.providers.google_auth.oauth.client, {
+      type: "host",
+      id: null,
+      need: null,
+      secret_need: null,
+    });
+  }
+});
+
+test("a host client rejects every credential field", () => {
+  // The point of the type is that a published document has nowhere to put a secret. Accepting these
+  // silently would reopen exactly that.
+  for (const extra of [{ id: "x.apps.googleusercontent.com" }, { secret_need: "GOOGLE_OAUTH_CLIENT_SECRET" }, { secret: "GOCSPX-x" }]) {
+    const m = oauthPlugin({ authorizer: { oauth: { client: { type: "host", ...extra } } } });
+    const res = validateManifest(m, { mode: "registry" });
+    assert.equal(res.ok, false, JSON.stringify(extra));
+    assert.match(res.errors.join(" "), /takes no (id|secret_need|secret)/);
+  }
+});
+
+test("a host client requires a known provider", () => {
+  // Credentials are keyed by provider name; a literal endpoint pair has no key to look them up under.
+  const m = oauthPlugin({
+    authorizer: {
+      oauth: {
+        client: { type: "host" },
+        known_provider: undefined,
+        authorize_url: "https://id.example.com/authorize",
+        token_url: "https://id.example.com/token",
+      },
+    },
+  });
+  assert.match(validateManifest(m, { mode: "client" }).errors.join(" "), /requires known_provider/);
+});
+
+test("a host client is confidential, so no-PKCE providers become declarable", () => {
+  // The public-client ban on GitHub/Slack does not apply: a host client carries a secret.
+  const m = oauthPlugin({
+    authorizer: { oauth: { known_provider: "github", client: { type: "host" }, pkce: false } },
+  });
+  const res = validateManifest(m, { mode: "registry" });
+  assert.equal(res.ok, true, res.errors.join("; "));
+});
+
+test("the shipped gmail-send plugin asks the user for nothing", () => {
+  // Regression guard for the whole point of this shape: no needs[], no client id, no secret anywhere.
+  const raw = JSON.parse(readFileSync(new URL("../plugins/zeraix/gmail-send/1.0.0/plugin.json", import.meta.url), "utf8"));
+  const res = validateManifest(raw, { mode: "registry" });
+  assert.equal(res.ok, true, res.errors.join("; "));
+  const auth = res.manifest.providers.google_auth;
+  assert.equal(auth.oauth.client.type, "host");
+  assert.deepEqual(auth.needs, []);
+  assert.ok(!JSON.stringify(raw).includes("GOCSPX"), "no secret may appear in a published manifest");
+});
+
+/* -------------------------------------------------- refresh endpoint declared by a manifest */
+
+/** A sideloaded manifest describing a Figma-shaped provider: refreshes elsewhere, bare body. */
+const literalFigmaShape = {
+  known_provider: undefined,
+  authorize_url: "https://id.example.com/oauth",
+  token_url: "https://api.example.com/v1/oauth/token",
+  refresh_url: "https://api.example.com/v1/oauth/refresh",
+  refresh_grant_type: false,
+};
+
+test("a sideloaded manifest may name its own refresh endpoint", () => {
+  // Without this a literal manifest could not describe Figma at all: its refresh endpoint is not the
+  // one that issued the token, so the refresh would go to the wrong URL and fail 90 days later.
+  const m = oauthPlugin({ authorizer: { oauth: literalFigmaShape } });
+  const res = validateManifest(m, { mode: "client" });
+  assert.equal(res.ok, true, res.errors.join("; "));
+  const o = res.manifest.providers.google_auth.oauth;
+  assert.equal(o.refresh_url, "https://api.example.com/v1/oauth/refresh");
+  assert.equal(o.refresh_grant_type, false);
+  // Round-trips, as parseIndex requires.
+  assert.equal(validateManifest(res.manifest, { mode: "client" }).ok, true);
+});
+
+test("a manifest-named refresh endpoint is refused for publication", () => {
+  // It receives the client secret and the refresh token, so naming it is naming where credentials go.
+  const m = oauthPlugin({ authorizer: { oauth: literalFigmaShape } });
+  const res = validateManifest(m, { mode: "registry" });
+  assert.equal(res.ok, false);
+  assert.match(res.errors.join(" "), /receives the client secret and refresh token/);
+});
+
+test("a preset's refresh endpoint cannot be overridden", () => {
+  // The dangerous shape: keep a trusted known_provider while redirecting where credentials are posted.
+  for (const over of [{ refresh_url: "https://evil.test/collect" }, { refresh_grant_type: false }]) {
+    const m = oauthPlugin({ authorizer: { oauth: over } });
+    for (const res of bothModes(m)) {
+      assert.equal(res.ok, false, JSON.stringify(over));
+      assert.match(res.errors.join(" "), /belong to the provider preset and cannot be overridden/);
+    }
+  }
+});
+
+test("a non-https refresh endpoint is refused", () => {
+  const m = oauthPlugin({
+    authorizer: { oauth: { ...literalFigmaShape, refresh_url: "http://evil.test/collect" } },
+  });
+  assert.equal(validateManifest(m, { mode: "client" }).ok, false);
 });
