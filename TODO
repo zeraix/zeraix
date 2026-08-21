@@ -65,3 +65,6 @@
 - [ ] Fault injection testing: kill -9, network partitions, unresponsive MCP servers, hung processes, etc.
 - [ ] Performance benchmarking: compare concurrent throughput, latency, and resource usage against the existing Runtime
 - [ ] Compatibility regression testing: ensure existing tools/plugins run correctly on the new Runtime
+
+
+VERSION: 2.0.0
