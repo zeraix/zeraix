@@ -1,0 +1,71 @@
+# Zeraix Agent Runtime — Rust workspace.
+#
+# See docs/Zeraix-Agent-Runtime-Rust.md for the target architecture and
+# docs/agent-runtime-migration.md for how this replaces the JS runtime stage by stage.
+#
+# Crate boundaries are deliberate (spec §3): no `runtime.rs` / `utils.rs` catch-alls. A crate is added
+# by the stage that first needs it, so an empty crate never sits in the tree pretending to be a
+# boundary. Still to come: context.
+[workspace]
+resolver = "3"
+members = [
+    "crates/agent-audit",
+    "crates/agent-core",
+    "crates/agent-events",
+    "crates/agent-mcp",
+    "crates/agent-permission",
+    "crates/agent-process",
+    "crates/agent-sandbox",
+    "crates/agent-resource",
+    "crates/agent-scheduler",
+    "crates/agent-subagents",
+    "crates/agent-tools",
+    "crates/agent-ipc",
+    "crates/agent-runtime",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "Apache-2.0"
+
+[workspace.dependencies]
+agent-audit = { path = "crates/agent-audit" }
+agent-core = { path = "crates/agent-core" }
+agent-events = { path = "crates/agent-events" }
+agent-mcp = { path = "crates/agent-mcp" }
+agent-permission = { path = "crates/agent-permission" }
+agent-process = { path = "crates/agent-process" }
+agent-sandbox = { path = "crates/agent-sandbox" }
+agent-resource = { path = "crates/agent-resource" }
+agent-scheduler = { path = "crates/agent-scheduler" }
+agent-subagents = { path = "crates/agent-subagents" }
+agent-tools = { path = "crates/agent-tools" }
+agent-ipc = { path = "crates/agent-ipc" }
+
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs", "io-std", "io-util", "sync", "time", "process"] }
+tokio-util = { version = "0.7", features = ["rt"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+anyhow = "1"
+async-trait = "0.1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+dashmap = "6"
+regex = "1"
+chrono = "0.4"
+encoding_rs = "0.8"
+landlock = "0.4"
+
+[workspace.dependencies.nix]
+version = "0.29"
+features = ["signal", "process", "resource"]
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = true

@@ -66,6 +66,21 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # The Rust Agent Runtime sidecar is built on each runner for its OWN host triple — no
+      # cross-compilation: the mac target is arm64-only on an arm64 runner, the win target x64-only on
+      # an x64 runner. If an x64 mac build ever returns, this needs a --target, not a cross toolchain.
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      # A release build of the workspace is a couple of minutes cold and seconds warm. Keyed on
+      # Cargo.lock via the action's own hashing, and scoped per-runner so the two matrix legs do not
+      # trample each other's target dir.
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: runtime
+          key: ${{ matrix.name }}
+
       - name: Setup pnpm
         uses: pnpm/action-setup@v4
 
@@ -98,6 +113,13 @@ jobs:
       # clear message. Without this, a missing value surfaces as an opaque Zod "Invalid URL"
       # from next.config.ts, three layers downstream of the real cause.
       # Only booleans and a length are printed — never a value.
+      # Run the Rust tests on the platform that will ship the binary. Landlock, process groups and the
+      # SIGTERM escalation are all platform behaviour, so a green Linux run says nothing about the
+      # artefact a user installs. Cheap insurance against shipping a sidecar that cannot start.
+      - name: Test Rust runtime
+        working-directory: runtime
+        run: cargo test --release --locked
+
       - name: Check required config
         shell: bash
         env:
@@ -329,6 +351,29 @@ jobs:
             Write-Output "    signer: $($sig.SignerCertificate.Subject)"
           }
           exit $fail
+
+      # The failure this catches is silent and total: if the sidecar is missing from the package,
+      # binaryPath() finds nothing, the bridge latches `disabled`, and every tool call falls through to
+      # the JS handlers — a working app that simply never uses the runtime it shipped. Nothing else in
+      # this pipeline would notice, because nothing else fails.
+      - name: Verify the sidecar was packaged
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ "${{ matrix.name }}" = "macos" ]; then
+            APP=$(find dist-electron -maxdepth 2 -name "*.app" -print -quit)
+            [ -n "$APP" ] || { echo "::error::no .app found"; exit 1; }
+            BIN="$APP/Contents/Resources/runtime/zeraix-agent-runtime"
+            [ -x "$BIN" ] || { echo "::error::sidecar missing or not executable at $BIN"; exit 1; }
+            # Under hardenedRuntime an unsigned nested Mach-O fails notarization, so assert the
+            # signature rather than merely the file's presence.
+            codesign --verify --strict "$BIN" || { echo "::error::sidecar is not validly signed"; exit 1; }
+            echo "sidecar packaged and signed: $("$BIN" --version)"
+          else
+            BIN=$(find dist-electron -path "*/resources/runtime/zeraix-agent-runtime.exe" -print -quit)
+            [ -n "$BIN" ] || { echo "::error::sidecar missing from the unpacked package"; exit 1; }
+            echo "sidecar packaged: $BIN"
+          fi
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4

@@ -1,5 +1,5 @@
 import request from "./request";
-import { GetUploadUrlResponse } from "@/types/upload";
+import type { GetUploadUrlResponse } from "@/types/upload";
 
 /**
  * Main-process OSS upload proxy (Electron only; see electron/preload.cjs / main.mjs).

@@ -41,6 +41,11 @@ import { callPluginTool, describePluginTools, isPluginTool, listPluginTools } fr
 // instead of filling in the settings form. Kept in its own module because it is the only part of the
 // toolkit that writes app configuration and grants trust -- see its header for the two-gate model.
 import { mcpAdminHandlers } from "./mcpAdmin.mjs";
+// Rust Agent Runtime sidecar. Fails open on every path: a missing binary, a refused spawn, a protocol
+// mismatch or a tool it does not implement all resolve to "the JS handler serves this call", so the
+// only observable difference when it is unavailable is that it is not used. See its header and
+// docs/agent-runtime-migration.md.
+import { invalidateFileList as invalidateRustFileList, tryRunTool } from "./rustRuntime.mjs";
 
 // Command execution is abstracted into a pluggable engine (native = run directly on the host
 // (legacy behavior); qemu = hardware-isolated VM, see the probing/selection in
@@ -464,7 +469,18 @@ function resolveInside(p) {
   return abs;
 }
 
-/** For display: a path relative to WORKDIR (with slashes normalized). */
+/**
+ * For display: a path relative to WORKDIR (with slashes normalized).
+ *
+ * Relative on purpose — it is what the model passes back to the next tool call, and an absolute path in
+ * that position invites it to start addressing files outside the workspace.
+ *
+ * But relative ALONE is what made "the AI said it wrote the file and it is not in my folder" a real
+ * report: the working directory defaults to a path buried in userData, so `Wrote 6535 bytes to
+ * minecraft-game/index.html` named a location the user had no way to find. Every tool that puts a file
+ * somewhere therefore reports the absolute path alongside it. Reads and searches deliberately do not —
+ * they return many paths, and repeating the workspace prefix on each would cost tokens to say nothing.
+ */
 function rel(abs) {
   const r = path.relative(WORKDIR, abs) || ".";
   return r.split(path.sep).join("/");
@@ -1092,7 +1108,7 @@ const handlers = {
     await fs.writeFile(abs, bytes);
     const verb = before ? "Wrote" : "Created";
     const diff = makeUnifiedDiff(toLf(before), afterLf);
-    return `${verb} ${bytes.length} bytes to ${rel(abs)}.${diff}`;
+    return `${verb} ${bytes.length} bytes to ${rel(abs)} (${abs}).${diff}`;
   },
 
   async edit_file({ path: p, old_string, new_string, replace_all }) {
@@ -1178,7 +1194,7 @@ const handlers = {
     await fs.appendFile(abs, addNorm, "utf8"); // appends at EOF; existing content and BOM untouched
     const toLf = (s) => s.replace(/\r\n/g, "\n");
     const diff = makeUnifiedDiff(toLf(before), toLf(before) + toLf(addNorm));
-    return `Appended ${Buffer.byteLength(addNorm)} bytes to ${rel(abs)}.${diff}`;
+    return `Appended ${Buffer.byteLength(addNorm)} bytes to ${rel(abs)} (${abs}).${diff}`;
   },
 
   async delete_file({ path: p }) {
@@ -1192,7 +1208,7 @@ const handlers = {
     const d = resolveInside(destination);
     await fs.mkdir(path.dirname(d), { recursive: true });
     await fs.copyFile(s, d);
-    return `Copied ${rel(s)} -> ${rel(d)}.`;
+    return `Copied ${rel(s)} -> ${rel(d)} (${d}).`;
   },
 
   async move_file({ source, destination }) {
@@ -1201,7 +1217,7 @@ const handlers = {
     await fs.mkdir(path.dirname(d), { recursive: true });
     await fs.rm(d, { force: true });
     await fs.rename(s, d);
-    return `Moved ${rel(s)} -> ${rel(d)}.`;
+    return `Moved ${rel(s)} -> ${rel(d)} (${d}).`;
   },
 
   async file_info({ path: p }) {
@@ -1242,7 +1258,7 @@ const handlers = {
   async create_directory({ path: p }) {
     const abs = resolveInside(p);
     await fs.mkdir(abs, { recursive: true });
-    return `Created directory ${rel(abs)}.`;
+    return `Created directory ${rel(abs)} (${abs}).`;
   },
 
   async search_files({ pattern }) {
@@ -1683,8 +1699,37 @@ export async function runTool(name, args = {}, { signal } = {}) {
   if (!handler) return { ok: false, content: `Unknown tool: ${name}` };
   try {
     await ensureWorkdir();
+    // Rust Agent Runtime (see docs/agent-runtime-migration.md, Stage 1). This is the ONLY hook the
+    // migration adds to this file: the sidecar either serves the call or declines, and declining is
+    // indistinguishable from it not existing. Everything below -- the mutator invalidation, the
+    // read observation, the { ok, content } contract, the catch -- is unchanged and still applies.
+    //
+    // It is off unless ZERAIX_RUST_RUNTIME says otherwise, so the default path through this function
+    // is byte-for-byte what it was before.
+    const offloaded = await tryRunTool(name, args ?? {}, { signal, workdir: WORKDIR });
+    if (offloaded) {
+      if (FILE_LIST_MUTATORS.has(name)) {
+        invalidateWalkCache();
+        invalidateRustFileList(WORKDIR);
+      }
+      if (name === "read_file" && offloaded.ok) {
+        noteFileRead({
+          workdir: WORKDIR,
+          relPath: args?.path,
+          text: offloaded.content,
+          llm: { available: Boolean(LLM_CONFIG.endpoint && LLM_CONFIG.model), chat: chatComplete },
+        });
+      }
+      return offloaded;
+    }
     const content = await handler(args ?? {}, { signal });
-    if (FILE_LIST_MUTATORS.has(name)) invalidateWalkCache(); // the file list may have changed: the next search_* re-walks
+    if (FILE_LIST_MUTATORS.has(name)) {
+      invalidateWalkCache(); // the file list may have changed: the next search_* re-walks
+      // The Rust runtime caches its own file list and cannot see a mutation performed by a JS handler.
+      // Needed only while the two share a tree -- once the mutating tools migrate, the tool that made
+      // the change reports it itself.
+      invalidateRustFileList(WORKDIR);
+    }
     // Observe reads so project memory can learn from what was actually opened. This is the right
     // layer for it: sub-agent tool calls come through here too, and sub-agents do most of the
     // exploring. Fire-and-forget — it can neither delay nor fail this call.

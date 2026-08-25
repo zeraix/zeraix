@@ -143,6 +143,20 @@ export interface Conversation {
    *  half-finished task into a finished one. A runtime artifact, not part of the integrity hash. */
   goal?: StoredGoalState;
   /**
+   * The task checklist (optional): what `update_todos` last recorded, and what the panel above the composer
+   * shows.
+   *
+   * Persisted since 2026-08-25. Before that the list lived only in memory and was archived as a display
+   * bubble when a turn ended, so reopening a conversation mid-task showed the transcript of a checklist and
+   * no checklist — the model's plan survived in Goal State while the user's view of it did not. A conversation
+   * written by an older build simply has no field here; `normalizeTodos` reads that as an empty list, which is
+   * exactly what those conversations behaved as.
+   *
+   * A runtime artifact like compaction / taskMemory / goal: it steers and displays execution, and it is not
+   * part of any signature over the message list.
+   */
+  todos?: StoredTodo[];
+  /**
    * The composed system message (messages[0]) as this conversation first sent it.
    *
    * It has to be frozen, not recomputed: it is the very front of the prefix, so re-deriving it against the current workdir,
@@ -184,6 +198,40 @@ export interface StoredTaskMemory {
  * read back goes through normalizeGoal(), which repairs partial and older records anyway.
  */
 export type StoredGoalState = Record<string, unknown>;
+
+
+/**
+ * One persisted checklist item (see app/agent/chat/types.ts `Todo`).
+ *
+ * Structurally identical to `Todo`, and declared here for the same reason `StoredTaskMemory` is: a lib module
+ * must not import from the app layer to describe its own on-disk shape. Read back through `normalizeTodos`,
+ * which repairs partial or older records rather than trusting them.
+ */
+export interface StoredTodo {
+  title: string;
+  status: "pending" | "in_progress" | "completed";
+}
+
+/**
+ * Repair a persisted checklist.
+ *
+ * Absent, malformed, or written by a build that did not have this field all produce an empty list — the
+ * behaviour those conversations already had. Unknown statuses fall back to "pending" rather than being
+ * dropped, because losing an item silently is worse than showing it as not-yet-done.
+ */
+export function normalizeTodos(raw: unknown): StoredTodo[] {
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .map((t) => {
+      const o = (t ?? {}) as Record<string, unknown>;
+      const status = o.status;
+      return {
+        title: String(o.title ?? "").trim(),
+        status: (status === "in_progress" || status === "completed" ? status : "pending") as StoredTodo["status"],
+      };
+    })
+    .filter((t) => t.title);
+}
 
 /** A project = a working directory. An empty workdir means the "default project" (no folder chosen). */
 export interface Project {

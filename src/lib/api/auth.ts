@@ -1,4 +1,4 @@
-import { ILoginResponse } from "@/types/auth";
+import type { ILoginResponse } from "@/types/auth";
 import request from "./request";
 import { getStorage } from "@zzcpt/zztool";
 import STORAGE from "@/constants/Storage";

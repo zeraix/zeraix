@@ -1,0 +1,21 @@
+[package]
+name = "agent-scheduler"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+agent-core = { workspace = true }
+agent-events = { workspace = true }
+agent-resource = { workspace = true }
+serde = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "time", "sync"] }
+
+[target.'cfg(loom)'.dev-dependencies]
+loom = "0.7"

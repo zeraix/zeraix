@@ -14,6 +14,7 @@ import {
   type StoredMessage,
   type StoredTaskMemory,
   type StoredGoalState,
+  type StoredTodo,
 } from "@/lib/ai/conversation";
 
 /** Temporary storage for the "initial message" to be sent when transitioning from Home to Chat page (passed in-memory via SPA client navigation). */
@@ -46,6 +47,14 @@ type AgentChatState = {
   generating: Record<string, boolean>;
   /** Record of conversations that have a sensitive-tool confirmation waiting for the user: used by the sidebar to show an "approval needed" badge, so a request made in a background conversation is discoverable. Transient (not persisted). */
   pendingConsent: Record<string, boolean>;
+  /**
+   * Conversations with an unanswered `ask_user` question, for the sidebar badge.
+   *
+   * Separate from `pendingConsent` rather than merged into it: both mean "this conversation is waiting for
+   * you", but they are written by different owners (the consent queue and the choice-card map), and a shared
+   * set would have each writer clobber the other's entries every time it re-synced.
+   */
+  pendingQuestion: Record<string, boolean>;
 
   /** Initially loads the project index (idempotent, does not load conversations). */
   init: () => Promise<void>;
@@ -80,6 +89,7 @@ type AgentChatState = {
   setConversationGenerating: (id: string, on: boolean) => void;
   /** Replaces the set of conversations that have a pending sensitive-tool confirmation (drives the sidebar approval-needed badge). */
   setPendingConsentIds: (ids: Set<string>) => void;
+  setPendingQuestionIds: (ids: Set<string>) => void;
   getConversation: (id: string) => Conversation | undefined;
   /** Binds or clears the model for a conversation (conversation-level model binding; null falls back to global configuration). */
   setConversationModel: (id: string, modelId: string | null) => void;
@@ -101,6 +111,7 @@ type AgentChatState = {
   setConversationTaskMemory: (id: string, taskMemory: StoredTaskMemory | null) => void;
   /** Saves or clears the Goal State (objective / criteria / plan / verification) for a conversation (persists to disk only). */
   setConversationGoal: (id: string, goal: StoredGoalState | null) => void;
+  setConversationTodos: (id: string, todos: StoredTodo[] | null) => void;
   /** Freeze this conversation's composed system message, so reopening it replays the same prefix instead of recomputing one. */
   setConversationSystemPrompt: (id: string, systemPrompt: string) => void;
   /** Record a sub-agent's own conversation id, so deleting this conversation can forget its KV too (Conversation.subConvIds). */
@@ -154,6 +165,7 @@ export const useAgentChatStore = create<AgentChatState>((set, get) => {
     pendingSend: null,
     generating: {},
     pendingConsent: {},
+    pendingQuestion: {},
 
     setPendingSend: (p) => set({ pendingSend: p }),
     consumePendingSend: () => {
@@ -367,6 +379,17 @@ export const useAgentChatStore = create<AgentChatState>((set, get) => {
         ids.forEach((id) => (next[id] = true));
         return { pendingConsent: next };
       }),
+    setPendingQuestionIds: (ids) =>
+      set((s) => {
+        const prev = s.pendingQuestion;
+        const prevKeys = Object.keys(prev);
+        // No change (same set of ids) → skip the update to avoid a needless sidebar re-render.
+        if (prevKeys.length === ids.size && prevKeys.every((k) => ids.has(k))) return s;
+        const next: Record<string, boolean> = {};
+        ids.forEach((id) => (next[id] = true));
+        return { pendingQuestion: next };
+      }),
+
     getConversation: (id) => get().conversations.find((c) => c.id === id),
 
     setConversationModel: (id, modelId) => {
@@ -448,6 +471,19 @@ export const useAgentChatStore = create<AgentChatState>((set, get) => {
         conversations: s.conversations.map((c) => (c.id === id ? { ...c, goal: goal ?? undefined } : c)),
       }));
       // Like compaction and taskMemory: a runtime artifact, flushed to disk only.
+      if (pid) markProjectDirty(pid);
+    },
+
+    setConversationTodos: (id, todos) => {
+      const conv = get().getConversation(id);
+      if (!conv) return;
+      const pid = conv.projectId;
+      set((s) => ({
+        conversations: s.conversations.map((c) =>
+          c.id === id ? { ...c, todos: todos && todos.length ? todos : undefined } : c,
+        ),
+      }));
+      // Like compaction / taskMemory / goal: a runtime artifact, flushed to disk only.
       if (pid) markProjectDirty(pid);
     },
 

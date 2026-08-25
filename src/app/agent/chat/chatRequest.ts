@@ -93,6 +93,13 @@ export function createChatRequest(cfg: {
     // Usage-log attribution (who is spending these tokens). Undefined while logging is off, and the
     // proxy is what actually writes the entry — see src/lib/ai/usageLog.ts.
     log?: RequestLog,
+    // Reasoning configuration for THIS request, overriding the session setting.
+    //
+    // The Agent Runtime's reasoning policy varies effort by execution phase (docs/agent-runtime-loop.md §6):
+    // a routine tool follow-up may be economised, a recovery round may not. That is a per-request decision,
+    // so it cannot come from the factory's captured config. Omitted → the session setting, which is what
+    // every caller that has no phase to reason about (the goal evaluator, sub-agents) gets.
+    reasoning?: ThinkingConfig,
   ): Promise<ChatResponse> => {
     const body = {
       model: modelName,
@@ -103,7 +110,7 @@ export function createChatRequest(cfg: {
       // reject it, so the fallback below costs one request per model rather than one per turn.
       ...(thinkingUnsupported().has(modelName)
         ? {}
-        : thinkingParams(thinking, { local: isLocalModel, model: modelName })),
+        : thinkingParams(reasoning ?? thinking, { local: isLocalModel, model: modelName })),
     };
     const wantStream = !!onDelta;
     const actor = log?.actor ?? "main";
@@ -368,6 +375,8 @@ export function createChatRequest(cfg: {
     signal?: AbortSignal,
     onDelta?: (d: { content: string; reasoning: string }) => void,
     log?: RequestLog,
+    /** Per-request reasoning, from the Runtime's phase policy. Omitted → the session setting. */
+    reasoning?: ThinkingConfig,
   ): Promise<ChatResponse> => {
     const hasImages = messages.some(
       (m) => Array.isArray(m.content) && m.content.some((p) => p.type === "image_url"),
@@ -389,7 +398,7 @@ export function createChatRequest(cfg: {
         turnId: log?.turnId,
       });
     try {
-      return await sendChatOnce(messages, tools, signal, onDelta, log);
+      return await sendChatOnce(messages, tools, signal, onDelta, log, reasoning);
     } catch (e) {
       // The provider rejected the thinking switch itself (a 400 naming the field): retire it for this
       // model and send the same request again. Checked first because it is the one failure that is
@@ -400,7 +409,7 @@ export function createChatRequest(cfg: {
         console.warn(`[thinking] ${modelName} rejected the thinking parameter; sending without it`, e);
         thinkingUnsupported().add(modelName);
         try {
-          return await sendChatOnce(messages, tools, signal, onDelta, log);
+          return await sendChatOnce(messages, tools, signal, onDelta, log, reasoning);
         } catch (retryErr) {
           logFailure(retryErr);
           throw retryErr;
@@ -419,7 +428,7 @@ export function createChatRequest(cfg: {
         console.warn(`[thinking] ${modelName} rejected replayed thinking blocks; sending without them`, e);
         reasoningContextUnsupported().add(modelName);
         try {
-          return await sendChatOnce(stripReasoningContent(messages), tools, signal, onDelta, log);
+          return await sendChatOnce(stripReasoningContent(messages), tools, signal, onDelta, log, reasoning);
         } catch (retryErr) {
           logFailure(retryErr);
           throw retryErr;
@@ -435,7 +444,7 @@ export function createChatRequest(cfg: {
       // The retry is logged as its own invocation: it is a second request that the provider bills for.
       let data: ChatResponse;
       try {
-        data = await sendChatOnce(stripped, tools, signal, onDelta, log); // throws the retry's own error if it also fails
+        data = await sendChatOnce(stripped, tools, signal, onDelta, log, reasoning); // throws the retry's own error if it also fails
       } catch (retryErr) {
         logFailure(retryErr);
         throw retryErr;

@@ -35,6 +35,49 @@ const mcpTool = (name) => ({
   parameters: { type: "object", properties: { q: { type: "string" } }, required: ["q"] },
 });
 
+/**
+ * The goal tools are gone from every layer, not merely undeclared.
+ *
+ * Removing a tool from the declared set only stops it being ADVERTISED. `call_tool` resolves any name it is
+ * given, and the loop then looks that name up in the renderer's dispatch table — so a tool removed from the
+ * schema and the catalog but left in the table is still fully callable by a model that remembers it. The goal
+ * belongs to the user (`/goal`), so all three layers were closed together, and this pins that.
+ */
+test("the model cannot reach set_goal or update_plan by any route", async () => {
+  const { RENDERER_HANDLED_TOOLS } = await import("../src/app/agent/chat/constants.ts");
+  const declared = names(buildToolSet(wrap(TOOLS)));
+
+  for (const tool of ["set_goal", "update_plan"]) {
+    assert.equal(declared.includes(tool), false, `${tool} must not be declared on the wire`);
+    assert.equal(ROUTED_TOOLS.has(tool), false, `${tool} must not be advertised through the catalog`);
+    // The one that actually decides whether it runs.
+    assert.equal(
+      RENDERER_HANDLED_TOOLS.has(tool),
+      false,
+      `${tool} must not be dispatchable — call_tool resolves names regardless of what is declared`,
+    );
+  }
+
+  // Control: the neighbouring tools that were deliberately kept.
+  assert.equal(declared.includes("update_todos"), true, "the user's checklist tool must survive");
+  assert.equal(ROUTED_TOOLS.has("set_task_state"), true, "the mission brief must survive");
+});
+
+/** The prompt must not advertise a tool that no longer exists, or the model spends rounds calling it. */
+test("no prompt text tells the model to call a removed goal tool", async () => {
+  const { GOAL_EXPLAINER, goalContinuationPrompt, startGoal } = await import(
+    "../src/app/agent/chat/goalState.ts"
+  );
+  const goal = startGoal("ship it", { now: 0 });
+  const surfaces = [GOAL_EXPLAINER, goalContinuationPrompt(goal, "not yet"), buildSystemPrompt()];
+
+  for (const text of surfaces) {
+    const body = typeof text === "string" ? text : JSON.stringify(text);
+    assert.doesNotMatch(body, /set_goal/, "prompt still names set_goal");
+    assert.doesNotMatch(body, /update_plan/, "prompt still names update_plan");
+  }
+});
+
 test("MCP tool names are recognised as routed", () => {
   assert.equal(isMcpToolName("mcp__github__create_issue"), true);
   assert.equal(isMcpToolName("read_file"), false);

@@ -3,6 +3,8 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { listTools, runTool, getWorkingDir, setWorkingDir, saveAttachment, setLLMConfig, getLLMConfig, setServiceEventHandler, stopProcess, listProcesses, initEngine, disposeEngines, getSandboxStatus, setSandboxMode, onSandboxStatus, restartSandbox, sandboxVmInfo, wsReadDir, wsReadFile, wsWriteFile } from "./tools/aiToolkit.mjs";
+// Reports at startup whether the Rust sidecar is enabled, active, or unavailable — see warmUp.
+import { warmUp as warmUpRustRuntime } from "./tools/rustRuntime.mjs";
 import { discoverProjectSkills, setProjectSkillDecision, readProjectSkillFile, loadEnabledProjectSkills } from "./tools/projectSkills.mjs";
 import { createTerminal, writeTerminal, resizeTerminal, killTerminal, killByWebContents, killAllTerminals } from "./tools/terminal.mjs";
 import { llmChat, llmChatStream } from "./llm/proxy.mjs";
@@ -915,6 +917,10 @@ app.whenReady().then(() => {
   initIntegrity();
   registerAppConfig();
   registerAiTools();
+  // Start the Rust sidecar now rather than on the first tool call, so its state is reported once at
+  // boot instead of being inferred from behaviour. Fire-and-forget and never fatal: with the flag off it
+  // prints one line and starts nothing, and every failure path leaves the JS handlers serving.
+  void warmUpRustRuntime().catch((e) => console.warn("[rust-runtime] warm-up failed:", e?.message ?? e));
   registerTerminal();
   // Select the command-execution engine (start a qemu VM in the background if hardware virtualization is available, otherwise keep running natively on the host).
   // Runs asynchronously in the background; on failure it silently falls back to native without affecting startup.

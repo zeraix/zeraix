@@ -2,7 +2,7 @@
  * Goal State — the condition a task must reach, and the bookkeeping of the loop driving it there.
  *
  * A goal is a CONDITION plus a verdict about it. The condition is text: either the user's own words from
- * `/goal <condition>`, or an objective the model recorded with set_goal for a task it decided was multi-step.
+ * `/goal <condition>`. The model cannot set one: set_goal was removed from the tool surface entirely.
  * The verdict is not made here and is not made by the acting model — after every turn an independent evaluator
  * reads the transcript and answers met / not-met (goalEvaluator.ts). Nothing in this module, and no tool the
  * model can call, sets `achieved`.
@@ -93,7 +93,8 @@ export interface GoalState {
   conditionSource: ConditionSource;
   status: GoalStatus;
   run: GoalRun;
-  /** Derived by the model (set_goal). Advisory: the evaluator judges the condition, using these as a checklist. */
+  /** Advisory checklist for the evaluator, which judges the CONDITION. Empty since set_goal was removed — the
+   *  evaluator was always the authority on the condition, so an empty list changes nothing about its verdict. */
   criteria: AcceptanceCriterion[];
   plan: GoalPlan;
   blockers: string[];
@@ -124,6 +125,16 @@ export const GOAL_CONDITION_WARN = 10000;
  * (or one the evaluator keeps reading as unmet) would spend unattended until someone noticed.
  */
 export const MAX_GOAL_AUTO_ROUNDS = 25;
+
+/**
+ * How long an achieved goal stays on screen before it clears itself.
+ *
+ * The bar is meant to show "the run that just finished" — a transient idea that previously had no transition
+ * behind it, so an achieved goal sat above the composer until the user typed `/goal clear`. Ten seconds is
+ * long enough to read the rounds/elapsed/spend line and short enough not to be mistaken for a goal still in
+ * force.
+ */
+export const GOAL_ACHIEVED_LINGER_MS = 10_000;
 
 const MAX_CRITERION = 300;
 const MAX_STEP_TITLE = 200;
@@ -347,13 +358,20 @@ export interface CriteriaPatch {
 }
 
 /**
- * The model calling set_goal: derive the checkable criteria for the goal, and — only when no goal exists yet —
+ * Derive the checkable criteria for a goal, and — only when no goal exists yet —
  * declare the objective itself.
  *
  * A condition the USER wrote is never overwritten here. That is the deterministic half of "the goal is not
  * yours": an agent that finds a condition hard cannot restate it in easier words, because this function will
  * keep the user's text and say so. It may still add criteria, which is the useful half — turning "implement
  * login" into the conditions that actually decide it.
+ */
+/**
+ * NOTE: no production caller. `set_goal` was its only one and the tool is gone — the goal is the user's, set
+ * with `/goal`. Kept rather than deleted because the READ side is still live: `toStoredGoal` persists a whole
+ * active goal, so a record written by an earlier build restores with criteria populated and `renderGoalState`
+ * shows them. Deleting the writer while that data can still arrive would leave a shape nothing can produce
+ * and nothing explains. If `/goal` ever grows criteria, this is the reducer it should use.
  */
 export function setCriteria(prev: GoalState, patch: CriteriaPatch, opts: { now: number }): GoalUpdate {
   const objective = text(patch.objective);
@@ -399,8 +417,8 @@ export function setCriteria(prev: GoalState, patch: CriteriaPatch, opts: { now: 
   }
   lines.push(
     goal.plan.steps.length
-      ? "The existing plan is still in force; revise it with update_plan if it no longer serves this goal."
-      : "Now call update_plan with the steps you will take.",
+      ? "The existing plan is still in force."
+      : "Track the steps you take with update_todos.",
   );
   return { goal, ok: true, message: lines.join(" ") };
 }
@@ -419,13 +437,18 @@ export interface PlanPatch {
  * a verdict on the condition. Statuses carry over by title across a revision, so re-planning around a blocker
  * does not silently discard work already done.
  */
+/**
+ * NOTE: no production caller — same story as `setCriteria`. `update_plan` was its only one. The plan a legacy
+ * persisted goal carries is still rendered and still folded into by `applyTodoStatuses`, so the type and the
+ * read paths stay live even though nothing new can write one.
+ */
 export function applyPlan(prev: GoalState, patch: PlanPatch): GoalUpdate {
   if (isGoalEmpty(prev)) {
     return {
       goal: prev,
       ok: false,
       message:
-        "No goal is set. Call set_goal first — a plan is a strategy for a goal, and without one there is nothing to plan for.",
+        "No goal is set. A goal is set by the user with /goal — a plan is a strategy for a goal, and without one there is nothing to plan for.",
     };
   }
   const incoming = (Array.isArray(patch.steps) ? patch.steps : [])
@@ -568,7 +591,7 @@ export function renderGoalState(g: GoalState | null | undefined): string {
       lines.push(`  ${mark} ${s.id}: ${s.title}`);
     }
   } else {
-    lines.push("Plan: none yet — call update_plan before doing the work.");
+    lines.push("Plan: none recorded. Work the condition directly, and keep update_todos current as you go.");
   }
   if (goal.blockers.length) lines.push(`Blockers: ${goal.blockers.join("; ")}`);
   if (goal.run.turnCount > 0) {
@@ -593,14 +616,11 @@ export function renderGoalState(g: GoalState | null | undefined): string {
 export const GOAL_EXPLAINER =
   "[GOAL] A goal is a condition this task must reach. It arrives in a system-reminder marked GOAL, and it outranks " +
   "everything else you are doing.\n" +
-  "- For any task with more than one step, call set_goal early: the end state the user actually requires — not a " +
-  "paraphrase of their sentence — plus the concrete, checkable acceptance criteria that decide it. Then call " +
-  "update_plan with the steps you will take.\n" +
-  "- The plan is yours. Rewrite it with update_plan whenever it stops serving the goal: a step that turned out to be " +
-  "unnecessary, an approach that failed, a project not shaped the way you assumed. A failed step or a failed tool " +
-  "call is NOT a failed goal.\n" +
-  "- The goal is not yours. You may not narrow it, drop a criterion, or lower the bar because something turned out " +
-  "to be hard. When the user set the condition themselves, it stands verbatim.\n" +
+  "- The goal is not yours. The user sets it, and there is no tool through which you can create, change, narrow or " +
+  "drop one. You may not lower the bar because something turned out to be hard: the condition stands verbatim. If " +
+  "it is genuinely unachievable, say so plainly and explain why — do not quietly substitute an easier one.\n" +
+  "- Track your own steps with update_todos, which is the checklist the user watches. A failed step or a failed " +
+  "tool call is NOT a failed goal.\n" +
   "- You do not decide that you are finished. After each round an INDEPENDENT evaluator reads the transcript and " +
   "judges whether the condition is met. It only believes what the transcript SHOWS — a command that ran and its " +
   "output, a file you read, a check that passed. Claiming success proves nothing to it, so do the work and let the " +
@@ -618,9 +638,9 @@ export function goalContinuationPrompt(goal: GoalState, reason: string): string 
     "[GOAL CHECK] This is an automatic continuation, not the user speaking.\n\n" +
     `The goal is not met yet: ${goal.condition}\n\n` +
     `The evaluator's reason: ${reason}\n\n` +
-    "Keep working on it. Address exactly what the reason says is missing. If the current plan cannot get there, " +
-    "revise it with update_plan (say why in `rationale`) and carry on. Do not reply with a status report or ask the " +
-    "user what to do next — act, and make the results visible in the conversation so the next check can see them."
+    "Keep working on it. Address exactly what the reason says is missing. If your current approach cannot get " +
+    "there, change it and carry on. Do not reply with a status report or ask the user what to do next — act, and " +
+    "make the results visible in the conversation so the next check can see them."
   );
 }
 

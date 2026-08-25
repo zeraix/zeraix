@@ -281,7 +281,7 @@ export function setTaskStateTool() {
         "user stated, and findings that took real work to establish. It is pinned into your context and preserved verbatim across " +
         "compaction. INTERNAL working memory: NOT shown to the user (use update_todos for a user-facing checklist).\n" +
         "This is NOT where the goal or the plan go. The goal condition and its acceptance criteria live in the GOAL state " +
-        "(set_goal), and the steps live in the plan (update_plan) — both survive compaction on their own, so restating them here " +
+        "(set by the user with /goal), and the steps live in the todo list (update_todos) — both survive compaction on their own, so restating them here " +
         "duplicates them and lets the two copies drift apart.\n" +
         "Call this SPARINGLY. Call it when a durable decision or constraint appears, not for routine progress, not after every " +
         "step, and not for minor wording tweaks — the brief already stays in your context, so re-recording it each turn is " +
@@ -341,123 +341,9 @@ export function callToolTool() {
   };
 }
 
-/**
- * set_goal — declare the end state the task must reach, and the criteria that decide it.
- *
- * The description carries the two rules nothing else can enforce for us: that the objective is the user's
- * REQUIREMENT rather than a paraphrase of their sentence, and that criteria must be checkable. The rest is
- * enforced in code (goalState.setCriteria): a condition the USER set with `/goal` is never overwritten here,
- * and no argument on this tool can declare the goal met — that verdict belongs to the evaluator alone.
- */
-export function setGoalTool() {
-  return {
-    type: "function" as const,
-    function: {
-      name: "set_goal",
-      description:
-        "Record the GOAL for this task: the end state the user requires, plus the acceptance criteria that decide whether it " +
-        "has been reached. Call this early for any task with more than one step, before doing the work.\n" +
-        "The objective is what the user actually needs to be true when you are done — not a restatement of their sentence. " +
-        "\"Implement login\" is a request; the goal is that a user can sign in, the session is established, protected routes " +
-        "reject unauthenticated access, and the tests pass.\n" +
-        "Acceptance criteria must be CHECKABLE — something that can be run, read or observed in this conversation. \"Works " +
-        "well\" is not a criterion; \"`npm test` passes\" and \"an unauthenticated request to /api/me returns 401\" are. " +
-        "Include the criteria the user implied but did not say, verification included: if they asked you to implement and " +
-        "test something, the test passing is a criterion.\n" +
-        "Recording a goal does NOT make you the judge of it. After each round an independent evaluator reads the transcript " +
-        "and decides whether the condition is met, and it believes only what the transcript shows. If the user set the goal " +
-        "themselves with /goal, their wording stands and this call only attaches your criteria to it — you cannot restate " +
-        "their condition in easier terms.",
-      parameters: {
-        type: "object",
-        properties: {
-          objective: {
-            type: "string",
-            description:
-              "The end state the user requires, in one or two sentences. Written as a state of the world, not as an activity. " +
-              "Ignored when the user set the goal condition themselves.",
-          },
-          acceptanceCriteria: {
-            type: "array",
-            minItems: 1,
-            description:
-              "The conditions that must ALL hold before this task is done, each concretely checkable. They are shown to the " +
-              "evaluator as its checklist, so write them as things it can look for in the transcript.",
-            items: {
-              type: "object",
-              properties: {
-                text: { type: "string", description: "The condition, phrased so it can be checked." },
-              },
-              required: ["text"],
-            },
-          },
-        },
-        required: ["objective", "acceptanceCriteria"],
-      },
-    },
-  };
-}
-
-/**
- * update_plan — the strategy for the goal, freely rewritten.
- *
- * Separate from set_goal on purpose: this is the tool the model is meant to reach for often, and its description
- * has to make re-planning feel like the normal response to a surprise rather than an admission of failure.
- */
-export function updatePlanTool() {
-  return {
-    type: "function" as const,
-    function: {
-      name: "update_plan",
-      description:
-        "Record or revise the PLAN for the current goal: the ordered steps you will take to satisfy its acceptance criteria. " +
-        "Call it right after set_goal, and again whenever reality disagrees with the plan — a feature already exists, the " +
-        "project is not structured the way you assumed, an approach failed, a step turned out to be unnecessary, or a new " +
-        "dependency appeared. Re-planning is the expected response to any of those, not a failure: the plan is yours to " +
-        "change, the goal is not.\n" +
-        "Pass the FULL step list every time (it replaces the previous one). Steps keep their status across a revision when " +
-        "their titles match, so a re-plan does not discard work already done. The steps are also shown to the user as the " +
-        "task checklist, so write them as short, concrete actions.",
-      parameters: {
-        type: "object",
-        properties: {
-          steps: {
-            type: "array",
-            minItems: 1,
-            description: "The complete ordered plan (replaces the previous one).",
-            items: {
-              type: "object",
-              properties: {
-                title: { type: "string", description: "One short, concrete action." },
-                status: {
-                  type: "string",
-                  enum: ["pending", "in_progress", "completed", "skipped", "failed"],
-                  description:
-                    "Defaults to pending, or to the status this step already had. Use failed for a step that was attempted " +
-                    "and did not work, and skipped for one that turned out to be unnecessary — both are useful history.",
-                },
-              },
-              required: ["title"],
-            },
-          },
-          rationale: {
-            type: "string",
-            description:
-              "Why the plan looks like this — and, when revising, what you learned that made the previous plan wrong. One or two sentences.",
-          },
-          blockers: {
-            type: "array",
-            items: { type: "string" },
-            description:
-              "What is currently preventing progress, if anything (a missing credential, a decision only the user can make, " +
-              "a failing dependency). Pass the full list; omit the argument to leave the recorded blockers unchanged.",
-          },
-        },
-        required: ["steps"],
-      },
-    },
-  };
-}
+// The set_goal and update_plan declarations lived here and are gone with the tools. Nothing composes them, so
+// leaving them would be dead schema that reads as available surface — and the next person to add a tool would
+// reasonably copy the pattern back onto the wire.
 
 export function updateTodosTool() {
   return {

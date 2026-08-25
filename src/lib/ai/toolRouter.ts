@@ -32,13 +32,15 @@ export const DISPATCHER_NAME = "call_tool";
  *  1. NOT "anything contextCompress.ts keys on". That was the original rule and it dissolved: `indexCalls` and `describeCall`
  *     resolve the wrapper on the read side, and `releaseCallArguments` rewrites the elided payload back INSIDE the envelope on the
  *     write side, so even `read_file` and `edit_file` — 76% of all tool calls — are routed with the compression layer intact.
- *  2. `run_command`, `ask_user`, `update_todos` and `update_plan` stay declared as the unbounded / interactive core — the
- *     things the model reaches for constantly, or that drive UI the user is watching.
+ *  2. `run_command`, `ask_user` and `update_todos` stay declared as the unbounded / interactive core — the things
+ *     the model reaches for constantly, or that drive UI the user is watching. `update_plan` was in this group
+ *     and is gone: not routed, but removed from the tool surface altogether along with `set_goal`, because the
+ *     goal is the user's. `update_todos` now carries the checklist on its own.
  *  3. `web_search`, `sandbox_tools` and `load_skill` stay declared because their descriptions are what prompt their use at
  *     all: each argues for being called in situations where the model's default is not to call anything.
  *
- * The delegation family (`run_subagent`, `spawn_subagents`, `join_subagents`, `spawn_sub_agent`), the goal/brief pair's
- * `set_goal` and `set_task_state`, and `mcp_tools` used to be declared under an earlier version of rule 3 — their
+ * The delegation family (`run_subagent`, `spawn_subagents`, `join_subagents`, `spawn_sub_agent`), `set_task_state`
+ * and `mcp_tools` used to be declared under an earlier version of rule 3 — their
  * descriptions carry real argument (the explore/plan/coder/reviewer roster, that an evaluator and not the model judges
  * completion, never-poll). They are routed now by an explicit product decision, and that argument does NOT simply vanish
  * with the schema: it has been moved into the tool catalog in `development.mode.md`, which is where a routed tool's case
@@ -80,9 +82,9 @@ export const ROUTED_TOOLS: ReadonlySet<string> = new Set([
   "spawn_subagents",
   "join_subagents",
   "spawn_sub_agent",
-  // Goal + mission brief. `update_plan` deliberately stays declared: it drives the checklist the user watches, and it is
-  // called far more often than the goal is set.
-  "set_goal",
+  // Mission brief. `set_goal` was here and is now gone entirely — not routed, not declared, not dispatched: the
+  // goal is the user's, set with /goal, and nothing the model emits may change it. Routing alone would not have
+  // achieved that, because a routed name is still resolved and executed; see the rendererTools table.
   "set_task_state",
 ]);
 

@@ -2,7 +2,7 @@ import { clsx, type ClassValue } from "clsx";
 import { twMerge } from "tailwind-merge";
 import { Toast } from "./toast";
 import { getUploadUrl, upLoadFileOSS } from "./api/upload";
-import { GetUploadUrlResponse } from "@/types/upload";
+import type { GetUploadUrlResponse } from "@/types/upload";
 
 export function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));

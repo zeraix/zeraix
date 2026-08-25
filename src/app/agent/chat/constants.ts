@@ -4,13 +4,13 @@
 import baseSystemMd from "./system/base.system.md";
 import developmentModeMd from "./system/development.mode.md";
 
-export const MAX_TOOL_ROUNDS = 100; // Prevent infinite tool-call loops
-export const MAX_SUBAGENT_ROUNDS = 30; // Cap on a sub-agent's own tool-call rounds
-// Infinite-loop guard: when the same "tool + args" is repeated this many times within a turn, treat it as no progress and abort,
-// to keep the model from spinning by retrying commands that keep failing / timing out (e.g. launching a GUI program).
-export const MAX_SAME_TOOL_CALLS = 3;
-// Infinite-loop guard: abort the turn after this many consecutive commands are killed by timeout (usually programs that keep running / open a window).
-export const MAX_CONSECUTIVE_TIMEOUTS = 2;
+// MAX_TOOL_ROUNDS / MAX_SUBAGENT_ROUNDS / MAX_SAME_TOOL_CALLS / MAX_CONSECUTIVE_TIMEOUTS lived here and are
+// gone (M3). Nothing had imported any of them since the run-parameter settings were removed, so they read as
+// enforced limits — "MAX_TOOL_ROUNDS = 100" in particular — while the loop was in fact unbounded. A limit
+// nothing reads is worse than no limit: docs/agent-runtime-loop.md §20 rule 7 forbids competing Stop
+// Policies, and a plausible-looking dead constant is how a second one gets written by mistake. Every real
+// limit now lives in lib/agent/stopPolicy.ts. Their storage keys in constants/Agent.ts are left alone: those
+// are a persisted config surface (§16), not code.
 
 /** Read-only tools with no side effects and no UI interaction: when the model issues several of them together,
  *  they can run concurrently instead of one await at a time. Only consecutive runs are batched, so a read never
@@ -31,8 +31,6 @@ export const RENDERER_HANDLED_TOOLS = new Set([
   "ask_user",
   "update_todos",
   "set_task_state",
-  "set_goal",
-  "update_plan",
   "openBrowser",
   "browser",
   "image_generation",
@@ -146,6 +144,57 @@ export const RECORD_MEMORY_NUDGE =
   "describe a module, or `note` alone for an invariant). Record only what will still be true next week, " +
   "not what you did in this turn. If you genuinely learned nothing the map does not already have, skip " +
   "the call and just give your final answer.";
+
+/**
+ * Loop reminders (model-facing only, never displayed; persisted into the tool result's wireText — see reminders.ts).
+ *
+ * The tool loop has no round limit, so nothing but the model itself ends a turn that has stopped getting
+ * anywhere. These are what the loop guard says on the way to breaking it (see loopGuard.ts): the first two
+ * are warnings the model can act on, the third is the announcement that it no longer can.
+ *
+ * All three name the specific thing that is repeating rather than saying "you are looping", because a model
+ * told it is looping generally will apologise and loop; a model told that THIS call returned THIS same output
+ * three times has something to act on.
+ */
+export const repeatedCallNudge = (name: string, times: number): string =>
+  `You have now called \`${name}\` with these exact arguments ${times} times in this turn, and it returned exactly the ` +
+  "same output every time. That output is already in your context above — calling it again cannot tell you anything new. " +
+  "Whatever you are trying to establish, this call is not the way to establish it. Either act on what the result already " +
+  "says, or take a genuinely different route: a different tool, a different path, a different query. Do not repeat this call.";
+
+export const repeatedFailureNudge = (name: string, times: number): string =>
+  `\`${name}\` has now failed ${times} times in a row in this turn. Retrying it with slightly different arguments is not ` +
+  "working. Stop and read the error text above literally: it is telling you that an assumption you are holding is wrong — " +
+  "the file is not where you think, its contents are not what you think, or the arguments are not the shape the tool wants. " +
+  "Verify that assumption with a different tool (read the file, list the directory) before calling this one again, or solve " +
+  "the problem another way.";
+
+/**
+ * Written when the guard breaks the loop. Every round after it is sent with NO tools declared, so this is not
+ * a request the model can decline by calling something — it is a description of what has already been decided.
+ * It says so plainly rather than pretending the model still has the choice, because a model told to "consider
+ * wrapping up" reliably calls one more tool.
+ */
+export const equivalentCallNudge = (name: string, times: number): string =>
+  `You have now called \`${name}\` ${times} times in this turn with arguments that differ only cosmetically — a trimmed ` +
+  "path, a changed case, a rephrased query. Those are the same call, and they return the same thing. Rewording the " +
+  "arguments is not a different approach; it is the same approach spelled differently. Change what you are actually doing: " +
+  "a different tool, a different file, or act on what you already know.";
+
+export const repeatedResourceNudge = (name: string, times: number): string =>
+  `This turn has now used \`${name}\` on the same target ${times} times. Going back to one file or one query over and over ` +
+  "usually means the answer is not there. Either you already have what it can tell you, or what you need is somewhere else — " +
+  "widen the search, look at a different file, or state plainly what you could not find and move on.";
+
+export const LOOP_BREAK_NUDGE =
+  "STOP. The last three rounds of this turn produced no new information at all — every tool call either repeated an earlier " +
+  "call verbatim and returned the identical result, or failed the same way again. The turn is looping, so tool access has " +
+  "been withdrawn for the rest of it: there are no tools available to you now and there is nothing further you can run.\n" +
+  "Write your final answer to the user, in the user's language, from what you already have. Tell them honestly where the " +
+  "task actually stands: what you established, what you were trying to do when you got stuck, what specifically blocked you " +
+  "(quote the error or the result you kept getting), and what you would need from them — a correct path, a decision, a " +
+  "different approach — to continue. Do not claim the task is finished if it is not, and do not apologise at length; a " +
+  "clear account of the blocker is what is useful here.";
 
 /** Sensitive tools: they modify the file system or run commands, and require user confirmation before being called.
  *  Read-only tools (read_file / list_directory / file_info / search_*) are not included here and can run directly. */

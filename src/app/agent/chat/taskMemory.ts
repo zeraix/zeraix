@@ -131,7 +131,7 @@ export const TASK_STATE_EXPLAINER =
   "memory: the surrounding conversation may be summarised, but the brief is preserved verbatim, so it is where the things you " +
   "would otherwise lose belong — decisions you made and why, approaches you ruled out and what ruled them out, constraints the " +
   "user stated, findings that cost you effort to establish. It is NOT where the goal or the plan live: the GOAL reminder holds " +
-  "the condition to be met and the criteria that decide it, and update_plan holds the steps. Do not restate either here. " +
+  "the condition to be met, and update_todos holds the steps. Do not restate either here. " +
   "Update it via set_task_state ONLY when something durable changes — not every turn.";
 
 /**

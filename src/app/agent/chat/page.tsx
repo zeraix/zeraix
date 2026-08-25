@@ -1,24 +1,10 @@
 "use client";
 
 import { InMemoryAuditLog } from "@/lib/ai/orchestration/audit-log";
-import { isKnownTool, type ToolDeclaration } from "@/lib/ai/orchestration/capabilities";
+import type { ToolDeclaration } from "@/lib/ai/orchestration/capabilities";
 import type { CapabilityBroker } from "@/lib/ai/orchestration/capability-broker";
-import { createConfiguredBroker, MAX_TURNS_PER_SUBAGENT } from "@/lib/ai/orchestration/config";
-import {
-  toChatMessages,
-  toChatTools,
-  toModelTurn,
-} from "@/lib/ai/orchestration/openai-adapter";
-import {
-  createSpawnSubAgentHandler,
-  // Aliased: `formatSpawnResult` is already taken by the fixed-role spawn_subagents path in subagents.ts,
-  // and the two format different things.
-  formatSpawnResult as formatBrokeredSpawn,
-} from "@/lib/ai/orchestration/orchestrator-tool";
-import type { ModelClient } from "@/lib/ai/orchestration/sub-agent-runner";
 import type { ConsentRequester } from "./ConsentPanel";
 import type { ChoiceAnswer, ChoiceQuestion } from "./types";
-import type { ToolSchema } from "@/lib/ai/toolkit";
 import {
   Suspense,
   useCallback,
@@ -38,7 +24,6 @@ import {
   defaultWorkingDir,
   isToolkitAvailable,
   listTools,
-  saveAttachment,
   setWorkingDir,
 } from "@/lib/ai/toolkit";
 import { isLlmProxyAvailable } from "@/lib/ai/llm";
@@ -46,14 +31,12 @@ import {
   onServiceEvent,
   isJobCompletion,
   describeJobEvent,
-  formatJobDelivery,
   formatJobMessage,
   type ServiceEvent,
 } from "@/lib/ai/services";
 import {
   isUsageLogEnabledSync,
   logContextDiag,
-  logSubagentRun,
   logToolCall,
   primeUsageLog,
 } from "@/lib/ai/usageLog";
@@ -64,16 +47,11 @@ import {
   formatSimulation,
 } from "./contextDiag";
 import { isLocalEndpoint, localLlm, LOCAL_PROVIDER_ID } from "@/lib/ai/localModel";
-import { setSecureEnv as syncSecureEnv, onSandboxStatus, getSandboxStatus, getSandboxVmInfo, isSandboxEngine, DEFAULT_SECURE_ENV, type SandboxStatus } from "@/lib/ai/sandbox";
+import { setSecureEnv as syncSecureEnv, onSandboxStatus, getSandboxStatus, getSandboxVmInfo, DEFAULT_SECURE_ENV, type SandboxStatus } from "@/lib/ai/sandbox";
 import { useT } from "@/lib/i18n";
 import { toast } from "sonner";
-import {
-  SUBAGENTS,
-  delegationSubject, findRepeatDelegation, isSameDelegation, repeatDelegationResult,
-  formatAutoDelivery, formatJoinResult, formatSpawnResult,
-  MAX_PARALLEL_SUBAGENTS, MAX_SUBAGENTS_PER_TURN, JOIN_DEFAULT_TIMEOUT_MS, JOIN_MAX_TIMEOUT_MS,
-  type DelegationMeta, type PriorDelegation,
-} from "@/lib/ai/subagents";
+// Only the two types remain here: the delegation tools themselves moved to chatDelegation.ts.
+import type { DelegationMeta, PriorDelegation } from "@/lib/ai/subagents";
 import { SubAgentScheduler } from "@/lib/ai/subagentScheduler";
 import { SkillSelectPanel } from "./SkillSelectPanel";
 import BrowserPanel from "./BrowserPanel";
@@ -91,10 +69,8 @@ import { notifyReplyComplete, notifyAgentError, notifyQuestion } from "@/lib/ai/
 import { isWindowAlwaysOnTop } from "@/lib/electron/windowControls";
 import { useAgentChatStore } from "@/store/agentChatStore";
 import { enabledSkills, loadInstalled } from "@/lib/ai/skills/store";
-import { getSkillInstructions } from "@/lib/ai/skills/runtime";
 import { loadPluginSkills } from "@/lib/plugins/skills";
 import { pluginBridge } from "@/lib/plugins/bridge";
-import { SANDBOX_TOOLBOX_SKILL } from "@/lib/ai/skills/builtin";
 import { buildSystemPrompt, buildToolSet as buildToolSet_ } from "@/lib/ai/promptPrefix";
 import { ROUTED_TOOLS, resolveToolCall, routedFailureHint, unknownToolResult } from "@/lib/ai/toolRouter";
 import { loadEnabledProjectSkills } from "@/lib/ai/skills/project";
@@ -102,19 +78,12 @@ import type { InstalledSkill } from "@/lib/ai/skills/types";
 import { makeUnifiedDiff } from "./diffUtil";
 import { capToolOutput } from "./compress";
 import {
-  planCompaction,
   buildWireContext,
   sanitizeToolCallPairs,
-  compactionSavings,
-  serializeCompaction,
   deserializeCompaction,
-  resolveHybridBudget,
   pathProvenance,
-  MANUAL_COMPACT_MIN_PCT,
-  MAX_SUMMARY_REUSE,
   type CompactionState,
 } from "./contextCompress";
-import { getContextBudgetK } from "@/lib/ai/contextBudget";
 import {
   loadThinking,
   saveThinking,
@@ -126,8 +95,6 @@ import {
   isTaskMemoryEmpty,
   normalizeTaskMemory,
   renderTaskMemory,
-  applyTaskState,
-  mergeExtracted,
   type TaskMemory,
 } from "./taskMemory";
 import {
@@ -140,12 +107,10 @@ import {
   startGoal,
   clearGoal,
   achieveGoal,
+  GOAL_ACHIEVED_LINGER_MS,
   recordEvaluation,
   addTurnSpend,
-  setCriteria,
-  applyPlan,
   recordEvidence,
-  todosFromGoal,
   applyTodoStatuses,
   decideNextRound,
   MAX_GOAL_AUTO_ROUNDS,
@@ -155,7 +120,7 @@ import { parseGoalCommand, GOAL_CLEAR_ALIASES, type GoalCommand } from "./goalCo
 import { parseSlashCommand } from "./slashCommands";
 import { createGoalEvaluator, TRANSCRIPT_BUDGET_FRACTION } from "./goalEvaluator";
 import { GoalBar } from "./GoalBar";
-import type { StoredCompaction } from "@/lib/ai/conversation";
+import { normalizeTodos } from "@/lib/ai/conversation";
 import { countMessagesTokens, countTokens } from "@/lib/ai/tokenizer";
 // ── Extracted modules (data / types / constants / tool declarations / display components) ──────────────────────
 import {
@@ -179,6 +144,11 @@ import {
   RECORD_MEMORY_NUDGE,
   FORCE_REVIEW_NUDGE,
   PENDING_DELEGATION_NUDGE,
+  LOOP_BREAK_NUDGE,
+  repeatedCallNudge,
+  repeatedFailureNudge,
+  equivalentCallNudge,
+  repeatedResourceNudge,
   DELEGATION_TOOLS,
   MUTATING_FILE_TOOLS,
   PARALLEL_SAFE_TOOLS,
@@ -197,32 +167,36 @@ import {
   renderReminder,
   wrapReminder,
 } from "./reminders";
+// The doom-loop detector (docs/agent-runtime-loop.md §12). Superseded app/agent/chat/loopGuard.ts at M3:
+// §20 rule 7 forbids two competing Stop Policies, and a detector that withdraws the model's tools was one.
+import { runAgentLoop } from "@/lib/agent/agentLoop";
+import type { ToolResult } from "@/lib/agent/turn";
+import { createRendererTools, type RendererTool } from "./chatTools";
+import { createDelegationTools } from "./chatDelegation";
+import { createCompaction } from "./chatCompaction";
+import type { ConsentDecision, ConsentRequest, RuntimeBoundary } from "@/lib/agent/runtimeBoundary";
+import { prepareWire, type WireSteps } from "@/lib/agent/contextManager";
+import { noObligations, recordTool, dueReminders, unansweredCalls, type ToolRuntimeRules } from "@/lib/agent/toolRuntime";
+// Execution State, the reasoning policy and the doom-loop detector are all owned by runAgentLoop now;
+// only the capability derivation stays here, because both the loop and the delegation factory need it.
+import { describeCapabilities } from "@/lib/agent/modelAdapter";
 import type {
   ApiMsg,
   Attachment,
   ContentPart,
   ReminderState,
-  RequestLog,
   RunCtx,
   DisplayMsg,
   SubAgentStep,
   Todo,
-  TodoStatus,
   ToolCall,
 } from "./types";
-import { generate, capabilityAvailable, imageErrorKey } from "@/lib/ai/generation";
-import {
-  saveMemoryFile,
-  listMemoryFiles,
-  deleteMemoryFile,
-  isMemoryFilesAvailable,
-} from "@/lib/ai/memoryFiles";
-import { searchMemories } from "@/lib/ai/memoryRetrieval";
-import { browserAction, requestOpenBrowser, setBrowserBusy, type BrowserAction } from "@/lib/automation";
-import { MessageItem, ProcessGroup, type ProcessItem } from "./MessageItem";
+import { capabilityAvailable } from "@/lib/ai/generation";
+import { isMemoryFilesAvailable } from "@/lib/ai/memoryFiles";
+import { setBrowserBusy } from "@/lib/automation";
 import { detectServices } from "@/store/servicesStore";
 import { TodoPanel } from "./TodoPanel";
-import { TranscriptSkeleton } from "./TranscriptSkeleton";
+import { ChatTranscript } from "./ChatTranscript";
 import CustomScrollbar, { PAGE_SCROLLBAR } from "@/components/CustomScrollbar";
 import { Composer } from "./Composer";
 import { ProjectSkillsPrompt } from "./ProjectSkillsPrompt";
@@ -247,7 +221,6 @@ import {
   saveAttachmentsToWorkdir,
 } from "./sendPrep";
 import { createChatRequest } from "./chatRequest";
-import { createRunDelegation } from "./delegation";
 import { createSummarizeHistory } from "./summarize";
 import { ChatHeader } from "./ChatHeader";
 import { ChatDialogs } from "./ChatDialogs";
@@ -301,6 +274,30 @@ const afterPaint = () =>
     setTimeout(resolve, 100);
     requestAnimationFrame(() => setTimeout(resolve, 0));
   });
+
+/**
+ * The wire-transformation steps, bound once (see contextManager.ts).
+ *
+ * Module scope rather than per-render: these are eight module functions that never change, and rebuilding
+ * the object every round would allocate for nothing.
+ */
+const WIRE_STEPS: WireSteps = {
+  buildWireContext: (messages, compaction) => buildWireContext(messages, compaction as CompactionState | null),
+  sanitizeToolCallPairs,
+  materializeReminders,
+  stripWireMetadata,
+  applyReasoningPolicy,
+  stripAllImagesForText,
+  stripRemoteImagesForLocal,
+  hoistSystemToFront,
+};
+
+/** The tool rules the turn's obligations are judged against (see toolRuntime.ts). Fixed, so bound once. */
+const TOOL_RULES: ToolRuntimeRules = {
+  mutatingTools: MUTATING_FILE_TOOLS,
+  riskyPath: RISKY_PATH_PATTERN,
+  delegationTools: DELEGATION_TOOLS,
+};
 
 function ChatAgent() {
   const t = useT();
@@ -420,6 +417,16 @@ function ChatAgent() {
      */
     stop: AbortController;
   } | null>(null);
+  /**
+   * The two refs the delegation tools need but cannot own.
+   *
+   * `createDelegationTools` is called per turn, so it cannot call `useRef` — and neither of these is
+   * turn-scoped anyway. The broker spans the whole mounted chat on purpose: grants, concurrency and the
+   * audit trail are a property of the session, and rebuilding it every turn would re-ask for everything the
+   * user already allowed. The declaration cache is just as long-lived, for cost rather than semantics.
+   */
+  const brokerRef = useRef<{ broker: CapabilityBroker; audit: InMemoryAuditLog } | null>(null);
+  const orchestrationDeclsRef = useRef<Map<string, ToolDeclaration> | null>(null);
   const [status, setStatus] = useState(""); // While generating, show the user "what it is doing"
   const [error, setError] = useState<string | null>(null);
   const [toolsReady, setToolsReady] = useState(false);
@@ -537,7 +544,9 @@ function ChatAgent() {
   // User choice (ask_user): resolve wakes the waiting Promise when an option is clicked.
   // ask_user's pending-answer choice cards: keyed by card id (each question is independent, multiple conversations / concurrent questions never overwrite each other).
   // Each entry records the issuing conversation, to ease unblocking by conversation on cancel / clear.
-  const choiceResolversRef = useRef<Map<number, { convId: string | null; resolve: (v: string) => void }>>(
+  const choiceResolversRef = useRef<
+    Map<number, { convId: string | null; questions: ChoiceQuestion[]; resolve: (v: string) => void }>
+  >(
     new Map(),
   );
   const choiceIdRef = useRef(0);
@@ -579,8 +588,10 @@ function ChatAgent() {
     cached: 0, // Accumulated input tokens served from the prefix cache
     estimated: false,
   });
-  // Run parameters removed: tool rounds / subagent rounds no longer have an upper limit, and the deadlock protection for repeated calls / consecutive timeouts is also disabled;
-  // interruption is only via the user's manual "stop". The related settings and persistence were removed accordingly.
+  // Run parameters removed: tool rounds / subagent rounds no longer have an upper limit, and the old deadlock protection keyed on
+  // "the same call again" / "another timeout" is gone with them. The related settings and persistence were removed accordingly.
+  // What replaced it is not a limit but a progress test (loopGuard.ts): a turn is only stopped once it demonstrably stops learning
+  // anything, so long work is unaffected and only a loop is cut short. Manual "stop" remains, and is still the user's own control.
 
   // Message queue: while generating, a new send by the user is no longer dropped but enqueued per conversation (FIFO), and auto-sent in order after this round of generation ends.
   // The queue lives in the component (AgentShell keeps it permanently mounted), so switching pages inside /agent does not affect the queue or resume. Keyed by conversation id.
@@ -621,6 +632,11 @@ function ChatAgent() {
     if (convId) {
       if (next.length > 0) todosByConvRef.current.set(convId, next);
       else todosByConvRef.current.delete(convId);
+      // Persisted since M6 (docs/agent-runtime-loop.md §16, §18 Test 7). The list used to live only in this
+      // ref and be archived as a display bubble at end of turn, so reopening a conversation mid-task showed
+      // the transcript of a checklist and no checklist — the model's plan survived in Goal State while the
+      // user's view of it did not. A runtime artifact, flushed to disk like compaction and goal.
+      useAgentChatStore.getState().setConversationTodos(convId, next.length > 0 ? next : null);
     }
     if (convId === convIdRef.current) setTodos(next);
   };
@@ -674,101 +690,50 @@ function ChatAgent() {
     if (convId === convIdRef.current) setDisplayedGoal(isGoalEmpty(g) ? null : g);
   };
 
-  /**
-   * The model calls set_goal: record the end state this task must reach, and the criteria that decide it.
-   *
-   * The reducer decides what the update means — in particular that a condition the USER wrote with /goal is
-   * never overwritten here. All this handler does is hand the arguments over and report what came back.
-   */
-  const setGoal = (ctx: RunCtx, rawArgs: Record<string, unknown>): string => {
-    const { goal, ok, message } = setCriteria(
-      goalFor(ctx.convId),
-      {
-        objective: typeof rawArgs.objective === "string" ? rawArgs.objective : "",
-        acceptanceCriteria: Array.isArray(rawArgs.acceptanceCriteria)
-          ? (rawArgs.acceptanceCriteria as Array<string | { text?: string }>)
-          : [],
-      },
-      // eslint-disable-next-line react-hooks/purity -- a tool handler, reached from an event, never from render
-      { now: Date.now() },
-    );
-    if (ok) setGoalFor(ctx.convId, goal);
-    return message;
-  };
+  /** Pending "clear the achieved goal" timers, keyed by conversation. */
+  const goalClearTimersRef = useRef(new Map<string, ReturnType<typeof setTimeout>>());
 
   /**
-   * The model calls update_plan: install or revise the strategy for the current goal.
+   * Clear an achieved goal after a short window (see GOAL_ACHIEVED_LINGER_MS).
    *
-   * The plan is also the user-facing checklist, so a new plan is mirrored into the todo panel here — one list
-   * seen from two sides (see todosFromGoal). Mirrored only when the call was accepted, so a rejected one never
-   * wipes a checklist the user is watching.
+   * The window exists so the finished run — rounds, elapsed, spend — is readable before it goes. What the
+   * window must not do is clear something else: within ten seconds the user can drop the goal, start a new one
+   * with /goal, or the conversation can be switched away. So the timer re-reads the state when it fires and
+   * only clears if it is still looking at the very run it was scheduled for, matched on condition AND start
+   * time — a new goal with the same wording is a different run and must survive.
    */
-  const updatePlan = (ctx: RunCtx, rawArgs: Record<string, unknown>): string => {
-    const { goal, ok, message } = applyPlan(goalFor(ctx.convId), {
-      steps: Array.isArray(rawArgs.steps)
-        ? (rawArgs.steps as Array<string | { title?: string; status?: string }>)
-        : [],
-      rationale: typeof rawArgs.rationale === "string" ? rawArgs.rationale : undefined,
-      blockers: Array.isArray(rawArgs.blockers) ? rawArgs.blockers.map((b) => String(b)) : undefined,
-    });
-    if (ok) {
-      setGoalFor(ctx.convId, goal);
-      setTodosFor(ctx.convId, todosFromGoal(goal));
-    }
-    return message;
+  const scheduleGoalClear = (convId: string, achieved: GoalState) => {
+    const timers = goalClearTimersRef.current;
+    const existing = timers.get(convId);
+    if (existing) clearTimeout(existing);
+    const timer = setTimeout(() => {
+      timers.delete(convId);
+      const current = goalFor(convId);
+      const sameRun =
+        current.status === "achieved" &&
+        current.condition === achieved.condition &&
+        current.run.startedAt === achieved.run.startedAt;
+      if (sameRun) setGoalFor(convId, clearGoal(current));
+    }, GOAL_ACHIEVED_LINGER_MS);
+    timers.set(convId, timer);
   };
 
-  // The model calls set_task_state: record its internal mission brief into Task Memory (source "model"),
-  // pinned into the wire every turn and preserved across compaction. Not shown to the user. When the brief
-  // is unchanged, return a discouraging result so the model stops re-recording it every turn (it over-calls
-  // otherwise; the brief is already in context and the compaction extractor backstops it).
-  const setTaskState = (ctx: RunCtx, rawArgs: Record<string, unknown>): string => {
-    if (typeof rawArgs.notes !== "string") {
-      return "No change — pass `notes` (your mission brief) to record it.";
-    }
-    const next = rawArgs.notes.trim();
-    if (next === taskMemoryFor(ctx.convId).notes) {
-      return "Task state unchanged — it is already pinned in your context; do not call set_task_state again unless the plan or goal materially changes.";
-    }
-    setTaskMemoryFor(ctx.convId, applyTaskState(taskMemoryFor(ctx.convId), { notes: next }));
-    return "Task state recorded.";
-  };
+  // Timers outlive the turn that scheduled them, so unmounting mid-window would otherwise fire into a dead
+  // component.
+  useEffect(() => {
+    const timers = goalClearTimersRef.current;
+    return () => {
+      for (const t of timers.values()) clearTimeout(t);
+      timers.clear();
+    };
+  }, []);
 
-  // The model calls update_todos: overwrite that conversation's list with the full list, returning a short confirmation.
-  // A background conversation's list is kept (keyed by its own id) but not shown, so it is intact when the user switches back.
-  const updateTodos = (ctx: RunCtx, rawArgs: Record<string, unknown>): string => {
-    const raw = Array.isArray(rawArgs.todos) ? rawArgs.todos : [];
-    const parsed: Todo[] = raw
-      .map((t) => {
-        const o = (t ?? {}) as Record<string, unknown>;
-        const status = o.status;
-        return {
-          title: String(o.title ?? "").trim(),
-          status: (status === "in_progress" || status === "completed"
-            ? status
-            : "pending") as TodoStatus,
-        };
-      })
-      .filter((t) => t.title);
-    setTodosFor(ctx.convId, parsed);
-    // Fold the checklist back into the plan it came from, so the two do not drift: the plan is what the goal
-    // reminder shows every turn, and a step the model just ticked off here would otherwise still read as pending
-    // there. Matched by title, so a list the model rewrote in its own words simply does not match and the plan is
-    // left alone rather than corrupted. See applyTodoStatuses.
-    const goal = applyTodoStatuses(goalFor(ctx.convId), parsed);
-    if (goal !== goalFor(ctx.convId)) setGoalFor(ctx.convId, goal);
-    const done = parsed.filter((t) => t.status === "completed").length;
-    return (
-      `Updated the todo list (${done}/${parsed.length} completed).` +
-      // A ticked-off checklist is progress through the plan, never proof that the goal is met — the evaluator
-      // decides that, from the transcript. Said here because a fully ticked list is the moment the model is
-      // most likely to conclude otherwise and stop.
-      (isGoalActive(goal) && done === parsed.length && parsed.length > 0
-        ? " Every step is marked done, but that is not the same as the goal being met: the evaluator checks the" +
-          " goal condition against what this conversation actually shows. Make sure the evidence for it is here."
-        : "")
-    );
-  };
+  // The set_goal and update_plan handlers lived here. They are gone with the tools: the goal is the user's,
+  // and a handler kept "just in case" would still be reachable by name through call_tool, which is exactly the
+  // hole removing the tools was meant to close.
+
+  // set_task_state and update_todos moved to chatTools.ts with the rest of the renderer tools.
+  // toggleTodo stays: it is the USER ticking a box, not a tool call.
 
   // Manual toggle: switch this item between "completed / not completed". Only ever acts on the viewed conversation's list.
   const toggleTodo = (index: number) => {
@@ -802,6 +767,9 @@ function ChatAgent() {
         d.map((m) => (m.kind === "choice" && dropped.includes(m.id) ? { ...m, submitted: true } : m)),
       );
     }
+    useAgentChatStore.getState().setPendingQuestionIds(
+      new Set([...choiceResolversRef.current.values()].flatMap((e) => (e.convId ? [e.convId] : []))),
+    );
   };
 
   // Stop the current generation: abort the in-flight request for the "current active conversation", release any waiting confirmation / choice, and the loop then exits on its own.
@@ -1382,43 +1350,6 @@ function ChatAgent() {
   // Load a historical conversation: rebuild the display and the API conversation (messages[0] is replayed from the frozen
   // conv.systemPrompt; only records from before that field existed fall back to composing on the next send).
   // Lazy loading: first ensure the conversation file of the project this conversation belongs to is loaded (projectId comes from the sidebar navigation's ?p=).
-  /** Snapshot the current conversation's compaction state into the session-level cache, to restore when switching back later (the fast path within this run). */
-  const snapshotCompaction = (convId: string | null) => {
-    if (!convId) return;
-    compactionCacheRef.current.set(convId, {
-      state: compactionRef.current,
-      manual: manualCompactRef.current,
-      compacted,
-      ctxTokens: contextTokensRef.current,
-    });
-  };
-
-  /**
-   * Persist the current conversation's compaction snapshot to disk (so compaction can be restored after close and reopen, without re-summarizing).
-   * compaction is not part of the integrity hash (see canonical.ts), so it does not trigger re-signing, and the existing signature stays valid.
-   * Called after every change to the compaction state (auto-compaction on send / manual "compact now" / clearing on falloff), keeping the disk always current.
-   */
-  const persistCompaction = (
-    convId: string | null,
-    // Explicit state for a round whose conversation is no longer the active view: compactionRef belongs to
-    // whatever the user switched TO, so a background round must pass its own.
-    explicit?: { state: CompactionState | null; manual: boolean; ctxTokens: number },
-  ) => {
-    if (!convId) return;
-    const state = explicit ? explicit.state : compactionRef.current;
-    let stored: StoredCompaction | null = null;
-    if (state) {
-      const s = compactionSavings(state);
-      stored = {
-        ...serializeCompaction(state),
-        manual: explicit ? explicit.manual : manualCompactRef.current,
-        compacted: s.summarizedTurns > 0 || s.dedupedReads > 0,
-        ctxTokens: explicit ? explicit.ctxTokens : contextTokensRef.current,
-      };
-    }
-    useAgentChatStore.getState().setConversationCompaction(convId, stored);
-  };
-
   /**
    * Open a conversation, with a skeleton in the message area for as long as the swap takes. The paint yield is what
    * makes the skeleton visible at all: without it the "show skeleton" state and the finished transcript land in the
@@ -1460,6 +1391,13 @@ function ChatAgent() {
       conv.secureEnv ?? store.secureEnvDefaultFor(conv.projectId) ?? DEFAULT_SECURE_ENV,
       { persist: false },
     );
+    // Restore the checklist from disk, unless a live in-session copy is already held — same rule as Task
+    // Memory below: the ref is the authority while the app has been running, disk is the authority after a
+    // reopen. A record written before M6 has no field, and normalizeTodos reads that as an empty list.
+    if (!todosByConvRef.current.has(id)) {
+      const restored = normalizeTodos(conv.todos);
+      if (restored.length > 0) todosByConvRef.current.set(id, restored as Todo[]);
+    }
     // Restore this conversation's internal Task Memory brief from disk into the ref, so the mission survives
     // app reopen. Seed only if the ref doesn't already hold a live in-session copy.
     if (conv.taskMemory && !taskMemoryByConvRef.current.has(id)) {
@@ -1611,6 +1549,9 @@ function ChatAgent() {
     });
     displayRef.current = disp;
     setDisplay(disp);
+    // A question this conversation asked while the user was looking elsewhere is still waiting on an answer.
+    // Re-shown here, after the rebuild, because the rebuild is what would otherwise drop it.
+    restorePendingChoices(id);
     // Opening a conversation mounts only its last INITIAL_VISIBLE_TURNS turns; the rest is revealed on scroll-up.
     // Reset per conversation, so a long history expanded earlier does not make the next one open fully mounted.
     resetHistoryWindow();
@@ -1754,9 +1695,38 @@ function ChatAgent() {
     t,
   });
 
-  // ── Context compaction ────────────────────────────────────────────────────────────────
   // History → summary, for the compaction plan below. See summarize.ts.
   const summarizeHistory = createSummarizeHistory(requestChat);
+
+  // ── Context compaction ────────────────────────────────────────────────────────────────
+  // Folding old turns into a summary, and the wire view that results. See chatCompaction.ts — the whole
+  // cluster moved there, including the disk snapshot, because every part of it is about the same decision.
+  //
+  // Built on every render for the same reason createChatRequest above is, and exempt for the same reason:
+  // the factory itself reads none of what it is handed. `compactNow` is wired to a button, so this cannot be
+  // deferred into the turn the way the delegation and renderer tables are.
+  const { snapshotCompaction, persistCompaction, maybeCompact, compactNow } =
+    // eslint-disable-next-line react-hooks/refs
+    createCompaction({
+      t,
+      activeModel,
+      compacting,
+      loading,
+      compacted,
+      setCompacted,
+      setCompacting,
+      setCtxTokens,
+      convIdRef,
+      convoRef,
+      compactionRef,
+      compactionCacheRef,
+      manualCompactRef,
+      contextTokensRef,
+      summarizeHistory,
+      taskMemoryFor,
+      setTaskMemoryFor,
+    });
+
 
   // ── Goal evaluation ───────────────────────────────────────────────────────────────────
   /**
@@ -1820,22 +1790,6 @@ function ChatAgent() {
    * persist it under its id. When the round is no longer the active view, the plan goes to the per-conversation cache (which
    * loadConversation restores from) and to disk under the round's own id instead, and the live refs and UI state are left alone.
    */
-  const commitCompaction = (convId: string | null, state: CompactionState | null) => {
-    const savings = state ? compactionSavings(state) : null;
-    const compactedNow = !!savings && (savings.summarizedTurns > 0 || savings.dedupedReads > 0);
-    if (convId && convId !== convIdRef.current) {
-      const cached = convId ? compactionCacheRef.current.get(convId) : undefined;
-      const ctxTokens = cached?.ctxTokens ?? 0;
-      const manual = cached?.manual ?? false;
-      compactionCacheRef.current.set(convId, { state, manual, compacted: compactedNow, ctxTokens });
-      persistCompaction(convId, { state, manual, ctxTokens });
-      return;
-    }
-    compactionRef.current = state;
-    setCompacted(compactedNow);
-    persistCompaction(convId);
-  };
-
   /**
    * Explain a FAILED call to a tool the model never saw a schema for.
    *
@@ -1856,129 +1810,6 @@ function ChatAgent() {
       return ROUTED_TOOLS.has(name) ? content + routedFailureHint(name, hit.function?.parameters) : content;
     } catch {
       return content; // The hint is an optimisation; never let looking it up turn a tool error into a broken turn.
-    }
-  };
-
-  const maybeCompact = async (
-    opts: {
-      force?: boolean;
-      signal?: AbortSignal;
-      log?: RequestLog;
-      /** The round's own buffer and conversation, captured before any await. Omitted → the active view (manual "compact now"). */
-      messages?: ApiMsg[];
-      convId?: string | null;
-    } = {},
-  ): Promise<CompactionState | null> => {
-    // Both captured before the first await: everything below must act on the conversation this round started in.
-    const targetConvId = opts.convId !== undefined ? opts.convId : convIdRef.current;
-    const full = opts.messages ?? convoRef.current;
-    const cw = activeModel?.contextWindow ?? resolveContextWindow(activeModel?.model ?? "");
-    const currentTokens = countMessagesTokens(full);
-    // Hybrid working-set budget: cap the trigger/target at an absolute token budget (configurable in
-    // Settings → General, default 120K, 0 = off) so a large-window model can't defer compaction until
-    // it has hoarded hundreds of thousands of tokens. null when disabled → original window-relative path.
-    const budget = resolveHybridBudget(cw, getContextBudgetK());
-    // prev: pass in the previous compaction state so planCompaction "freezes the boundary" — reuse the old summary boundary until the tail again
-    // exceeds the threshold; if coversCount is stable, the old summary body is reused below, so the post-compaction prefix is byte-stable and hits the prefix cache (§4.1).
-    const res = planCompaction(full, {
-      contextWindow: cw,
-      currentTokens,
-      force: opts.force,
-      prev: compactionRef.current,
-      triggerTokens: budget?.triggerTokens,
-      targetTokens: budget?.targetTokens,
-    });
-    if (!res) {
-      // Below the threshold: if it is not a manual compaction, clear it (wire view == full conversation, most stable prefix cache); a manual compaction is kept as-is.
-      if (!manualCompactRef.current) {
-        commitCompaction(targetConvId, null); // Sync to disk after clearing (remove the old snapshot)
-        return null;
-      }
-      return compactionRef.current;
-    }
-    const { plan, summarizeMessages } = res;
-    let summaryText: string | null = null;
-    let reuseCount = 0;
-    if (plan.coversCount > 0) {
-      const prev = compactionRef.current;
-      const prevReuse = prev?.reuseCount ?? 0;
-      const canReuse = !!prev?.summaryText && prev.coversCount === plan.coversCount;
-      if (canReuse && prevReuse < MAX_SUMMARY_REUSE) {
-        // Coverage unchanged and under the reuse cap → reuse the old summary (saves a model call), but
-        // COUNT it so a slowly-growing conversation can't keep an unverified summary alive forever (§B1).
-        summaryText = prev!.summaryText;
-        reuseCount = prevReuse + 1;
-      } else {
-        // Regenerate. Three shapes:
-        //  - forced-from-scratch: the reuse cap was hit (canReuse but over MAX) → re-read the FULL covered
-        //    span from the verbatim originals, so drift/errors reset (§B1). Planner returned no
-        //    summarizeMessages (freeze-reuse signals reuse with an empty list), so reconstruct the span.
-        //  - incremental (§8.1): the boundary advanced past a usable prior summary → summarise only
-        //    (prior summary + the newly-covered span), avoiding a from-scratch pass over everything.
-        //  - first summary: no prior summary → from-scratch of the covered span.
-        const hasSystem = full[0]?.role === "system";
-        const body = hasSystem ? full.slice(1) : full;
-        const prevCovers = prev?.coversCount ?? 0;
-        const canIncrement =
-          !canReuse && !!prev?.summaryText && prevCovers > 0 && prevCovers < plan.coversCount;
-        const toSummarize = canIncrement
-          ? body.slice(prevCovers, plan.coversCount) // only the newly-folded messages
-          : summarizeMessages.length
-            ? summarizeMessages
-            : body.slice(0, plan.coversCount); // full covered span (first summary / forced reset)
-        const priorSummary = canIncrement ? prev!.summaryText : null;
-        try {
-          const { summary, extracted } = await summarizeHistory(toSummarize, opts.signal, opts.log, priorSummary);
-          summaryText = summary;
-          // The guarantee: capture any mission/plan/constraints from the span being discarded into Task
-          // Memory, non-destructively. Fills an empty brief or refreshes a prior auto-extracted one (§B2),
-          // never clobbering a model-authored brief. See docs/context-memory-tiers-design.md §5.3.
-          if (extracted) {
-            const convId = opts.log?.convId ?? convIdRef.current;
-            const prevTm = taskMemoryFor(convId);
-            const merged = mergeExtracted(prevTm, extracted);
-            if (merged.notes !== prevTm.notes) setTaskMemoryFor(convId, merged);
-          }
-        } catch {
-          summaryText = null; // Summary failed → fall back to dedup-only (buildWireContext ignores an empty summary)
-        }
-        reuseCount = 0; // fresh summary
-      }
-    }
-    const next: CompactionState = { ...plan, summaryText, reuseCount };
-    if (opts.force) manualCompactRef.current = true;
-    commitCompaction(targetConvId, next);
-    // Refresh the progress bar immediately: estimate usage from the post-compaction wire size, without waiting for the next
-    // request. Only meaningful for the conversation actually on screen — a background round must not move the active view's bar.
-    if (!targetConvId || targetConvId === convIdRef.current) {
-      setCtxTokens(countMessagesTokens(buildWireContext(full, next)));
-    }
-    return next;
-  };
-
-  /** The manual "compact now" button: compact once ignoring the auto threshold, but disallowed when usage is too low (<20%), reporting the result. */
-  const compactNow = async () => {
-    if (compacting || loading) return;
-    // When usage is below 20% of the window AND below any absolute budget, there is too little content
-    // and compaction is meaningless, so reject directly (consistent with the button's disabled condition).
-    const cw = activeModel?.contextWindow ?? resolveContextWindow(activeModel?.model ?? "");
-    const budgetK = getContextBudgetK();
-    const overBudget = budgetK > 0 && contextTokensRef.current >= budgetK * 1000;
-    if (!overBudget && cw > 0 && contextTokensRef.current / cw < MANUAL_COMPACT_MIN_PCT) {
-      toast.message(t("chat.compactMinTitle"));
-      return;
-    }
-    setCompacting(true);
-    try {
-      await maybeCompact({ force: true });
-      const s = compactionSavings(compactionRef.current);
-      if (s.summarizedTurns === 0 && s.dedupedReads === 0) {
-        toast.message(t("chat.compactTooShort"));
-      } else {
-        toast.success(t("chat.compactDone"));
-      }
-    } finally {
-      setCompacting(false);
     }
   };
 
@@ -2015,6 +1846,23 @@ function ChatAgent() {
 
   // Execute a single tool call (including sensitive-operation confirmation), push a display bubble, and return the result text fed back to the model.
   // displayName is only for display (subagent calls carry an "agentId→" prefix).
+  /**
+   * Ask the user to approve a tool call — the host half of the §13 boundary's `requestConsent` (M2b).
+   *
+   * A thin adapter onto `useConsentQueue`, and thin on purpose: the queueing, the per-conversation ordering
+   * and the "don't ask again" set are all behaviour worth keeping exactly as it is. What this adds is the
+   * contract's argument shape, so that the caller does not have to know the queue's six-parameter signature.
+   */
+  const hostConsent = (convId: string | null, req: ConsentRequest): Promise<ConsentDecision> =>
+    requestConsent(
+      convId,
+      req.name,
+      req.args,
+      req.previewDiff ?? null,
+      req.warning ?? null,
+      (req.requester ?? null) as ConsentRequester | null,
+    );
+
   const execToolCall = async (
     ctx: RunCtx,
     name: string,
@@ -2068,7 +1916,10 @@ function ChatAgent() {
         targetPath && pathProvenance(convoRef.current, compactionRef.current, targetPath) === "digest-only"
           ? t("chat.provenanceWarning")
           : null;
-      const decision = await requestConsent(ctx.convId, name, args, previewDiff, warning, requester);
+      // Routed through the §13 contract shape rather than the raw six-argument call (M2b). `hostConsent` is
+      // the same function the boundary hands the Runtime, so consent has one implementation whether it is
+      // asked for from here or from a Runtime that no longer lives in this component.
+      const decision = await hostConsent(ctx.convId, { name, args, previewDiff, warning, requester });
       if (decision === "always") allowedToolsRef.current.add(name);
       if (decision === "no") {
         const denied = "The user rejected this operation.";
@@ -2090,462 +1941,6 @@ function ChatAgent() {
     // The schema hint is model-facing only: the bubble above and the log entry keep the tool's own error, because a parameter
     // dump is what the model needs to retry and noise to everyone reading the timeline.
     return result.ok ? result.content : await explainToolFailure(name, result.content);
-  };
-
-  // ── Delegation plumbing ─────────────────────────────────────────────────────────────────────────
-  //
-  // Three call paths share one delegation loop: run_subagent (one delegation, blocking), and
-  // spawn_subagents / join_subagents (many, concurrent, collected later). Only the loop is shared —
-  // each path owns its own display bubble, because what the user should see differs: a lone delegation
-  // settles its own bubble on its conclusion, whereas a fan-out keeps one bubble for the whole batch.
-
-  /** Get (or create) the place a delegation tool call parks its sub-agent trace for persistence. */
-  const delegationSink = (argsKey: object, convId: string) => {
-    const existing = subagentSinksRef.current.get(argsKey);
-    if (existing) return existing;
-    const fresh = { convId, steps: [] as SubAgentStep[], storedIndex: null as number | null };
-    subagentSinksRef.current.set(argsKey, fresh);
-    return fresh;
-  };
-
-  /**
-   * Record one sub-agent tool call against a sink, patching the stored message when it already exists.
-   *
-   * A blocking delegation finishes before its tool result is written, so its steps ride along with
-   * appendMessage. A spawned one does not: it settles after that message is on disk, so its trace has to
-   * be patched in — otherwise the operations the user watched happen would vanish on reload.
-   */
-  const recordStep = (
-    sink: { convId: string; steps: SubAgentStep[]; storedIndex: number | null },
-    step: SubAgentStep,
-  ) => {
-    sink.steps.push(step);
-    if (sink.storedIndex != null) {
-      useAgentChatStore.getState().setMessageSteps(sink.convId, sink.storedIndex, [...sink.steps]);
-    }
-  };
-
-  /** Settle every outstanding job AND stop the loops still producing them. Both, always — see `stop` above. */
-  const shutdownScheduler = (held: NonNullable<typeof schedulerRef.current>) => {
-    held.sched.cancelAll();
-    held.stop.abort();
-  };
-
-  /** The scheduler for the current turn, rebuilt (and the previous one shut down) when the turn changes. */
-  const schedulerFor = (ctx: RunCtx): SubAgentScheduler<DelegationMeta> => {
-    const held = schedulerRef.current;
-    if (held && held.turnId === ctx.turnId) return held.sched;
-    if (held) shutdownScheduler(held);
-    const stop = new AbortController();
-    const sched = new SubAgentScheduler<DelegationMeta>({
-      limit: MAX_PARALLEL_SUBAGENTS,
-      maxJobs: MAX_SUBAGENTS_PER_TURN,
-      // The in-flight half of the repeat-delegation guard. The completed half (delegationsRef) can only
-      // see delegations that already returned, so before this a model that spawned the same question
-      // twice in one batch paid for both — the case fan-out makes easy and serial delegation never could.
-      isDuplicate: (a, b) => isSameDelegation(a, b),
-      onChange: () => {
-        const c = sched.counts();
-        if (c.running + c.queued > 0) {
-          ctx.status(t("chat.subagentsWorking", { running: c.running, queued: c.queued }));
-        }
-      },
-    });
-    const held2 = { turnId: ctx.turnId, sched, stop };
-    // Cancelling the turn has to reach the scheduler directly, not via the run loop's `finally`: when the
-    // user hits stop the loop is typically parked inside join_subagents, so waiting for the loop to unwind
-    // would deadlock the cancel behind the very wait it is meant to interrupt.
-    if (ctx.signal.aborted) shutdownScheduler(held2);
-    else ctx.signal.addEventListener("abort", () => shutdownScheduler(held2), { once: true });
-    schedulerRef.current = held2;
-    return sched;
-  };
-
-  // One sub-agent, run to its conclusion in its own small loop. See delegation.ts — it needs no page state
-  // beyond what is threaded in here, so it lives outside the component.
-  // Same shape as createChatRequest above, and exempt for the same reason: nothing is read until a delegation
-  // actually runs.
-  // eslint-disable-next-line react-hooks/refs
-  const runDelegation = createRunDelegation({
-    t,
-    toolsReady,
-    workdir,
-    endpoint,
-    // Read when the delegation runs, not when this factory is built — see the note on the parameters.
-    sandboxStatus: () => sandboxStatusRef.current,
-    isLocalModel,
-    sendReasoningContext,
-    requestChat,
-    execToolCall,
-    delegations: () => delegationsRef.current,
-  });
-
-  /**
-   * Reset the completed-delegation record when the turn changes.
-   *
-   * Keyed by turnId rather than cleared at some end-of-turn point, because there is no single place a turn
-   * is known to have ended (it can abort, be cancelled, or run in the background while another
-   * conversation is active) — keying is the only reset that cannot leak one turn's delegations into the next.
-   */
-  const ensureTurnBucket = (ctx: RunCtx) => {
-    const bucket = delegationsRef.current;
-    if (bucket.turnId !== ctx.turnId) {
-      bucket.turnId = ctx.turnId;
-      bucket.done = [];
-    }
-    return bucket;
-  };
-
-  /** The repeat-guard reply, shown and logged like a real delegation so the saving is visible in the timeline. */
-  const answerFromPriorDelegation = (ctx: RunCtx, agentId: string, task: string, prior: PriorDelegation) => {
-    const answer = repeatDelegationResult(prior);
-    logSubagentRun({
-      agent: agentId, task, rounds: 0, steps: 0,
-      promptTokens: 0, completionTokens: 0, totalTokens: 0,
-      ms: 0, ok: true, error: "repeat: answered from an earlier delegation this turn",
-      convId: ctx.convId, turnId: ctx.turnId,
-    });
-    return answer;
-  };
-
-  // run_subagent: one delegation, awaited in place. The simple path, unchanged in behaviour.
-  const runSubAgent = async (ctx: RunCtx, rawArgs: Record<string, unknown>): Promise<string> => {
-    const agentId = String(rawArgs.agent ?? "");
-    const task = String(rawArgs.task ?? "").trim();
-    const def = SUBAGENTS.find((a) => a.id === agentId);
-    if (!def) return `Unknown subagent: ${agentId}`;
-    if (!task) return "task must not be empty.";
-
-    const bucket = ensureTurnBucket(ctx);
-    const repeat = findRepeatDelegation(agentId, task, bucket.done);
-    if (repeat) {
-      const answer = answerFromPriorDelegation(ctx, agentId, task, repeat);
-      ctx.push({ kind: "tool", name: `run_subagent → ${agentId}`, args: { agent: agentId, task }, ok: true, result: answer });
-      return answer;
-    }
-
-    // A "delegate" bubble, so the user can see what task the main model handed to which sub-agent. Its
-    // `steps` grow in place as the sub-agent works, so the delegation is not an opaque wait.
-    const sink = delegationSink(rawArgs, ctx.convId);
-    // Typed as the tool variant, not the DisplayMsg union: `...bubble` below must keep the tool shape.
-    let bubble: Extract<DisplayMsg, { kind: "tool" }> = {
-      kind: "tool",
-      name: `run_subagent → ${agentId}`,
-      args: { agent: agentId, task },
-      ok: true,
-      result: task,
-      steps: sink.steps,
-    };
-    ctx.push(bubble);
-    // New object identity so memoized message components re-render; the array is copied for the same reason.
-    const refresh = (result?: string) => {
-      const next = { ...bubble, steps: [...sink.steps], ...(result != null ? { result } : {}) };
-      replaceDisplay(bubble, next);
-      bubble = next;
-    };
-
-    const { conclusion } = await runDelegation(ctx, {
-      agentId,
-      task,
-      def,
-      label: agentId,
-      onStep: (s) => {
-        recordStep(sink, s);
-        refresh();
-      },
-      status: ctx.status,
-    });
-    // Settle the bubble on the conclusion. Live and reloaded views must agree, and the reload path rebuilds
-    // `result` from the persisted tool content — which is the conclusion, not the task. Without this the
-    // bubble showed the task while running and the conclusion after reopening.
-    refresh(conclusion);
-    return conclusion;
-  };
-
-  /**
-   * spawn_subagents: start delegations concurrently and hand back their ids at once.
-   *
-   * Returns as soon as the jobs are registered — it never awaits them. That is the whole point: the model
-   * gets its handles in the same round it asked, so it can keep working and then block exactly once in
-   * join_subagents, instead of asking "are they done yet" every round.
-   */
-  const spawnSubagents = async (ctx: RunCtx, rawArgs: Record<string, unknown>): Promise<string> => {
-    const entries = Array.isArray(rawArgs.tasks) ? rawArgs.tasks : [];
-    if (entries.length === 0) return "tasks must be a non-empty array of { agent, task } objects.";
-
-    const bucket = ensureTurnBucket(ctx);
-    const sched = schedulerFor(ctx);
-    const sink = delegationSink(rawArgs, ctx.convId);
-    // The delegations run on the scheduler's stop signal rather than the turn's. It fires on BOTH exits —
-    // the user interrupting (ctx.signal is wired to shut the scheduler down) and the turn simply ending
-    // with work in flight — whereas ctx.signal covers only the first, which is the exit a spawned
-    // delegation is least likely to take.
-    const jobCtx: RunCtx = { ...ctx, signal: schedulerRef.current!.stop.signal };
-
-    // ONE bubble for the whole batch, whose trace collects every delegation's tool calls (each already
-    // prefixed with its job id by runDelegation's label). Per-delegation bubbles would look right live and
-    // then collapse on reload, because the batch persists as this single tool message.
-    let bubble: Extract<DisplayMsg, { kind: "tool" }> = {
-      kind: "tool",
-      name: "spawn_subagents",
-      args: rawArgs,
-      ok: true,
-      result: "",
-      steps: sink.steps,
-    };
-    ctx.push(bubble);
-    const refresh = (result?: string) => {
-      const next = { ...bubble, steps: [...sink.steps], ...(result != null ? { result } : {}) };
-      replaceDisplay(bubble, next);
-      bubble = next;
-    };
-
-    const spawned: Array<{ id: string; agent: string; coalesced: boolean; refused?: string }> = [];
-    const answered: string[] = [];
-    for (const raw of entries) {
-      const entry = (raw ?? {}) as Record<string, unknown>;
-      const agentId = String(entry.agent ?? "");
-      const task = String(entry.task ?? "").trim();
-      const def = SUBAGENTS.find((a) => a.id === agentId);
-      if (!def) {
-        spawned.push({ id: "", agent: agentId || "(missing)", coalesced: false, refused: `unknown sub-agent "${agentId}"` });
-        continue;
-      }
-      if (!task) {
-        spawned.push({ id: "", agent: agentId, coalesced: false, refused: "task must not be empty" });
-        continue;
-      }
-      // Completed-delegation guard: answer from the earlier conclusion instead of spawning a second copy.
-      // Its in-flight counterpart lives in the scheduler's isDuplicate — together they cover both the
-      // "asked again later" and the "asked twice in one batch" cases.
-      const repeat = findRepeatDelegation(agentId, task, bucket.done);
-      if (repeat) {
-        answered.push(answerFromPriorDelegation(ctx, agentId, task, repeat));
-        continue;
-      }
-      const meta: DelegationMeta = { agent: agentId, task, subject: delegationSubject(task) };
-      const res = sched.spawn(meta, async (job) => {
-        const { conclusion } = await runDelegation(jobCtx, {
-          agentId,
-          task,
-          def,
-          label: `${job.id} ${agentId}`,
-          onStep: (s) => {
-            recordStep(sink, s);
-            refresh();
-          },
-          // Per-delegation progress text is dropped on this path: concurrent delegations would fight over
-          // the single status line. The scheduler's onChange publishes the aggregate instead.
-          status: () => {},
-        });
-        return conclusion;
-      });
-      spawned.push({ id: res.id, agent: agentId, coalesced: res.coalesced, refused: res.refused });
-    }
-
-    const summary =
-      formatSpawnResult(spawned) + (answered.length > 0 ? `\n\n${answered.join("\n\n")}` : "");
-    refresh(summary);
-    return summary;
-  };
-
-  /**
-   * join_subagents: block until the named delegations finish, then return their conclusions.
-   *
-   * This is the call that replaces polling. It awaits the jobs' own promises, so the tool call is
-   * suspended for exactly as long as the work takes and wakes the moment it is done — one model
-   * round-trip for the whole wait, however long that is.
-   */
-  const joinSubagents = async (ctx: RunCtx, rawArgs: Record<string, unknown>): Promise<string> => {
-    const held = schedulerRef.current;
-    const sched = held && held.turnId === ctx.turnId ? held.sched : null;
-    if (!sched) return "No delegations have been spawned in this turn — call spawn_subagents first.";
-
-    const ids = Array.isArray(rawArgs.ids)
-      ? rawArgs.ids.map((v) => String(v)).filter((v) => v.length > 0)
-      : null;
-    const mode = rawArgs.mode === "any" ? "any" : "all";
-    // Non-blocking collect: the model still has work in hand and wants what has already finished. The main
-    // agent has exactly one thread of control, so a blocking join costs it every other action until the
-    // delegations land — this is the escape hatch that lets it keep that time when it can still use it.
-    const block = rawArgs.block !== false;
-    const secs = typeof rawArgs.timeout_seconds === "number" ? rawArgs.timeout_seconds : null;
-    const timeoutMs =
-      secs != null && secs > 0 ? Math.min(secs * 1000, JOIN_MAX_TIMEOUT_MS) : JOIN_DEFAULT_TIMEOUT_MS;
-
-    const before = sched.counts();
-    if (block) ctx.status(t("chat.subagentsJoin", { done: before.settled, total: before.total }));
-    let bubble: Extract<DisplayMsg, { kind: "tool" }> = {
-      kind: "tool",
-      name: "join_subagents",
-      args: rawArgs,
-      ok: true,
-      result: t("chat.subagentsJoin", { done: before.settled, total: before.total }),
-    };
-    ctx.push(bubble);
-
-    const r = await sched.join(ids && ids.length > 0 ? ids : null, { mode, timeoutMs, block });
-    const text = formatJoinResult(
-      r.ready.map((x) => ({
-        meta: x.job.meta,
-        id: x.outcome.id,
-        state: x.outcome.state,
-        result: x.outcome.result,
-      })),
-      r.pending,
-      r.unknown,
-      r.timedOut,
-      block,
-    );
-    const next = { ...bubble, result: text };
-    replaceDisplay(bubble, next);
-    bubble = next;
-    return text;
-  };
-
-  /**
-   * Conclusions that landed while the model was doing something else, appended to whatever tool result
-   * comes next.
-   *
-   * The safety net under spawn/join: a delegation the model forgets to collect is work already paid for,
-   * and without this it would be silently discarded when the turn ends. Empty string when there is
-   * nothing to deliver, so the common case adds no bytes to the wire.
-   */
-  // ── Brokered anonymous sub-agents (spawn_sub_agent) ─────────────────────────────────────────────
-  //
-  // The fixed roles above (run_subagent / spawn_subagents) keep their static tool lists and do not touch
-  // any of this. What follows is the other path: the model names the tools a subtask needs, a broker in
-  // src/lib/ai/orchestration decides what it actually gets, and the sub-agent is re-checked before every
-  // single tool call. See capability-broker.ts for why that decision is pure code and never the model's.
-  //
-  // Tool execution routes back through execToolCall rather than calling the toolkit directly, so a brokered
-  // sub-agent's actions land in the same timeline, the same usage log, and the same consent panel as
-  // everything else. Two consent systems for one app would be a way to have neither.
-
-  /** One broker per mounted chat, so grants, concurrency and the audit trail span a session rather than a turn. */
-  const brokerRef = useRef<{ broker: CapabilityBroker; audit: InMemoryAuditLog } | null>(null);
-  const getBroker = () => {
-    if (!brokerRef.current) {
-      const audit = new InMemoryAuditLog();
-      brokerRef.current = {
-        audit,
-        broker: createConfiguredBroker({
-          audit,
-          // High-risk tools are approved per call by the consent panel below, which is a strictly finer
-          // gate than one yes at grant time — so the grant-time path must not ALSO prompt, or the user
-          // answers twice for the same action. Denying here and confirming there would refuse the grant
-          // outright; approving here and confirming there is the behaviour we want.
-          approver: { id: "renderer:per-call-consent", approve: async () => true },
-        }),
-      };
-    }
-    return brokerRef.current;
-  };
-
-  /** Declarations for the brokered path, in the orchestration shape. Read once per turn. */
-  const orchestrationDeclsRef = useRef<Map<string, ToolDeclaration> | null>(null);
-  const getOrchestrationDecls = async () => {
-    if (!orchestrationDeclsRef.current) {
-      const map = new Map<string, ToolDeclaration>();
-      if (toolsReady) {
-        for (const t of (await listTools("raw")) as ToolSchema[]) {
-          // Unclassified names — MCP tools above all — can never be granted, so they are not offered.
-          if (!isKnownTool(t.name)) continue;
-          map.set(t.name, { name: t.name, description: t.description, input_schema: t.parameters as never });
-        }
-      }
-      orchestrationDeclsRef.current = map;
-    }
-    return orchestrationDeclsRef.current;
-  };
-
-  const spawnSubAgent = async (ctx: RunCtx, rawArgs: Record<string, unknown>): Promise<string> => {
-    if (!toolsReady) return "spawn_sub_agent needs local tools, which are unavailable in this environment.";
-    const task = String(rawArgs.task ?? "");
-    const decls = await getOrchestrationDecls();
-    const { broker } = getBroker();
-    const sink = delegationSink(rawArgs, ctx.convId);
-
-    const client: ModelClient = {
-      async send(req) {
-        // Reuses the conversation's own request path — same provider, key, proxy and usage logging as
-        // every other call. Only the message and tool translation is ours.
-        const data = await requestChat(
-          applyReasoningPolicy(
-            toChatMessages(req.system, req.messages) as unknown as ApiMsg[],
-            isLocalModel,
-            sendReasoningContext(),
-          ),
-          req.tools.length ? toChatTools(req.tools) : undefined,
-          ctx.signal,
-        );
-        return toModelTurn(data);
-      },
-    };
-
-    const result = await createSpawnSubAgentHandler({
-      broker,
-      client,
-      requesterId: `conv:${ctx.convId}`,
-      maxTurns: MAX_TURNS_PER_SUBAGENT,
-      tools: {
-        declarationFor: (name) => decls.get(name),
-        execute: async (name, input, context) => {
-          let ok = true;
-          const content = await execToolCall(
-            ctx,
-            name,
-            input,
-            `${context.agentId}→${name}`,
-            `sub:${context.agentId}`,
-            { agentId: context.agentId, task },
-            (v) => {
-              ok = v;
-            },
-          );
-          recordStep(sink, { name, args: input, ok, result: content });
-          return { content, isError: !ok };
-        },
-      },
-    })(rawArgs);
-
-    ctx.push({
-      kind: "tool",
-      name: `spawn_sub_agent → ${result.agentId ?? "(not created)"}`,
-      args: rawArgs,
-      ok: result.status === "completed",
-      result: formatBrokeredSpawn(result),
-    });
-    return formatBrokeredSpawn(result);
-  };
-
-  /**
-   * Background jobs that reported back during this turn, formatted to ride the next tool result.
-   *
-   * The counterpart to drainDelegations below, and it exists for the same reason: work that finishes while the
-   * model is mid-turn has no other way in. Keyed by conversation, so a job belonging to a background
-   * conversation is not handed to whichever turn happens to be running.
-   */
-  const drainJobEvents = (ctx: RunCtx): string => {
-    const held = pendingJobsRef.current.get(ctx.convId);
-    if (!held || held.length === 0) return "";
-    pendingJobsRef.current.delete(ctx.convId);
-    return formatJobDelivery(held);
-  };
-
-  const drainDelegations = (ctx: RunCtx): string => {
-    const held = schedulerRef.current;
-    if (!held || held.turnId !== ctx.turnId) return "";
-    const ready = held.sched.drain();
-    if (ready.length === 0) return "";
-    return formatAutoDelivery(
-      ready.map((x) => ({
-        meta: x.job.meta,
-        id: x.outcome.id,
-        state: x.outcome.state,
-        result: x.outcome.result,
-      })),
-    );
   };
 
   // Runtime skills = the installed skills the user enabled + conditionally-equipped built-in skills: when commands actually run in the sandbox,
@@ -2595,227 +1990,74 @@ function ChatAgent() {
     };
   }, []);
 
-  // load_skill: return the full instructions of an enabled skill (progressive disclosure), fed back to the model; also show a bubble.
-  const loadSkill = (ctx: RunCtx, rawArgs: Record<string, unknown>): string => {
-    const id = String(rawArgs.id ?? "");
-    const enabled = runtimeSkills();
-    // The built-in toolbox is advertised in messages[0] unconditionally — it has to be, or the prompt prefix would differ per
-    // install — so the model can legitimately ask for it. But its whole toolchain (imagemagick, ffmpeg, pandoc, OCR) lives in the
-    // sandbox image, so handing over the instructions while running natively would send it off to call tools that do not exist.
-    // Only resolve it while the sandbox is actually up.
-    const sandboxUp = isSandboxEngine(sandboxStatusRef.current?.active);
-    const text =
-      id === SANDBOX_TOOLBOX_SKILL.id && !sandboxUp
-        ? `Skill not enabled: ${id} requires the Linux sandbox, which is not running right now (commands are executing directly on the host). ` +
-          "Its tools are not installed on this machine — do not try to run them. Tell the user that media / document processing needs the sandbox, " +
-          "and that it can be restarted from the sandbox status indicator."
-        : getSkillInstructions(sandboxUp ? [...enabled, SANDBOX_TOOLBOX_SKILL] : enabled, id);
-    const ok = !text.startsWith("Skill not enabled");
-    ctx.status(ok ? t("chat.loadingSkill", { id }) : t("chat.skillDisabled"));
-    ctx.push({ kind: "tool", name: `load_skill → ${id}`, args: { id }, ok, result: text });
-    return text;
+  /**
+   * Ask the user a question and wait — the host half of the §13 boundary's `askUser` (M2b).
+   *
+   * This is where the loop used to reach into component state and park a promise in a ref. It still parks a
+   * promise in a ref; what changed is WHO does it. The tool now calls a function it was handed, so the tool
+   * itself no longer needs to be inside a React component — which is the property M5 depends on.
+   *
+   * Resolves with the text to feed back to the model, already formatted by `submitChoice`: how an answer
+   * reads depends on whether it was multi-select or flagged for discussion, and that is the host's knowledge.
+   */
+  /**
+   * Push the set of conversations with an unanswered question into the store, so the sidebar can badge them.
+   *
+   * The counterpart to the consent queue's own badge sync, and it exists for the same reason: a question
+   * asked by a conversation the user is not looking at has to be discoverable from outside it. Called
+   * wherever the pending set changes — asked, answered, dropped.
+   */
+  const syncQuestionBadges = () => {
+    const ids = new Set<string>();
+    for (const e of choiceResolversRef.current.values()) if (e.convId) ids.add(e.convId);
+    useAgentChatStore.getState().setPendingQuestionIds(ids);
   };
 
-  // openBrowser: open the built-in browser panel on the right and (optionally) navigate; show a bubble and return the text fed back to the model.
-  const openBrowserAction = (ctx: RunCtx, rawArgs: Record<string, unknown>): string => {
-    const url = String(rawArgs.url ?? "").trim();
-    if (url) detectServices(url); // A local address opened by the AI is also registered with the running indicator
-    requestOpenBrowser(url);
-    const result = url ? `Opened the built-in browser and navigated to ${url}` : "Opened the built-in browser";
-    ctx.push({ kind: "tool", name: "openBrowser", args: { url }, ok: true, result });
-    return `${result}.`;
+  const hostAskUser = (convId: string, questions: ChoiceQuestion[]): Promise<string> => {
+    const id = ++choiceIdRef.current;
+    // Trigger condition 4: question notification — the AI needs user input to continue (only pops when the
+    // app is unfocused). This is also what makes a question asked by a BACKGROUND conversation discoverable,
+    // now that its card no longer appears in whichever conversation happens to be on screen.
+    notifyQuestion(convId, questions[0].question);
+    // Keyed by card id, so concurrent questions do not overwrite each other and are answered independently.
+    // Registered before the card is shown, so a submit can never arrive ahead of its resolver.
+    return new Promise<string>((resolve) => {
+      choiceResolversRef.current.set(id, { convId, questions, resolve });
+      // Shown only in the conversation that asked.
+      //
+      // This used to be pushed unconditionally, with the reasoning that an interactive prompt must stay
+      // answerable or a background conversation would wait forever. The cost was worse than the problem: a
+      // question from conversation B appeared inside conversation A, where it reads as part of A's
+      // transcript and answers a question the user cannot see the context for. The waiting case is solved
+      // properly instead — `restorePendingChoices` re-shows the card when the user opens B, because a choice
+      // card is display-only and would otherwise be lost the moment the display is rebuilt.
+      if (convId === convIdRef.current) {
+        pushDisplay({ kind: "choice", id, questions, answers: questions.map(() => null), submitted: false });
+      }
+      syncQuestionBadges();
+    });
   };
 
   /**
-   * Write a generated artifact into the working directory and return its absolute path (null when
-   * tools are unavailable or the write fails — the caller treats the path as a bonus, never a
-   * precondition). Handles both artifact shapes: a data: URL decodes inline, a vendor URL downloads
-   * once, which also rescues the pixels before the vendor link expires.
+   * Re-show the unanswered questions of the conversation being opened.
    *
-   * The download happens in the MAIN process, via saveAttachment's `url` source. It used to `fetch()`
-   * here and hand over the bytes, which worked only for the base64 dialect: an adapter that returns a
-   * hosted link instead (OpenAI's `data[0].url`, and wan-image always — see firstArtifact in
-   * generation/adapters.ts) produces a cross-origin URL, and the renderer has webSecurity on, so the
-   * fetch failed CORS and the catch below swallowed it. The image still appeared on screen, because an
-   * <img> tag is not CORS-bound, while nothing ever reached disk and the model got no path. Main has no
-   * such limit, and this also keeps a multi-MB base64 from crossing IPC.
+   * Choice cards live only in the display, which a conversation switch rebuilds from the store — so without
+   * this a card asked while the user was elsewhere would vanish, and the tool call parked on its promise
+   * would never be answerable. Ordered by card id, which is the order they were asked in.
    */
-  const saveGeneratedArtifact = async (src: string, mime: string, prompt: string): Promise<string | null> => {
-    if (!toolsReady) return null;
-    try {
-      // Name from the prompt so a directory of generated images stays readable; saveAttachment
-      // sanitizes the name and de-duplicates collisions (-1/-2…), so no timestamp is needed.
-      const slug =
-        prompt
-          .toLowerCase()
-          .replace(/[^a-z0-9]+/g, "-")
-          .replace(/^-+|-+$/g, "")
-          .split("-")
-          .slice(0, 6)
-          .join("-") || "image";
-      const ext = /png|jpeg|jpg|webp|gif/.exec(mime)?.[0].replace("jpeg", "jpg") ?? "png";
-      return await saveAttachment({ name: `generated-${slug}.${ext}`, url: src });
-    } catch (e) {
-      // The user already has the image on screen; a missing file is a degraded path, not a failure. Still
-      // logged rather than dropped: this returning null silently is what hid the CORS bug above, and the
-      // only other symptom is a path the model never mentions.
-      console.warn("[image_generation] could not save the artifact into the working directory:", e);
-      return null;
+  const restorePendingChoices = (convId: string) => {
+    const pending = [...choiceResolversRef.current.entries()]
+      .filter(([, e]) => e.convId === convId)
+      .sort(([a], [b]) => a - b);
+    for (const [id, entry] of pending) {
+      pushDisplay({
+        kind: "choice",
+        id,
+        questions: entry.questions,
+        answers: entry.questions.map(() => null),
+        submitted: false,
+      });
     }
-  };
-
-  // image_generation: text-to-image through the user's own provider key. The engine is derived from
-  // the configured keys (their chat vendor first, then any keyed vendor) — never picked by the model
-  // and never shown in the model picker. See docs/generation-capabilities-design.md.
-  const generateImageAction = async (ctx: RunCtx, rawArgs: Record<string, unknown>): Promise<string> => {
-    const prompt = String(rawArgs.prompt ?? "").trim();
-    if (!prompt) return "(image_generation is missing prompt)";
-
-    ctx.status?.(t("image.generating"));
-    const res = await generate({ capability: "image_generation", prompt, chatProviderId: activeModel?.providerId });
-
-    if (!res.ok) {
-      ctx.push({ kind: "tool", name: "image_generation", args: { prompt }, ok: false, result: t(imageErrorKey(res.error.kind)) });
-      // The model relays this to the user in its own words, so it must be plain and actionable.
-      return `Image generation failed (${res.error.kind}): ${res.error.message}`;
-    }
-
-    // The artifact must NOT be fed back to the model: a base64 payload is 1-3 MB and would be
-    // re-sent on every subsequent turn, wrecking the context window and the prompt cache.
-    // The bubble carries the pixels; the model gets metadata only.
-    ctx.push({
-      kind: "tool",
-      name: "image_generation",
-      args: { prompt },
-      ok: true,
-      result: res.artifact.src,
-      image: res.artifact.src,
-      servedBy: res.artifact.servedBy,
-    });
-    // Stash the artifact so the persist step can store it (display-only) and the image survives a conversation switch.
-    lastImageArtifactRef.current = { image: res.artifact.src, servedBy: res.artifact.servedBy };
-
-    // Also drop the pixels into the working directory. The artifact reaches the renderer as a data: or
-    // vendor URL, neither of which exists for the sandbox — so a model asked to "generate frames, then
-    // stitch them with ffmpeg" would find nothing on disk and fall back to drawing the frames in code.
-    // A real path is what makes a generated image composable with every other tool. Best-effort: the
-    // image is already shown to the user, so a failed write must not turn into a failed generation.
-    const savedPath = await saveGeneratedArtifact(res.artifact.src, res.artifact.mime, prompt);
-
-    return (
-      `Generated the image with ${res.artifact.servedBy}. It is already displayed to the user — do not repeat the URL or embed it in markdown.` +
-      (savedPath
-        ? ` The file is saved in the working directory at ${savedPath} — use that path if you need to process it further (edit, convert, compose into a video); do not redraw it in code.`
-        : // Said outright rather than left to silence. The model otherwise assumes the usual path exists and
-          // goes looking for a file that was never written, or invents a plausible-looking one.
-          " It could NOT be written to the working directory, so there is no file to process — do not guess a path for it. If the user needs it on disk, say the save failed.")
-    );
-  };
-
-  // save_memory: write a memory as a standalone Markdown file (retained across conversations), show a bubble, and feed the result back to the model.
-  const saveMemory = async (ctx: RunCtx, rawArgs: Record<string, unknown>): Promise<string> => {
-    const title = String(rawArgs.title ?? "").trim();
-    const content = String(rawArgs.content ?? "").trim();
-    const id = typeof rawArgs.id === "string" && rawArgs.id.trim() ? rawArgs.id.trim() : undefined;
-    if (!title && !content) return "(save_memory is missing title / content)";
-    const saved = await saveMemoryFile({ title, content, id });
-    if (!saved) {
-      ctx.push({ kind: "tool", name: "save_memory", args: { title }, ok: false, result: "Failed to save memory" });
-      return "Failed to save memory (the current environment does not support it, or a write error occurred).";
-    }
-    ctx.push({ kind: "tool", name: "save_memory", args: { title: saved.title }, ok: true, result: `Remembered: ${saved.title}` });
-    return `Saved the memory "${saved.title}" (id: ${saved.id}).`;
-  };
-
-  // delete_memory: permanently delete a memory by id (deleting its Markdown file), show a bubble, and feed it back to the model.
-  const deleteMemory = async (ctx: RunCtx, rawArgs: Record<string, unknown>): Promise<string> => {
-    const id = String(rawArgs.id ?? "").trim();
-    if (!id) return "(delete_memory is missing id)";
-    const ok = await deleteMemoryFile(id);
-    ctx.push({
-      kind: "tool",
-      name: "delete_memory",
-      args: { id },
-      ok,
-      result: ok ? `Deleted memory ${id}` : `Memory ${id} not found`,
-    });
-    return ok ? `Permanently deleted the memory (id: ${id}).` : `No memory found with id ${id} (it may already be deleted).`;
-  };
-
-  // search_memory: retrieve relevant memories from the memory store by query (reads the current file each time → memories added / modified in this conversation are immediately visible),
-  // formatted and fed back to the model as the tool result. This is the retrieval side of "RAG": results land at the end of the wire, do not enter the frozen prefix, and do not disturb the prefix cache.
-  const searchMemory = async (ctx: RunCtx, rawArgs: Record<string, unknown>): Promise<string> => {
-    const query = String(rawArgs.query ?? "").trim();
-    const limit = Math.max(1, Math.min(50, Number(rawArgs.limit) || 20));
-    const all = await listMemoryFiles(); // Reads the current file each time: additions / modifications are immediately visible
-    const hits = searchMemories(all, query, limit);
-    ctx.push({
-      kind: "tool",
-      name: "search_memory",
-      args: query ? { query } : {},
-      ok: true,
-      result: `Retrieved ${hits.length}/${all.length} memories`,
-    });
-    if (all.length === 0) return "The memory store is empty: no long-term memories about the user have been saved yet.";
-    if (hits.length === 0) return `No memories related to "${query}" (${all.length} saved in total).`;
-    const body = hits
-      .map((m) => `- [${m.id}] ${m.title}: ${m.content.replace(/\s+/g, " ").trim().slice(0, 800)}`)
-      .join("\n");
-    const scope = query ? `Memories related to "${query}"` : "All saved memories";
-    return `${scope} (${hits.length}/${all.length}, earlier means more relevant / more recent):\n${body}`;
-  };
-
-  // browser: operate the built-in browser via CDP (read / list links / click / type / navigate), with the result fed back to the model.
-  const browserControl = async (ctx: RunCtx, rawArgs: Record<string, unknown>): Promise<string> => {
-    const action = String(rawArgs.action ?? "") as BrowserAction;
-    ctx.status(t("chat.browserAction", { action }));
-    // When the AI operates the browser, ensure the panel is visible (the user may have manually closed it); no url, just expand without re-navigating.
-    // Only the active conversation drives the browser panel / halo; a background conversation operates silently.
-    if (ctx.convId === convIdRef.current) {
-      requestOpenBrowser();
-      // Mark "the AI is operating the browser": turn on the glowing halo, lasting until the end of this round (closed in send's finally),
-      // so the halo spins continuously during multi-step browser operations, rather than flickering on each call.
-      setBrowserBusy(true);
-    }
-    const res = await browserAction(action, rawArgs);
-    const text = res.ok
-      ? typeof res.result === "string"
-        ? res.result
-        : JSON.stringify(res.result)
-      : `Operation failed: ${res.error ?? "unknown error"}`;
-    ctx.push({ kind: "tool", name: `browser → ${action}`, args: rawArgs, ok: res.ok, result: text });
-    return text;
-  };
-
-  // ask_user: render a choice card and wait for the user to click; return the text fed back to the model.
-  const askUserChoice = async (ctx: RunCtx, rawArgs: Record<string, unknown>): Promise<string> => {
-    // Accepts both shapes. `questions` is what the tool now declares; the flat `question` + `options` pair
-    // is the older one, still honoured because a model mid-conversation may have the previous declaration
-    // in its cached prefix and would otherwise get an unusable error for a well-formed call.
-    const asQuestion = (v: unknown): ChoiceQuestion | null => {
-      if (!v || typeof v !== "object") return null;
-      const o = v as Record<string, unknown>;
-      const question = String(o.question ?? "").trim();
-      const options = Array.isArray(o.options) ? o.options.map((x) => String(x)).filter(Boolean) : [];
-      // snake_case accepted alongside the declared camelCase: models mix the two conventions freely, and a
-      // multi-select question silently rendered as single-select is a wrong answer, not a cosmetic slip.
-      const multiSelect = o.multiSelect === true || o.multi_select === true;
-      return question || options.length ? { question, options, multiSelect } : null;
-    };
-    const questions = Array.isArray(rawArgs.questions)
-      ? (rawArgs.questions.map(asQuestion).filter(Boolean) as ChoiceQuestion[])
-      : ([asQuestion(rawArgs)].filter(Boolean) as ChoiceQuestion[]);
-    if (questions.length === 0) return "(ask_user is missing question / options)";
-
-    const id = ++choiceIdRef.current;
-    // The choice card stays globally displayed (interactive prompts must be answerable, otherwise a background conversation would be stuck forever).
-    pushDisplay({ kind: "choice", id, questions, answers: questions.map(() => null), submitted: false });
-    // Trigger condition 4: question notification — the AI needs user input to continue (only pops when the app is unfocused).
-    notifyQuestion(ctx.convId, questions[0].question);
-    // Store the resolver keyed by card id (concurrent questions do not overwrite each other and are answered independently).
-    return new Promise<string>((resolve) => {
-      choiceResolversRef.current.set(id, { convId: ctx.convId, resolve });
-    });
   };
 
   /**
@@ -2827,6 +2069,12 @@ function ChatAgent() {
     const entry = choiceResolversRef.current.get(id);
     if (!entry) return; // Already handled / no such card, ignore
     choiceResolversRef.current.delete(id);
+    // Inlined rather than calling syncQuestionBadges: this callback has an empty dependency list, so it
+    // would capture the first render's copy. The two statements below read only a ref and the store, so
+    // there is nothing render-scoped to go stale.
+    useAgentChatStore.getState().setPendingQuestionIds(
+      new Set([...choiceResolversRef.current.values()].flatMap((e) => (e.convId ? [e.convId] : []))),
+    );
     let questions: ChoiceQuestion[] = [];
     setDisplay((d) =>
       d.map((m) => {
@@ -2979,32 +2227,6 @@ function ChatAgent() {
     if (next) void send({ text: next.text, attachments: next.attachments, _fromQueue: true });
   };
 
-  /**
-   * The renderer's own tools: dispatched by name to a handler that closes over component state, instead of
-   * going through execToolCall (the unified sandbox/consent path). A table rather than a ternary chain so
-   * adding a tool is one line and the control flow in the loop stays flat.
-   */
-  const rendererTools: Record<
-    string,
-    (ctx: RunCtx, a: Record<string, unknown>) => string | Promise<string>
-  > = {
-    ask_user: askUserChoice,
-    update_todos: updateTodos,
-    set_task_state: setTaskState,
-    set_goal: setGoal,
-    update_plan: updatePlan,
-    openBrowser: openBrowserAction,
-    browser: browserControl,
-    image_generation: generateImageAction,
-    load_skill: loadSkill,
-    save_memory: saveMemory,
-    delete_memory: deleteMemory,
-    search_memory: searchMemory,
-    run_subagent: runSubAgent,
-    spawn_subagents: spawnSubagents,
-    join_subagents: joinSubagents,
-    spawn_sub_agent: spawnSubAgent,
-  };
 
   /**
    * Working-directory policy, applied on every send (only when Electron tools are available). Choosing a folder is
@@ -3363,12 +2585,69 @@ function ChatAgent() {
     // One id per generation, shared by everything this turn spends (see RunCtx.turnId).
     // eslint-disable-next-line react-hooks/purity -- see the note on the first Date.now() in send()
     const turnId = `${genConvId}-${Date.now().toString(36)}`;
+    /**
+     * The Runtime/UI boundary for this turn (docs/agent-runtime-loop.md §13, milestone M2).
+     *
+     * Built here, from the refs and state this component already owns, and handed to whatever needs it —
+     * which today is still the loop below, in this same file. That is what M2 is for: the contract exists and
+     * the call sites go through it, while the loop itself stays put until M5 can move it onto already-proven
+     * primitives.
+     *
+     * `signal` is passed, never created: §13 is explicit that page.tsx keeps owning the per-conversation
+     * AbortController map and the Runtime only accepts a signal. Every `active()` guard stays on this side of
+     * the boundary too — a background conversation must still persist and still run, it just must not write
+     * the view of whatever conversation the user is actually looking at.
+     */
+    /**
+     * Where a streaming delta goes.
+     *
+     * Rebound at the top of every round, because the renderer for a round closes over that round's display
+     * baseline — the boundary is built once, before the loop, and cannot capture a closure that does not
+     * exist yet. A no-op until the first round assigns it, so a delta arriving out of band is dropped rather
+     * than throwing.
+     */
+    let renderDelta: (content: string, reasoning: string) => void = () => {};
+
+    const boundary: RuntimeBoundary = {
+      signal: ctrl.signal,
+      onEvent: (event) => {
+        switch (event.type) {
+          case "status":
+            if (active()) setStatus(event.text);
+            break;
+          case "delta":
+            if (active()) renderDelta(event.content, event.reasoning);
+            break;
+          // turn-start / turn-end / tool-start / tool-end / stopped are emitted from M3 onward, once there is
+          // an Execution State and a Stop Policy to emit them. Ignored rather than unhandled: an event the
+          // host does not care about must never be a crash, since the Runtime does not know who is listening.
+          default:
+            break;
+        }
+      },
+      requestConsent: (req) => hostConsent(genConvId, req),
+      // Routed at M2b: the same host function `chatTools` now calls, so there is one implementation of
+      // "ask and wait" rather than one per caller.
+      askUser: (questions) => hostAskUser(genConvId, questions),
+      storage: {
+        appendMessage: (sessionId, msg) => {
+          store.appendMessage(sessionId, msg as Parameters<typeof store.appendMessage>[1]);
+          return (store.getConversation(sessionId)?.messages.length ?? 0) - 1;
+        },
+        setMessageReminder: (sessionId, index, reminderText) =>
+          useAgentChatStore.getState().setMessageReminder(sessionId, index, reminderText),
+        setGenerating: (sessionId, generating) => store.setConversationGenerating(sessionId, generating),
+      },
+    };
+
     const ctx: RunCtx = {
       convId: genConvId,
       turnId,
       signal: ctrl.signal,
       push: (m) => { if (active()) pushDisplay(m); },
-      status: (s) => { if (active()) setStatus(s); },
+      // Routed through the boundary rather than calling setStatus directly: this is the §13 contract in use,
+      // and it is what lets the same handlers run under a test boundary in M5.
+      status: (s) => boundary.onEvent({ type: "status", text: s }),
     };
 
     /**
@@ -3380,6 +2659,57 @@ function ChatAgent() {
      */
     let goalContinuation: string | null = null;
 
+    /**
+     * The sub-agent tools for this turn (see chatDelegation.ts).
+     *
+     * Built here rather than at component scope for the same reason as the renderer table below: the factory
+     * is handed refs, and a turn is an event. Built OUTSIDE the try, unlike that table, because `finally`
+     * calls shutdownScheduler and cannot see a const declared inside the block it is unwinding.
+     */
+    /**
+     * What this model can actually do (docs/agent-runtime-loop.md §5).
+     *
+     * Derived once per turn, before anything that needs it: the reasoning policy below and the sub-agent
+     * loops both gate on it. Seeded with the live rejection set, so a model that has already refused the
+     * thinking parameter is reported as unable to reason and nothing keeps trying to vary it.
+     */
+    const modelCaps = describeCapabilities({
+      model: modelName,
+      local: isLocalModel,
+      multimodal: !!activeModel?.multimodal,
+      contextWindow: activeModel?.contextWindow,
+      thinkingRejected: thinkingUnsupportedRef.current.has(modelName),
+    });
+
+    const {
+      runSubAgent,
+      spawnSubagents,
+      joinSubagents,
+      spawnSubAgent,
+      drainDelegations,
+      drainJobEvents,
+      shutdownScheduler,
+    } = createDelegationTools({
+      t,
+      toolsReady,
+      workdir,
+      endpoint,
+      isLocalModel,
+      sendReasoningContext,
+      sandboxStatusRef,
+      requestChat,
+      execToolCall,
+      replaceDisplay,
+      thinking,
+      capabilities: modelCaps,
+      subagentSinksRef,
+      schedulerRef,
+      delegationsRef,
+      brokerRef,
+      orchestrationDeclsRef,
+      pendingJobsRef,
+    });
+
     try {
       // Tool set = ask_user + update_todos + load_skill + (local tools + run_subagent, Electron only).
       //
@@ -3389,14 +2719,47 @@ function ChatAgent() {
       // unavailability is announced as a change event. Only `mode` is allowed to vary it, because messages[0] is mode-determined
       // anyway. See docs/cache-stable-prompt-context.md.
       const tools = await buildToolSet();
-      // Critical-change review guard (dev mode only): when a risky path (auth / data / security …) has been changed but no reviewer was run before wrapping up,
-      // inject one forced reminder and continue the loop, nudging the model to delegate a reviewer first. Cleared after a reviewer is delegated; forced at most once per round, to avoid a deadlock.
-      let riskyChangePending = false;
-      // Project-memory guard state: set when this turn modifies source files, cleared the moment it records
-      // something. If it is still set when the turn tries to wrap up, the model gets one reminder (memoryNudged).
-      let learnedWithoutRecording = false;
-      let memoryNudged = false;
-      let reviewForced = false;
+      /**
+       * The renderer's own tools: dispatched by name to a handler that closes over component state, instead of
+       * going through execToolCall (the unified sandbox/consent path). A table rather than a ternary chain so
+       * adding a tool is one line and the control flow in the loop stays flat.
+       *
+       * Built per turn rather than at component scope. The table closes over refs, and constructing it
+       * during render means handing those refs to a function at a point React does not guarantee is safe
+       * to read them (react-hooks/refs says exactly that). A turn is an event, which is when a ref may be
+       * read — and the table has never been needed anywhere but inside the loop below.
+       */
+      const rendererTools: Record<string, RendererTool> = {
+        // The self-contained half (choice cards, todos, skills, memory, browser, image generation) is built by
+        // createRendererTools from the slice of state listed in RendererToolDeps. `set_goal` / `update_plan` are
+        // absent from it on purpose — see that factory's doc for why absence here, and not merely undeclaring
+        // them, is what makes the goal untouchable by the model.
+        ...createRendererTools({
+          t,
+          convIdRef,
+          runtimeSkills,
+          sandboxStatusRef,
+          toolsReady,
+          activeModel,
+          lastImageArtifactRef,
+          askUser: hostAskUser,
+          setTodosFor,
+          taskMemoryFor,
+          setTaskMemoryFor,
+          goalFor,
+          setGoalFor,
+        }),
+        // The delegation family stays in the component: these own the per-turn sub-agent scheduler, so their
+        // lifetime is the turn's, not this render's.
+        run_subagent: runSubAgent,
+        spawn_subagents: spawnSubagents,
+        join_subagents: joinSubagents,
+        spawn_sub_agent: spawnSubAgent,
+      };
+      // What this turn owes: a review for a risky change, a note to project memory for a source edit. Both
+      // fire at most once per turn — a reminder the model reads and declines must not be re-injected, or the
+      // turn cannot end. See toolRuntime.ts, which is where the rules and the latches now live (M5b).
+      let obligations = noObligations();
       // Wrap-up guard: whether a tool was executed this round (including subagents). If a tool was executed yet the model ends with empty content (no user-facing
       // final answer, common when the main model "assumes it's done" and stays silent after a subagent returns a result, or writes the conclusion into reasoning),
       // inject one FINALIZE_NUDGE to nudge it to answer formally. finalizeNudged ensures at most once per round, to avoid an infinite loop.
@@ -3405,6 +2768,27 @@ function ChatAgent() {
       // Wrap-up guard: whether the model has already been told once that it is ending the turn with
       // delegations still running. See PENDING_DELEGATION_NUDGE.
       let delegationNudged = false;
+      // Progress guard: the tool loop below is unbounded on purpose, so a turn that has stopped learning
+      // anything would otherwise run until the user notices and presses stop. The guard watches for the
+      // absence of new information rather than for round count (see loopGuard.ts), warns the model twice,
+      // and then withdraws tool access — which is what `toolsWithdrawn` does: from that point every request
+      // goes out with no tools declared, so the model can only answer in text and the loop exits.
+      //
+      // Withdrawn for the REST of the turn rather than for one round. In the ordinary case the difference is
+      // invisible: the forced round produces a reply with no tool calls and the turn is over anyway. It
+      // matters for the case this whole mechanism exists for — a model that has stopped responding to what it
+      // is told. Restoring the tools after one round would hand a still-looping turn its tools back, and the
+      // guard has already latched, so there would be nothing left to stop it the second time.
+      /**
+       * Execution State for this turn (docs/agent-runtime-loop.md §4.2), and the capabilities the reasoning
+       * policy is gated on (§5). Live from M5d.
+       *
+       * This is what makes §6 real rather than advisory: until now every request in a turn carried the same
+       * reasoning configuration, so a routine "read the next file" round cost exactly what a recovery round
+       * did. The phase is derived from recorded facts — did the last tool fail, was context just compacted —
+       * and the policy turns it into an effort that only ever goes DOWN from the user's setting.
+       */
+
       // Carrier for the mid-loop nudges: the last tool result, in the buffer and on disk. Those nudges fire AFTER the assistant
       // turn has been appended and persisted, so there is no new turn to ride and no reliable way to find the carrier by scanning
       // (the compaction plan may already have rewritten the wire view). Tracked at each append instead. See reminders.ts.
@@ -3507,393 +2891,505 @@ function ChatAgent() {
         return true;
       };
       // No upper limit on tool-call rounds: loop until the model gives a final reply with no tool calls, or the user interrupts.
-      while (true) {
-        if (ctrl.signal.aborted) return;
-        ctx.status(t("chat.thinking"));
-        // Wire view: the "sent to the model" version of this round's local buffer derived through the compaction plan (a background conversation does not depend on the active view).
-        // Also backfill tool-call pairing as a fallback: prevents assistant.tool_calls with missing results from getting a 400 from the provider when "reopening an interrupted / backend-crashed conversation".
-        let wire = sanitizeToolCallPairs(buildWireContext(convo, compaction));
-        // Fold each turn's <system-reminder> block into its content — on this outgoing copy only, never on the buffer or on disk.
-        // Done after compaction so a stubbed tool result keeps the event that rode it, and after the summary fold so the banner
-        // stays adjacent to the text it summarises.
-        wire = materializeReminders(wire);
-        // Remove the app's own bookkeeping keys (rating, reminder) — this is the only place either is stripped before the body is built.
-        wire = stripWireMetadata(wire);
-        // Replay thinking text: every turn to every model when the user turned "send thinking as context" on, otherwise only
-        // to local models and only on the turns their chat template renders it back on.
-        wire = applyReasoningPolicy(wire, isLocalModel, sendReasoningContext());
-        // The runtime context (time zone, date, current model) used to be concatenated into messages[0] here on every request,
-        // which re-prefilled the entire conversation from token 0 at every midnight and every model switch — on cloud models too,
-        // since this path was never gated on isLocalModel. It is now announced once, when it changes, as a change event above.
-        // Image handling, applied to the wire only (never the persisted buffer). `multimodal` here resolves
-        // through modelAcceptsImages, which now answers "yes" unless the model is a local build with no
-        // mmproj, or a provider actually rejected images for it before — so this strips only when we KNOW
-        // it is needed, instead of guessing and silently dropping the user's picture. If the guess is
-        // still wrong in the permissive direction, requestChat retries without images and records it.
-        //  - Known text-only: strip EVERY image_url part (such a provider 400s on any image anywhere in
-        //    history, even one sent turns ago to a different model).
-        //  - Multimodal local model: keep inline base64 images, but downgrade remote http images (llama can't fetch them).
-        //  - Multimodal cloud model: leave images as-is.
-        if (!activeModel?.multimodal) {
-          // Logged because this is otherwise invisible: the request goes out with the pictures replaced by
-          // "N image(s) omitted", the model answers that it cannot see images, and nothing on screen says the
-          // app removed them. If this fires for a model that DOES support vision, the verdict behind it is in
-          // the model list (visionUnsupported) and settings offers a reset.
-          if (wire.some((m) => Array.isArray(m.content) && m.content.some((p) => p.type === "image_url"))) {
-            console.warn(
-              `[vision] stripping images for ${activeModel?.model ?? "(no model)"} — it is a local build without ` +
-                "an mmproj projector, or a provider rejected image input for it within the last day",
-            );
+      // The one thing that can end it otherwise is the progress guard (loopGuard.ts) — and it ends it through the same door, by
+      // withdrawing the tools so the only reply available is a final one. There is still no round cap.
+      /**
+       * The turn's last round, kept for the post-loop work.
+       *
+       * The goal evaluator judges the transcript that was actually sent plus the answer it produced, and the
+       * reply notification quotes that answer — both run after the loop, so the round that produced them has
+       * to leave them behind.
+       */
+      let lastWire: ApiMsg[] = [];
+      let lastContent = "";
+
+      const loopOutcome = await runAgentLoop({
+        boundary,
+        sessionId: genConvId,
+        turnId,
+        modelId: modelName,
+        thinking,
+        capabilities: modelCaps,
+        // The goal is NOT wired in here on purpose. `evaluateGoal` would make an unmet goal run another round
+        // inside this turn; today an unmet goal ends the turn and queues a fresh one carrying the evaluator's
+        // reason, which re-runs compaction and rebuilds the wire. Those are materially different, and the
+        // second is the behaviour this app has. The check therefore stays below, after the loop.
+        evaluateGoal: undefined,
+        // The proportional half of §12: name the specific signal, because a model told the vaguer thing
+        // ("you are looping") varies its arguments rather than changing course.
+        onDoomSignal: (signal, result, verdict) => {
+          if (signal === "identical") nudgeIntoLastTool(repeatedCallNudge(result.name, verdict.repeat));
+          else if (signal === "equivalent") nudgeIntoLastTool(equivalentCallNudge(result.name, verdict.repeat));
+          else if (signal === "failing") nudgeIntoLastTool(repeatedFailureNudge(result.name, verdict.failStreak));
+          else if (signal === "resource") nudgeIntoLastTool(repeatedResourceNudge(result.name, verdict.resourceHits));
+        },
+        now: () => Date.now(),
+        runRound: async ({ reasoning: roundReasoning }) => {
+          ctx.status(t("chat.thinking"));
+          // Wire view: the "sent to the model" version of this round's local buffer derived through the compaction plan (a background conversation does not depend on the active view).
+          // Also backfill tool-call pairing as a fallback: prevents assistant.tool_calls with missing results from getting a 400 from the provider when "reopening an interrupted / backend-crashed conversation".
+          // The buffer → wire transformation (docs/agent-runtime-loop.md §10, M5a). Six steps that used to sit
+          // inline here; their ORDER is the specification and is documented in contextManager.ts. The steps
+          // themselves are unchanged and are passed in, so the mature modules that implement them
+          // (contextCompress / reminders / wireHelpers) stay the single implementation.
+          //
+          // The runtime context (time zone, date, current model) used to be concatenated into messages[0] on
+          // every request, which re-prefilled the whole conversation at every midnight and every model switch.
+          // It is announced once, when it changes, as a change event above. Likewise the interrupt-resume and
+          // rating hints, and Task Memory — all written into the turn itself before the loop starts, so they
+          // persist and the turn renders identically on every later request.
+          const wire = prepareWire(convo, compaction, {
+            model: {
+              isLocal: isLocalModel,
+              acceptsImages: !!activeModel?.multimodal,
+              sendReasoningContext: sendReasoningContext(),
+              modelId: activeModel?.model,
+            },
+            steps: WIRE_STEPS,
+            onImagesStripped: (modelId) =>
+              // Otherwise invisible: the request goes out with the pictures replaced by "N image(s) omitted",
+              // the model answers that it cannot see images, and nothing on screen says the app removed them.
+              // If this fires for a model that DOES support vision, the verdict behind it is in the model list
+              // (visionUnsupported) and settings offers a reset.
+              console.warn(
+                `[vision] stripping images for ${modelId} — it is a local build without ` +
+                  "an mmproj projector, or a provider rejected image input for it within the last day",
+              ),
+          });
+          // Context diagnostics (Phase 1, measurement only): snapshot exactly what is about to be sent —
+          // buckets + the tool-schema tax the app's own estimate never counts + the redundant-re-read proxy.
+          // Also stash the wire/tools/window so the offline replay harness can simulate budgets on this task.
+          {
+            const cw = activeModel?.contextWindow ?? resolveContextWindow(activeModel?.model ?? "");
+            diagRef.current = { messages: wire, tools, contextWindow: cw };
+            if (isUsageLogEnabledSync()) {
+              const b = describeContext(wire, tools);
+              logContextDiag({
+                actor: "main",
+                convId: genConvId,
+                turnId,
+                model: modelName,
+                ctxWindow: cw,
+                ctxSystem: b.system,
+                ctxToolSchemas: b.toolSchemas,
+                ctxHistory: b.history,
+                ctxToolOutputs: b.toolOutputs,
+                ctxSubagent: b.subagentOutputs,
+                ctxTotal: b.total,
+                ctxWire: b.wireTotal,
+                rereads: b.rereads,
+                msgCount: b.msgCount,
+              });
+            }
           }
-          wire = stripAllImagesForText(wire);
-        }
-        else if (isLocalModel) wire = stripRemoteImagesForLocal(wire);
-        // The interrupt-resume hint and the rating-feedback hint used to be appended here, wire-only, on the first request of the
-        // round. Both are now written into the user turn itself before the loop starts (see the change-events block above), so
-        // they persist and the turn renders identically on every later request.
-        // Task Memory (CRITICAL tier) is no longer re-injected here on every request. Re-sending it each round kept the block
-        // current but cost a full re-prefill on local models, where the hoist below drags any system message to messages[0]. The
-        // brief is announced as a change event when it changes — including when the summariser extracts one during compaction,
-        // which is why change events are emitted after maybeCompact rather than at the persist site.
-        // Local models: strict llama.cpp chat templates reject any system message that is not at the very front. Nothing appends
-        // trailing system messages any more, so this is a never-firing guard (see hoistSystemToFront) kept against future callers.
-        if (isLocalModel) wire = hoistSystemToFront(wire);
-        // Context diagnostics (Phase 1, measurement only): snapshot exactly what is about to be sent —
-        // buckets + the tool-schema tax the app's own estimate never counts + the redundant-re-read proxy.
-        // Also stash the wire/tools/window so the offline replay harness can simulate budgets on this task.
-        {
-          const cw = activeModel?.contextWindow ?? resolveContextWindow(activeModel?.model ?? "");
-          diagRef.current = { messages: wire, tools, contextWindow: cw };
-          if (isUsageLogEnabledSync()) {
-            const b = describeContext(wire, tools);
-            logContextDiag({
-              actor: "main",
-              convId: genConvId,
-              turnId,
-              model: modelName,
-              ctxWindow: cw,
-              ctxSystem: b.system,
-              ctxToolSchemas: b.toolSchemas,
-              ctxHistory: b.history,
-              ctxToolOutputs: b.toolOutputs,
-              ctxSubagent: b.subagentOutputs,
-              ctxTotal: b.total,
-              ctxWire: b.wireTotal,
-              rereads: b.rereads,
-              msgCount: b.msgCount,
+          // Phased streaming: the final reply's content / reasoning renders chunk by chunk, and each "tool-call round" body is
+          // shown as that phase's summary (phaseSummaryText strips the chain-of-thought remnants), presenting the process of
+          // "phase summary → execute → next phase summary …". Daily mode used to discard tool-round bodies instead; with the
+          // modes merged, the phased presentation is the only one.
+          const wantIncremental = true;
+          const showPhaseSummary = true;
+          // This round's display baseline = the display array before this round started (only meaningful in the active view; a background conversation does not touch the active view).
+          const liveBase = active() ? displayRef.current : [];
+          // Shared by finalization / increments: rebuild this round's display as [baseline, deep-thinking?, body?] (only effective in the active view).
+          // asPhase: the body is "the phase summary of a tool-call round" — collected into the card as a "thinking process" timeline entry,
+          // rather than a standalone final reply; a final reply with no tool calls goes to assistant (a standalone bubble + action bar).
+          const renderTurn = (reasoning: string, content: string, asPhase = false) => {
+            if (!active()) return;
+            const items: DisplayMsg[] = [];
+            if (reasoning) items.push({ kind: "reasoning", content: reasoning });
+            if (content) items.push(asPhase ? { kind: "phase", content } : { kind: "assistant", content });
+            const next = [...liveBase, ...items];
+            displayRef.current = next;
+            setDisplay(next);
+          };
+          // Streaming always renders incrementally as a normal reply bubble (so the final reply forms smoothly); if this round ultimately carries tool calls,
+          // the finalization below with asPhase=true folds that body into the "thinking process" timeline (exactly in sync with the tools starting to execute).
+          renderDelta = (content, reasoning) =>
+            renderTurn(reasoning, showPhaseSummary ? phaseSummaryText(content) : content);
+          // Routed through the boundary (§13): the request path emits a delta, the host decides what a delta
+          // looks like. Still `undefined` when incremental rendering is off, because that is what tells
+          // requestChat to use the non-streaming transport — a no-op callback would silently switch it to
+          // streaming and change how every provider error surfaces.
+          const onDelta =
+            wantIncremental && active()
+              ? (d: { content: string; reasoning: string }) =>
+                  boundary.onEvent({ type: "delta", content: d.content, reasoning: d.reasoning })
+              : undefined;
+          // Tools are withdrawn from the round after the loop guard fires onward, which is the whole mechanism: an
+          // instruction to stop calling tools is a request the model can decline by calling a tool, whereas an
+          // empty tool set is not. requestChat omits the field entirely when the list is empty (see
+          // sendChatOnce), so the provider is told nothing is callable rather than being handed an empty array.
+          lastWire = wire;
+          const data = await requestChat(
+            wire,
+            tools,
+            ctrl.signal,
+            onDelta,
+            { actor: "main", convId: genConvId, turnId },
+            roundReasoning.config,
+          );
+          // Cancelled mid-round. Reported as an empty round rather than by returning from send():
+          // the loop re-checks the signal and stops with reason `cancelled`, so there is one place
+          // that decides a run has ended (after the request).
+          if (ctrl.signal.aborted) return { content: "", reasoning: "", toolResults: [], toolCallCount: 0 };
+          const msg = data.choices?.[0]?.message;
+          if (!msg) throw new Error(t("chat.emptyResponse"));
+          // Context usage: this request's input tokens (refresh the progress bar only while active; a background conversation does not touch the current view).
+          if (active()) setCtxTokens(data.usage?.prompt_tokens ?? countMessagesTokens(wire));
+          // Deep thinking (a reasoning model's reasoning_content): kept on the buffer; whether it is fed back is applyReasoningPolicy's call.
+          const reasoningText = (msg.reasoning_content ?? msg.reasoning ?? "").trim();
+          // Finalize this round's display: the deep-thinking block + body. A final reply with no tool calls always shows the body;
+          // the body of a tool-call round is shown as a "phase summary" (after cleanup), consistent with the streaming path.
+          const finalContent = msg.tool_calls?.length
+            ? showPhaseSummary
+              ? phaseSummaryText(msg.content ?? "")
+              : ""
+            : msg.content ?? "";
+          // The phase summary of a tool-call round enters the "thinking process" timeline (asPhase); a final reply with no tool calls becomes a standalone bubble.
+          renderTurn(reasoningText, finalContent, !!msg.tool_calls?.length);
+          // reasoning_content rides the buffer so it is available to replay, but applyReasoningPolicy decides whether it reaches
+          // the wire: by default local models only, and only for turns after the last user query, which is exactly what their
+          // chat template renders back; with "send thinking as context" on, every model gets every turn's thinking.
+          convo = [
+            ...convo,
+            msg.tool_calls?.length
+              ? { role: "assistant", content: msg.content, tool_calls: msg.tool_calls, ...(reasoningText ? { reasoning_content: reasoningText } : {}) }
+              : { role: "assistant", content: msg.content, ...(reasoningText ? { reasoning_content: reasoningText } : {}) },
+          ];
+          syncView();
+
+          // Persist the assistant message (including the tool calls it issued) to this conversation (genConvId), so that after reopening / switching back the model still knows what it did.
+          // A plain-text final reply is also persisted here (the wrap-up below does not archive it again).
+          if (msg.content || msg.tool_calls?.length || reasoningText) {
+            store.appendMessage(genConvId, {
+              role: "assistant",
+              content: msg.content ?? "",
+              ...(msg.tool_calls?.length ? { tool_calls: msg.tool_calls } : {}),
+              ...(reasoningText ? { reasoning: reasoningText } : {}),
+              ts: Date.now(),
             });
+            // After persisting the final reply (no tool calls, has body): attach its archive index to the just-rendered display entry,
+            // so it can be rated and persisted within this conversation (otherwise the storedIndex would only be obtained on the next loadConversation rebuild).
+            if (active() && !msg.tool_calls?.length && (msg.content ?? "").trim()) {
+              const idx = (store.getConversation(genConvId)?.messages.length ?? 0) - 1;
+              if (idx >= 0) tagLastAssistantStoredIndex(idx);
+            }
           }
-        }
-        // Phased streaming: the final reply's content / reasoning renders chunk by chunk, and each "tool-call round" body is
-        // shown as that phase's summary (phaseSummaryText strips the chain-of-thought remnants), presenting the process of
-        // "phase summary → execute → next phase summary …". Daily mode used to discard tool-round bodies instead; with the
-        // modes merged, the phased presentation is the only one.
-        const wantIncremental = true;
-        const showPhaseSummary = true;
-        // This round's display baseline = the display array before this round started (only meaningful in the active view; a background conversation does not touch the active view).
-        const liveBase = active() ? displayRef.current : [];
-        // Shared by finalization / increments: rebuild this round's display as [baseline, deep-thinking?, body?] (only effective in the active view).
-        // asPhase: the body is "the phase summary of a tool-call round" — collected into the card as a "thinking process" timeline entry,
-        // rather than a standalone final reply; a final reply with no tool calls goes to assistant (a standalone bubble + action bar).
-        const renderTurn = (reasoning: string, content: string, asPhase = false) => {
-          if (!active()) return;
-          const items: DisplayMsg[] = [];
-          if (reasoning) items.push({ kind: "reasoning", content: reasoning });
-          if (content) items.push(asPhase ? { kind: "phase", content } : { kind: "assistant", content });
-          const next = [...liveBase, ...items];
-          displayRef.current = next;
-          setDisplay(next);
-        };
-        const onDelta =
-          wantIncremental && active()
-            ? (d: { content: string; reasoning: string }) =>
-                // Streaming always renders incrementally as a normal reply bubble (so the final reply forms smoothly); if this round ultimately carries tool calls,
-                // the finalization below with asPhase=true folds that body into the "thinking process" timeline (exactly in sync with the tools starting to execute).
-                renderTurn(d.reasoning, showPhaseSummary ? phaseSummaryText(d.content) : d.content)
-            : undefined;
-        const data = await requestChat(wire, tools, ctrl.signal, onDelta, {
+
+          // Has tool calls → execute them, feed the results back, and continue to the next round.
+          if (msg.tool_calls && msg.tool_calls.length > 0) {
+            didToolCall = true; // A tool was executed this round: provides the basis for the "empty-content wrap-up" guard
+            const calls = msg.tool_calls;
+            // Resolved ONCE, up front: everything downstream keys on the RESOLVED name, never on what the model
+            // emitted (see resolveToolCalls).
+            const resolved = resolveToolCalls(calls);
+            const callOf = (tc: ToolCall) => resolved.get(tc) ?? { name: tc.function.name, args: {} };
+
+            // ask_user: pop a choice card and wait for the user to click.
+            // update_todos: update the task list above the input box.
+            // load_skill: feed back the full instructions of an enabled skill as the tool result (progressive disclosure).
+            // run_subagent: delegate to a subagent and feed back its final conclusion as the tool result.
+            // Other tools: executed through the unified path (including sensitive-operation confirmation).
+            const runToolCall = async (tc: ToolCall) => {
+              const { name, args } = callOf(tc);
+              const startedAt = Date.now();
+              // Renderer-handled tools dispatch by name to their local handler (see rendererTools); everything
+              // else falls through to execToolCall (the unified sandbox/consent path).
+              const handler = rendererTools[name];
+              // Whether the call succeeded, for the loop guard's repeated-failure signal. execToolCall folds a
+              // failure into the text it returns, so the distinction is only available through this callback;
+              // renderer-handled tools (a choice card, the todo list, the browser panel) have no failure mode
+              // that reaches here, hence the true default rather than a guess parsed out of their text.
+              let callOk = true;
+              const base = handler
+                ? await handler(ctx, args)
+                : await execToolCall(ctx, name, args, name, "main", null, (v) => {
+                    callOk = v;
+                  });
+              // Auto-delivery: a delegation that finished while this tool was running rides back on its
+              // result. Appended here, at the one point every tool result passes through, so the model
+              // cannot lose a conclusion by never calling join_subagents — and so it has no reason to poll
+              // for one. Deliberately skipped on join_subagents itself, which already reported everything
+              // it was owed and would otherwise print the same conclusions twice in one result.
+              // Background job results ride back the same way, and unconditionally — join_subagents is exempt
+              // from the delegation drain because it has already reported those, but it has said nothing about
+              // a build that finished while it was blocking.
+              const content =
+                (name === "join_subagents" ? base : base + drainDelegations(ctx)) + drainJobEvents(ctx);
+              // Usage log: the branches above are the tools the renderer handles itself (a choice card,
+              // the todo list, a skill's instructions, memory, the browser panel). They never reach
+              // execToolCall, which is where every other tool is logged, so without this they would be
+              // the one class of action missing from the timeline. run_subagent is absent from the set
+              // because runSubAgent logs the delegation itself, with its rounds and tokens.
+              if (RENDERER_HANDLED_TOOLS.has(name)) {
+                logToolCall({
+                  actor: "main",
+                  name,
+                  args,
+                  ok: true,
+                  result: content,
+                  resultTokens: isUsageLogEnabledSync() ? countTokens(content) : undefined,
+                  ms: Date.now() - startedAt,
+                  convId: genConvId,
+                  turnId,
+                });
+              }
+              return { tc, name, args, content, ok: callOk };
+            };
+
+            // Batched on the RESOLVED name, so a dispatched read is recognised as read-only (see groupParallelCalls).
+            const groups = groupParallelCalls(calls, (tc) => callOf(tc).name, PARALLEL_SAFE_TOOLS);
+
+            // The loop guard's reading of every call in THIS round, judged together once the round is complete:
+            // a round is only stalled when nothing in it was productive, so a single real result anywhere in a
+            // parallel batch clears the streak.
+            // What the loop is handed back: it folds these into Execution State and into the doom-loop
+            // detector itself, so nothing here observes them a second time.
+            const roundResults: ToolResult[] = [];
+            for (const group of groups) {
+              if (ctrl.signal.aborted) break;
+              // Results are consumed in the original order regardless of which call settled first, so the tool
+              // messages stay aligned with assistant.tool_calls.
+              const settled =
+                group.length > 1
+                  ? await Promise.all(group.map(runToolCall))
+                  : [await runToolCall(group[0])];
+
+              for (const { tc, name, args, content, ok } of settled) {
+                // Delegating to a reviewer counts as reviewed; recording anything satisfies the memory guard;
+                // a mutating call on a risky path re-arms the review. One reducer, so the six places that used
+                // to mutate these flags are now one call. See toolRuntime.recordTool.
+                obligations = recordTool(obligations, { name, args }, TOOL_RULES);
+                // A `notify` job promises a result later. Counted so the goal check can defer rather than judge
+                // a turn whose whole point was to start something and wait for it.
+                if (name === "run_command" && args.notify) {
+                  awaitingJobsRef.current.set(genConvId, (awaitingJobsRef.current.get(genConvId) ?? 0) + 1);
+                }
+                // Sub-agent write-back. A delegation runs in its own isolated context and its conversation is
+                // never persisted, so the only durable trace is this one tool result — which compaction is free
+                // to summarise away. Copying the conclusion into Goal State keeps it as established fact, and it
+                // is handed to the evaluator separately from the transcript for exactly that reason.
+                if (DELEGATION_TOOLS.has(name) && isGoalActive(goalFor(genConvId))) {
+                  setGoalFor(genConvId, recordEvidence(goalFor(genConvId), { source: name, summary: content }));
+                }
+
+                // Compress overly long tool output before feeding back / persisting (the full text is already in each tool's display bubble, so the UI is unaffected).
+                // read_file is exempt: it returns the line range that was asked for, so there is nothing to elide.
+                const cappedContent = UNCAPPED_TOOLS.has(name)
+                  ? content
+                  : capToolOutput(content);
+                convo = [...convo, { role: "tool", tool_call_id: tc.id, content: cappedContent }];
+                lastToolIdx = convo.length - 1;
+                syncView();
+                // A generated image's artifact URL is stored display-only (not in content, so it never re-enters the wire),
+                // so the image bubble can be rebuilt after switching conversations. Consume the side-channel ref.
+                const imageArtifact =
+                  name === "image_generation" ? lastImageArtifactRef.current : null;
+                lastImageArtifactRef.current = null;
+                // Likewise for a sub-agent's inner steps: display-only, stored beside the conclusion so reopening
+                // the conversation shows the same operations the user watched happen. Addressed by the tool
+                // call's own args object, because a spawned delegation settles after this point and has to be
+                // able to find its message again (see the storedIndex hand-off below).
+                const sink = subagentSinksRef.current.get(args as object) ?? null;
+                const subSteps = sink ? sink.steps : null;
+                // Persist the tool result to this conversation (store the compressed version, to avoid bloating storage / the integrity hash).
+                store.appendMessage(genConvId, {
+                  role: "tool",
+                  content: cappedContent,
+                  tool_call_id: tc.id,
+                  // The RESOLVED name, not what the model emitted: this field is display-only (loadConversation rebuilds tool
+                  // bubbles from it), so persisting "call_tool" would make every reopened conversation show a row of identical
+                  // dispatcher bubbles instead of the tools that actually ran. The wire copy in assistant.tool_calls is untouched.
+                  name,
+                  ts: Date.now(),
+                  ...(imageArtifact
+                    ? { image: imageArtifact.image, servedBy: imageArtifact.servedBy }
+                    : {}),
+                  // Copied, not the live array: a spawned delegation keeps appending to it after this write.
+                  ...(subSteps?.length ? { steps: [...subSteps] } : {}),
+                });
+                lastToolStoredIdx = (store.getConversation(genConvId)?.messages.length ?? 0) - 1;
+                // Tell the sink where its message landed. Until this point a still-running delegation has
+                // nowhere to write its trace; from here every step it takes is patched straight onto that
+                // message, so the reopened conversation matches what the user watched.
+                if (sink) {
+                  sink.storedIndex = lastToolStoredIdx;
+                  if (sink.steps.length > 0) store.setMessageSteps(genConvId, lastToolStoredIdx, [...sink.steps]);
+                }
+
+                // Detect local service addresses in the tool output (e.g. an http://localhost:5173 printed by a dev server),
+                // using the full output (the elided middle section may also contain a URL). Once registered, the bottom-left floating indicator displays it and polls its health.
+                if (typeof content === "string") detectServices(content);
+
+                // ── Progress guard ──────────────────────────────────────────────────────────────────────────
+                // Judged on `cappedContent` rather than `content`: what the guard has to answer is "does the
+                // model already have this", and what the model has is the capped text. Placed after the append
+                // so a reminder rides the result it is about — nudgeIntoLastTool writes into the message that
+                // was just recorded, which the model has not been shown yet, so it costs no re-prefill.
+                roundResults.push({ toolCallId: tc.id, name, args, content: cappedContent, ok, ms: 0 });
+              }
+            }
+            // Wrap-up alignment: for any tool_call with no result yet (this round was cut short early because the user canceled), append a placeholder result,
+            // ensuring assistant.tool_calls and tool results correspond one-to-one — otherwise, when continuing the chat / reopening, it would be rejected by the provider because "tool_calls were not answered".
+            // The placeholder is also persisted, staying consistent with the conversation fed back to the model.
+            const answeredIds = convo.flatMap((mm) =>
+              mm.role === "tool" && mm.tool_call_id ? [{ toolCallId: mm.tool_call_id }] : [],
+            );
+            for (const tc of unansweredCalls(msg.tool_calls, answeredIds)) {
+              const placeholder = ctrl.signal.aborted ? t("chat.canceled") : t("chat.skipped");
+              convo = [...convo, { role: "tool", tool_call_id: tc.id, content: placeholder }];
+              lastToolIdx = convo.length - 1;
+              syncView();
+              store.appendMessage(genConvId, {
+                role: "tool",
+                content: placeholder,
+                tool_call_id: tc.id,
+                name: callOf(tc).name,
+                ts: Date.now(),
+              });
+              lastToolStoredIdx = (store.getConversation(genConvId)?.messages.length ?? 0) - 1;
+            }
+            // Cancelled mid-round. Reported as an empty round rather than by returning from send():
+            // the loop re-checks the signal and stops with reason `cancelled`, so there is one place
+            // that decides a run has ended (after the tools).
+            if (ctrl.signal.aborted) return { content: "", reasoning: "", toolResults: [], toolCallCount: 0 };
+            // ── File-change guards, evaluated HERE rather than at wrap-up ───────────────────────────────────────────────
+            // Both flags are known the moment the tools return, so the nudge is written into the last tool result before that
+            // result is ever sent. Two things follow. The model reads it while it can still act — it can delegate the reviewer in
+            // its very next turn instead of being told off for a conclusion it already reached. And mutating a message that has
+            // not been sent yet costs nothing: the previous request did not contain this tool result at all, so there is no
+            // divergence and no re-prefill. Nudging at wrap-up instead would rewrite a result the model had already answered.
+            //
+            // Each fires at most once per round. Neither blocks the wrap-up: the old wrap-up-time version let the model through
+            // after one nudge anyway ("if the model still insists, let it through, to avoid a deadlock"), so this is the same
+            // single nudge, delivered early enough to be preventive. They stay able to fire again on a later turn — the review
+            // guard is a safety check, so a risky change at turn 40 must be caught even though turn 5 was.
+            {
+              const { due, next } = dueReminders(obligations);
+              obligations = next;
+              // Both can be due at once and both are delivered: they are about different things, and dropping
+              // one because the other fired would silently skip a safety check.
+              for (const reminder of due) {
+                nudgeIntoLastTool(reminder === "review" ? FORCE_REVIEW_NUDGE : RECORD_MEMORY_NUDGE);
+              }
+            }
+            // Doom-loop detection is the LOOP's now, not this function's — one detector, one policy (§20 rule
+            // 7). It observes these same results, warns through onDoomSignal above, and escalates to a
+            // `doom-loop` stop. The wrap-up round that used to happen here, with the tools withdrawn, happens
+            // after the loop returns instead: same outcome for the user, one place that decides it.
+            return {
+              content: msg.content ?? "",
+              reasoning: reasoningText,
+              toolResults: roundResults,
+              toolCallCount: msg.tool_calls.length,
+            };
+          }
+
+          // Outstanding-delegation guard: the model is about to end the turn (no tool calls this round) while
+          // delegations it spawned are still running. They are cancelled the instant the turn ends, so this is
+          // the last moment the work can still be used. Placed before the finalize guard because it is the more
+          // specific diagnosis of an empty ending — a model that spawned and then stalled has something to wait
+          // for, not something to summarise. Fires once per turn, so declining to join is respected.
+          {
+            const held = schedulerRef.current;
+            const outstanding = held && held.turnId === turnId ? held.sched.outstanding() : [];
+            if (outstanding.length > 0 && !delegationNudged) {
+              delegationNudged = true;
+              nudgeIntoLastTool(PENDING_DELEGATION_NUDGE);
+              return { content: "", reasoning: reasoningText, toolResults: [], toolCallCount: 0, forceContinue: true };
+            }
+          }
+
+          // Wrap-up guard: the model demonstrably did work this round — ran a tool, or produced reasoning — yet ended with
+          // empty content, so the user saw nothing. Inject one FINALIZE_NUDGE to make it answer from what it already has,
+          // then continue the loop. Only once, to avoid a deadlock.
+          //
+          // `reasoningText` is in the condition because a tool call is not the only way to end up here. A reasoning model
+          // writing ABOUT its own control tokens emits one for real: Qwen's tokenizer has </think> as a special token, so
+          // a turn explaining thinking tags terminates itself at the backtick before the tag name. Observed twice in one
+          // conversation — once truncating the answer at 845 tokens, once ending the whole response at 0 — and the user
+          // had to type "continue" by hand, which is exactly what this nudge does.
+          //
+          // Requiring evidence of work (a tool ran, or tokens were reasoned) rather than firing on any empty reply keeps
+          // an aborted or genuinely empty stream from being nudged into a second request.
+          if ((didToolCall || reasoningText.trim()) && !finalizeNudged && !(msg.content ?? "").trim()) {
+            finalizeNudged = true;
+            nudgeIntoLastTool(FINALIZE_NUDGE);
+            return { content: "", reasoning: reasoningText, toolResults: [], toolCallCount: 0, forceContinue: true };
+          }
+
+          // The model answered with no tool calls. Whether that ENDS the turn is the stop policy's decision,
+          // not this function's — a goal in force can turn a "final" answer into another round. Everything that
+          // used to follow here (the goal check, the checklist archive, the reply notification) now runs after
+          // the loop returns, because all of it is about a turn that has finished rather than a round that has.
+          lastContent = msg.content ?? "";
+          return { content: lastContent, reasoning: reasoningText, toolResults: [], toolCallCount: 0 };
+        },
+      });
+
+      /**
+       * The wrap-up round after a detected doom loop.
+       *
+       * The Runtime stops on escalation; withdrawing the tools and making the model account for itself is the
+       * host's response, and it belongs here rather than inside the loop because it is a request this host
+       * builds. Same outcome the user saw before — one final, tool-free reply explaining where it got stuck —
+       * reached through one decision instead of two.
+       */
+      if (loopOutcome.stop.reason === "doom-loop" && !ctrl.signal.aborted) {
+        nudgeIntoLastTool(LOOP_BREAK_NUDGE);
+        // Said out loud, because from outside a loop and long work look identical — a spinner and a rising
+        // token count — and the user is the one paying for the difference.
+        if (active()) toast.warning(t("chat.loopBroken"));
+        console.warn(`[loop-guard] ${loopOutcome.stop.detail ?? "no new information"}; withdrawing tools for a final reply`);
+        // Built through prepareWire like every other request. Hand-composing a few of its steps here would be
+        // a second wire builder, and it would skip the two that matter least often and hurt most when missed:
+        // the reasoning replay policy, and image handling for a provider that rejects them.
+        const wrapWire = prepareWire(convo, compaction, {
+          model: {
+            isLocal: isLocalModel,
+            acceptsImages: !!activeModel?.multimodal,
+            sendReasoningContext: sendReasoningContext(),
+            modelId: activeModel?.model,
+          },
+          steps: WIRE_STEPS,
+        });
+        const wrapUp = await requestChat(wrapWire, undefined, ctrl.signal, undefined, {
           actor: "main",
           convId: genConvId,
           turnId,
         });
-        if (ctrl.signal.aborted) return;
-        const msg = data.choices?.[0]?.message;
-        if (!msg) throw new Error(t("chat.emptyResponse"));
-        // Context usage: this request's input tokens (refresh the progress bar only while active; a background conversation does not touch the current view).
-        if (active()) setCtxTokens(data.usage?.prompt_tokens ?? countMessagesTokens(wire));
-        // Deep thinking (a reasoning model's reasoning_content): kept on the buffer; whether it is fed back is applyReasoningPolicy's call.
-        const reasoningText = (msg.reasoning_content ?? msg.reasoning ?? "").trim();
-        // Finalize this round's display: the deep-thinking block + body. A final reply with no tool calls always shows the body;
-        // the body of a tool-call round is shown as a "phase summary" (after cleanup), consistent with the streaming path.
-        const finalContent = msg.tool_calls?.length
-          ? showPhaseSummary
-            ? phaseSummaryText(msg.content ?? "")
-            : ""
-          : msg.content ?? "";
-        // The phase summary of a tool-call round enters the "thinking process" timeline (asPhase); a final reply with no tool calls becomes a standalone bubble.
-        renderTurn(reasoningText, finalContent, !!msg.tool_calls?.length);
-        // reasoning_content rides the buffer so it is available to replay, but applyReasoningPolicy decides whether it reaches
-        // the wire: by default local models only, and only for turns after the last user query, which is exactly what their
-        // chat template renders back; with "send thinking as context" on, every model gets every turn's thinking.
-        convo = [
-          ...convo,
-          msg.tool_calls?.length
-            ? { role: "assistant", content: msg.content, tool_calls: msg.tool_calls, ...(reasoningText ? { reasoning_content: reasoningText } : {}) }
-            : { role: "assistant", content: msg.content, ...(reasoningText ? { reasoning_content: reasoningText } : {}) },
-        ];
-        syncView();
-
-        // Persist the assistant message (including the tool calls it issued) to this conversation (genConvId), so that after reopening / switching back the model still knows what it did.
-        // A plain-text final reply is also persisted here (the wrap-up below does not archive it again).
-        if (msg.content || msg.tool_calls?.length || reasoningText) {
+        const wrapMsg = wrapUp.choices?.[0]?.message;
+        // A model that emits tool calls when none were declared: rare, and seen on local builds whose chat
+        // template writes call syntax out of habit. Nothing can execute them — there is no declaration to
+        // validate them against — and the round is over, so they are dropped rather than persisted. Writing
+        // them would leave an assistant.tool_calls that nothing answers, which the provider rejects on the
+        // conversation's NEXT request.
+        if (wrapMsg?.tool_calls?.length) {
+          console.warn(`[loop-guard] dropped ${wrapMsg.tool_calls.length} tool call(s) emitted with no tools declared`);
+          delete wrapMsg.tool_calls;
+        }
+        lastWire = wrapWire;
+        lastContent = wrapMsg?.content ?? "";
+        if (lastContent && active()) pushDisplay({ kind: "assistant", content: lastContent });
+        if (lastContent) {
           store.appendMessage(genConvId, {
             role: "assistant",
-            content: msg.content ?? "",
-            ...(msg.tool_calls?.length ? { tool_calls: msg.tool_calls } : {}),
-            ...(reasoningText ? { reasoning: reasoningText } : {}),
+            content: lastContent,
             // eslint-disable-next-line react-hooks/purity -- see the note on the first Date.now() in send()
             ts: Date.now(),
           });
-          // After persisting the final reply (no tool calls, has body): attach its archive index to the just-rendered display entry,
-          // so it can be rated and persisted within this conversation (otherwise the storedIndex would only be obtained on the next loadConversation rebuild).
-          if (active() && !msg.tool_calls?.length && (msg.content ?? "").trim()) {
-            const idx = (store.getConversation(genConvId)?.messages.length ?? 0) - 1;
-            if (idx >= 0) tagLastAssistantStoredIndex(idx);
-          }
         }
+      }
 
-        // Has tool calls → execute them, feed the results back, and continue to the next round.
-        if (msg.tool_calls && msg.tool_calls.length > 0) {
-          didToolCall = true; // A tool was executed this round: provides the basis for the "empty-content wrap-up" guard
-          const calls = msg.tool_calls;
-          // Resolved ONCE, up front: everything downstream keys on the RESOLVED name, never on what the model
-          // emitted (see resolveToolCalls).
-          const resolved = resolveToolCalls(calls);
-          const callOf = (tc: ToolCall) => resolved.get(tc) ?? { name: tc.function.name, args: {} };
-
-          // ask_user: pop a choice card and wait for the user to click.
-          // update_todos: update the task list above the input box.
-          // load_skill: feed back the full instructions of an enabled skill as the tool result (progressive disclosure).
-          // run_subagent: delegate to a subagent and feed back its final conclusion as the tool result.
-          // Other tools: executed through the unified path (including sensitive-operation confirmation).
-          const runToolCall = async (tc: ToolCall) => {
-            const { name, args } = callOf(tc);
-            const startedAt = Date.now();
-            // Renderer-handled tools dispatch by name to their local handler (see rendererTools); everything
-            // else falls through to execToolCall (the unified sandbox/consent path).
-            const handler = rendererTools[name];
-            const base = handler
-              ? await handler(ctx, args)
-              : await execToolCall(ctx, name, args, name);
-            // Auto-delivery: a delegation that finished while this tool was running rides back on its
-            // result. Appended here, at the one point every tool result passes through, so the model
-            // cannot lose a conclusion by never calling join_subagents — and so it has no reason to poll
-            // for one. Deliberately skipped on join_subagents itself, which already reported everything
-            // it was owed and would otherwise print the same conclusions twice in one result.
-            // Background job results ride back the same way, and unconditionally — join_subagents is exempt
-            // from the delegation drain because it has already reported those, but it has said nothing about
-            // a build that finished while it was blocking.
-            const content =
-              (name === "join_subagents" ? base : base + drainDelegations(ctx)) + drainJobEvents(ctx);
-            // Usage log: the branches above are the tools the renderer handles itself (a choice card,
-            // the todo list, a skill's instructions, memory, the browser panel). They never reach
-            // execToolCall, which is where every other tool is logged, so without this they would be
-            // the one class of action missing from the timeline. run_subagent is absent from the set
-            // because runSubAgent logs the delegation itself, with its rounds and tokens.
-            if (RENDERER_HANDLED_TOOLS.has(name)) {
-              logToolCall({
-                actor: "main",
-                name,
-                args,
-                ok: true,
-                result: content,
-                resultTokens: isUsageLogEnabledSync() ? countTokens(content) : undefined,
-                ms: Date.now() - startedAt,
-                convId: genConvId,
-                turnId,
-              });
-            }
-            return { tc, name, args, content };
-          };
-
-          // Batched on the RESOLVED name, so a dispatched read is recognised as read-only (see groupParallelCalls).
-          const groups = groupParallelCalls(calls, (tc) => callOf(tc).name, PARALLEL_SAFE_TOOLS);
-
-          for (const group of groups) {
-            if (ctrl.signal.aborted) break;
-            // Results are consumed in the original order regardless of which call settled first, so the tool
-            // messages stay aligned with assistant.tool_calls.
-            const settled =
-              group.length > 1
-                ? await Promise.all(group.map(runToolCall))
-                : [await runToolCall(group[0])];
-
-            for (const { tc, name, args, content } of settled) {
-              // Delegating to a reviewer is treated as reviewed, clearing the pending-risky-change flag —
-              // by either route, since a review spawned alongside other delegations is still a review.
-              if (name === "run_subagent" && String(args.agent ?? "") === "reviewer") {
-                riskyChangePending = false;
-              }
-              if (
-                name === "spawn_subagents" &&
-                (Array.isArray(args.tasks) ? args.tasks : []).some(
-                  (x) => String(((x ?? {}) as Record<string, unknown>).agent ?? "") === "reviewer",
-                )
-              ) {
-                riskyChangePending = false;
-              }
-              // Recording anything at all satisfies the memory guard — the reminder exists to make the model
-              // consider the question once per turn, not to demand a note per file touched.
-              if (name === "remember_project") learnedWithoutRecording = false;
-              // A `notify` job promises a result later. Counted so the goal check can defer rather than judge
-              // a turn whose whole point was to start something and wait for it.
-              if (name === "run_command" && args.notify) {
-                awaitingJobsRef.current.set(genConvId, (awaitingJobsRef.current.get(genConvId) ?? 0) + 1);
-              }
-              // Sub-agent write-back. A delegation runs in its own isolated context and its conversation is
-              // never persisted, so the only durable trace is this one tool result — which compaction is free
-              // to summarise away. Copying the conclusion into Goal State keeps it as established fact, and it
-              // is handed to the evaluator separately from the transcript for exactly that reason.
-              if (DELEGATION_TOOLS.has(name) && isGoalActive(goalFor(genConvId))) {
-                setGoalFor(genConvId, recordEvidence(goalFor(genConvId), { source: name, summary: content }));
-              }
-              // Risky-change detection: a tool that modifies source files hitting the risky-path signature (taking path-like args such as path/file/dest) → mark as pending review.
-              if (MUTATING_FILE_TOOLS.has(name)) {
-                learnedWithoutRecording = true;
-                const pathVals = Object.entries(args)
-                  .filter(([k, v]) => typeof v === "string" && /path|file|dir|dest|src|source|target|name/i.test(k))
-                  .map(([, v]) => v as string);
-                if (pathVals.some((p) => RISKY_PATH_PATTERN.test(p))) riskyChangePending = true;
-              }
-
-              // Compress overly long tool output before feeding back / persisting (the full text is already in each tool's display bubble, so the UI is unaffected).
-              // read_file is exempt: it returns the line range that was asked for, so there is nothing to elide.
-              const cappedContent = UNCAPPED_TOOLS.has(name)
-                ? content
-                : capToolOutput(content);
-              convo = [...convo, { role: "tool", tool_call_id: tc.id, content: cappedContent }];
-              lastToolIdx = convo.length - 1;
-              syncView();
-              // A generated image's artifact URL is stored display-only (not in content, so it never re-enters the wire),
-              // so the image bubble can be rebuilt after switching conversations. Consume the side-channel ref.
-              const imageArtifact =
-                name === "image_generation" ? lastImageArtifactRef.current : null;
-              lastImageArtifactRef.current = null;
-              // Likewise for a sub-agent's inner steps: display-only, stored beside the conclusion so reopening
-              // the conversation shows the same operations the user watched happen. Addressed by the tool
-              // call's own args object, because a spawned delegation settles after this point and has to be
-              // able to find its message again (see the storedIndex hand-off below).
-              const sink = subagentSinksRef.current.get(args as object) ?? null;
-              const subSteps = sink ? sink.steps : null;
-              // Persist the tool result to this conversation (store the compressed version, to avoid bloating storage / the integrity hash).
-              store.appendMessage(genConvId, {
-                role: "tool",
-                content: cappedContent,
-                tool_call_id: tc.id,
-                // The RESOLVED name, not what the model emitted: this field is display-only (loadConversation rebuilds tool
-                // bubbles from it), so persisting "call_tool" would make every reopened conversation show a row of identical
-                // dispatcher bubbles instead of the tools that actually ran. The wire copy in assistant.tool_calls is untouched.
-                name,
-                // eslint-disable-next-line react-hooks/purity -- see the note on the first Date.now() in send()
-                ts: Date.now(),
-                ...(imageArtifact
-                  ? { image: imageArtifact.image, servedBy: imageArtifact.servedBy }
-                  : {}),
-                // Copied, not the live array: a spawned delegation keeps appending to it after this write.
-                ...(subSteps?.length ? { steps: [...subSteps] } : {}),
-              });
-              lastToolStoredIdx = (store.getConversation(genConvId)?.messages.length ?? 0) - 1;
-              // Tell the sink where its message landed. Until this point a still-running delegation has
-              // nowhere to write its trace; from here every step it takes is patched straight onto that
-              // message, so the reopened conversation matches what the user watched.
-              if (sink) {
-                sink.storedIndex = lastToolStoredIdx;
-                if (sink.steps.length > 0) store.setMessageSteps(genConvId, lastToolStoredIdx, [...sink.steps]);
-              }
-
-              // Detect local service addresses in the tool output (e.g. an http://localhost:5173 printed by a dev server),
-              // using the full output (the elided middle section may also contain a URL). Once registered, the bottom-left floating indicator displays it and polls its health.
-              if (typeof content === "string") detectServices(content);
-            }
-          }
-          // Wrap-up alignment: for any tool_call with no result yet (this round was cut short early because the user canceled), append a placeholder result,
-          // ensuring assistant.tool_calls and tool results correspond one-to-one — otherwise, when continuing the chat / reopening, it would be rejected by the provider because "tool_calls were not answered".
-          // The placeholder is also persisted, staying consistent with the conversation fed back to the model.
-          const answered = new Set(
-            convo.flatMap((mm) => (mm.role === "tool" ? [mm.tool_call_id] : [])),
-          );
-          for (const tc of msg.tool_calls) {
-            if (answered.has(tc.id)) continue;
-            const placeholder = ctrl.signal.aborted ? t("chat.canceled") : t("chat.skipped");
-            convo = [...convo, { role: "tool", tool_call_id: tc.id, content: placeholder }];
-            lastToolIdx = convo.length - 1;
-            syncView();
-            store.appendMessage(genConvId, {
-              role: "tool",
-              content: placeholder,
-              tool_call_id: tc.id,
-              name: callOf(tc).name,
-              // eslint-disable-next-line react-hooks/purity -- see the note on the first Date.now() in send()
-              ts: Date.now(),
-            });
-            lastToolStoredIdx = (store.getConversation(genConvId)?.messages.length ?? 0) - 1;
-          }
-          if (ctrl.signal.aborted) return;
-          // ── File-change guards, evaluated HERE rather than at wrap-up ───────────────────────────────────────────────
-          // Both flags are known the moment the tools return, so the nudge is written into the last tool result before that
-          // result is ever sent. Two things follow. The model reads it while it can still act — it can delegate the reviewer in
-          // its very next turn instead of being told off for a conclusion it already reached. And mutating a message that has
-          // not been sent yet costs nothing: the previous request did not contain this tool result at all, so there is no
-          // divergence and no re-prefill. Nudging at wrap-up instead would rewrite a result the model had already answered.
-          //
-          // Each fires at most once per round. Neither blocks the wrap-up: the old wrap-up-time version let the model through
-          // after one nudge anyway ("if the model still insists, let it through, to avoid a deadlock"), so this is the same
-          // single nudge, delivered early enough to be preventive. They stay able to fire again on a later turn — the review
-          // guard is a safety check, so a risky change at turn 40 must be caught even though turn 5 was.
-          if (riskyChangePending && !reviewForced) {
-            reviewForced = true;
-            nudgeIntoLastTool(FORCE_REVIEW_NUDGE);
-          }
-          if (learnedWithoutRecording && !memoryNudged) {
-            memoryNudged = true;
-            nudgeIntoLastTool(RECORD_MEMORY_NUDGE);
-          }
-          continue;
-        }
-
-        // Outstanding-delegation guard: the model is about to end the turn (no tool calls this round) while
-        // delegations it spawned are still running. They are cancelled the instant the turn ends, so this is
-        // the last moment the work can still be used. Placed before the finalize guard because it is the more
-        // specific diagnosis of an empty ending — a model that spawned and then stalled has something to wait
-        // for, not something to summarise. Fires once per turn, so declining to join is respected.
-        {
-          const held = schedulerRef.current;
-          const outstanding = held && held.turnId === turnId ? held.sched.outstanding() : [];
-          if (outstanding.length > 0 && !delegationNudged) {
-            delegationNudged = true;
-            nudgeIntoLastTool(PENDING_DELEGATION_NUDGE);
-            continue;
-          }
-        }
-
-        // Wrap-up guard: the model demonstrably did work this round — ran a tool, or produced reasoning — yet ended with
-        // empty content, so the user saw nothing. Inject one FINALIZE_NUDGE to make it answer from what it already has,
-        // then continue the loop. Only once, to avoid a deadlock.
-        //
-        // `reasoningText` is in the condition because a tool call is not the only way to end up here. A reasoning model
-        // writing ABOUT its own control tokens emits one for real: Qwen's tokenizer has </think> as a special token, so
-        // a turn explaining thinking tags terminates itself at the backtick before the tag name. Observed twice in one
-        // conversation — once truncating the answer at 845 tokens, once ending the whole response at 0 — and the user
-        // had to type "continue" by hand, which is exactly what this nudge does.
-        //
-        // Requiring evidence of work (a tool ran, or tokens were reasoned) rather than firing on any empty reply keeps
-        // an aborted or genuinely empty stream from being nudged into a second request.
-        if ((didToolCall || reasoningText.trim()) && !finalizeNudged && !(msg.content ?? "").trim()) {
-          finalizeNudged = true;
-          nudgeIntoLastTool(FINALIZE_NUDGE);
-          continue;
-        }
-
+      /**
+       * Everything below is about a turn that has FINISHED, not a round that has.
+       *
+       * Skipped entirely when the user cancelled. Before the loop moved out, the two mid-round abort checks
+       * returned from send() outright, so a cancelled turn reached none of this; now the loop returns
+       * normally with reason `cancelled` and the guard has to be explicit. Without it, pressing stop would
+       * announce a completed reply and archive the checklist of a turn that never finished.
+       */
+      if (!ctrl.signal.aborted) {
         // ── Goal check ───────────────────────────────────────────────────────────────────────────────────────
         // The turn is over and the model has answered. If a goal is in force, this is where an INDEPENDENT
         // evaluator reads what just happened and decides whether the condition is met — the model does not get
@@ -3918,7 +3414,7 @@ function ChatAgent() {
             const turnTokens = u.total || u.prompt + u.completion;
             // `wire` is what the model was actually sent this round; the reply it produced arrived afterwards,
             // so it is appended here — without it the evaluator would judge a transcript missing its conclusion.
-            const judged: ApiMsg[] = [...wire, { role: "assistant", content: msg.content ?? "" }];
+            const judged: ApiMsg[] = [...lastWire, { role: "assistant", content: lastContent }];
             const outcome = await evaluateGoal(
               {
                 condition: before.condition,
@@ -3953,6 +3449,15 @@ function ChatAgent() {
                   }),
                 );
               }
+              // Then clear it. `achieved` deactivates the loop, but GoalBar renders anything that is not
+              // `cleared`, and nothing ever left `achieved` — so the finished goal sat above the composer for
+              // the rest of the session and only `/goal clear` removed it. The bar was meant to show "the run
+              // that just finished", which is a transient idea that had no transition behind it.
+              //
+              // Delayed rather than immediate so that record is actually readable; the impossible/exhausted
+              // paths clear at once because they queue an explaining round that must not be re-evaluated,
+              // whereas nothing follows a success.
+              scheduleGoalClear(genConvId, done);
             } else {
               setGoalFor(genConvId, evaluated);
               const maxRounds = Number(getStorage(AGENT_MAX_GOAL_ROUNDS_KEY)) || MAX_GOAL_AUTO_ROUNDS;
@@ -4014,9 +3519,8 @@ function ChatAgent() {
           const title = store.getConversation(genConvId)?.title?.trim();
           toast.success(title ? t("chat.replyDoneNamed", { title }) : t("chat.replyDone"));
         } else {
-          notifyReplyComplete(genConvId, msg.content);
+          notifyReplyComplete(genConvId, lastContent);
         }
-        return;
       }
     } catch (e) {
       // A user-initiated cancel does not count as an error.
@@ -4277,104 +3781,23 @@ function ChatAgent() {
         config={PAGE_SCROLLBAR}
       >
         <div className="mx-auto flex w-full max-w-4xl flex-col gap-4 px-4 py-5">
-          {/* Switching conversations: a skeleton stands in for the message area, so the previous conversation's
-              messages are not left on screen (or the "start a conversation" placeholder flashed) mid-swap. */}
-          {switching && <TranscriptSkeleton label={t("chat.loadingConversation")} />}
-
-          {!switching && display.length === 0 && (
-            <div className="mt-16 text-center">
-              <div className="mx-auto mb-3 flex h-12 w-12 items-center justify-center rounded-2xl bg-gradient-to-br from-primary to-primary/70 text-lg font-bold text-white shadow-lg shadow-primary/25">
-                AI
-              </div>
-              <p className="text-sm font-medium text-ink-muted">{t("chat.emptyTitle")}</p>
-              <p className="mt-1 text-xs text-ink-subtle">
-                {t("chat.emptyHint")}
-                {toolsReady ? t("chat.emptyHintTools") : ""}
-              </p>
-            </div>
-          )}
-
-          {/* Earlier turns exist but are not mounted: the sentinel pulls in the next batch as it scrolls into view,
-              and the button does the same for a transcript too short to scroll (or with the observer unavailable). */}
-          {!switching && hasEarlier && (
-            <div ref={earlierSentinelRef} className="flex justify-center py-1">
-              <button
-                type="button"
-                onClick={loadEarlier}
-                className="rounded-full border border-line/60 px-3 py-1 text-xs text-ink-muted transition-colors hover:bg-surface-muted hover:text-ink"
-              >
-                {t("chat.loadEarlier")}
-              </button>
-            </div>
-          )}
-
-          {!switching && (() => {
-            // Gather consecutive "deep thinking + tool calls" (the AI's thinking / operation trace) into a single collapsible
-            // "thinking process" card, while the rest of the messages (user / reply / usage / todos / choice) are rendered one by one as usual.
-            const nodes: React.ReactNode[] = [];
-            // Mount only the current window; `i` stays an absolute index into `display` because MessageItem's index is
-            // what edit / regenerate / rating resolve against (and what the React keys are built from).
-            let i = visibleStart;
-            // A tool call carrying an artifact (image_generation) is the deliverable, not a step in
-            // the trace: it renders standalone rather than being swallowed into the collapsed
-            // "Thinking process" card, where the user would never see the thing they asked for.
-            const inProcess = (m: DisplayMsg) =>
-              (m.kind === "tool" && !m.image) || m.kind === "reasoning" || m.kind === "phase";
-            // The index of the last AI reply: only it shows "regenerate" (regenerating discards everything after it, to avoid an old reply being triggered by mistake).
-            let lastAssistantIndex = -1;
-            for (let j = display.length - 1; j >= 0; j--) {
-              if (display[j].kind === "assistant") { lastAssistantIndex = j; break; }
-            }
-            while (i < display.length) {
-              if (inProcess(display[i])) {
-                const start = i;
-                const group: ProcessItem[] = [];
-                while (i < display.length && inProcess(display[i])) {
-                  group.push(display[i] as ProcessItem);
-                  i++;
-                }
-                // This group is at the end of the message list and still generating → treated as "in progress", auto-expanded.
-                const live = loading && i === display.length;
-                // `turnActive` distinguishes "this group is no longer last" from "the turn ended".
-                // Only the second should auto-collapse the card — see ProcessGroup.
-                nodes.push(<ProcessGroup key={`pg-${start}`} items={group} live={live} turnActive={loading} />);
-              } else {
-                nodes.push(
-                  <MessageItem
-                    key={i}
-                    index={i}
-                    m={display[i]}
-                    onSubmitChoice={submitChoice}
-                    onEditUser={editUser}
-                    onRegenerate={regenerate}
-                    onRateMessage={rateMessage}
-                    canRegenerate={!loading && i === lastAssistantIndex}
-                    busy={loading}
-                  />,
-                );
-                i++;
-              }
-            }
-            return nodes;
-          })()}
-
-          {/* The skeleton already reads as "loading"; the outgoing conversation's thinking dots would double up on it. */}
-          {!switching && loading && !display.some((m) => m.kind === "choice" && !m.submitted) && (
-            <div className="flex items-center gap-2 px-1 py-0.5">
-              <span className="flex shrink-0 items-center gap-1">
-                <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-primary [animation-delay:-0.3s]" />
-                <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-primary [animation-delay:-0.15s]" />
-                <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-primary" />
-              </span>
-              <span className="text-sm text-ink-muted">{status || t("chat.thinking")}</span>
-            </div>
-          )}
-
-          {error && (
-            <div className="rounded-lg border border-destructive/20 bg-destructive/10 px-3 py-2 text-xs text-destructive">
-              {error}
-            </div>
-          )}
+          <ChatTranscript
+            switching={switching}
+            display={display}
+            visibleStart={visibleStart}
+            hasEarlier={hasEarlier}
+            earlierSentinelRef={earlierSentinelRef}
+            loadEarlier={loadEarlier}
+            loading={loading}
+            status={status}
+            error={error}
+            toolsReady={toolsReady}
+            t={t}
+            onSubmitChoice={submitChoice}
+            onEditUser={editUser}
+            onRegenerate={regenerate}
+            onRateMessage={rateMessage}
+          />
 
           <ChatDialogs
             localStartOpen={localStartDialog}

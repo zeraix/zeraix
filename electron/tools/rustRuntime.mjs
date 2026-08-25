@@ -1,0 +1,344 @@
+/**
+ * Host bridge to the Rust Agent Runtime sidecar.
+ *
+ * See docs/agent-runtime-migration.md. The runtime is migrating out of this process one stage at a
+ * time; this module is the seam it arrives through. It owns three things and deliberately nothing else:
+ * spawning the sidecar, speaking its protocol, and deciding — per call — whether the sidecar or the
+ * existing JS handler serves a tool.
+ *
+ * ## Why a child process rather than a native addon
+ *
+ * A panic in a sidecar costs one restart of the sidecar. A panic in a NAPI addon takes down the main
+ * process and every open conversation with it. A separate process also keeps the binary free of any
+ * Electron ABI coupling, which this repo already pays for once with node-pty (electron-rebuild in dev,
+ * asarUnpack when packaging) and explicitly avoided a second time by choosing node:sqlite over
+ * better-sqlite3 -- see the header of electron/automation/db.mjs.
+ *
+ * ## Fail open, always
+ *
+ * Every failure mode here -- binary missing, spawn refused, protocol mismatch, crash mid-call, a tool
+ * the runtime does not implement -- resolves to `null`, which means "the JS handler serves this call".
+ * The runtime can therefore be absent, broken, or a version behind, and the app behaves exactly as it
+ * did before it existed. That property is what makes it safe to enable by default later; until then it
+ * is off unless ZERAIX_RUST_RUNTIME says otherwise.
+ */
+import { spawn } from "node:child_process";
+import fs from "node:fs";
+import path from "node:path";
+import process from "node:process";
+
+/** Protocol version this host speaks. Must satisfy the runtime's compatibility rule (same major, minor <= runtime's). */
+const PROTOCOL_VERSION = "1.0";
+
+/** A call the sidecar has not answered in this long is not going to help the turn it belongs to. */
+const CALL_TIMEOUT_MS = 180_000;
+/** Handshake budget. Generous: a cold binary on a slow disk still has to be paged in. */
+const INIT_TIMEOUT_MS = 10_000;
+/**
+ * Consecutive spawn failures after which we stop trying for the rest of the session.
+ *
+ * Without this, a runtime that crashes on startup would be respawned on every single tool call --
+ * turning a broken sidecar into a fork bomb that is slower than not having it at all.
+ */
+const MAX_SPAWN_FAILURES = 3;
+
+/**
+ * Feature flag. Default OFF: the JS handlers stay authoritative until the A/B harness says otherwise.
+ *
+ * `shadow` used to be accepted here and returned as its own state, described as "run both, compare, still
+ * return the JS answer". Nothing implemented that, and `ensureStarted` only refuses on `"off"` — so the
+ * value behaved EXACTLY like `on`: real calls went to the sidecar and the sidecar's answer was returned.
+ * A flag whose safest-sounding setting silently enables the thing is worse than no flag, so it is refused
+ * outright and says why. Shadow comparison lives in scripts/ab-runtime-parity.mjs, which runs both
+ * implementations against the same tree and diffs every byte.
+ */
+function flagState() {
+  const raw = String(process.env.ZERAIX_RUST_RUNTIME ?? "").trim().toLowerCase();
+  if (raw === "1" || raw === "on" || raw === "true") return "on";
+  if (raw === "shadow") {
+    console.warn(
+      "[rust-runtime] ZERAIX_RUST_RUNTIME=shadow is not implemented and is being treated as OFF. " +
+        "For a side-by-side comparison run scripts/ab-runtime-parity.mjs.",
+    );
+    return "off";
+  }
+  return "off";
+}
+
+/** Where the compiled sidecar lives: packaged beside the app, or in the cargo target dir during development. */
+function binaryPath() {
+  const exe = process.platform === "win32" ? "zeraix-agent-runtime.exe" : "zeraix-agent-runtime";
+  const override = process.env.ZERAIX_RUST_RUNTIME_BIN;
+  if (override) return override;
+  const candidates = [
+    // Packaged: electron-builder places it under resources/.
+    path.join(process.resourcesPath ?? "", "runtime", exe),
+    // Development: whichever profile was built last.
+    path.join(process.cwd(), "runtime", "target", "release", exe),
+    path.join(process.cwd(), "runtime", "target", "debug", exe),
+  ];
+  return candidates.find((p) => p && fs.existsSync(p)) ?? null;
+}
+
+let state = null; // { child, pending, buffer, tools, nextId, ready }
+let callSeq = 0;
+let spawnFailures = 0;
+let disabled = false;
+
+/** Tear down the current sidecar. Pending calls are rejected so no caller waits on a dead process. */
+function teardown(reason) {
+  const s = state;
+  state = null;
+  if (!s) return;
+  for (const [, entry] of s.pending) {
+    clearTimeout(entry.timer);
+    entry.reject(new Error(reason));
+  }
+  s.pending.clear();
+  try {
+    s.child.kill();
+  } catch {
+    /* already gone */
+  }
+}
+
+/** Parse whatever complete lines have arrived and settle the calls they answer. */
+function onData(s, chunk) {
+  s.buffer += chunk;
+  let idx;
+  while ((idx = s.buffer.indexOf("\n")) >= 0) {
+    const line = s.buffer.slice(0, idx).trim();
+    s.buffer = s.buffer.slice(idx + 1);
+    if (!line) continue;
+    let msg;
+    try {
+      msg = JSON.parse(line);
+    } catch {
+      // The sidecar writes diagnostics to stderr, so anything unparseable on stdout is a bug in it.
+      // Logged rather than fatal: one bad line must not strand every later call.
+      console.warn("[rust-runtime] unparseable line on stdout:", line.slice(0, 200));
+      continue;
+    }
+    const entry = s.pending.get(String(msg.id));
+    if (!entry) continue;
+    s.pending.delete(String(msg.id));
+    clearTimeout(entry.timer);
+    if (msg.error) entry.reject(Object.assign(new Error(msg.error.message ?? "runtime error"), { runtimeError: msg.error }));
+    else entry.resolve(msg.result);
+  }
+}
+
+/** Send one request and await its reply. */
+function request(s, method, params, timeoutMs) {
+  return new Promise((resolve, reject) => {
+    const id = ++s.nextId;
+    const timer = setTimeout(() => {
+      s.pending.delete(String(id));
+      reject(new Error(`${method} timed out after ${timeoutMs}ms`));
+    }, timeoutMs);
+    s.pending.set(String(id), { resolve, reject, timer });
+    try {
+      s.child.stdin.write(`${JSON.stringify({ id, method, params })}\n`);
+    } catch (e) {
+      s.pending.delete(String(id));
+      clearTimeout(timer);
+      reject(e);
+    }
+  });
+}
+
+/** Fire-and-forget notification (no id, no reply). Used for cancel and cache invalidation. */
+function notify(s, method, params) {
+  try {
+    s.child.stdin.write(`${JSON.stringify({ method, params })}\n`);
+  } catch {
+    /* the sidecar is gone; the caller's own teardown path will notice */
+  }
+}
+
+/** Spawn and handshake. Returns the live state, or null if the runtime is unavailable for any reason. */
+async function ensureStarted() {
+  if (disabled || flagState() === "off") return null;
+  if (state?.ready) return state;
+  if (state) return null; // a start is already in flight; this call uses the JS handler
+
+  const bin = binaryPath();
+  if (!bin) {
+    disabled = true; // not built -- there is nothing to retry
+    return null;
+  }
+
+  let child;
+  try {
+    child = spawn(bin, [], { stdio: ["pipe", "pipe", "pipe"], windowsHide: true });
+  } catch (e) {
+    if (++spawnFailures >= MAX_SPAWN_FAILURES) disabled = true;
+    console.warn("[rust-runtime] spawn failed:", e?.message ?? e);
+    return null;
+  }
+
+  const s = { child, pending: new Map(), buffer: "", tools: new Set(), nextId: 0, ready: false };
+  state = s;
+
+  child.stdout.setEncoding("utf8");
+  child.stdout.on("data", (d) => onData(s, d));
+  // The sidecar's own logs. Surfaced rather than swallowed: a silent sidecar that quietly falls back
+  // on every call would look like "the Rust runtime is doing nothing" and be invisible to diagnose.
+  child.stderr.setEncoding("utf8");
+  child.stderr.on("data", (d) => process.stderr.write(`[rust-runtime] ${d}`));
+  child.on("exit", (code, signal) => {
+    if (state === s) teardown(`runtime exited (code=${code} signal=${signal ?? "-"})`);
+    if (code !== 0 && ++spawnFailures >= MAX_SPAWN_FAILURES) {
+      disabled = true;
+      console.warn(`[rust-runtime] disabled after ${spawnFailures} failures`);
+    }
+  });
+  child.on("error", (e) => {
+    if (state === s) teardown(`runtime error: ${e?.message ?? e}`);
+  });
+
+  try {
+    const init = await request(
+      s,
+      "runtime.initialize",
+      { protocol_version: PROTOCOL_VERSION, client: "zeraix-electron" },
+      INIT_TIMEOUT_MS,
+    );
+    for (const name of init?.tools ?? []) s.tools.add(name);
+    s.ready = true;
+    spawnFailures = 0;
+    console.info(`[rust-runtime] ready -- protocol ${init?.protocol_version}, ${s.tools.size} tool(s)`);
+    return s;
+  } catch (e) {
+    // A version mismatch lands here too, which is the point of negotiating: the host falls back
+    // cleanly instead of failing somewhere deep in a turn.
+    console.warn("[rust-runtime] handshake failed:", e?.message ?? e);
+    teardown("handshake failed");
+    if (++spawnFailures >= MAX_SPAWN_FAILURES) disabled = true;
+    return null;
+  }
+}
+
+/**
+ * Try to serve a tool call from the Rust runtime.
+ *
+ * Returns `{ ok, content }` on success, or **null** meaning "not served -- use the JS handler". Null is
+ * returned for every failure mode there is, deliberately: the caller has a working implementation, so
+ * there is never a reason to surface an infrastructure problem to the model as a tool failure.
+ *
+ * `tool.unsupported_pattern` is the one *expected* fallback rather than a fault: Rust's regex crate has
+ * no backreferences or lookaround, so a pattern using them is valid in the JS handler and uncompilable
+ * here. See the header of search_in_files.rs.
+ */
+export async function tryRunTool(name, args, { signal, workdir, callId } = {}) {
+  const s = await ensureStarted();
+  if (!s || !s.tools.has(name)) return null;
+  if (!workdir) return null; // no workspace to scope the call to
+
+  // Minted here when the caller has no handle of its own. runTool's signature carries a signal but no
+  // id, and the id exists only so an abort can name the call it is aborting -- so generating it locally
+  // keeps cancellation working without threading a new argument through every caller.
+  const id = callId ?? `h${++callSeq}`;
+  const onAbort = () => notify(s, "tool.cancel", { call_id: id });
+  if (signal?.aborted) return { ok: false, content: "The user stopped this operation before it started." };
+  signal?.addEventListener("abort", onAbort, { once: true });
+
+  try {
+    const res = await request(
+      s,
+      "tool.call",
+      { name, args: args ?? {}, workdir, call_id: id },
+      CALL_TIMEOUT_MS,
+    );
+    if (!res) return null;
+    // A capability gap in the Rust tool: fall back rather than reporting a failure the JS path
+    // would not have produced.
+    if (res.error?.code === "tool.unsupported_pattern") return null;
+    return { ok: Boolean(res.ok), content: String(res.content ?? "") };
+  } catch (e) {
+    console.warn(`[rust-runtime] ${name} fell back to the JS handler:`, e?.message ?? e);
+    return null;
+  } finally {
+    signal?.removeEventListener("abort", onAbort);
+  }
+}
+
+/**
+ * Tell the runtime a workspace's file list is stale.
+ *
+ * Needed only while the two runtimes share a tree: the JS handlers still own every mutating tool, so
+ * the Rust side cannot know a file was created or deleted. Once those tools migrate, each reports the
+ * invalidation itself and this goes away.
+ */
+export function invalidateFileList(workdir) {
+  const s = state;
+  if (s?.ready) notify(s, "workspace.invalidate", { workdir: workdir ?? null });
+}
+
+/**
+ * Start the sidecar at app boot and say — once, plainly — what happened.
+ *
+ * Without this the bridge is invisible. `ensureStarted` is lazy, so nothing happens until the first tool
+ * call, and every failure path returns null so the app keeps working with no indication that the runtime
+ * it was told to use is absent. "Is Rust actually serving my calls?" then has no answer short of reading
+ * a usage log, which is how you end up believing a flag took effect when it did not.
+ *
+ * Safe to call unconditionally: with the flag off it prints one line and starts nothing.
+ */
+export async function warmUp() {
+  const flag = flagState();
+  if (flag === "off") {
+    const bin = binaryPath();
+    console.info(
+      bin
+        ? "[rust-runtime] disabled (ZERAIX_RUST_RUNTIME unset) — a built binary is present; `npm run electron:dev:rust` enables it"
+        : "[rust-runtime] disabled (ZERAIX_RUST_RUNTIME unset, no binary built)",
+    );
+    return { enabled: false, ready: false, tools: [] };
+  }
+
+  const bin = binaryPath();
+  if (!bin) {
+    console.warn(
+      "[rust-runtime] ENABLED but no binary found — run `npm run build:runtime`. " +
+        "Every tool call will fall back to the JS handlers.",
+    );
+    return { enabled: true, ready: false, tools: [] };
+  }
+
+  const s = await ensureStarted();
+  if (!s) {
+    console.warn(`[rust-runtime] ENABLED but could not start ${bin} — falling back to the JS handlers.`);
+    return { enabled: true, ready: false, tools: [] };
+  }
+  const tools = [...s.tools];
+  console.info(`[rust-runtime] ACTIVE — ${bin}`);
+  console.info(`[rust-runtime] serving ${tools.length} tool(s): ${tools.join(", ")}`);
+  console.info("[rust-runtime] every other tool still runs on the JS handlers");
+  return { enabled: true, ready: true, tools };
+}
+
+/** Which tools the runtime is currently serving. Diagnostic; also used by the A/B harness. */
+export function servedTools() {
+  return state?.ready ? [...state.tools] : [];
+}
+
+/** Whether the runtime is live. */
+export function isReady() {
+  return Boolean(state?.ready);
+}
+
+/** Stop the sidecar. Called on app quit so no orphan survives the window closing. */
+export async function shutdown() {
+  const s = state;
+  if (!s?.ready) {
+    teardown("shutdown");
+    return;
+  }
+  try {
+    await request(s, "runtime.shutdown", {}, 2000);
+  } catch {
+    /* it is going away regardless */
+  }
+  teardown("shutdown");
+}

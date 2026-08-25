@@ -211,7 +211,11 @@ test("a failed step is not a failed goal", () => {
 test("a plan without a goal is refused", () => {
   const res = applyPlan(emptyGoal(), { steps: ["do something"] });
   assert.equal(res.ok, false);
-  assert.match(res.message, /Call set_goal first/);
+  // The refusal now points at /goal rather than at set_goal: the model has no tool for setting a goal, so
+  // telling it to call one would send it after something that does not exist. The behaviour under test —
+  // a plan is refused when there is no goal to plan for — is unchanged.
+  assert.match(res.message, /No goal is set/);
+  assert.doesNotMatch(res.message, /set_goal/, "must not name a tool the model cannot call");
 });
 
 /* ------------------------------------------------------------------ todo synchronisation */

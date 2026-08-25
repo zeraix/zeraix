@@ -27,6 +27,11 @@ import { PARALLEL_SAFE_TOOLS, UNCAPPED_TOOLS, WORKDIR_SCOPE_RULE, workdirPrompt 
 import { groupParallelCalls } from "./sendPrep";
 import type { ApiMsg, ChatResponse, RequestLog, RunCtx, SubAgentStep } from "./types";
 import { applyReasoningPolicy } from "./wireHelpers";
+import { runAgentLoop } from "@/lib/agent/agentLoop";
+import type { RuntimeBoundary } from "@/lib/agent/runtimeBoundary";
+import type { ToolResult } from "@/lib/agent/turn";
+import type { ModelCapabilities } from "@/lib/agent/modelAdapter";
+import type { ThinkingConfig } from "@/lib/ai/thinking";
 
 /** What one delegation is asked to do, plus where its progress goes. */
 export type DelegationOpts = {
@@ -50,12 +55,18 @@ export function createRunDelegation(deps: {
   sandboxStatus: () => SandboxStatus | null;
   isLocalModel: boolean;
   sendReasoningContext: () => boolean;
+  /** The user's thinking setting. A sub-agent's reasoning is clamped against it exactly as the main agent's is. */
+  thinking: ThinkingConfig;
+  /** What the model can do (§5): the gate on varying reasoning effort per round. */
+  capabilities: ModelCapabilities;
   requestChat: (
     messages: ApiMsg[],
     tools?: unknown[],
     signal?: AbortSignal,
     onDelta?: (d: { content: string; reasoning: string }) => void,
     log?: RequestLog,
+    /** Per-request reasoning, from this round's phase. Omitted → the session setting. */
+    reasoning?: ThinkingConfig,
   ) => Promise<ChatResponse>;
   execToolCall: (
     ctx: RunCtx,
@@ -63,6 +74,10 @@ export function createRunDelegation(deps: {
     args: Record<string, unknown>,
     displayName: string,
     actor?: string,
+    /** Set when a brokered sub-agent is the caller; null here — a fixed-role delegation is not brokered. */
+    requester?: { agentId: string; task: string } | null,
+    /** Whether the call succeeded. Folded into Execution State, so a failure makes the next round `recovering`. */
+    onResult?: (ok: boolean) => void,
   ) => Promise<string>;
   /** This turn's completed delegations — the repeat-delegation guard reads it, likewise at delegation time. */
   delegations: () => { turnId: string; done: PriorDelegation[] };
@@ -75,6 +90,8 @@ export function createRunDelegation(deps: {
     sandboxStatus,
     isLocalModel,
     sendReasoningContext,
+    thinking,
+    capabilities,
     requestChat,
     execToolCall,
     delegations,
@@ -202,78 +219,172 @@ export function createRunDelegation(deps: {
       return { conclusion, error };
     };
 
-    // No upper limit on subagent rounds: loop until the subagent produces final text, or the user interrupts (using this run's own signal).
-    while (true) {
-      if (ctx.signal.aborted) return finish("(canceled)", "cancelled");
-      opts.status(t("chat.subagentThinking", { agent: agentId }));
-      // The subagent bypasses the main wire pipeline, so the policy is applied here too — without it the thinking text carried
-      // on `convo` below would reach every provider, including the ones that reject the field.
-      const data = await requestChat(
-        applyReasoningPolicy(convo, isLocalModel, sendReasoningContext()),
-        subTools,
-        ctx.signal,
-        undefined,
-        subLog,
-      );
-      rounds++;
-      const u = data.usage;
-      if (u) {
-        subUsage.prompt += u.prompt_tokens ?? 0;
-        subUsage.completion += u.completion_tokens ?? 0;
-        subUsage.total += u.total_tokens ?? (u.prompt_tokens ?? 0) + (u.completion_tokens ?? 0);
-      }
-      if (ctx.signal.aborted) return finish("(canceled)", "cancelled");
-      const msg = data.choices?.[0]?.message;
-      if (!msg) return finish("(no response from subagent)", "no response");
-      // Rebuilt field-by-field rather than spread: the response type allows `null` for the reasoning fields, while the wire
-      // buffer wants "absent or a string". A subagent runs its own tool loop against the same model, so it has the same
-      // prefix break to avoid — carry the thinking text, and let applyReasoningPolicy above decide who actually receives it.
-      const subReasoning = (msg.reasoning_content ?? msg.reasoning ?? "").trim();
-      convo = [
-        ...convo,
-        {
-          role: "assistant",
-          content: msg.content,
-          ...(msg.tool_calls?.length ? { tool_calls: msg.tool_calls } : {}),
-          ...(subReasoning ? { reasoning_content: subReasoning } : {}),
-        },
-      ];
+    // ── The shared Agent Loop ────────────────────────────────────────────────────────────────────────────
+    //
+    // docs/agent-runtime-loop.md §15: a sub-agent runs "its own instance of the same Agent Loop the Main
+    // Agent uses", not a second implementation of one. This used to be a bare `while (true)` with no upper
+    // limit, no doom-loop detection and no stop policy — so a sub-agent that started repeating itself did so
+    // completely unobserved, which is worse than the main agent's case because nobody is watching its output.
+    //
+    // What it gains by converging: execution state, phase-based reasoning (a recovery round inside a
+    // delegation keeps full effort, a routine one is economised), doom-loop detection, and the same
+    // structured stop reasons. What it keeps: everything about how a delegation runs — its own conversation,
+    // its own tool set, its trace reported through onStep, its usage accounting.
+    let lastContent = "";
 
-      if (msg.tool_calls && msg.tool_calls.length > 0) {
-        const runOne = async (tc: (typeof msg.tool_calls)[number]) => {
+    // A sub-agent's boundary. It has no path to choice cards (collectCtx drops every non-tool push) and its
+    // conversation is never persisted, so those two members are unreachable rather than merely unused —
+    // stated here as behaviour instead of left as silent no-ops.
+    const boundary: RuntimeBoundary = {
+      signal: ctx.signal,
+      onEvent: (event) => {
+        if (event.type === "status") opts.status(event.text);
+      },
+      // Consent is asked for INSIDE execToolCall, on the same queue the main agent uses and with the
+      // sub-agent named as requester. The loop never reaches for it.
+      requestConsent: async () => "no",
+      askUser: async () => {
+        throw new Error("a sub-agent cannot ask the user: it has no path to a choice card");
+      },
+      storage: {
+        appendMessage: () => -1,
+        setMessageReminder: () => {},
+        setGenerating: () => {},
+      },
+    };
+
+    const result = await runAgentLoop({
+      boundary,
+      sessionId: ctx.convId,
+      turnId: ctx.turnId,
+      modelId: agentId,
+      agentId,
+      thinking,
+      capabilities,
+      // Sub-agents have no goal of their own: the goal belongs to the conversation, and the main agent's
+      // evaluator judges it from the transcript the delegation's conclusion lands in.
+      evaluateGoal: undefined,
+      now: () => Date.now(),
+      runRound: async ({ reasoning }) => {
+        opts.status(t("chat.subagentThinking", { agent: agentId }));
+        // The subagent bypasses the main wire pipeline, so the policy is applied here too — without it the
+        // thinking text carried on `convo` would reach every provider, including those that reject the field.
+        const data = await requestChat(
+          applyReasoningPolicy(convo, isLocalModel, sendReasoningContext()),
+          subTools,
+          ctx.signal,
+          undefined,
+          subLog,
+          // The phase-based effort the loop resolved for THIS round. Passing it is the entire point of the
+          // convergence: without it the loop would compute a reasoning decision that nothing applied, and a
+          // sub-agent's recovery round would be issued at whatever the session default happened to be.
+          reasoning.config,
+        );
+        rounds++;
+        const u = data.usage;
+        if (u) {
+          subUsage.prompt += u.prompt_tokens ?? 0;
+          subUsage.completion += u.completion_tokens ?? 0;
+          subUsage.total += u.total_tokens ?? (u.prompt_tokens ?? 0) + (u.completion_tokens ?? 0);
+        }
+        const msg = data.choices?.[0]?.message;
+        if (!msg) {
+          return { content: "", reasoning: "", toolResults: [], toolCallCount: 0, providerError: "no response" };
+        }
+        // Rebuilt field-by-field rather than spread: the response type allows `null` for the reasoning
+        // fields, while the wire buffer wants "absent or a string". A subagent runs its own tool loop against
+        // the same model, so it has the same prefix break to avoid — carry the thinking text, and let
+        // applyReasoningPolicy above decide who actually receives it.
+        const subReasoning = (msg.reasoning_content ?? msg.reasoning ?? "").trim();
+        convo = [
+          ...convo,
+          {
+            role: "assistant",
+            content: msg.content,
+            ...(msg.tool_calls?.length ? { tool_calls: msg.tool_calls } : {}),
+            ...(subReasoning ? { reasoning_content: subReasoning } : {}),
+          },
+        ];
+        lastContent = msg.content || "";
+        const calls = msg.tool_calls ?? [];
+        if (calls.length === 0) {
+          return { content: lastContent, reasoning: subReasoning, toolResults: [], toolCallCount: 0 };
+        }
+
+        const runOne = async (tc: (typeof calls)[number]) => {
           let a: Record<string, unknown> = {};
           try {
             a = JSON.parse(tc.function.arguments || "{}");
           } catch {
             /* Invalid JSON arguments, call with an empty object */
           }
-          const content = await execToolCall(collectCtx, tc.function.name, a, `${label}→${tc.function.name}`, actor);
-          return { tc, content };
+          let ok = true;
+          const content = await execToolCall(
+            collectCtx,
+            tc.function.name,
+            a,
+            `${label}→${tc.function.name}`,
+            actor,
+            null,
+            (v) => {
+              ok = v;
+            },
+          );
+          return { tc, args: a, content, ok };
         };
 
-        // Same batching rule as the main loop: consecutive read-only calls run concurrently, everything else serial.
-        // No dispatcher unwrapping here — a subagent's calls are executed by raw name (see execToolCall below).
-        const groups = groupParallelCalls(
-          msg.tool_calls,
-          (tc) => tc.function.name,
-          PARALLEL_SAFE_TOOLS,
-        );
-
+        // Same batching rule as the main loop: consecutive read-only calls run concurrently, everything else
+        // serial. No dispatcher unwrapping — a subagent's calls are executed by raw name.
+        const groups = groupParallelCalls(calls, (tc) => tc.function.name, PARALLEL_SAFE_TOOLS);
+        const toolResults: ToolResult[] = [];
         for (const group of groups) {
-          if (ctx.signal.aborted) return finish("(canceled)", "cancelled");
+          if (ctx.signal.aborted) break;
           const settled =
             group.length > 1 ? await Promise.all(group.map(runOne)) : [await runOne(group[0])];
-          for (const { tc, content } of settled) {
+          for (const { tc, args, content, ok } of settled) {
             if (typeof content === "string") detectServices(content);
-            // Compress overly long tool output, to avoid bloating the subagent context (the subagent conversation is not persisted and only lives for this delegation).
-            // read_file is exempt for the same reason as the main loop: eliding the middle of a source file makes the subagent's conclusion unreliable.
+            // Compress overly long tool output, to avoid bloating the subagent context (its conversation is
+            // not persisted and lives only for this delegation). read_file is exempt for the same reason as
+            // the main loop: eliding the middle of a source file makes the conclusion unreliable.
             const capped = UNCAPPED_TOOLS.has(tc.function.name) ? content : capToolOutput(content);
             convo = [...convo, { role: "tool", tool_call_id: tc.id, content: capped }];
+            toolResults.push({
+              toolCallId: tc.id,
+              name: tc.function.name,
+              args,
+              content: capped,
+              ok,
+              ms: 0,
+            });
           }
         }
-        continue;
-      }
-      return finish(msg.content || "(no output from subagent)");
+        return {
+          content: lastContent,
+          reasoning: subReasoning,
+          toolResults,
+          toolCallCount: calls.length,
+        };
+      },
+    });
+
+    // Map the structured stop reason onto the delegation's own two-field outcome. Only `completed` is an
+    // answer; everything else is a delegation that did not finish, and saying so is what stops a truncated
+    // run from being recorded as a reusable conclusion (see finish()).
+    switch (result.stop.reason) {
+      case "completed":
+        return finish(lastContent || "(no output from subagent)");
+      case "cancelled":
+        return finish("(canceled)", "cancelled");
+      case "doom-loop":
+        return finish(
+          lastContent || `(the ${agentId} sub-agent stopped making progress and was halted)`,
+          `doom-loop: ${result.stop.detail ?? ""}`.trim(),
+        );
+      default:
+        return finish(
+          lastContent || `(the ${agentId} sub-agent stopped: ${result.stop.reason})`,
+          result.stop.detail ? `${result.stop.reason}: ${result.stop.detail}` : result.stop.reason,
+        );
     }
   };
 }

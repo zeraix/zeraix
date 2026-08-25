@@ -21,7 +21,6 @@ import { SANDBOX_TOOLBOX_SKILL } from "@/lib/ai/skills/builtin";
 import {
   askUserTool, updateTodosTool, setTaskStateTool, openBrowserTool, browserTool, imageGenerationTool,
   saveMemoryTool, deleteMemoryTool, searchMemoryTool, callToolTool,
-  setGoalTool, updatePlanTool,
 } from "@/app/agent/chat/agentTools";
 import { joinSubagentsTool, spawnSubagentsTool, subAgentTool } from "@/lib/ai/subagents";
 import { isMcpToolName, isRouted, ROUTED_TOOLS } from "@/lib/ai/toolRouter";
@@ -114,13 +113,15 @@ export function buildToolSet(native: unknown[], { memory = true } = {}): unknown
     askUserTool(),
     updateTodosTool(),
     setTaskStateTool(),
-    // Composed unconditionally; whether each actually reaches the wire is decided by the routing filter at the end.
-    // `set_goal` is routed now and `update_plan` is not — the rules their descriptions used to carry live in
-    // GOAL_EXPLAINER (always in messages[0]) and in the catalog, so routing one of them deletes no argument. See
-    // toolRouter.ts. There is deliberately no third tool for "declare the goal met": that verdict is the
-    // evaluator's, and giving the model a way to ask for it would be giving it a way to grant it.
-    setGoalTool(),
-    updatePlanTool(),
+    // `set_goal` and `update_plan` are deliberately absent, and not merely unrouted: the goal belongs to the
+    // USER, who sets it with /goal, and the model has no way to declare, narrow or re-plan it. Removing a tool
+    // from this list only stops it being *declared* — it must also be absent from ROUTED_TOOLS (or the catalog
+    // still advertises it) and from rendererTools (or `call_tool` still executes it by name). All three were
+    // done together; see toolRouter.ts and the rendererTools table.
+    //
+    // There was already no tool for "declare the goal met": that verdict is the evaluator's, and giving the
+    // model a way to ask for it would be giving it a way to grant it. The same reasoning now covers setting the
+    // condition in the first place.
     openBrowserTool(),
     browserTool(),
     // Declared even with no image key configured. Gating it here used to be the earliest per-install difference in the array;

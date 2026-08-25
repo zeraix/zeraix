@@ -63,6 +63,8 @@ next-env.d.ts
 
 # QEMU sandbox preinstalled binaries (prepared at release time, not committed); rootfs is downloaded to ~/.operease/vm on first run
 resources/bin/*/
+# Staged Rust sidecar (built by scripts/build-rust-runtime.mjs, not committed).
+resources/runtime/
 resources/qemu/*/
 
 # Google OAuth fallback credentials (generated locally from .env during build; do not commit)
@@ -71,3 +73,8 @@ electron/services/google-defaults.json
 build-mac.sh
 # Plugin OAuth client credentials (generated locally from .env during build; do not commit)
 electron/plugins/oauth-credentials.json
+
+# Rust Agent Runtime build artifacts (see runtime/ and docs/agent-runtime-migration.md).
+# The compiled sidecar is produced by `cargo build --release`; only the sources and Cargo.lock
+# belong in the repo.
+/runtime/target

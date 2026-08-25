@@ -2,7 +2,7 @@ import { create } from "zustand";
 import { getAuthToken, isAuthenticated, setAuthCookie } from "@/lib/actions/auth.actions";
 import { getStorage, setStorage } from "@zzcpt/zztool";
 import { refreshCurrentUser } from "@/lib/api/auth";
-import { IUser } from "@/types/auth";
+import type { IUser } from "@/types/auth";
 import STORAGE_KEY from "@/constants/Storage";
 
 /**

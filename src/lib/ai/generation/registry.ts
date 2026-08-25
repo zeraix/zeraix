@@ -7,6 +7,7 @@
  * "this vendor cannot generate images", which fails safe.
  */
 import { PROVIDERS } from "@/app/agent/chat/providers";
+import { adapterFor, findCustomEngine } from "./custom";
 import { getApiKeyByRef } from "@/lib/ai/models";
 import { geminiImageAdapter, openaiImageAdapter, qwenImageAdapter, zhipuImageAdapter } from "./adapters";
 import type { CapabilityId, GenerationModel, GenerationProvider } from "./types";
@@ -99,6 +100,35 @@ export interface SelectedEngine {
  * required and always shown on the chat card.
  */
 export function selectEngine(capability: CapabilityId, chatProviderId?: string): SelectedEngine | null {
+  // Step 0: an engine the user added themselves (see custom.ts).
+  //
+  // Ahead of the registry, and deliberately so. Everything below this is inference — "you have a Zhipu key,
+  // so you presumably want Zhipu images" — which is the right default precisely BECAUSE the user expressed no
+  // preference. Once they have gone to Settings and configured an endpoint for this capability, they have
+  // expressed one, and a guess must not outrank it. It is also the only path that works at all when the
+  // user's vendor is not one of the four below.
+  const mine = findCustomEngine(capability);
+  if (mine) {
+    const adapter = adapterFor(mine);
+    // findCustomEngine already refuses an engine with no adapter; this narrows the type and keeps the
+    // invariant local rather than assumed.
+    if (adapter) {
+      return {
+        provider: {
+          id: mine.id,
+          label: mine.label,
+          capability: mine.capability,
+          path: "",
+          models: [{ id: mine.model, label: mine.label }],
+          adapter,
+        },
+        model: { id: mine.model, label: mine.label },
+        endpoint: mine.endpoint,
+        apiKey: getApiKeyByRef(mine.id),
+      };
+    }
+  }
+
   const usable = (p: GenerationProvider) =>
     p.capability === capability && p.models.length > 0 && !!getApiKeyByRef(p.id) && !!generationEndpoint(p);
 

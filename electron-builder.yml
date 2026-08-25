@@ -129,6 +129,15 @@ extraResources:
   # Staged straight from the docker build context so there is ONE copy of the file in the repo and the two cannot drift.
   - from: sandbox/qemu/rapidocr_v6_api.py
     to: ocr/rapidocr_v6_api.py
+  # The Rust Agent Runtime sidecar, staged by scripts/build-rust-runtime.mjs. It lands at
+  # Contents/Resources/runtime/ (mac) or resources\runtime\ (win), which is the FIRST path
+  # binaryPath() in electron/tools/rustRuntime.mjs probes — keep the two in step or the packaged app
+  # silently falls back to the JS handlers forever, which is indistinguishable from working.
+  #
+  # Signed as part of the .app by electron-builder under hardenedRuntime, the same way the bundled
+  # qemu binaries above are; the afterAllArtifactBuild hook only signs the DMG on top of that.
+  - from: resources/runtime
+    to: runtime
 
 # Keep only the English language pack
 # Filter locales/*.pak on Windows/Linux; filter .lproj directories on macOS

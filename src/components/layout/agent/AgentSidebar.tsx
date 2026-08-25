@@ -261,6 +261,7 @@ export default function AgentSidebar({
   const activeConversationId = useAgentChatStore((s) => s.activeConversationId);
   const generating = useAgentChatStore((s) => s.generating);
   const pendingConsent = useAgentChatStore((s) => s.pendingConsent);
+  const pendingQuestion = useAgentChatStore((s) => s.pendingQuestion);
   const initStore = useAgentChatStore((s) => s.init);
   const setActiveProject = useAgentChatStore((s) => s.setActiveProject);
   const setActiveConversation = useAgentChatStore((s) => s.setActiveConversation);
@@ -594,6 +595,7 @@ export default function AgentSidebar({
               active={c.id === activeConversationId}
               generating={!!generating[c.id]}
               pendingConsent={!!pendingConsent[c.id]}
+              pendingQuestion={!!pendingQuestion[c.id]}
               onClick={() => openConversation(c.id, c.projectId)}
               onNewChat={() => {
                 const proj = projects.find((pp) => pp.id === c.projectId);
@@ -811,6 +813,7 @@ function SidebarLeaf({
   active = false,
   generating = false,
   pendingConsent = false,
+  pendingQuestion = false,
   onClick,
   onNewChat,
   onOpenFolder,
@@ -823,6 +826,7 @@ function SidebarLeaf({
   generating?: boolean;
   /** Whether this conversation has a sensitive-tool confirmation waiting (show an "approval needed" badge). */
   pendingConsent?: boolean;
+  pendingQuestion?: boolean;
   onClick?: () => void;
   /** Right-click "New chat" (take the project path and start a new conversation). */
   onNewChat?: () => void;
@@ -847,11 +851,15 @@ function SidebarLeaf({
       )}
     >
       <span className="min-w-0 flex-1 truncate">{label}</span>
-      {/* Approval-needed badge: a pulsing amber dot when this conversation is waiting for the user to confirm a sensitive
-          tool. Takes precedence over the generating spinner (the AI is blocked on the user, not actively producing). */}
-      {pendingConsent ? (
+      {/* Waiting-on-you badge: a pulsing amber dot when this conversation needs the user before it can go on —
+          either a sensitive tool awaiting confirmation, or an unanswered ask_user question. Both take
+          precedence over the generating spinner (the AI is blocked on the user, not actively producing).
+          A question badge matters most for a conversation that is NOT on screen: its card is shown only in
+          its own conversation, so without this the only signal would be an OS notification the user may
+          never see while the app is focused. */}
+      {pendingConsent || pendingQuestion ? (
         <span
-          title={t("sidebar.approvalNeeded")}
+          title={pendingConsent ? t("sidebar.approvalNeeded") : t("sidebar.answerNeeded")}
           className="size-2 shrink-0 animate-pulse rounded-full bg-amber-500"
         />
       ) : (

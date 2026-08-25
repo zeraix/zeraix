@@ -4,6 +4,13 @@ import { useEffect, useState } from "react";
 import { ImageOff, Plus, Trash2 } from "lucide-react";
 import { useLoginModalStore } from "@/store/loginModalStore";
 import {
+  addCustomEngine,
+  loadCustomEngines,
+  removeCustomEngine,
+  type CustomEngine,
+  type EngineFormat,
+} from "@/lib/ai/generation/custom";
+import {
   addCustomModel,
   addOfficialModel,
   addOfficialModelFromCatalog,
@@ -52,6 +59,18 @@ export function ModelsSection({ t }: { t: TFunc }) {
   const [omSelected, setOmSelected] = useState("");
   // Custom model form.
   const [cApiFormat, setCApiFormat] = useState("openai-chat");
+  /**
+   * What the entry being added actually is.
+   *
+   * A chat model and an image engine are different things that happen to share an "add a model" form: they
+   * have different endpoints, different response shapes, and different consumers. The selector decides which
+   * LIST the entry lands in — a chat model goes to the model picker, an image engine to the generation
+   * engines (see lib/ai/generation/custom.ts). They are never mixed, because that was tried once and had to
+   * be cleaned up afterwards by purgeLegacyImageModels.
+   */
+  const [cKind, setCKind] = useState<"chat" | "image_generation">("chat");
+  const [cImageFormat, setCImageFormat] = useState<EngineFormat>("openai-image");
+  const [engines, setEngines] = useState<CustomEngine[]>([]);
   const [cBaseUrl, setCBaseUrl] = useState("");
   const [cFullUrl, setCFullUrl] = useState(false);
   const [cModel, setCModel] = useState("");
@@ -65,6 +84,7 @@ export function ModelsSection({ t }: { t: TFunc }) {
   useEffect(() => {
     setList(loadModelList());
     setSelectedId(getSelectedModelId());
+    setEngines(loadCustomEngines());
   }, []);
 
   // Fetch the official model list (requires login + a reachable platform).
@@ -128,14 +148,27 @@ export function ModelsSection({ t }: { t: TFunc }) {
   };
   const addCustom = () => {
     if (!cBaseUrl.trim() || !cModel.trim()) return;
-    addCustomModel({
-      baseUrl: cBaseUrl.trim(),
-      fullUrl: cFullUrl,
-      model: cModel.trim(),
-      apiFormat: cApiFormat,
-      multimodal: cMultimodal,
-      apiKey: cKey,
-    });
+    if (cKind === "image_generation") {
+      // The URL is taken as given. An image endpoint's path is vendor-specific (/images/generations,
+      // /v4/images/generations, :predict …), so appending one would be a guess that silently produces 404s.
+      addCustomEngine({
+        capability: "image_generation",
+        endpoint: cBaseUrl.trim(),
+        model: cModel.trim(),
+        format: cImageFormat,
+        apiKey: cKey,
+      });
+      setEngines(loadCustomEngines());
+    } else {
+      addCustomModel({
+        baseUrl: cBaseUrl.trim(),
+        fullUrl: cFullUrl,
+        model: cModel.trim(),
+        apiFormat: cApiFormat,
+        multimodal: cMultimodal,
+        apiKey: cKey,
+      });
+    }
     setCBaseUrl("");
     setCFullUrl(false);
     setCModel("");
@@ -144,6 +177,8 @@ export function ModelsSection({ t }: { t: TFunc }) {
     setCApiFormat("openai-chat");
     refresh();
   };
+
+  const dropEngine = (id: string) => setEngines(removeCustomEngine(id));
   const setDefault = (id: string) => {
     setSelectedModelId(id);
     setSelectedId(id);
@@ -355,18 +390,87 @@ export function ModelsSection({ t }: { t: TFunc }) {
         </div>
       </div>
 
+      {/* Generation engines the user added.
+          Shown separately from the model list, and deliberately so: these are not selectable and never appear
+          in the chat picker — the image_generation tool resolves one by capability when it needs it. Listing
+          them here is what makes an added engine verifiable at all; without it the only way to know whether
+          one took would be to ask for an image and see. */}
+      {engines.length > 0 && (
+        <>
+          <p className="mb-2 text-sm font-semibold text-ink">{t("models.engines")}</p>
+          <div className="mb-5 space-y-2">
+            {engines.map((e) => (
+              <div
+                key={e.id}
+                className="flex items-center gap-3 rounded-xl border border-line bg-surface-muted/50 px-4 py-2.5"
+              >
+                <div className="min-w-0 flex-1">
+                  <p className="truncate text-sm font-medium text-ink">{e.label}</p>
+                  <p className="truncate font-mono text-[11px] text-ink-subtle">{e.endpoint}</p>
+                </div>
+                <span className="shrink-0 rounded-md bg-surface px-2 py-0.5 text-[11px] text-ink-muted">
+                  {t("models.kindImage")}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => dropEngine(e.id)}
+                  aria-label={t("models.remove")}
+                  className="shrink-0 rounded-md p-1.5 text-ink-subtle transition-colors hover:bg-destructive/10 hover:text-destructive"
+                >
+                  <Trash2 className="size-3.5" />
+                </button>
+              </div>
+            ))}
+          </div>
+        </>
+      )}
+
       {/* Add custom model */}
       <p className="mb-2 text-sm font-semibold text-ink">{t("models.addCustom")}</p>
       <div className="space-y-3 rounded-xl border border-line bg-surface-muted/50 px-4 py-3.5">
-        {/* API format */}
+        {/* What is being added. Video is absent on purpose: CapabilityId has it, but no video adapter exists
+            yet, so offering it would let the user configure something that cannot run. */}
+        <div>
+          <label className="mb-1 block text-xs font-medium text-ink">
+            <span className="text-destructive">*</span> {t("models.kind")}
+          </label>
+          <select
+            value={cKind}
+            onChange={(e) => setCKind(e.target.value as "chat" | "image_generation")}
+            className={cn(FIELD_CLS, "w-full")}
+          >
+            <option value="chat">{t("models.kindChat")}</option>
+            <option value="image_generation">{t("models.kindImage")}</option>
+          </select>
+        </div>
+
+        {/* API format — the chat request shape, or the image RESPONSE shape, which is the part that varies. */}
         <div>
           <label className="mb-1 block text-xs font-medium text-ink">
             <span className="text-destructive">*</span> {t("models.apiFormat")}
           </label>
-          <select value={cApiFormat} onChange={(e) => setCApiFormat(e.target.value)} className={cn(FIELD_CLS, "w-full")}>
-            <option value="openai-chat">{t("models.apiFormatOpenAI")}</option>
-            <option value="openai-responses">{t("models.apiFormatResponses")}</option>
-          </select>
+          {cKind === "chat" ? (
+            <select value={cApiFormat} onChange={(e) => setCApiFormat(e.target.value)} className={cn(FIELD_CLS, "w-full")}>
+              <option value="openai-chat">{t("models.apiFormatOpenAI")}</option>
+              <option value="openai-responses">{t("models.apiFormatResponses")}</option>
+            </select>
+          ) : (
+            <>
+              <select
+                value={cImageFormat}
+                onChange={(e) => setCImageFormat(e.target.value as EngineFormat)}
+                className={cn(FIELD_CLS, "w-full")}
+              >
+                <option value="openai-image">{t("models.imageFormatOpenAI")}</option>
+                <option value="zhipu-image">{t("models.imageFormatZhipu")}</option>
+                <option value="gemini-image">{t("models.imageFormatGemini")}</option>
+                <option value="qwen-image">{t("models.imageFormatQwen")}</option>
+              </select>
+              <p className="mt-1 rounded-md bg-surface px-2.5 py-1.5 text-[11px] leading-relaxed text-ink-subtle">
+                ⓘ {t("models.imageFormatHint")}
+              </p>
+            </>
+          )}
         </div>
 
         {/* Custom request URL + full-URL toggle */}
@@ -375,10 +479,12 @@ export function ModelsSection({ t }: { t: TFunc }) {
             <label className="text-xs font-medium text-ink">
               <span className="text-destructive">*</span> {t("models.customUrl")}
             </label>
-            <span className="flex items-center gap-1.5 text-[11px] text-ink-subtle">
-              {t("models.fullUrl")}
-              <ToggleSwitch on={cFullUrl} onChange={setCFullUrl} label={t("models.fullUrl")} />
-            </span>
+            {cKind === "chat" && (
+              <span className="flex items-center gap-1.5 text-[11px] text-ink-subtle">
+                {t("models.fullUrl")}
+                <ToggleSwitch on={cFullUrl} onChange={setCFullUrl} label={t("models.fullUrl")} />
+              </span>
+            )}
           </div>
           <input
             value={cBaseUrl}
@@ -388,7 +494,7 @@ export function ModelsSection({ t }: { t: TFunc }) {
           />
           <p className="mt-1 rounded-md bg-surface px-2.5 py-1.5 text-[11px] leading-relaxed text-ink-subtle">
             ⓘ{" "}
-            {cFullUrl ? (
+            {cKind === "image_generation" || cFullUrl ? (
               t("models.urlHintFull")
             ) : (
               <>
@@ -407,10 +513,12 @@ export function ModelsSection({ t }: { t: TFunc }) {
             <label className="text-xs font-medium text-ink">
               <span className="text-destructive">*</span> {t("models.modelId")}
             </label>
-            <span className="flex items-center gap-1.5 text-[11px] text-ink-subtle">
-              {t("models.multimodal")}
-              <ToggleSwitch on={cMultimodal} onChange={setCMultimodal} label={t("models.multimodal")} />
-            </span>
+            {cKind === "chat" && (
+              <span className="flex items-center gap-1.5 text-[11px] text-ink-subtle">
+                {t("models.multimodal")}
+                <ToggleSwitch on={cMultimodal} onChange={setCMultimodal} label={t("models.multimodal")} />
+              </span>
+            )}
           </div>
           <input
             value={cModel}
