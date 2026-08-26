@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 import { usePathname } from "next/navigation";
 import { motion, AnimatePresence } from "framer-motion";
 import { PanelLeft } from "lucide-react";
@@ -9,7 +9,8 @@ import AgentSidebar from "./AgentSidebar";
 import FilesSidebar from "./FilesSidebar";
 import FilesPanel from "@/app/agent/chat/FilesPanel";
 import { ChatAgentView } from "@/app/agent/chat/page";
-import WindowControls from "./WindowControls";
+import WindowControls, { useWindowControlsPresent, WINDOW_CONTROLS_WIDTH } from "./WindowControls";
+import { TitleBarSlotContext, FilesSidebarContext, TITLE_BAR_HEIGHT } from "./titleBar";
 import LocalModelSync from "@/components/ai/LocalModelSync";
 import TrayLabelSync from "@/components/ai/TrayLabelSync";
 import { requestCloseFile } from "@/lib/fileViewer";
@@ -25,6 +26,11 @@ const EASE = [0.4, 0, 0.2, 1] as const;
  */
 export default function AgentShell({ children }: { children: React.ReactNode }) {
   const [collapsed, setCollapsed] = useState(false);
+  // The title bar's left slot, handed to the conversation header so it can render into this row. State, not a ref, so
+  // filling it re-renders the consumer; mounted only on the chat route, which is what keeps the header out of the bar
+  // on every other page (the conversation view stays mounted there but hidden).
+  const [titleSlot, setTitleSlot] = useState<HTMLDivElement | null>(null);
+  const hasWindowControls = useWindowControlsPresent();
   // Files sidebar: when open, collapse the main sidebar and surface the file tree in the same spot; when closed, restore the main sidebar.
   const [filesOpen, setFilesOpen] = useState(false);
   // Full-screen pages (e.g. settings) hide the left main sidebar; the page provides its own back entry. See AGENT_FULLSCREEN_PATHS.
@@ -35,17 +41,25 @@ export default function AgentShell({ children }: { children: React.ReactNode }) 
   // See ChatAgentView / page.tsx.
   const isChatRoute = pathname === "/agent/chat";
 
-  const openFiles = () => {
+  const openFiles = useCallback(() => {
     setFilesOpen(true);
     setCollapsed(true);
-  };
-  const closeFiles = () => {
+  }, []);
+  const closeFiles = useCallback(() => {
     setFilesOpen(false);
     setCollapsed(false);
     requestCloseFile(); // When collapsing the file-tree sidebar, also close the right-side file view/edit panel
-  };
+  }, []);
+  // What the title bar's Files button drives: one button that opens the sidebar and closes it again. Handed over as a
+  // memoised object so the conversation view only re-renders when the sidebar actually opens or closes.
+  const filesSidebar = useMemo(
+    () => ({ open: filesOpen, toggle: () => (filesOpen ? closeFiles() : openFiles()) }),
+    [filesOpen, closeFiles, openFiles]
+  );
 
   return (
+    <TitleBarSlotContext.Provider value={titleSlot}>
+    <FilesSidebarContext.Provider value={filesSidebar}>
     <div className="relative flex h-full w-full overflow-hidden bg-surface">
       {/* Global: local model ready/stopped -> sync the chat model list (persists across pages, so leaving the model-library page doesn't lose the ready event). */}
       <LocalModelSync />
@@ -58,7 +72,7 @@ export default function AgentShell({ children }: { children: React.ReactNode }) 
           transition={{ duration: 0.28, ease: EASE }}
           className="h-full shrink-0 overflow-hidden"
         >
-          <AgentSidebar onToggle={() => setCollapsed(true)} onOpenFiles={openFiles} />
+          <AgentSidebar onToggle={() => setCollapsed(true)} />
         </motion.div>
       )}
 
@@ -72,17 +86,29 @@ export default function AgentShell({ children }: { children: React.ReactNode }) 
             transition={{ duration: 0.28, ease: EASE }}
             className="h-full shrink-0 overflow-hidden"
           >
-            <FilesSidebar onClose={closeFiles} />
+            <FilesSidebar />
           </motion.div>
         )}
       </AnimatePresence>
 
       <main className="flex min-w-0 flex-1 flex-col overflow-hidden">
-        {/* Top title bar: reserves height and is draggable (top-right window controls float over it), keeping content off the window's top edge */}
+        {/* Top title bar: draggable, with the top-right window controls floating over the gap reserved at its end.
+            On the chat route the conversation header fills the slot on the left, so the conversation title, the
+            environment switch and the skills / clear buttons sit on this row instead of in a second strip below it.
+            Everywhere else the bar is empty, and only keeps page content off the window's top edge. */}
         <div
           style={{ WebkitAppRegion: "drag" } as React.CSSProperties}
-          className="h-8 shrink-0 bg-surface"
-        />
+          className={`flex ${TITLE_BAR_HEIGHT} shrink-0 items-stretch bg-surface ${
+            isChatRoute ? "border-b border-line" : ""
+          }`}
+        >
+          {/* Clears the floating "expand sidebar" button, which overlaps this row's left end while the sidebar is away. */}
+          {collapsed && !hideSidebar && !filesOpen && <div className="w-[44px] shrink-0" />}
+          {isChatRoute && <div ref={setTitleSlot} className="flex min-w-0 flex-1 items-center" />}
+          {hasWindowControls && (
+            <div className="shrink-0" style={{ width: WINDOW_CONTROLS_WIDTH }} aria-hidden />
+          )}
+        </div>
         {/* Content row below the top bar: page content + right-side file panel side by side. The file panel sits
             here (below the top bar) rather than outside main, so its header doesn't overlap the top-right window
             controls (which float over the top bar). */}
@@ -113,7 +139,7 @@ export default function AgentShell({ children }: { children: React.ReactNode }) 
             exit={{ opacity: 0, x: -8 }}
             transition={{ duration: 0.2, ease: EASE }}
             style={{ WebkitAppRegion: "no-drag" } as React.CSSProperties}
-            className="absolute left-3 top-3 z-[60] flex size-8 items-center justify-center rounded-lg border border-line bg-surface text-foreground/70 shadow-sm transition-colors hover:bg-accent hover:text-foreground"
+            className="absolute left-2 top-[9px] z-[60] flex size-8 items-center justify-center rounded-lg border border-line bg-surface text-foreground/70 shadow-sm transition-colors hover:bg-accent hover:text-foreground"
           >
             <PanelLeft className="size-4" />
           </motion.button>
@@ -122,5 +148,7 @@ export default function AgentShell({ children }: { children: React.ReactNode }) 
       {/* Windows / Linux: top-right window controls (not rendered on macOS, which uses the sidebar traffic lights) */}
       <WindowControls />
     </div>
+    </FilesSidebarContext.Provider>
+    </TitleBarSlotContext.Provider>
   );
 }

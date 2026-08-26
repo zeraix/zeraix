@@ -1,20 +1,16 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import Image from "next/image";
 import { usePathname, useRouter } from "next/navigation";
 import {
   ChevronDown,
-  ChevronRight,
   ChevronsUpDown,
   PanelLeftClose,
   Pin,
-  MessageSquarePlus,
-  PencilLine,
-  Trash2,
+  Folder,
   FolderOpen,
-  FolderTree,
   Settings,
   CircleHelp,
   Coins,
@@ -33,12 +29,6 @@ import {
   DropdownMenuSubTrigger,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import {
-  ContextMenu,
-  ContextMenuContent,
-  ContextMenuItem,
-  ContextMenuTrigger,
-} from "@/components/ui/context-menu";
 import {
   Dialog,
   DialogContent,
@@ -66,8 +56,6 @@ import { PLUGINS_UI_ENABLED } from "@/constants/App";
 import { cn } from "@/lib/utils";
 import { formatWallet, isCnEdition } from "@/lib/edition";
 import { openPathInShell } from "@/lib/electron/shell";
-import { isToolkitAvailable, setWorkingDir } from "@/lib/ai/toolkit";
-import { Spinner } from "@/components/ui/spinner";
 import {
   minimizeWindow,
   toggleMaximizeWindow,
@@ -79,6 +67,7 @@ import {
   onWindowAlwaysOnTopChange,
 } from "@/lib/electron/windowControls";
 import STORAGE_KEY from "@/constants/Storage";
+import SidebarLeaf, { formatAge } from "./SidebarLeaf";
 import CustomScrollbar from "@/components/CustomScrollbar";
 /**
  * New Agent sidebar (independent of the legacy `sidebar.tsx`).
@@ -102,6 +91,7 @@ const NAV_ITEMS: NavItem[] = [
   { id: "automation", labelKey: "nav.automation", icon: "/image/agent/sidebar/sidebar3.svg", activeIcon: "/image/agent/sidebar/sidebar31.svg", href: "/agent/automation" },
   { id: "models", labelKey: "nav.models", icon: "/image/agent/sidebar/sidebar4.svg", activeIcon: "/image/agent/sidebar/sidebar41.svg", href: "/agent/models" },
   { id: "plugins", labelKey: "nav.plugins", icon: "/image/agent/sidebar/sidebar5.svg", activeIcon: "/image/agent/sidebar/sidebar51.svg", href: "/agent/plugins" },
+  { id: "library", labelKey: "nav.library", icon: "/image/agent/sidebar/sidebar6.svg", activeIcon: "/image/agent/sidebar/sidebar61.svg", href: "/agent/library" },
   // Filtered rather than deleted: the page and its route stay built and reachable by URL for
   // testing, and switching PLUGINS_UI_ENABLED on is the whole launch.
 ]
@@ -233,14 +223,7 @@ function CollapsibleSection({
   );
 }
 
-export default function AgentSidebar({
-  onToggle,
-  onOpenFiles,
-}: {
-  onToggle?: () => void;
-  /** Open the "Files" sidebar: collapse the main sidebar and reveal a separate file-list sidebar (coordinated by AgentShell). */
-  onOpenFiles?: () => void;
-}) {
+export default function AgentSidebar({ onToggle }: { onToggle?: () => void }) {
   const pathname = usePathname();
   const router = useRouter();
   const { userInfo, isLoggedIn, logOut } = useAuthStore();
@@ -262,6 +245,7 @@ export default function AgentSidebar({
   const generating = useAgentChatStore((s) => s.generating);
   const pendingConsent = useAgentChatStore((s) => s.pendingConsent);
   const pendingQuestion = useAgentChatStore((s) => s.pendingQuestion);
+  const unread = useAgentChatStore((s) => s.unread);
   const initStore = useAgentChatStore((s) => s.init);
   const setActiveProject = useAgentChatStore((s) => s.setActiveProject);
   const setActiveConversation = useAgentChatStore((s) => s.setActiveConversation);
@@ -316,6 +300,13 @@ export default function AgentSidebar({
     void initStore();
   }, [initStore]);
 
+  // Chat rows show how long ago each was last updated; re-read the clock every minute so "13m" does not sit there stale.
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const id = setInterval(() => setNow(Date.now()), 60_000);
+    return () => clearInterval(id);
+  }, []);
+
   // Mirror of the current route (so event handlers can read the latest value, avoiding stale closures): only auto-navigate to the selected conversation on conversation-related routes.
   const pathnameRef = useRef(pathname);
   pathnameRef.current = pathname;
@@ -331,12 +322,38 @@ export default function AgentSidebar({
   useEffect(() => {
     if (currentProjectId) void ensureProjectLoaded(currentProjectId);
   }, [currentProjectId, ensureProjectLoaded]);
-  const projectConversations = conversations
-    .filter((c) => c.projectId === currentProjectId)
-    .sort((a, b) => b.updatedAt - a.updatedAt);
+  // Projects and chats are one tree: a project row expands to reveal its own chats. Projects start open — the tree is
+  // meant to be read as one list of chats grouped by folder — and stay that way until the user folds one, which is why
+  // this is an override map rather than a set of open ids (a set would need an effect to seed itself).
+  const [expandOverrides, setExpandOverrides] = useState<Record<string, boolean>>({});
+  const expandedProjectIds = useMemo(
+    () => projects.filter((p) => expandOverrides[p.id] ?? true).map((p) => p.id),
+    [projects, expandOverrides]
+  );
+  // Chats are now visible for any open project, not just the current one, so each open project needs its records loaded.
+  useEffect(() => {
+    expandedProjectIds.forEach((id) => void ensureProjectLoaded(id));
+  }, [expandedProjectIds, ensureProjectLoaded]);
+  const setProjectExpanded = (id: string, open: boolean) =>
+    setExpandOverrides((m) => ({ ...m, [id]: open }));
+
+  // Chats grouped by project (most recently updated first), so each row can render its own children without re-filtering.
+  const conversationsByProject = useMemo(() => {
+    const map = new Map<string, typeof conversations>();
+    for (const c of [...conversations].sort((a, b) => b.updatedAt - a.updatedAt)) {
+      const list = map.get(c.projectId);
+      if (list) list.push(c);
+      else map.set(c.projectId, [c]);
+    }
+    return map;
+  }, [conversations]);
 
   const openConversation = (id: string, projectId: string) => {
     setActiveConversation(id);
+    // Chats of every open project are reachable now, so a chat can belong to a project that is not the current one;
+    // adopt its project so the sidebar highlight and the Files button follow the chat. The working directory is left to
+    // the chat page, which restores the conversation's own directory (more precise than the project's) as it loads.
+    if (projectId !== currentProjectId) setActiveProject(projectId);
     saveSelection({ projectId, conversationId: id }); // remember the selection, to restore on the next launch
     router.push(`/agent/chat?c=${id}&p=${projectId}`);
   };
@@ -366,29 +383,15 @@ export default function AgentSidebar({
     }
   };
 
-  // Click "Files": before opening, always land the "target project" directory as the main-process working directory, so the file tree shows that project's contents.
-  //  - Target project = the active project, otherwise the first project in the list.
-  // Why it must be landed explicitly here: the file tree reads the main-process cwd, but clicking a project's selectProject only dispatches
-  // WORKDIR_SET_EVENT (which only the conversation page listens to and calls setWorkingDir); on other pages the cwd isn't updated, causing
-  // "clicked a project then clicked Files, but the file tree didn't switch over". Here we call setWorkingDir directly and await it before opening,
-  // ensuring that when the file tree mounts, the cwd already points at the target project — regardless of the current page.
-  const handleOpenFiles = async () => {
-    const target =
-      (activeProjectId ? projects.find((p) => p.id === activeProjectId) : undefined) ??
-      projects[0] ??
-      null;
-    if (target) {
-      if (target.id !== activeProjectId) setActiveProject(target.id);
-      const dir = projectFolder(target);
-      if (dir) {
-        putStorage(AGENT_WORKDIR_KEY, dir);
-        window.dispatchEvent(new CustomEvent(WORKDIR_SET_EVENT, { detail: dir }));
-        if (isToolkitAvailable()) await setWorkingDir(dir).catch(() => {});
-      } else {
-        clearAgentWorkdir();
-      }
+  // Click a project row: open it and make it current. Clicking the already-open current project folds it back up.
+  const toggleProject = (p: { id: string; workdir?: string }) => {
+    const open = expandedProjectIds.includes(p.id);
+    if (open && p.id === currentProjectId) {
+      setProjectExpanded(p.id, false);
+      return;
     }
-    onOpenFiles?.();
+    if (!open) setProjectExpanded(p.id, true);
+    selectProject(p);
   };
 
   // Right-click "New chat": take that project's path and start a new conversation belonging to that project.
@@ -558,84 +561,107 @@ export default function AgentSidebar({
         })}
       </motion.nav>
 
-      {/* Project group (= folders): click to switch the current project. When there are too many, scroll within this section (max 30vh),
-          taking only the height needed, without crowding out the conversation list space */}
-      <CollapsibleSection title={t("section.projects")} className="mt-7 max-h-[30vh] px-3" scroll>
+      {/* Projects + their chats, as one tree: clicking a project expands its chats underneath. Fills the remaining
+          space (pushing the user area to the bottom) and scrolls internally when the tree gets long. */}
+      <CollapsibleSection title={t("section.projects")} className="mt-7 min-h-0 flex-1 px-3" scroll>
         {projects.length === 0 ? (
           <p className="px-2 py-1 text-xs text-muted-foreground">{t("sidebar.autoCreated")}</p>
         ) : (
-          projects.map((p) => (
-            <SidebarLeaf
-              key={p.id}
-              label={p.name}
-              active={p.id === currentProjectId}
-              onClick={() => selectProject(p)}
-              onNewChat={() => newChatInProject(p.workdir)}
-              onOpenFolder={(() => {
-                const dir = projectFolder(p);
-                return dir ? () => void openPathInShell(dir) : undefined;
-              })()}
-              onRename={() => setRenameState({ kind: "project", id: p.id, value: p.name })}
-              onDelete={() => setDeleteState({ kind: "project", id: p.id, name: p.name })}
-            />
-          ))
+          projects.map((p) => {
+            const expanded = expandedProjectIds.includes(p.id);
+            const convs = conversationsByProject.get(p.id) ?? [];
+            // Rolled up onto a collapsed project row: without this, a chat needing attention inside a folded project
+            // would show no signal at all.
+            const rollup = expanded
+              ? { generating: false, consent: false, question: false, unread: false }
+              : {
+                  generating: convs.some((c) => generating[c.id]),
+                  consent: convs.some((c) => pendingConsent[c.id]),
+                  question: convs.some((c) => pendingQuestion[c.id]),
+                  unread: convs.some((c) => unread[c.id]),
+                };
+            return (
+              <div key={p.id}>
+                <SidebarLeaf
+                  label={p.name}
+                  active={p.id === currentProjectId}
+                  icon={
+                    expanded ? (
+                      <FolderOpen className="size-[15px]" />
+                    ) : (
+                      <Folder className="size-[15px]" />
+                    )
+                  }
+                  generating={rollup.generating}
+                  pendingConsent={rollup.consent}
+                  pendingQuestion={rollup.question}
+                  unread={rollup.unread}
+                  expanded={expanded}
+                  onClick={() => toggleProject(p)}
+                  onNewChat={() => newChatInProject(p.workdir)}
+                  onOpenFolder={(() => {
+                    const dir = projectFolder(p);
+                    return dir ? () => void openPathInShell(dir) : undefined;
+                  })()}
+                  onRename={() => setRenameState({ kind: "project", id: p.id, value: p.name })}
+                  onDelete={() => setDeleteState({ kind: "project", id: p.id, name: p.name })}
+                />
+                <AnimatePresence initial={false}>
+                  {expanded && (
+                    <motion.div
+                      initial={{ height: 0, opacity: 0 }}
+                      animate={{ height: "auto", opacity: 1 }}
+                      exit={{ height: 0, opacity: 0 }}
+                      transition={{ duration: 0.18, ease: EASE }}
+                      className="overflow-hidden"
+                    >
+                      {/* No rule and no indent: the folder glyph in the gutter is what marks a project row, so chat
+                          labels line up directly under the project label they belong to. */}
+                      <div className="space-y-0.5 py-0.5">
+                        {convs.length === 0 ? (
+                          <p className="px-8 py-1 text-xs text-muted-foreground">
+                            {t("sidebar.noConversations")}
+                          </p>
+                        ) : (
+                          convs.map((c) => (
+                            <SidebarLeaf
+                              key={c.id}
+                              label={c.title || t("conversation.untitled")}
+                              active={c.id === activeConversationId}
+                              meta={formatAge(c.updatedAt, now, locale)}
+                              generating={!!generating[c.id]}
+                              pendingConsent={!!pendingConsent[c.id]}
+                              pendingQuestion={!!pendingQuestion[c.id]}
+                              unread={!!unread[c.id]}
+                              onClick={() => openConversation(c.id, c.projectId)}
+                              onNewChat={() => newChatInProject(p.workdir)}
+                              onOpenFolder={(() => {
+                                // A conversation prefers its own actual directory (under the default project each conversation has its own real directory); if missing, fall back to the project directory.
+                                const dir = c.workdir || p.workdir;
+                                return dir ? () => void openPathInShell(dir) : undefined;
+                              })()}
+                              onRename={() =>
+                                setRenameState({ kind: "conversation", id: c.id, value: c.title || "" })
+                              }
+                              onDelete={() =>
+                                setDeleteState({
+                                  kind: "conversation",
+                                  id: c.id,
+                                  name: c.title || t("conversation.untitled"),
+                                })
+                              }
+                            />
+                          ))
+                        )}
+                      </div>
+                    </motion.div>
+                  )}
+                </AnimatePresence>
+              </div>
+            );
+          })
         )}
       </CollapsibleSection>
-
-      {/* Conversation group (fills the remaining space, pushing the user area to the bottom; when the list is too long, scroll within this section) */}
-      <CollapsibleSection title={t("section.conversations")} className="mt-7 min-h-0 flex-1 px-3" scroll>
-        {projectConversations.length === 0 ? (
-          <p className="px-2 py-1 text-xs text-muted-foreground">{t("sidebar.noConversations")}</p>
-        ) : (
-
-          projectConversations.map((c) => (
-            <SidebarLeaf
-              key={c.id}
-              label={c.title || t("conversation.untitled")}
-              active={c.id === activeConversationId}
-              generating={!!generating[c.id]}
-              pendingConsent={!!pendingConsent[c.id]}
-              pendingQuestion={!!pendingQuestion[c.id]}
-              onClick={() => openConversation(c.id, c.projectId)}
-              onNewChat={() => {
-                const proj = projects.find((pp) => pp.id === c.projectId);
-                newChatInProject(proj?.workdir ?? "");
-              }}
-              onOpenFolder={(() => {
-                // A conversation prefers its own actual directory (under the default project each conversation has its own real directory); if missing, fall back to the project directory.
-                const dir = c.workdir || projects.find((pp) => pp.id === c.projectId)?.workdir;
-                return dir ? () => void openPathInShell(dir) : undefined;
-              })()}
-              onRename={() =>
-                setRenameState({ kind: "conversation", id: c.id, value: c.title || "" })
-              }
-              onDelete={() =>
-                setDeleteState({
-                  kind: "conversation",
-                  id: c.id,
-                  name: c.title || t("conversation.untitled"),
-                })
-              }
-            />
-          ))
-        )}
-      </CollapsibleSection>
-
-      {/* Files: click to open the separate "Files" sidebar (collapse the main sidebar and reveal the file tree, see AgentShell).
-          Electron only; determine only after mounted, to avoid a hydration mismatch between static export (no window) and the client. */}
-      {mounted && isToolkitAvailable() && (
-        <div className="mt-2 px-3">
-          <button
-            type="button"
-            onClick={() => void handleOpenFiles()}
-            className="flex w-full items-center gap-3 rounded-lg px-3 py-2 text-sm text-foreground transition-colors hover:bg-accent/60 dark:hover:bg-white/[0.04]"
-          >
-            <FolderTree className="size-[18px] shrink-0 text-muted-foreground" />
-            <span className="flex-1 truncate text-left">{t("files.section")}</span>
-            <ChevronRight className="size-4 shrink-0 text-muted-foreground" />
-          </button>
-        </div>
-      )}
 
       {/* Bottom user */}
       <div className="border-t border-line p-3">
@@ -804,88 +830,5 @@ export default function AgentSidebar({
         </DialogContent>
       </Dialog>
     </aside>
-  );
-}
-
-/** A list item within a section (project / conversation entry). Supports a context menu when onNewChat/onRename/onDelete are provided. */
-function SidebarLeaf({
-  label,
-  active = false,
-  generating = false,
-  pendingConsent = false,
-  pendingQuestion = false,
-  onClick,
-  onNewChat,
-  onOpenFolder,
-  onRename,
-  onDelete,
-}: {
-  label: string;
-  active?: boolean;
-  /** Whether this conversation is currently generating AI output (if so, show a spinner on the right). */
-  generating?: boolean;
-  /** Whether this conversation has a sensitive-tool confirmation waiting (show an "approval needed" badge). */
-  pendingConsent?: boolean;
-  pendingQuestion?: boolean;
-  onClick?: () => void;
-  /** Right-click "New chat" (take the project path and start a new conversation). */
-  onNewChat?: () => void;
-  /** Right-click "Open folder" (open the project directory in the system file manager); not provided when there's no directory. */
-  onOpenFolder?: () => void;
-  /** Right-click "Rename". */
-  onRename?: () => void;
-  /** Right-click "Delete". */
-  onDelete?: () => void;
-}) {
-  const t = useT();
-  const leaf = (
-    <button
-      type="button"
-      onClick={onClick}
-      title={label}
-      className={cn(
-        "flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm transition-colors",
-        active
-          ? "bg-accent font-medium text-foreground dark:bg-white/[0.06]"
-          : "text-foreground/80 hover:bg-accent dark:hover:bg-white/[0.04]"
-      )}
-    >
-      <span className="min-w-0 flex-1 truncate">{label}</span>
-      {/* Waiting-on-you badge: a pulsing amber dot when this conversation needs the user before it can go on —
-          either a sensitive tool awaiting confirmation, or an unanswered ask_user question. Both take
-          precedence over the generating spinner (the AI is blocked on the user, not actively producing).
-          A question badge matters most for a conversation that is NOT on screen: its card is shown only in
-          its own conversation, so without this the only signal would be an OS notification the user may
-          never see while the app is focused. */}
-      {pendingConsent || pendingQuestion ? (
-        <span
-          title={pendingConsent ? t("sidebar.approvalNeeded") : t("sidebar.answerNeeded")}
-          className="size-2 shrink-0 animate-pulse rounded-full bg-amber-500"
-        />
-      ) : (
-        generating && <Spinner className="size-3.5 shrink-0 text-muted-foreground" />
-      )}
-    </button>
-  );
-
-  if (!onNewChat && !onOpenFolder && !onRename && !onDelete) return leaf;
-
-  return (
-    <ContextMenu>
-      <ContextMenuTrigger asChild>{leaf}</ContextMenuTrigger>
-      <ContextMenuContent className="w-40">
-        {onNewChat && <ContextMenuItem onSelect={onNewChat}><MessageSquarePlus />{t("ctx.newChat")}</ContextMenuItem>}
-        {onOpenFolder && <ContextMenuItem onSelect={onOpenFolder}><FolderOpen />{t("ctx.openFolder")}</ContextMenuItem>}
-        {onRename && <ContextMenuItem onSelect={onRename}><PencilLine />{t("ctx.rename")}</ContextMenuItem>}
-        {onDelete && (
-          <ContextMenuItem
-            onSelect={onDelete}
-            className="text-destructive focus:text-destructive"
-          >
-            <Trash2 />{t("ctx.delete")}
-          </ContextMenuItem>
-        )}
-      </ContextMenuContent>
-    </ContextMenu>
   );
 }

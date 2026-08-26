@@ -63,6 +63,7 @@ export function Composer({
   onGoSettings,
   thinking,
   onThinkingChange,
+  contextIndicator,
 }: {
   input: string;
   onInputChange: (v: string) => void;
@@ -83,6 +84,11 @@ export function Composer({
   /** Thinking mode: the master switch plus the gear it uses while on. */
   thinking: ThinkingConfig;
   onThinkingChange: (next: ThinkingConfig) => void;
+  /**
+   * Rendered immediately left of the send button — the context-usage ring. A slot rather than the half-dozen props
+   * the indicator needs, so the composer stays out of the compaction business entirely.
+   */
+  contextIndicator?: React.ReactNode;
 }) {
   const t = useT();
   const ime = useImeGuard();
@@ -498,12 +504,15 @@ export function Composer({
               </DropdownMenuContent>
             </DropdownMenu>
 
-            {/* Send / stop (right-aligned) */}
+            {/* Trailing group, right-aligned: context ring, then stop / send. The group carries the anchor so the
+                buttons keep their position whether or not the ring is there. */}
+            <div className="ml-auto flex shrink-0 items-center gap-2">
+            {contextIndicator}
             {/* While generating: offer both "stop" and "queue" — queuing adds the new message to the queue, which is then sent automatically in order after this round finishes. */}
             {loading && (
               <button
                 onClick={onCancel}
-                className="ml-auto flex h-9 shrink-0 items-center gap-1.5 rounded-full bg-neutral-700 px-4 text-sm font-semibold text-white shadow-sm transition hover:bg-neutral-800 active:scale-95"
+                className="flex h-9 shrink-0 items-center gap-1.5 rounded-full bg-neutral-700 px-4 text-sm font-semibold text-white shadow-sm transition hover:bg-neutral-800 active:scale-95"
               >
                 <span className="inline-block size-2.5 rounded-[2px] bg-surface" />
                 {t("chat.stop")}
@@ -515,15 +524,13 @@ export function Composer({
                 (!input.trim() && attachments.length === 0) ||
                 attachments.some((a) => a.kind === "image" && a.uploading)
               }
-              className={cn(
-                "flex h-9 shrink-0 items-center gap-1.5 rounded-full bg-gradient-to-br from-primary to-primary/85 pl-4 pr-4 text-sm font-semibold text-white shadow-sm transition hover:shadow-md hover:brightness-105 active:scale-95 disabled:opacity-50 disabled:shadow-none",
-                !loading && "ml-auto",
-              )}
+              className="flex h-9 shrink-0 items-center gap-1.5 rounded-full bg-gradient-to-br from-primary to-primary/85 pl-4 pr-4 text-sm font-semibold text-white shadow-sm transition hover:shadow-md hover:brightness-105 active:scale-95 disabled:opacity-50 disabled:shadow-none"
               title={loading ? t("chat.queueTitle") : undefined}
             >
               <Send className="size-4 -translate-y-px" />
               {loading ? t("chat.queue") : t("chat.send")}
             </button>
+            </div>
           </div>
         </div>
       </div>

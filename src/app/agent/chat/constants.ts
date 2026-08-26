@@ -34,6 +34,7 @@ export const RENDERER_HANDLED_TOOLS = new Set([
   "openBrowser",
   "browser",
   "image_generation",
+  "video_generation",
   "load_skill",
   "save_memory",
   "delete_memory",

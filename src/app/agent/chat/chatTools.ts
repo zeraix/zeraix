@@ -23,8 +23,9 @@ import { getSkillInstructions } from "@/lib/ai/skills/runtime";
 import { SANDBOX_TOOLBOX_SKILL } from "@/lib/ai/skills/builtin";
 import type { InstalledSkill } from "@/lib/ai/skills/types";
 import { isSandboxEngine, type SandboxStatus } from "@/lib/ai/sandbox";
-import { saveAttachment } from "@/lib/ai/toolkit";
-import { generate, imageErrorKey } from "@/lib/ai/generation";
+import { capabilityAvailable, generate, imageErrorKey } from "@/lib/ai/generation";
+import { modelPathFor, storeArtifact } from "@/lib/ai/mediaLibrary";
+import { startGenerationJob } from "@/lib/ai/generation/jobs";
 import { saveMemoryFile, deleteMemoryFile, listMemoryFiles } from "@/lib/ai/memoryFiles";
 import { searchMemories } from "@/lib/ai/memoryRetrieval";
 import { browserAction, requestOpenBrowser, setBrowserBusy, type BrowserAction } from "@/lib/automation";
@@ -56,8 +57,10 @@ export interface RendererToolDeps {
   toolsReady: boolean;
   /** Only `providerId` is read — the image engine is derived from the chat vendor's key. */
   activeModel: ResolvedModel | null;
+  /** Counts a started generation job, so the goal check defers rather than judging a turn that is waiting. */
+  onJobStarted: (convId: string) => void;
   /** Side channel for a generated image's artifact, consumed by the persist step in the turn loop. */
-  lastImageArtifactRef: { current: { image: string; servedBy?: string } | null };
+  lastArtifactRef: { current: { src: string; kind: "image" | "video"; servedBy?: string } | null };
   /**
    * Ask the user a question and wait, through the §13 boundary.
    *
@@ -90,7 +93,8 @@ export function createRendererTools(deps: RendererToolDeps): Record<string, Rend
     sandboxStatusRef,
     toolsReady,
     activeModel,
-    lastImageArtifactRef,
+    lastArtifactRef,
+    onJobStarted,
     askUser,
     setTodosFor,
     taskMemoryFor,
@@ -188,7 +192,7 @@ export function createRendererTools(deps: RendererToolDeps): Record<string, Rend
    * precondition). Handles both artifact shapes: a data: URL decodes inline, a vendor URL downloads
    * once, which also rescues the pixels before the vendor link expires.
    *
-   * The download happens in the MAIN process, via saveAttachment's `url` source. It used to `fetch()`
+   * The download happens in the MAIN process, via the media store's `url` source (mediaStore.saveMedia). It used to `fetch()`
    * here and hand over the bytes, which worked only for the base64 dialect: an adapter that returns a
    * hosted link instead (OpenAI's `data[0].url`, and wan-image always — see firstArtifact in
    * generation/adapters.ts) produces a cross-origin URL, and the renderer has webSecurity on, so the
@@ -196,29 +200,17 @@ export function createRendererTools(deps: RendererToolDeps): Record<string, Rend
    * <img> tag is not CORS-bound, while nothing ever reached disk and the model got no path. Main has no
    * such limit, and this also keeps a multi-MB base64 from crossing IPC.
    */
-  const saveGeneratedArtifact = async (src: string, mime: string, prompt: string): Promise<string | null> => {
+  const saveGeneratedArtifact = async (
+    src: string,
+    mime: string,
+    prompt: string,
+    convId: string,
+  ): Promise<string | null> => {
     if (!toolsReady) return null;
-    try {
-      // Name from the prompt so a directory of generated images stays readable; saveAttachment
-      // sanitizes the name and de-duplicates collisions (-1/-2…), so no timestamp is needed.
-      const slug =
-        prompt
-          .toLowerCase()
-          .replace(/[^a-z0-9]+/g, "-")
-          .replace(/^-+|-+$/g, "")
-          .split("-")
-          .slice(0, 6)
-          .join("-") || "image";
-      const ext = /png|jpeg|jpg|webp|gif/.exec(mime)?.[0].replace("jpeg", "jpg") ?? "png";
-      return await saveAttachment({ name: `generated-${slug}.${ext}`, url: src });
-    } catch (e) {
-      // The user already has the image on screen; a missing file is a degraded path, not a failure. Still
-      // logged rather than dropped: this returning null silently is what hid the CORS bug above, and the
-      // only other symptom is a path the model never mentions.
-      console.warn("[image_generation] could not save the artifact into the working directory:", e);
-      return null;
-    }
+    const { path } = await storeArtifact({ src, mime, origin: "generated", convId, prompt });
+    return path;
   };
+
 
   // image_generation: text-to-image through the user's own provider key. The engine is derived from
   // the configured keys (their chat vendor first, then any keyed vendor) — never picked by the model
@@ -249,22 +241,68 @@ export function createRendererTools(deps: RendererToolDeps): Record<string, Rend
       servedBy: res.artifact.servedBy,
     });
     // Stash the artifact so the persist step can store it (display-only) and the image survives a conversation switch.
-    lastImageArtifactRef.current = { image: res.artifact.src, servedBy: res.artifact.servedBy };
+    lastArtifactRef.current = { src: res.artifact.src, kind: "image", servedBy: res.artifact.servedBy };
 
-    // Also drop the pixels into the working directory. The artifact reaches the renderer as a data: or
-    // vendor URL, neither of which exists for the sandbox — so a model asked to "generate frames, then
-    // stitch them with ffmpeg" would find nothing on disk and fall back to drawing the frames in code.
-    // A real path is what makes a generated image composable with every other tool. Best-effort: the
-    // image is already shown to the user, so a failed write must not turn into a failed generation.
-    const savedPath = await saveGeneratedArtifact(res.artifact.src, res.artifact.mime, prompt);
+    // Also drop the pixels into the media library. The artifact reaches the renderer as a data: or vendor
+    // URL, neither of which exists for the sandbox — so a model asked to "generate frames, then stitch them
+    // with ffmpeg" would find nothing on disk and fall back to drawing the frames in code. A real path is
+    // what makes a generated image composable with every other tool. Best-effort: the image is already shown
+    // to the user, so a failed write must not turn into a failed generation.
+    const savedPath = await saveGeneratedArtifact(res.artifact.src, res.artifact.mime, prompt, ctx.convId);
+    // Named the way the model can actually reach it. It lands in the LIBRARY, which is read-only to the
+    // model — saying "the working directory" here was not a loose phrasing but a wrong instruction: it
+    // invited an in-place edit that tools/paths.mjs then refused.
+    const shown = modelPathFor(savedPath ?? "", isSandboxEngine(sandboxStatusRef.current?.active));
 
     return (
       `Generated the image with ${res.artifact.servedBy}. It is already displayed to the user — do not repeat the URL or embed it in markdown.` +
-      (savedPath
-        ? ` The file is saved in the working directory at ${savedPath} — use that path if you need to process it further (edit, convert, compose into a video); do not redraw it in code.`
+      (shown
+        ? ` The file is saved in the media library at ${shown} — use that exact path to process it further (convert, compose into a video); do not redraw it in code. The library is READ-ONLY: to change the image itself, copy it into the working directory first and write the result there.`
         : // Said outright rather than left to silence. The model otherwise assumes the usual path exists and
           // goes looking for a file that was never written, or invents a plausible-looking one.
-          " It could NOT be written to the working directory, so there is no file to process — do not guess a path for it. If the user needs it on disk, say the save failed.")
+          " It could NOT be written to disk, so there is no file to process — do not guess a path for it. If the user needs it on disk, say the save failed.")
+    );
+  };
+
+  /**
+   * video_generation: start the job and hand back an acknowledgement.
+   *
+   * It does NOT wait. Video takes minutes on every vendor, and awaiting it here — which is what the first
+   * implementation did — holds the turn open for all of them: the model cannot act, the user cannot be
+   * answered, and a spinner that has not moved in four minutes is indistinguishable from one that has hung.
+   *
+   * The job runs on its own (see generation/jobs.ts) and reports back through the same two routes a
+   * `notify` background command uses: riding the next tool result if a turn is still going, or opening a new
+   * turn if the conversation went idle. So the model is told "started", carries on, and is handed the clip
+   * when it exists.
+   */
+  const generateVideoAction = async (ctx: RunCtx, rawArgs: Record<string, unknown>): Promise<string> => {
+    const prompt = String(rawArgs.prompt ?? "").trim();
+    if (!prompt) return "(video_generation is missing prompt)";
+    if (!capabilityAvailable("video_generation")) {
+      return "Video generation is not configured: no video engine has been added in Settings. Tell the user rather than retrying.";
+    }
+
+    const job = startGenerationJob({
+      convId: ctx.convId,
+      capability: "video_generation",
+      prompt,
+      chatProviderId: activeModel?.providerId,
+    });
+    ctx.push({
+      kind: "tool",
+      name: "video_generation",
+      args: { prompt },
+      ok: true,
+      result: t("video.started"),
+    });
+    onJobStarted(ctx.convId);
+
+    return (
+      `Video generation started (job ${job.id}). This takes MINUTES and is running in the background — you have NOT been given the video yet.\n` +
+      "Do not wait for it, do not poll for it, and do not call video_generation again for the same request. " +
+      "The result will be delivered to you automatically when it is ready, and it is shown to the user at that point. " +
+      "Carry on with anything else the user asked for, or tell them it is running and end your turn."
     );
   };
 
@@ -377,6 +415,7 @@ export function createRendererTools(deps: RendererToolDeps): Record<string, Rend
     openBrowser: openBrowserAction,
     browser: browserControl,
     image_generation: generateImageAction,
+    video_generation: generateVideoAction,
     load_skill: loadSkill,
     save_memory: saveMemory,
     delete_memory: deleteMemory,

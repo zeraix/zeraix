@@ -1,37 +1,28 @@
 "use client";
 
-import { ChevronLeft } from "lucide-react";
-import { useT } from "@/lib/i18n";
 import FilesTree from "./FilesTree";
+import { TITLE_BAR_HEIGHT_PX } from "./titleBar";
+
+/** The card is inset by 8px (m-2), so this much of it makes up the rest of the title-bar band. */
+const TOP_STRIP = TITLE_BAR_HEIGHT_PX - 8;
 
 /**
  * Standalone "Files" sidebar: surfaces in the same spot after the main sidebar collapses, showing the file tree of the current working directory.
- * The top back button collapses this sidebar and restores the main sidebar (open/close state coordinated by AgentShell).
  * The card appearance matches the main sidebar (AgentSidebar).
+ *
+ * It carries no title row of its own. The title bar's Files button is the only control — it opens this panel and closes
+ * it again — so a heading repeating the word and a second way to close it were both redundant.
  */
-export default function FilesSidebar({ onClose }: { onClose?: () => void }) {
-  const t = useT();
+export default function FilesSidebar() {
   return (
     <aside className="m-2 flex h-[calc(100%_-_16px)] w-[260px] shrink-0 flex-col overflow-hidden rounded-2xl border border-line bg-surface shadow-[0px_4px_12.3px_0px_#0000000A]">
-      {/* Top: back + title (the whole block is a frameless-window drag region; interactive elements are no-drag) */}
+      {/* Empty top band, as tall as the window's title bar. Not decoration: this strip is where macOS puts the
+          traffic lights and where the frameless window expects to be dragged from, so anything laid out in it is
+          unclickable. The tree starts below it. */}
       <div
-        className="flex items-center gap-1.5 px-3 pt-4 pb-3"
-        style={{ WebkitAppRegion: "drag" } as React.CSSProperties}
-      >
-        <button
-          type="button"
-          aria-label={t("files.close")}
-          title={t("files.close")}
-          onClick={onClose}
-          style={{ WebkitAppRegion: "no-drag" } as React.CSSProperties}
-          className="flex size-7 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground dark:hover:bg-white/[0.04]"
-        >
-          <ChevronLeft className="size-[18px]" />
-        </button>
-        <span className="min-w-0 flex-1 truncate text-sm font-semibold text-foreground">
-          {t("files.section")}
-        </span>
-      </div>
+        className="shrink-0"
+        style={{ height: TOP_STRIP, WebkitAppRegion: "drag" } as React.CSSProperties}
+      />
 
       {/* File tree: the whole block scrolls */}
       <div className="min-h-0 flex-1 overflow-y-auto px-2 pb-3">

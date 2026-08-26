@@ -12,7 +12,7 @@ import type { ProcessItem } from "./MessageItem";
 
 /** A trace entry, which collapses into the "thinking process" card. See the exception in the header. */
 const inProcess = (m: DisplayMsg): boolean =>
-  (m.kind === "tool" && !m.image) || m.kind === "reasoning" || m.kind === "phase";
+  (m.kind === "tool" && !m.image && !m.video) || m.kind === "reasoning" || m.kind === "phase";
 
 /** One rendered row: either a run of trace entries, or a single message shown on its own. */
 export type TranscriptRow =

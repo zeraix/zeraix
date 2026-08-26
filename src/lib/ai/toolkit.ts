@@ -38,7 +38,7 @@ interface AiToolsBridge {
   chooseWorkingDir(): Promise<string | null>;
   defaultWorkingDir(): Promise<string>;
   getPathForFile?(file: File): string;
-  saveAttachment?(payload: { name: string; srcPath?: string; url?: string; bytes?: ArrayBuffer }): Promise<string>;
+  saveAttachment?(payload: { name: string; srcPath?: string; url?: string; bytes?: ArrayBuffer; subdir?: string }): Promise<string>;
   wsReadDir?(relPath?: string): Promise<WsEntry[]>;
   wsReadFile?(relPath: string): Promise<WsReadFileResult>;
   wsWriteFile?(relPath: string, content: string): Promise<WsWriteResult>;
@@ -187,11 +187,17 @@ export function saveAttachment(payload: {
   srcPath?: string;
   bytes?: ArrayBuffer;
   url?: string;
+  /** Optional folder under the working directory (the media library uses `.zeraix-media`). Guarded in main. */
+  subdir?: string;
 }): Promise<string> {
+  // Threaded through every branch below rather than spread once, because each rebuilds the payload by hand —
+  // a field added to only some of them is a save that silently lands in the wrong place for pasted images
+  // but not dragged ones, which is exactly the kind of bug nobody reproduces on purpose.
+  const subdir = payload.subdir;
   if (payload.srcPath) {
     const b = bridge();
     if (!b.saveAttachment) return Promise.reject(new Error("saveAttachment is unavailable (the preload version is too old)"));
-    return b.saveAttachment({ name: payload.name, srcPath: payload.srcPath });
+    return b.saveAttachment({ name: payload.name, srcPath: payload.srcPath, subdir });
   }
   if (payload.bytes) {
     // Byte-only attachments (pasted screenshots, web-uploaded images) hand their bytes to the main
@@ -201,17 +207,17 @@ export function saveAttachment(payload: {
     // a replacement. This is why paste / web uploads failed while Electron file drags (srcPath) worked.
     const bytes = payload.bytes;
     if (window.transfer) {
-      return transferToMain<string>("save-attachment", { name: payload.name }, bytes).catch((e) => {
+      return transferToMain<string>("save-attachment", { name: payload.name, subdir }, bytes).catch((e) => {
         const b = bridge();
         // Retry via invoke only if the bytes are still intact (transfer neuters the buffer once it posts;
         // an up-front failure leaves byteLength untouched).
-        if (b.saveAttachment && bytes.byteLength > 0) return b.saveAttachment({ name: payload.name, bytes });
+        if (b.saveAttachment && bytes.byteLength > 0) return b.saveAttachment({ name: payload.name, bytes, subdir });
         throw e;
       });
     }
     const b = bridge();
     if (!b.saveAttachment) return Promise.reject(new Error("saveAttachment is unavailable (the preload version is too old)"));
-    return b.saveAttachment({ name: payload.name, bytes });
+    return b.saveAttachment({ name: payload.name, bytes, subdir });
   }
   if (payload.url) {
     // A URL-only image (edit/resend, home-page handoff, restored history) — no local bytes to hand over.
@@ -219,7 +225,7 @@ export function saveAttachment(payload: {
     // it into the working directory, so it becomes an editable file, not just something the model can view.
     const b = bridge();
     if (!b.saveAttachment) return Promise.reject(new Error("saveAttachment is unavailable (the preload version is too old)"));
-    return b.saveAttachment({ name: payload.name, url: payload.url });
+    return b.saveAttachment({ name: payload.name, url: payload.url, subdir });
   }
   return Promise.reject(new Error("saveAttachment requires srcPath, bytes, or url"));
 }

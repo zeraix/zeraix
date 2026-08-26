@@ -42,7 +42,15 @@ export interface GenerationArtifact {
 }
 
 export type AdapterResult =
-  | { ok: true; artifacts: GenerationArtifact[] }
+  | { ok: true; artifacts: GenerationArtifact[]; pending?: undefined }
+  /**
+   * The request was ACCEPTED and the work is still running — an async job.
+   *
+   * Images come back on the same response; video does not, on any vendor. Submitting returns a task id and
+   * the caller polls until it settles, which is a different protocol rather than a slower version of the
+   * same one, and it is why this variant exists instead of a longer timeout.
+   */
+  | { ok: true; pending: { taskId: string }; artifacts?: undefined }
   | { ok: false; error: GenerationError };
 
 export interface CapabilityAdapter {
@@ -51,6 +59,16 @@ export interface CapabilityAdapter {
   /** Vendor response → artifacts, or a typed failure. Receives the HTTP status because not every
    *  vendor signals failure the same way (Zhipu reports safety refusals in-band on HTTP 200). */
   fromResponse(json: unknown, status: number): AdapterResult;
+  /**
+   * Async jobs only. Absent means "this adapter always answers on the first response", which is true of
+   * every image adapter and is why nothing else had to change when this was added.
+   */
+  poll?: {
+    /** Where to ask about a submitted task. `template` is the engine's own poll URL, `{id}` substituted. */
+    url(taskId: string, template: string): string;
+    /** A poll response: finished artifacts, still pending, or a typed failure. */
+    from(json: unknown, status: number): AdapterResult;
+  };
 }
 
 export interface GenerationProvider {

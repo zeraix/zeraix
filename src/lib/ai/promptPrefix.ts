@@ -20,6 +20,7 @@ import { skillSystemHint, loadSkillTool } from "@/lib/ai/skills/runtime";
 import { SANDBOX_TOOLBOX_SKILL } from "@/lib/ai/skills/builtin";
 import {
   askUserTool, updateTodosTool, setTaskStateTool, openBrowserTool, browserTool, imageGenerationTool,
+  videoGenerationTool,
   saveMemoryTool, deleteMemoryTool, searchMemoryTool, callToolTool,
 } from "@/app/agent/chat/agentTools";
 import { joinSubagentsTool, spawnSubagentsTool, subAgentTool } from "@/lib/ai/subagents";
@@ -127,6 +128,9 @@ export function buildToolSet(native: unknown[], { memory = true } = {}): unknown
     // Declared even with no image key configured. Gating it here used to be the earliest per-install difference in the array;
     // the model is told it is unusable through the disabledTools reminder instead, which costs nothing when it never changes.
     imageGenerationTool(),
+    // Declared unconditionally for the same reason as image_generation: a per-install difference here is a
+    // per-install difference in the cached prefix. Availability is announced through disabledTools instead.
+    videoGenerationTool(),
     ...(memory
       ? [saveMemoryTool(), deleteMemoryTool(), searchMemoryTool()]
       : []),

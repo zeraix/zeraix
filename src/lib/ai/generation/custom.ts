@@ -27,8 +27,17 @@ import { getStorage } from "@zzcpt/zztool";
 // putStorage, not setStorage: setStorage is a no-op for falsy values, so clearing a key needs the wrapper.
 import { putStorage } from "@/lib/ai/agentStorage";
 import { agentLlmKeyOf } from "@/constants/Agent";
-import { geminiImageAdapter, openaiImageAdapter, qwenImageAdapter, zhipuImageAdapter } from "./adapters";
+import {
+  asyncJobAdapter,
+  createAsyncJobAdapter,
+  type AsyncJobPaths,
+  geminiImageAdapter,
+  openaiImageAdapter,
+  qwenImageAdapter,
+  zhipuImageAdapter,
+} from "./adapters";
 import type { CapabilityAdapter, CapabilityId } from "./types";
+import { clampPollInterval } from "./polling";
 
 const CUSTOM_ENGINE_KEY = "agent.generation.customEngines";
 
@@ -40,7 +49,18 @@ const CUSTOM_ENGINE_KEY = "agent.generation.customEngines";
  * cannot be guessed, so the user names it. Defaulting silently would produce a request that succeeds and a
  * result nothing can read, which is the least debuggable failure available.
  */
-export const ENGINE_FORMATS = ["openai-image", "zhipu-image", "gemini-image", "qwen-image"] as const;
+export const ENGINE_FORMATS = [
+  "openai-image",
+  "zhipu-image",
+  "gemini-image",
+  "qwen-image",
+  /**
+   * Any endpoint that runs generation as a job: submit, get a task id, poll. Every vendor's VIDEO API works
+   * this way, and they disagree only on field names — which is why this is one format rather than four
+   * guesses. See `asyncJobAdapter` for the exact field names it reads.
+   */
+  "async-job",
+] as const;
 export type EngineFormat = (typeof ENGINE_FORMATS)[number];
 
 const ADAPTERS: Record<EngineFormat, CapabilityAdapter> = {
@@ -48,6 +68,7 @@ const ADAPTERS: Record<EngineFormat, CapabilityAdapter> = {
   "zhipu-image": zhipuImageAdapter,
   "gemini-image": geminiImageAdapter,
   "qwen-image": qwenImageAdapter,
+  "async-job": asyncJobAdapter,
 };
 
 /** One engine the user added. Its API key lives under the same `agent.llm.keys.<ref>` scheme models use. */
@@ -61,12 +82,45 @@ export interface CustomEngine {
   /** The model string sent as `model`. */
   model: string;
   format: EngineFormat;
+  /**
+   * Where to poll a submitted job, with `{id}` for the task id (a bare URL gets `/<id>` appended).
+   *
+   * Required for `async-job` and meaningless otherwise. It cannot be derived: the poll path is unrelated to
+   * the submit path on most vendors, so guessing one would turn every video request into a 404 several
+   * minutes after the user asked for it.
+   */
+  pollUrl?: string;
+  /**
+   * Explicit response field paths, for an endpoint whose names the generic reader does not know.
+   *
+   * Optional, and each field is independent — naming only the one that is wrong is the common case. The
+   * result path matters most: a wrong task id fails after the poll budget, while a wrong result path fails
+   * only AFTER the video has been generated and paid for, reporting "succeeded but no URL found".
+   */
+  paths?: AsyncJobPaths;
+  /**
+   * How often to poll this engine, in milliseconds. Absent → the default.
+   *
+   * Worth setting when a vendor is slow: a job does not finish sooner for being asked more often, so a wider
+   * interval costs nothing and spends less of the rate limit. Clamped to a floor at read time
+   * (see polling.ts) rather than validated here, because a stored engine may predate the floor.
+   */
+  pollIntervalMs?: number;
 }
 
 /** The adapter for an engine, or null when its format predates this build (never assume one — see above). */
 export function adapterFor(engine: CustomEngine): CapabilityAdapter | null {
+  // An async job may carry explicit field paths, so its reader is built per engine rather than shared. Every
+  // other format is a fixed vendor dialect with nothing to configure.
+  if (engine.format === "async-job") {
+    return hasPaths(engine.paths) ? createAsyncJobAdapter(engine.paths) : asyncJobAdapter;
+  }
   return ADAPTERS[engine.format] ?? null;
 }
+
+/** Whether any override was actually given; an object of empty strings is not a configuration. */
+const hasPaths = (p?: AsyncJobPaths): p is AsyncJobPaths =>
+  !!p && [p.taskId, p.status, p.url].some((v) => !!v?.trim());
 
 const isEngine = (v: unknown): v is CustomEngine => {
   if (!v || typeof v !== "object") return false;
@@ -81,14 +135,17 @@ const isEngine = (v: unknown): v is CustomEngine => {
 };
 
 /**
- * Every engine the user has added.
+ * Read a stored engine list.
+ *
+ * Pure, and separated from the storage call below so the validation can be tested — storage here is
+ * localStorage-backed and silently does nothing outside a browser, so anything that reads it directly is
+ * untestable by construction.
  *
  * Malformed entries are dropped rather than repaired: unlike a conversation record, nothing here represents
  * work the user would lose, and an engine with a missing endpoint can only produce a confusing failure at the
  * moment they ask for an image.
  */
-export function loadCustomEngines(): CustomEngine[] {
-  const raw = getStorage(CUSTOM_ENGINE_KEY);
+export function parseEngines(raw: unknown): CustomEngine[] {
   if (typeof raw !== "string" || !raw.trim()) return [];
   try {
     const parsed: unknown = JSON.parse(raw);
@@ -96,6 +153,11 @@ export function loadCustomEngines(): CustomEngine[] {
   } catch {
     return [];
   }
+}
+
+/** Every engine the user has added. */
+export function loadCustomEngines(): CustomEngine[] {
+  return parseEngines(getStorage(CUSTOM_ENGINE_KEY));
 }
 
 export function saveCustomEngines(list: CustomEngine[]): void {
@@ -109,6 +171,9 @@ export function addCustomEngine(input: {
   endpoint: string;
   model: string;
   format: EngineFormat;
+  pollUrl?: string;
+  paths?: AsyncJobPaths;
+  pollIntervalMs?: number;
   apiKey?: string;
 }): CustomEngine {
   const entry: CustomEngine = {
@@ -118,6 +183,17 @@ export function addCustomEngine(input: {
     endpoint: input.endpoint.trim(),
     model: input.model.trim(),
     format: input.format,
+    ...(input.pollUrl?.trim() ? { pollUrl: input.pollUrl.trim() } : {}),
+    ...(input.pollIntervalMs ? { pollIntervalMs: clampPollInterval(input.pollIntervalMs) } : {}),
+    // Only the paths actually given are stored, so an untouched Advanced section leaves no trace and the
+    // engine keeps using the documented defaults.
+    ...(hasPaths(input.paths)
+      ? {
+          paths: Object.fromEntries(
+            Object.entries(input.paths).filter(([, v]) => !!v?.trim()).map(([k, v]) => [k, v!.trim()]),
+          ),
+        }
+      : {}),
   };
   saveCustomEngines([...loadCustomEngines(), entry]);
   if (input.apiKey?.trim()) putStorage(agentLlmKeyOf(entry.id), input.apiKey.trim());
@@ -139,15 +215,29 @@ export function removeCustomEngine(id: string): CustomEngine[] {
  * missing any of those is skipped rather than returned and failed on, so the registry fallback still gets its
  * chance — a half-configured entry should not take away the working default.
  */
-export function findCustomEngine(capability: CapabilityId): CustomEngine | null {
+export function pickEngine(
+  engines: CustomEngine[],
+  capability: CapabilityId,
+  hasKey: (ref: string) => boolean,
+): CustomEngine | null {
   return (
-    loadCustomEngines().find(
+    engines.find(
       (e) =>
         e.capability === capability &&
         !!e.endpoint &&
         !!e.model &&
         !!adapterFor(e) &&
-        !!(getStorage(agentLlmKeyOf(e.id)) as string | null)?.toString().trim(),
+        // An async job whose result cannot be collected is worse than no engine: it spends the vendor's
+        // quota, waits out the poll budget, and then fails.
+        (e.format !== "async-job" || !!e.pollUrl) &&
+        hasKey(e.id),
     ) ?? null
+  );
+}
+
+/** The stored counterpart of `pickEngine`. */
+export function findCustomEngine(capability: CapabilityId): CustomEngine | null {
+  return pickEngine(loadCustomEngines(), capability, (ref) =>
+    !!String(getStorage(agentLlmKeyOf(ref)) ?? "").trim(),
   );
 }

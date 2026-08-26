@@ -287,6 +287,21 @@ contextBridge.exposeInMainWorld("chatIntegrity", {
   listMeta: () => ipcRenderer.invoke("integrity:list-meta"),
 });
 
+// The media library: <data storage location>/media, with index.json at its root. Written by the APP (a
+// generated asset, an attachment) — the folder is read-only to the AI's own file tools and to the sandbox.
+contextBridge.exposeInMainWorld("mediaStore", {
+  /** Absolute path of the media folder. */
+  dir: () => ipcRenderer.invoke("media:dir"),
+  /** index.json as text, or "" when there is not one yet. */
+  readIndex: () => ipcRenderer.invoke("media:read-index"),
+  /** Replace index.json (written atomically). */
+  writeIndex: (json) => ipcRenderer.invoke("media:write-index", json),
+  /** Put a file in the library: { name, srcPath | bytes | url } -> { path, bytes }. */
+  save: (payload) => ipcRenderer.invoke("media:save", payload),
+  /** Reveal the folder in the system file manager. */
+  open: () => ipcRenderer.invoke("media:open"),
+});
+
 // File-based memory: one Markdown file per memory (userData/memories/<id>.md). Written by the AI's save_memory tool.
 contextBridge.exposeInMainWorld("memoryFiles", {
   /** Save/update a memory { title, content, id? } → { id, title, file, created, updated }. */

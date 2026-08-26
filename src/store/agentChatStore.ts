@@ -55,6 +55,15 @@ type AgentChatState = {
    * set would have each writer clobber the other's entries every time it re-synced.
    */
   pendingQuestion: Record<string, boolean>;
+  /**
+   * Conversations that finished a reply while the user was looking at a different one, for the sidebar's
+   * "new reply" dot. Cleared when the conversation is opened.
+   *
+   * Its own map rather than a flag on the conversation record: it describes this session's attention, not the
+   * conversation, and persisting it would greet the user with unread dots on chats they had already read
+   * before quitting.
+   */
+  unread: Record<string, boolean>;
 
   /** Initially loads the project index (idempotent, does not load conversations). */
   init: () => Promise<void>;
@@ -90,6 +99,8 @@ type AgentChatState = {
   /** Replaces the set of conversations that have a pending sensitive-tool confirmation (drives the sidebar approval-needed badge). */
   setPendingConsentIds: (ids: Set<string>) => void;
   setPendingQuestionIds: (ids: Set<string>) => void;
+  /** Flags a conversation as having an unseen reply (drives the sidebar's new-reply dot). Opening it clears the flag. */
+  markConversationUnread: (id: string) => void;
   getConversation: (id: string) => Conversation | undefined;
   /** Binds or clears the model for a conversation (conversation-level model binding; null falls back to global configuration). */
   setConversationModel: (id: string, modelId: string | null) => void;
@@ -166,6 +177,7 @@ export const useAgentChatStore = create<AgentChatState>((set, get) => {
     generating: {},
     pendingConsent: {},
     pendingQuestion: {},
+    unread: {},
 
     setPendingSend: (p) => set({ pendingSend: p }),
     consumePendingSend: () => {
@@ -188,6 +200,7 @@ export const useAgentChatStore = create<AgentChatState>((set, get) => {
         loadedProjectIds: new Set<string>(),
         activeProjectId: null,
         activeConversationId: null,
+        unread: {},
         loaded: true,
       });
     },
@@ -358,7 +371,17 @@ export const useAgentChatStore = create<AgentChatState>((set, get) => {
       set({ activeProjectId: id });
       void get().ensureProjectLoaded(id);
     },
-    setActiveConversation: (id) => set({ activeConversationId: id }),
+    setActiveConversation: (id) =>
+      set((s) => {
+        // Opening a conversation is what "reads" it, so the new-reply dot is dropped here rather than at every call site.
+        if (!id || !s.unread[id]) return { activeConversationId: id };
+        const unread = { ...s.unread };
+        delete unread[id];
+        return { activeConversationId: id, unread };
+      }),
+
+    markConversationUnread: (id) =>
+      set((s) => (s.unread[id] ? s : { unread: { ...s.unread, [id]: true } })),
 
     setConversationGenerating: (id, on) =>
       set((s) => {
@@ -516,10 +539,15 @@ export const useAgentChatStore = create<AgentChatState>((set, get) => {
       void localLlm()?.eraseConversationsKv([id, ...(conv.subConvIds ?? [])]);
       const pid = conv.projectId;
       const remaining = get().conversations.filter((c) => c.projectId === pid && c.id !== id);
-      set((s) => ({
-        conversations: s.conversations.filter((c) => c.id !== id),
-        activeConversationId: s.activeConversationId === id ? null : s.activeConversationId,
-      }));
+      set((s) => {
+        const unread = { ...s.unread };
+        delete unread[id]; // a deleted conversation has no row left to carry its new-reply dot
+        return {
+          conversations: s.conversations.filter((c) => c.id !== id),
+          activeConversationId: s.activeConversationId === id ? null : s.activeConversationId,
+          unread,
+        };
+      });
       if (remaining.length === 0) {
         // Project is empty → Remove project and its files.
         set((s) => {

@@ -4,11 +4,17 @@
  * The chat page's top bar: conversation title (with the token-usage / rename / clear dropdown), the secure-environment
  * switch, the current-model chip, and the skills button.
  *
+ * These controls belong to the window's title bar, not to a strip below it: the shell hands out a slot in the row that
+ * carries the minimize / maximize / close buttons, and the title row renders into it through a portal. The shell mounts
+ * that slot only on the chat route, so on other pages — where this component stays mounted but hidden — the row falls
+ * back to rendering in place, exactly as it did before.
+ *
  * Purely presentational — every action is a callback and every value a prop, so nothing here reaches into the
  * page's state. It reads translations and the router itself, because those are ambient rather than page state.
  */
-import { ChevronDown, Eraser, Monitor, Pencil, ShieldCheck } from "lucide-react";
-import { useRouter } from "next/navigation";
+import { createPortal } from "react-dom";
+import { ChevronDown, Eraser, FolderTree, Monitor, Pencil, PanelLeftClose, ShieldCheck } from "lucide-react";
+import { useTitleBarSlot, useFilesSidebar } from "@/components/layout/agent/titleBar";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -18,7 +24,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { isSandboxEngine, type SandboxStatus } from "@/lib/ai/sandbox";
-import type { ResolvedModel } from "@/lib/ai/models";
+import { prepareFilesWorkdir } from "@/lib/ai/filesPanel";
 import { useT } from "@/lib/i18n";
 
 export type SessionUsage = {
@@ -46,10 +52,6 @@ export function ChatHeader(props: {
   onSecureEnvChange: (next: boolean) => void;
   /** The runtime environment has a newer image available. */
   vmUpdatable: boolean;
-  activeModel: ResolvedModel | null;
-  isLocalModel: boolean;
-  /** Tri-state: null while unknown, false when llama-server is selected but not running. */
-  localLlmReady: boolean | null;
   onOpenSkills: () => void;
   enabledSkillCount: number;
   /** The settings strip below the title row is only rendered while the settings area is expanded. */
@@ -64,8 +66,9 @@ export function ChatHeader(props: {
   ref?: React.Ref<HTMLDivElement>;
 }) {
   const t = useT();
-  const router = useRouter();
-  const { sandboxStatus: sbx, activeModel, sessionUsage, secureEnv, ref: rootRef } = props;
+  const titleSlot = useTitleBarSlot();
+  const files = useFilesSidebar();
+  const { sandboxStatus: sbx, sessionUsage, secureEnv, ref: rootRef } = props;
   const usageArgs = {
     approx: sessionUsage.estimated ? "≈" : "",
     total: sessionUsage.total,
@@ -127,6 +130,9 @@ export function ChatHeader(props: {
       : pending
         ? "text-sky-600"
         : "text-ink-muted";
+  // The title bar is a drag region for the frameless window, so every control on this row has to opt out of it —
+  // otherwise the mouse is taken by the window drag before it reaches the button.
+  const noDrag = { WebkitAppRegion: "no-drag" } as React.CSSProperties;
   const envTitle = inSandbox
     ? t("sbx.env.onTip")
     : sandboxUnavailable
@@ -137,161 +143,180 @@ export function ChatHeader(props: {
           ? t("sbx.env.pendingTip")
           : t("sbx.env.offTip");
 
-  return (
-    <div ref={rootRef} className="border-b border-line bg-surface/90 backdrop-blur">
-      <div className="mx-auto w-full px-4 py-3">
-        {/* Title row */}
-        <div className="flex min-w-0 items-center gap-2">
-          {/* Conversation title + dropdown: token usage, rename, clear. */}
-          <DropdownMenu>
-            <DropdownMenuTrigger asChild>
-              <button
-                type="button"
-                className="flex min-w-0 max-w-[min(45vw,320px)] items-center gap-1 rounded-lg px-1 py-0.5 text-left transition hover:bg-surface-muted"
-                title={props.title || t("chat.title")}
-              >
-                <span className="truncate text-base font-bold">{props.title || t("chat.title")}</span>
-                <ChevronDown className="size-4 shrink-0 text-ink-muted" />
-              </button>
-            </DropdownMenuTrigger>
-            <DropdownMenuContent align="start" className="min-w-[15rem]">
-              <DropdownMenuLabel className="whitespace-nowrap font-normal text-ink-subtle">
-                {t("chat.tokenUsageLine", usageArgs)}
-              </DropdownMenuLabel>
-              <DropdownMenuSeparator />
-              <DropdownMenuItem disabled={!props.hasConversation} onClick={props.onRename}>
-                <Pencil className="size-4" /> {t("ctx.rename")}
-              </DropdownMenuItem>
-              <DropdownMenuItem
-                disabled={props.messageCount === 0}
-                onClick={props.onClear}
-                className="text-destructive focus:text-destructive"
-              >
-                <Eraser className="size-4" /> {t("chat.clearChat")}
-              </DropdownMenuItem>
-            </DropdownMenuContent>
-          </DropdownMenu>
-          {/* Secure environment: the switch that decides where THIS session's commands run, plus an indicator of where they
-              actually run right now. Two controls in one pill because they answer two different questions and users conflate
-              them — the left half states the live engine (and opens the runtime dialog for progress / failure / update), the
-              right half is the request. Bound to the conversation, not the project: see Conversation.secureEnv. */}
-          {props.toolsReady && (
-            // Never hidden at narrow widths, unlike the status badge it replaces and the model chip beside it: this is the
-            // only place the environment can be changed, and a control with no other entry point cannot responsively
-            // disappear. The LABEL collapses instead — the icon and the switch still say which environment is live.
-            <span
-              className={`relative inline-flex items-center gap-1.5 overflow-hidden rounded-full bg-surface-muted py-0.5 pl-2 pr-1 text-[11px] font-medium transition-colors duration-300 ${envText}`}
-            >
-              {/* The wiping fill. Sits under the content (which is why the content is z-10) and is inert to the pointer,
-                  so it changes nothing about hit-testing on either button. */}
-              <span
-                aria-hidden
-                className={`pointer-events-none absolute inset-0 origin-left transition-transform duration-300 ease-in ${envFill} ${
-                  envFilled ? "scale-x-100" : "scale-x-0"
-                }`}
-              />
-              <button
-                type="button"
-                onClick={props.onSandboxBadgeClick}
-                className="relative z-10 flex items-center gap-1 rounded-full transition hover:brightness-95"
-                title={envTitle}
-              >
-                {inSandbox ? <ShieldCheck className="size-3" /> : <Monitor className="size-3" />}
-                <span className="hidden sm:inline">{envLabel}</span>
-                {/* The runtime has a newer image: appended here rather than beside the switch, because updating is
-                    something you do to the runtime, and this half is what opens the runtime dialog. */}
-                {props.vmUpdatable && (
-                  <span className="text-amber-600 dark:text-amber-400">{t("sbx.badge.updatable")}</span>
-                )}
-              </button>
-              {/* The switch proper. Disabled when this machine cannot run the VM at all — offering a control that silently
-                  does nothing is worse than showing why it is unavailable. */}
-              <button
-                type="button"
-                role="switch"
-                aria-checked={secureEnv}
-                aria-label={t("sbx.env.label")}
-                disabled={sandboxUnavailable}
-                onClick={() => props.onSecureEnvChange(!secureEnv)}
-                title={
-                  sandboxUnavailable
-                    ? sbx?.reason || t("sbx.env.unsupported")
-                    : `${secureEnv ? t("sbx.env.onTip") : t("sbx.env.offTip")}\n${t("sbx.env.sessionNote")}`
-                }
-                className={`relative z-10 h-3.5 w-7 shrink-0 overflow-hidden rounded-full bg-line-strong ${
-                  sandboxUnavailable ? "cursor-not-allowed opacity-50" : ""
-                }`}
-              >
-                {/* The track fills by the same wipe, anchored the same way and over the same duration as the pill, so one
-                    state change reads as one gesture rather than two effects that happen to coincide. The knob's slide is
-                    matched to it too — it used to run at the default duration and arrived ahead of the colour. */}
-                <span
-                  aria-hidden
-                  className={`absolute inset-0 origin-left bg-emerald-500 transition-transform duration-300 ease-in ${
-                    secureEnv ? "scale-x-100" : "scale-x-0"
-                  }`}
-                />
-                <span
-                  className={`absolute top-0.5 z-10 size-2.5 rounded-full bg-white shadow-sm transition-[left] duration-300 ease-in ${
-                    secureEnv ? "left-[15px]" : "left-0.5"
-                  }`}
-                />
-              </button>
-            </span>
-          )}
-          {/* The current model (read-only; chosen in settings / home page). Green dot = available (cloud has a key configured / the local service is running);
-              amber = missing key or the local service is not started — when local is not started, clicking jumps directly to "Settings → Local model" to start it. */}
-          <span
-            className={`hidden max-w-[220px] items-center gap-1.5 truncate rounded-full bg-surface-muted px-2.5 py-0.5 text-[11px] text-ink-muted sm:flex ${props.isLocalModel && props.localLlmReady === false ? "cursor-pointer hover:bg-surface" : ""}`}
-            title={
-              !activeModel
-                ? t("lm.chipNoModel")
-                : props.isLocalModel && props.localLlmReady === false
-                  ? t("lm.notStartedTip")
-                  : activeModel.label
-            }
-            onClick={() => {
-              if (props.isLocalModel && props.localLlmReady === false) router.push("/agent/models");
-            }}
-          >
-            <span
-              className={`h-1.5 w-1.5 shrink-0 rounded-full ${activeModel && (props.isLocalModel ? props.localLlmReady === true : !!activeModel.apiKey.trim()) ? "bg-emerald-500" : "bg-amber-500"}`}
-            />
-            <span className="truncate">{activeModel?.label ?? t("lm.noModelShort")}</span>
-          </span>
+  // The title row itself. In the title bar it fills the slot's height and needs no chrome of its own — the bar draws the
+  // background and the bottom rule; the in-place fallback keeps them.
+  const titleRow = (
+    <div
+      ref={rootRef}
+      className={`flex min-w-0 items-center gap-2 px-3 ${
+        titleSlot ? "h-full flex-1" : "border-b border-line bg-surface/90 py-3 backdrop-blur"
+      }`}
+    >
+      {/* Conversation title + dropdown: token usage, rename, clear. */}
+      <DropdownMenu>
+        <DropdownMenuTrigger asChild>
           <button
-            onClick={props.onOpenSkills}
-            className="ml-auto shrink-0 rounded-lg border border-line-strong bg-surface px-3 py-1.5 text-xs font-medium transition hover:border-line hover:bg-surface-muted active:scale-[0.98]"
-            title={t("chat.selectSkills")}
+            type="button"
+            style={noDrag}
+            className="flex min-w-0 max-w-[min(45vw,320px)] items-center gap-1 rounded-lg px-1 py-0.5 text-left transition hover:bg-surface-muted"
+            title={props.title || t("chat.title")}
           >
-            🧩 {t("chat.skills")}
-            {props.enabledSkillCount > 0 && (
-              <span className="ml-1 rounded-full bg-primary/15 px-1.5 py-0.5 text-[10px] font-semibold text-primary">
-                {props.enabledSkillCount}
-              </span>
+            <span className="truncate text-base font-bold">{props.title || t("chat.title")}</span>
+            <ChevronDown className="size-4 shrink-0 text-ink-muted" />
+          </button>
+        </DropdownMenuTrigger>
+        <DropdownMenuContent align="start" className="min-w-[15rem]">
+          <DropdownMenuLabel className="whitespace-nowrap font-normal text-ink-subtle">
+            {t("chat.tokenUsageLine", usageArgs)}
+          </DropdownMenuLabel>
+          <DropdownMenuSeparator />
+          <DropdownMenuItem disabled={!props.hasConversation} onClick={props.onRename}>
+            <Pencil className="size-4" /> {t("ctx.rename")}
+          </DropdownMenuItem>
+          <DropdownMenuItem
+            disabled={props.messageCount === 0}
+            onClick={props.onClear}
+            className="text-destructive focus:text-destructive"
+          >
+            <Eraser className="size-4" /> {t("chat.clearChat")}
+          </DropdownMenuItem>
+        </DropdownMenuContent>
+      </DropdownMenu>
+      {/* Secure environment: the switch that decides where THIS session's commands run, plus an indicator of where they
+          actually run right now. Two controls in one pill because they answer two different questions and users conflate
+          them — the left half states the live engine (and opens the runtime dialog for progress / failure / update), the
+          right half is the request. Bound to the conversation, not the project: see Conversation.secureEnv. */}
+      {props.toolsReady && (
+        // Never hidden at narrow widths, unlike the status badge it replaces and the model chip beside it: this is the
+        // only place the environment can be changed, and a control with no other entry point cannot responsively
+        // disappear. The LABEL collapses instead — the icon and the switch still say which environment is live.
+        <span
+          style={noDrag}
+          className={`relative inline-flex items-center gap-1.5 overflow-hidden rounded-full bg-surface-muted py-0.5 pl-2 pr-1 text-[11px] font-medium transition-colors duration-300 ${envText}`}
+        >
+          {/* The wiping fill. Sits under the content (which is why the content is z-10) and is inert to the pointer,
+              so it changes nothing about hit-testing on either button. */}
+          <span
+            aria-hidden
+            className={`pointer-events-none absolute inset-0 origin-left transition-transform duration-300 ease-in ${envFill} ${
+              envFilled ? "scale-x-100" : "scale-x-0"
+            }`}
+          />
+          <button
+            type="button"
+            onClick={props.onSandboxBadgeClick}
+            className="relative z-10 flex items-center gap-1 rounded-full transition hover:brightness-95"
+            title={envTitle}
+          >
+            {inSandbox ? <ShieldCheck className="size-3" /> : <Monitor className="size-3" />}
+            <span className="hidden sm:inline">{envLabel}</span>
+            {/* The runtime has a newer image: appended here rather than beside the switch, because updating is
+                something you do to the runtime, and this half is what opens the runtime dialog. */}
+            {props.vmUpdatable && (
+              <span className="text-amber-600 dark:text-amber-400">{t("sbx.badge.updatable")}</span>
             )}
           </button>
-          {props.messageCount > 0 && (
-            <button
-              onClick={props.onClear}
-              className="shrink-0 rounded-lg border border-line-strong bg-surface px-3 py-1.5 text-xs font-medium transition hover:border-line hover:bg-surface-muted active:scale-[0.98]"
-            >
-              {t("chat.clearChat")}
-            </button>
-          )}
-        </div>
-
-        {/* The model and API key are managed in "Settings · Model / API key"; the working directory is now determined
-            automatically by the project / at send time. Run parameters (round limits / deadlock protection) have been
-            removed, and this area only shows this session's token usage. */}
-        {props.settingsOpen && (
-          <div className="mt-3 border-t border-line/60 pt-3">
-            {sessionUsage.total > 0 && (
-              <p className="text-[11px] text-ink-subtle">{t("chat.sessionTokens", usageArgs)}</p>
-            )}
-          </div>
+          {/* The switch proper. Disabled when this machine cannot run the VM at all — offering a control that silently
+              does nothing is worse than showing why it is unavailable. */}
+          <button
+            type="button"
+            role="switch"
+            aria-checked={secureEnv}
+            aria-label={t("sbx.env.label")}
+            disabled={sandboxUnavailable}
+            onClick={() => props.onSecureEnvChange(!secureEnv)}
+            title={
+              sandboxUnavailable
+                ? sbx?.reason || t("sbx.env.unsupported")
+                : `${secureEnv ? t("sbx.env.onTip") : t("sbx.env.offTip")}\n${t("sbx.env.sessionNote")}`
+            }
+            className={`relative z-10 h-3.5 w-7 shrink-0 overflow-hidden rounded-full bg-line-strong ${
+              sandboxUnavailable ? "cursor-not-allowed opacity-50" : ""
+            }`}
+          >
+            {/* The track fills by the same wipe, anchored the same way and over the same duration as the pill, so one
+                state change reads as one gesture rather than two effects that happen to coincide. The knob's slide is
+                matched to it too — it used to run at the default duration and arrived ahead of the colour. */}
+            <span
+              aria-hidden
+              className={`absolute inset-0 origin-left bg-emerald-500 transition-transform duration-300 ease-in ${
+                secureEnv ? "scale-x-100" : "scale-x-0"
+              }`}
+            />
+            <span
+              className={`absolute top-0.5 z-10 size-2.5 rounded-full bg-white shadow-sm transition-[left] duration-300 ease-in ${
+                secureEnv ? "left-[15px]" : "left-0.5"
+              }`}
+            />
+          </button>
+        </span>
+      )}
+      <div className="ml-auto flex shrink-0 items-center gap-2">
+      {/* Files: shows the shell's file tree, and hides it again on a second click. Used to be a row in the main
+          sidebar; as an icon it sits with the other session actions instead. Electron only — toolsReady is
+          isToolkitAvailable() resolved after mount, which also keeps the button out of the server render.
+          The working directory is only landed on the way in; closing has nothing to point anywhere. */}
+      {files && props.toolsReady && (
+        <button
+          type="button"
+          onClick={() =>
+            files.open ? files.toggle() : void prepareFilesWorkdir().then(files.toggle)
+          }
+          style={noDrag}
+          aria-pressed={files.open}
+          title={t("files.section")}
+          aria-label={t("files.section")}
+          className={`flex size-8 shrink-0 items-center justify-center rounded-lg border transition active:scale-[0.98] ${
+            files.open
+              ? "border-primary bg-primary text-primary-foreground hover:opacity-90"
+              : "border-line-strong bg-surface text-ink-muted hover:border-line hover:bg-surface-muted"
+          }`}
+        >
+          {/* The glyph reports the state as well as the colour: a filled button alone reads as "selected" to some and
+              "disabled" to others, so the open state shows the panel-closing icon — what the next click will do. */}
+          {files.open ? <PanelLeftClose className="size-4" /> : <FolderTree className="size-4" />}
+        </button>
+      )}
+      <button
+        onClick={props.onOpenSkills}
+        style={noDrag}
+        className="shrink-0 rounded-lg border border-line-strong bg-surface px-3 py-1.5 text-xs font-medium transition hover:border-line hover:bg-surface-muted active:scale-[0.98]"
+        title={t("chat.selectSkills")}
+      >
+        🧩 {t("chat.skills")}
+        {props.enabledSkillCount > 0 && (
+          <span className="ml-1 rounded-full bg-primary/15 px-1.5 py-0.5 text-[10px] font-semibold text-primary">
+            {props.enabledSkillCount}
+          </span>
         )}
+      </button>
+      {props.messageCount > 0 && (
+        <button
+          onClick={props.onClear}
+          style={noDrag}
+          className="shrink-0 rounded-lg border border-line-strong bg-surface px-3 py-1.5 text-xs font-medium transition hover:border-line hover:bg-surface-muted active:scale-[0.98]"
+        >
+          {t("chat.clearChat")}
+        </button>
+      )}
       </div>
     </div>
+  );
+
+  return (
+    <>
+      {titleSlot ? createPortal(titleRow, titleSlot) : titleRow}
+      {/* The model and API key are managed in "Settings · Model / API key"; the working directory is now determined
+          automatically by the project / at send time. Run parameters (round limits / deadlock protection) have been
+          removed, and this area only shows this session's token usage. Stays in the page rather than the title bar:
+          it is a second line, and the bar is one row tall. */}
+      {props.settingsOpen && (
+        <div className="border-b border-line bg-surface/90 px-4 py-2 backdrop-blur">
+          {sessionUsage.total > 0 && (
+            <p className="text-[11px] text-ink-subtle">{t("chat.sessionTokens", usageArgs)}</p>
+          )}
+        </div>
+      )}
+    </>
   );
 }

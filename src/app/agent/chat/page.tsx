@@ -47,7 +47,7 @@ import {
   formatSimulation,
 } from "./contextDiag";
 import { isLocalEndpoint, localLlm, LOCAL_PROVIDER_ID } from "@/lib/ai/localModel";
-import { setSecureEnv as syncSecureEnv, onSandboxStatus, getSandboxStatus, getSandboxVmInfo, DEFAULT_SECURE_ENV, type SandboxStatus } from "@/lib/ai/sandbox";
+import { setSecureEnv as syncSecureEnv, onSandboxStatus, getSandboxStatus, getSandboxVmInfo, isSandboxEngine, DEFAULT_SECURE_ENV, type SandboxStatus } from "@/lib/ai/sandbox";
 import { useT } from "@/lib/i18n";
 import { toast } from "sonner";
 // Only the two types remain here: the delegation tools themselves moved to chatDelegation.ts.
@@ -192,6 +192,13 @@ import type {
   ToolCall,
 } from "./types";
 import { capabilityAvailable } from "@/lib/ai/generation";
+import { mediaDir, mediaSrcFor, registerMedia } from "@/lib/ai/mediaLibrary";
+import {
+  onGenerationJobEvent,
+  describeJobResult,
+  cancelJobsFor,
+  type GenerationJobEvent,
+} from "@/lib/ai/generation/jobs";
 import { isMemoryFilesAvailable } from "@/lib/ai/memoryFiles";
 import { setBrowserBusy } from "@/lib/automation";
 import { detectServices } from "@/store/servicesStore";
@@ -218,13 +225,13 @@ import {
   composeWireText,
   groupParallelCalls,
   resolveToolCalls,
-  saveAttachmentsToWorkdir,
+  saveAttachments,
 } from "./sendPrep";
 import { createChatRequest } from "./chatRequest";
 import { createSummarizeHistory } from "./summarize";
 import { ChatHeader } from "./ChatHeader";
 import { ChatDialogs } from "./ChatDialogs";
-import { ContextUsageBar } from "./ContextUsageBar";
+import { ContextUsageRing } from "./ContextUsageRing";
 
 /**
  * Transcript windowing. A long conversation used to mount every message at once — hundreds of markdown /
@@ -378,7 +385,14 @@ function ChatAgent() {
   // Side-channel for image_generation: the tool returns only a text note (the artifact must not enter the wire), but
   // the persist step needs the image URL to store it for display rebuild. generateImageAction sets this right before
   // returning; the persist step consumes it. Safe because image_generation runs serially (its own tool group).
-  const lastImageArtifactRef = useRef<{ image: string; servedBy?: string } | null>(null);
+  /**
+   * The artifact a generation tool just produced, handed to the persist step below.
+   *
+   * Carries its KIND, not just a URL. Image and video are stored and rendered differently — a video src in
+   * an <img> shows nothing at all — so a single untyped "artifact" field would produce a bubble that is
+   * silently empty after a reload, which reads as lost work rather than as a wrong tag.
+   */
+  const lastArtifactRef = useRef<{ src: string; kind: "image" | "video"; servedBy?: string } | null>(null);
   /**
    * Where a delegation tool call parks its sub-agent's inner tool trace, so the persist step can store it
    * beside the conclusion and a reopened conversation shows the same operations the user watched.
@@ -1256,6 +1270,10 @@ function ChatAgent() {
     // If there are pending sensitive-operation confirmations / choices, wind them up first to avoid the send loop hanging. Clearing targets the current conversation, releasing its pending-confirmation requests.
     dropConsentsFor(convIdRef.current);
     dropChoicesFor(convIdRef.current, "The user cleared the conversation.");
+    // Generation jobs outlive their turn on purpose, so nothing else stops them — but they must not outlive
+    // the conversation they would report into. Cancelled silently: waking a conversation the user just
+    // cleared is the opposite of what clearing it asked for.
+    if (convIdRef.current) cancelJobsFor(convIdRef.current);
     allowedToolsRef.current.clear(); // Clearing the conversation also resets the "don't ask again" allowances
     interruptedRef.current = false; // New conversation: clear any residual "interrupt resume" flag
     displayRef.current = [];
@@ -2140,7 +2158,10 @@ function ChatAgent() {
    */
   const awaitingJobsRef = useRef(new Map<string, number>());
   const jobFinishedRef = useRef<(evt: ServiceEvent) => void>(() => {});
+  /** Same late-bound shape, for jobs this renderer runs itself (image / video generation). */
+  const generationJobFinishedRef = useRef<(evt: GenerationJobEvent) => void>(() => {});
   useEffect(() => onServiceEvent((evt) => jobFinishedRef.current(evt)), []);
+  useEffect(() => onGenerationJobEvent((evt) => generationJobFinishedRef.current(evt)), []);
 
   // Resend from "the displayIndex-th display message (must be a user message)": truncate this point and everything after it
   // (the display / wire / persistence are aligned by "user message ordinal" — user messages correspond one-to-one across all three), then resend with newText.
@@ -2165,13 +2186,14 @@ function ChatAgent() {
     resendRef.current(userIdx, um.kind === "user" ? um.content : "", nudge);
   }, []);
 
-  // Attachment size limits: images go multimodal (≤10MB); text-type files are inlined into the prompt, with a stricter limit (≤2MB) to avoid consuming too many tokens.
+  // Images go multimodal, which every provider bounds; ≤10MB is the common floor. Nothing else has a size
+  // limit any more: a non-image is saved to the library and referenced by path, never read into the prompt.
   const MAX_IMAGE_BYTES = 10 * 1024 * 1024;
-  const MAX_TEXT_BYTES = 2 * 1024 * 1024;
   const pushAttachment = (a: Attachment) => setAttachments((list) => [...list, a]);
 
-  // Select a file of any type: images defer the upload decision to send time based on the model (local → base64, not uploaded; cloud → uploaded to OSS at send time);
-  // text-type files are read as text and inlined; binary/oversized files attach only a file-name note.
+  // Select a file of any type: images defer the upload decision to send time based on the model (local → base64,
+  // not uploaded; cloud → uploaded to OSS at send time); everything else is saved to the media library on send
+  // and referenced by its path, whatever its type.
   const addFiles = (files: FileList | null) => {
     if (!files || files.length === 0) return;
     for (const file of Array.from(files)) {
@@ -2191,20 +2213,11 @@ function ChatAgent() {
         // that can *see* an image still cannot *edit* it without a path on disk.
         const previewUrl = URL.createObjectURL(file);
         pushAttachment({ ...meta, kind: "image", file, previewUrl, hostPath });
-      } else if (file.size > MAX_TEXT_BYTES) {
-        // Too large to inline: capture the host path, and copy it to the working directory (Electron) at send time for the tools to process.
-        pushAttachment({ ...meta, kind: "binary", hostPath, file });
-        setError(t("chat.fileTooLarge", { name: file.name }));
       } else {
-        const reader = new FileReader();
-        reader.onload = () => {
-          const text = String(reader.result ?? "");
-          // Treat content with NUL bytes as binary and do not inline it (to avoid stuffing garbled text into the prompt).
-          if (text.includes("\u0000")) pushAttachment({ ...meta, kind: "binary", hostPath, file });
-          else pushAttachment({ ...meta, kind: "text", text });
-        };
-        reader.onerror = () => pushAttachment({ ...meta, kind: "binary", hostPath, file });
-        reader.readAsText(file);
+        // Every non-image attachment is a FILE: copied to the working directory on send and handed to the
+        // model as a path. Nothing is inlined any more — see addFilesTo in lib/ai/attachments.ts for why a
+        // path beats a transcript of the file's contents.
+        pushAttachment({ ...meta, kind: "binary", hostPath, file });
       }
     }
   };
@@ -2489,9 +2502,7 @@ function ChatAgent() {
     // the mode alone, which is what lets two installs share a prefix — and a resident KV seed.
     // Binary/oversized attachments: under Electron, persist them to the working directory first (workdir is already mounted into the sandbox),
     // so the model can process them directly with file tools / sandbox commands; the browser environment keeps to file names only.
-    const savedPaths = toolsReady
-      ? await saveAttachmentsToWorkdir(atts)
-      : new Map<number, string>();
+    const savedPaths = toolsReady ? await saveAttachments(atts) : new Map<number, string>();
     // Assemble this round's content: images go multimodal via image_url, everything else is composed into the
     // body (inlined text, or a note pointing at the path it was saved to). With images, use a content array;
     // otherwise a plain string (compatible with non-vision models).
@@ -2502,7 +2513,7 @@ function ChatAgent() {
       return;
     }
     const imageParts = images.parts;
-    const composed = composeWireText(text, atts, savedPaths);
+    const composed = composeWireText(text, atts, savedPaths, sandboxStatusRef.current);
     const userContent: string | ContentPart[] =
       imageParts.length > 0
         ? [...(composed ? [{ type: "text" as const, text: composed }] : []), ...imageParts]
@@ -2564,6 +2575,30 @@ function ChatAgent() {
     // Bound to a const so the closures below (active(), the RunCtx, the log calls) capture a settled string
     // rather than the still-reassignable `convId` above.
     const genConvId = convId;
+    // Index what the user just handed over, at the point it lands on disk. Placed here rather than beside the
+    // save because the conversation id is what makes an entry findable later, and it is only settled now.
+    // Only what was actually saved: a save can fail, and an entry pointing at nothing would be a library row
+    // the user can click and get an error from.
+    for (const a of atts) {
+      const savedPath = savedPaths.get(a.id);
+      if (!savedPath) continue;
+      void registerMedia({
+        // The renderable source. A local path is not one — an <img src="C:\…"> shows nothing — so an asset
+        // in the library is addressed through the app's own scheme, and only an actual URL is used as-is.
+        src: a.url || mediaSrcFor(savedPath, true),
+        // The browser's own verdict, when there is one. `image/*` was a placeholder that could not be
+        // categorised, so an uploaded PNG landed under "other" and a document under nothing at all.
+        mime: a.file?.type || (a.kind === "image" ? "image/png" : "application/octet-stream"),
+        path: savedPath,
+        bytes: a.size,
+        origin: "upload",
+        convId: genConvId,
+        // The name on DISK, which is not the name it arrived with: storing a file replaces spaces and
+        // reserved punctuation with underscores. Recording the original here made the index disagree with
+        // its own `path`, so the library showed a title no file on disk answered to.
+        filename: savedPath.split(/[\\/]/).pop() || a.name,
+      });
+    }
     store.appendMessage(genConvId, {
       role: "user",
       content: text,
@@ -2741,8 +2776,10 @@ function ChatAgent() {
           sandboxStatusRef,
           toolsReady,
           activeModel,
-          lastImageArtifactRef,
+          lastArtifactRef,
           askUser: hostAskUser,
+          onJobStarted: (convId) =>
+            awaitingJobsRef.current.set(convId, (awaitingJobsRef.current.get(convId) ?? 0) + 1),
           setTodosFor,
           taskMemoryFor,
           setTaskMemoryFor,
@@ -2825,9 +2862,14 @@ function ChatAgent() {
         const current = buildReminderState({
           workdir: effectiveWorkdir || "",
           sandbox: sandboxStatusRef.current,
+          // Read per turn rather than cached: the library follows the data-storage location, which the user
+          // can change from Settings mid-session, and a cached path would keep announcing the old folder —
+          // the one failure this announcement exists to prevent. One IPC call against a model request is free.
+          assetsDir: await mediaDir().catch(() => ""),
           activeModel,
           skills: enabled,
           imageGenerationAvailable: capabilityAvailable("image_generation"),
+          videoGenerationAvailable: capabilityAvailable("video_generation"),
           task: renderTaskMemory(taskMemoryFor(genConvId)),
           // The goal rides the same road as the mission brief, and for the same reason: it is re-rendered from
           // structured state every turn, so the model sees the current condition, criteria and plan even after
@@ -3183,9 +3225,11 @@ function ChatAgent() {
                 syncView();
                 // A generated image's artifact URL is stored display-only (not in content, so it never re-enters the wire),
                 // so the image bubble can be rebuilt after switching conversations. Consume the side-channel ref.
-                const imageArtifact =
-                  name === "image_generation" ? lastImageArtifactRef.current : null;
-                lastImageArtifactRef.current = null;
+                const artifact =
+                  name === "image_generation" || name === "video_generation"
+                    ? lastArtifactRef.current
+                    : null;
+                lastArtifactRef.current = null;
                 // Likewise for a sub-agent's inner steps: display-only, stored beside the conclusion so reopening
                 // the conversation shows the same operations the user watched happen. Addressed by the tool
                 // call's own args object, because a spawned delegation settles after this point and has to be
@@ -3202,8 +3246,11 @@ function ChatAgent() {
                   // dispatcher bubbles instead of the tools that actually ran. The wire copy in assistant.tool_calls is untouched.
                   name,
                   ts: Date.now(),
-                  ...(imageArtifact
-                    ? { image: imageArtifact.image, servedBy: imageArtifact.servedBy }
+                  ...(artifact
+                    ? {
+                        [artifact.kind === "video" ? "video" : "image"]: artifact.src,
+                        servedBy: artifact.servedBy,
+                      }
                     : {}),
                   // Copied, not the live array: a spawned delegation keeps appending to it after this write.
                   ...(subSteps?.length ? { steps: [...subSteps] } : {}),
@@ -3505,9 +3552,11 @@ function ChatAgent() {
           if (active()) pushDisplay({ kind: "todos", todos: finishedTodos });
           setTodosFor(genConvId, []);
         }
-        // Trigger condition 1: the AI reply is complete. Choose the notification channel by "whether the window is always on top":
-        //  - Always on top (always-on-top, the window is certainly visible) → in-app hint (toast);
-        //  - Not on top (may be obscured by other windows) → system notification (following the existing preference / unfocused gating, clicking jumps to that conversation).
+        // Trigger condition 1: the AI reply is complete. The channel follows where the user's attention is:
+        //  - Finished in the background (a different conversation is on screen) → toast + sidebar dot, plus the
+        //    system notification, which self-gates to the window being unfocused;
+        //  - On screen, window always on top (certainly visible) → in-app hint (toast);
+        //  - On screen, not on top (may be obscured by other windows) → system notification (following the existing preference / unfocused gating, clicking jumps to that conversation).
         // Use the captured genConvId rather than the active conversation id, to ensure correct ownership (reserved for background concurrent generation).
         //
         // Skipped entirely mid-goal-loop: the round is finished but the TASK is not, and telling the user their
@@ -3515,6 +3564,23 @@ function ChatAgent() {
         // announces itself once, when it is met or when the loop gives up.
         if (goalContinuation) {
           // nothing to announce yet; the loop continues below
+        } else if (!active()) {
+          // The conversation that finished is not the one on screen. Its sidebar spinner simply stopping is not an
+          // announcement, and the system notification is gated on the window being unfocused — so with the app in
+          // front of the user, reading another chat, nothing at all used to happen. Two signals, because they
+          // answer different questions: a toast naming the chat (with a button that jumps to it) says "it is done
+          // now", and an unread dot on its sidebar row survives until the chat is opened, so it still says so for
+          // a user who was away from the keyboard. notifyReplyComplete still runs and self-gates: it pops only if
+          // the window is unfocused, which is exactly the case the toast cannot cover.
+          store.markConversationUnread(genConvId);
+          const title = store.getConversation(genConvId)?.title?.trim();
+          toast.success(title ? t("chat.replyDoneNamed", { title }) : t("chat.replyDone"), {
+            action: {
+              label: t("chat.replyDoneOpen"),
+              onClick: () => router.push(`/agent/chat?c=${encodeURIComponent(genConvId)}`),
+            },
+          });
+          notifyReplyComplete(genConvId, lastContent);
         } else if (await isWindowAlwaysOnTop()) {
           const title = store.getConversation(genConvId)?.title?.trim();
           toast.success(title ? t("chat.replyDoneNamed", { title }) : t("chat.replyDone"));
@@ -3648,6 +3714,66 @@ function ChatAgent() {
       }
     };
 
+    /**
+     * A generation job finished (generation/jobs.ts).
+     *
+     * Deliberately the same two routes `jobFinishedRef` uses for a background command, and for the same
+     * reason: mid-turn the result rides the next tool result, because the user-message queue by construction
+     * is not read until the turn ENDS — which is precisely the case a job finishing during a turn can never
+     * be delivered by. Idle, it opens its own turn, which is what wakes the conversation back up.
+     *
+     * The difference from a command is that this job produces an ARTIFACT, so the clip is rendered and
+     * persisted here before the model is told about it. Rendering it only when the model next speaks would
+     * leave the user watching nothing while the thing they asked for sat in a variable.
+     */
+    generationJobFinishedRef.current = (evt) => {
+      const convId = evt.job.convId;
+      const waiting = awaitingJobsRef.current.get(convId) ?? 0;
+      if (waiting > 0) awaitingJobsRef.current.set(convId, waiting - 1);
+
+      if (evt.status === "succeeded") {
+        const isVideo = evt.job.capability === "video_generation";
+        const bubble: DisplayMsg = {
+          kind: "tool",
+          name: evt.job.capability,
+          args: { prompt: evt.job.prompt },
+          ok: true,
+          result: evt.artifact.src,
+          ...(isVideo ? { video: evt.artifact.src } : { image: evt.artifact.src }),
+          servedBy: evt.artifact.servedBy,
+        };
+        // Only the conversation on screen draws it; a background one is rebuilt from the store on switch,
+        // which is why the persist below is not conditional.
+        if (convId === convIdRef.current) pushDisplay(bubble);
+        // NOT indexed here. The job runner stores and indexes the artifact before emitting this event, so by
+        // the time any listener runs the library file is already current — doing it here raced the library's
+        // own re-read and made a finished video vanish from it until the page was reloaded.
+        useAgentChatStore.getState().appendMessage(convId, {
+          role: "tool",
+          content: evt.artifact.src,
+          // No tool_call_id: this message answers no call. The turn that started the job has long since
+          // closed its own tool_calls, and inventing an id here would pair this with a call that already has
+          // a result — which the provider rejects on the conversation's next request.
+          name: evt.job.capability,
+          ...(isVideo ? { video: evt.artifact.src } : { image: evt.artifact.src }),
+          servedBy: evt.artifact.servedBy,
+          ts: Date.now(),
+        });
+      }
+
+      const notice = describeJobResult(evt, isSandboxEngine(sandboxStatusRef.current?.active));
+      if (useAgentChatStore.getState().generating[convId]) {
+        const held = pendingJobsRef.current.get(convId) ?? [];
+        pendingJobsRef.current.set(convId, [...held, notice]);
+      } else if (convId === convIdRef.current) {
+        void send({ text: formatJobMessage(notice), attachments: [], _fromQueue: true });
+      } else {
+        // A background conversation that is idle: queued rather than sent, so it wakes when the user opens it
+        // instead of starting a turn in a conversation nobody is looking at.
+        enqueueMessage(convId, formatJobMessage(notice), []);
+      }
+    };
+
     // On every render, refresh the "resend from a user message" implementation, capturing the latest send / state (see the note at the resendRef declaration).
     resendRef.current = (displayIndex, newText, feedbackNudge) => {
       if (loading) return; // Editing / regenerating is not allowed while generating
@@ -3763,9 +3889,6 @@ function ChatAgent() {
         secureEnv={secureEnv}
         onSecureEnvChange={applySecureEnv}
         vmUpdatable={vmUpdatable}
-        activeModel={activeModel}
-        isLocalModel={isLocalModel}
-        localLlmReady={localLlmReady}
         onOpenSkills={() => setSkillsOpen(true)}
         enabledSkillCount={enabledSkills(installedSkills).length}
         settingsOpen={settingsOpen}
@@ -3813,16 +3936,6 @@ function ChatAgent() {
           />
         </div>
 
-        {activeModel && (
-          <ContextUsageBar
-            tokens={contextTokens}
-            contextWindow={activeModel.contextWindow ?? resolveContextWindow(activeModel.model)}
-            compacted={compacted}
-            compacting={compacting}
-            generating={loading}
-            onCompactNow={compactNow}
-          />
-        )}
       </CustomScrollbar>
       {/* Back to bottom: surfaces centered below the message area when the user scrolls up while generating; clicking smoothly returns to the bottom and resumes auto-follow. */}
       <button
@@ -3953,6 +4066,18 @@ function ChatAgent() {
         onGoSettings={() => router.push("/agent/settings")}
         thinking={thinking}
         onThinkingChange={changeThinking}
+        contextIndicator={
+          activeModel && (
+            <ContextUsageRing
+              tokens={contextTokens}
+              contextWindow={activeModel.contextWindow ?? resolveContextWindow(activeModel.model)}
+              compacted={compacted}
+              compacting={compacting}
+              generating={loading}
+              onCompactNow={compactNow}
+            />
+          )
+        }
       />
     </div>
       <BrowserPanel

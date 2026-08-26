@@ -139,6 +139,13 @@ function renderBody(state: ReminderState, atCut: boolean): string {
         : `- working directory: ${state.workdir}`,
     );
   }
+  if (state.assets !== undefined) {
+    lines.push(
+      state.assets
+        ? `- asset folder: ${state.assets} — everything the user has uploaded and everything you have generated (images, video, documents) lives here, so look here FIRST for "the file I sent", "that image", "the video we made". It is READ-ONLY: read from it freely, but never write, edit, move or delete anything in it. To change one of these files, copy it into the working directory and work on the copy; write every output you produce to the working directory.`
+        : "- asset folder: none in this environment; uploaded and generated files are not kept on disk.",
+    );
+  }
   if (state.ctx) {
     const { date, model, tz } = state.ctx;
     lines.push(`- date ${date}; model ${model}; time zone ${tz}.`);

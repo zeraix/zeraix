@@ -65,6 +65,10 @@ export interface StoredMessage {
    *  bubble after reload — the tool's text content is only a note, so without this the picture vanishes on switching
    *  conversations. Display-only, not fed to the model, not part of the integrity hash (same as name / steps). */
   image?: string;
+  /** A generated video's artifact URL, for the same reason and with the same rules as `image`. Kept as its
+   *  own field rather than reusing `image`: a reload that put a video URL in an <img> would render nothing,
+   *  and the failure would look like the artifact was lost rather than mis-typed. */
+  video?: string;
   servedBy?: string;
   /** The tool calls a sub-agent made inside its own loop (on a run_subagent or spawn_subagents tool result;
    *  a spawned batch collects every delegation's calls onto the one message, each prefixed with its job id).

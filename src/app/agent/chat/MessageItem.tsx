@@ -140,6 +140,34 @@ function GeneratedImageCard({ src, servedBy }: { src: string; servedBy?: string 
   );
 }
 
+/**
+ * A generated video.
+ *
+ * `controls` and no autoplay, deliberately: a clip that starts playing on its own in the middle of a
+ * transcript is startling, and it would play again every time the conversation is reopened. `preload none`
+ * for the same reason a long transcript mounts only its tail — the src is a vendor URL, and fetching every
+ * video in a reopened conversation would spend the user's bandwidth on clips they are scrolling past.
+ */
+function GeneratedVideoCard({ src, servedBy }: { src: string; servedBy?: string }) {
+  const t = useT();
+  return (
+    <div className="flex justify-center">
+      <div className="w-full max-w-[92%]">
+        <div className="overflow-hidden rounded-lg border border-border bg-background/60">
+          <video src={src} controls preload="none" className="block h-auto w-full">
+            {t("video.unsupported")}
+          </video>
+          {servedBy ? (
+            <div className="border-t border-border px-3 py-1.5 text-xs text-muted-foreground">
+              {t("image.servedBy", { engine: servedBy })}
+            </div>
+          ) : null}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function FileChangeCard({
   name,
   args,
@@ -1148,6 +1176,7 @@ export const MessageItem = memo(function MessageItem({
     // A generated image renders as the artifact itself — a collapsed "image_generation ✓" bubble
     // would hide the one thing the user asked for.
     if (m.image) return <GeneratedImageCard src={m.image} servedBy={m.servedBy} />;
+    if (m.video) return <GeneratedVideoCard src={m.video} servedBy={m.servedBy} />;
     // File-type tools (whose result includes a diff) directly show "path + changes"; other tools use a collapsible bubble.
     const isFileChange = extractDiff(m.result).diff !== null;
     return (

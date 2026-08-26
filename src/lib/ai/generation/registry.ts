@@ -7,7 +7,7 @@
  * "this vendor cannot generate images", which fails safe.
  */
 import { PROVIDERS } from "@/app/agent/chat/providers";
-import { adapterFor, findCustomEngine } from "./custom";
+import { adapterFor, findCustomEngine, type CustomEngine } from "./custom";
 import { getApiKeyByRef } from "@/lib/ai/models";
 import { geminiImageAdapter, openaiImageAdapter, qwenImageAdapter, zhipuImageAdapter } from "./adapters";
 import type { CapabilityId, GenerationModel, GenerationProvider } from "./types";
@@ -80,6 +80,16 @@ export function generationEndpoint(p: GenerationProvider): string {
 }
 
 export interface SelectedEngine {
+  /**
+   * Where to ask about a submitted async job, with `{id}` standing in for the task id.
+   *
+   * Only meaningful for a capability that runs as a job (video). Absent for every image engine, and absent
+   * for every registry entry — the registry has no async vendors, so this is currently supplied only by a
+   * user-configured engine, which is also the only place the template can be known without guessing.
+   */
+  pollUrl?: string;
+  /** Poll cadence for an async job, in ms. Absent → the default; clamped to a floor before use. */
+  pollIntervalMs?: number;
   provider: GenerationProvider;
   model: GenerationModel;
   endpoint: string;
@@ -107,8 +117,25 @@ export function selectEngine(capability: CapabilityId, chatProviderId?: string):
   // preference. Once they have gone to Settings and configured an endpoint for this capability, they have
   // expressed one, and a guess must not outrank it. It is also the only path that works at all when the
   // user's vendor is not one of the four below.
-  const mine = findCustomEngine(capability);
-  if (mine) {
+  return resolveEngineSelection(capability, chatProviderId, findCustomEngine(capability));
+}
+
+/**
+ * The selection itself, with the user's engine supplied rather than read.
+ *
+ * Split out so the precedence — an explicit choice beats an inference from an API key — can be tested
+ * without a browser: the storage this module reads is localStorage-backed and does nothing under a test
+ * runner, so a function that looks it up itself cannot be exercised at all.
+ */
+export function resolveEngineSelection(
+  capability: CapabilityId,
+  chatProviderId: string | undefined,
+  mine: CustomEngine | null,
+): SelectedEngine | null {
+  // The capability is re-checked rather than assumed. `selectEngine` passes an engine it already filtered by
+  // capability, so this is unreachable from there — but a function that silently returns an image engine when
+  // asked for video is a trap for the next caller, and the check costs one comparison.
+  if (mine && mine.capability === capability) {
     const adapter = adapterFor(mine);
     // findCustomEngine already refuses an engine with no adapter; this narrows the type and keeps the
     // invariant local rather than assumed.
@@ -124,6 +151,8 @@ export function selectEngine(capability: CapabilityId, chatProviderId?: string):
         },
         model: { id: mine.model, label: mine.label },
         endpoint: mine.endpoint,
+        pollUrl: mine.pollUrl,
+        pollIntervalMs: mine.pollIntervalMs,
         apiKey: getApiKeyByRef(mine.id),
       };
     }

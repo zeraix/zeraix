@@ -178,7 +178,164 @@ export const qwenImageAdapter: CapabilityAdapter = {
 
 /** Overrides `servedBy` with the engine actually used (adapters only know their vendor's default). */
 export function withServedBy(result: AdapterResult, model: GenerationModel): AdapterResult {
-  if (!result.ok) return result;
+  // A pending job has no artifacts to stamp yet; it is stamped when its poll settles.
+  if (!result.ok || result.pending) return result;
   const artifacts: GenerationArtifact[] = result.artifacts.map((a) => ({ ...a, servedBy: model.id }));
   return { ok: true, artifacts };
 }
+
+// ── Async jobs ─────────────────────────────────────────────────────────────────────────────────────────
+
+/**
+ * A generic asynchronous generation job.
+ *
+ * Every vendor's video API works the same way in outline — POST a prompt, get a task id, poll until it
+ * settles — and disagrees on the field names. That is a problem for this file, whose whole standard is
+ * stated at the top: only vendors verified against live docs get an adapter, because a guessed shape is a
+ * runtime failure the user cannot diagnose.
+ *
+ * So this is deliberately NOT a vendor adapter. It is the shape of the protocol, and it reads the field
+ * names listed below — nothing inferred, nothing clever. A user pointing their own endpoint at it can check
+ * the list against their vendor's documentation in a few seconds, and when nothing matches it says exactly
+ * what it looked for instead of failing silently. When a specific vendor is verified later, it gets its own
+ * adapter beside the image ones and this stays as the fallback for everything else.
+ *
+ * Submit response — a finished result is checked FIRST (same URL fields as below); only when there is none
+ * is it read as a job, with the task id from the first of:
+ *   `id` · `task_id` · `taskId` · `output.task_id` · `data.task_id`
+ * Poll response — the status, from the first of:
+ *   `status` · `task_status` · `state` · `output.task_status` · `data.status`
+ *   succeeded: SUCCESS SUCCEEDED COMPLETED DONE OK   failed: FAIL FAILED ERROR CANCELLED
+ *   anything else is treated as still running.
+ * Poll response — the artifact URL, from the first of:
+ *   `url` · `video_url` · `output.video_url` · `video_result[0].url` · `output.results[0].url`
+ *   `data[0].url` · `output.video[0].url` · `result.url`
+ */
+const pick = (obj: unknown, path: string): unknown =>
+  path.split(".").reduce<unknown>((acc, key) => {
+    if (acc === null || acc === undefined) return undefined;
+    const m = /^(.+)\[(\d+)\]$/.exec(key);
+    if (m) {
+      const arr = (acc as Record<string, unknown>)[m[1]];
+      return Array.isArray(arr) ? arr[Number(m[2])] : undefined;
+    }
+    return (acc as Record<string, unknown>)[key];
+  }, obj);
+
+const firstString = (json: unknown, paths: string[]): string | null => {
+  for (const p of paths) {
+    const v = pick(json, p);
+    if (typeof v === "string" && v.trim()) return v.trim();
+  }
+  return null;
+};
+
+/**
+ * Where a task handle lives.
+ *
+ * `request_id` is deliberately NOT here. Several vendors stamp one on every response for support
+ * correlation — Zhipu returns both a `request_id` and a separate task `id` — so treating it as a task handle
+ * polls a well-formed identifier that names nothing, and the resulting 404 arrives minutes later looking
+ * like a vendor fault rather than a wrong field.
+ */
+const TASK_ID_PATHS = ["id", "task_id", "taskId", "output.task_id", "data.task_id"];
+const STATUS_PATHS = ["status", "task_status", "state", "output.task_status", "data.status"];
+const URL_PATHS = [
+  "url",
+  "video_url",
+  "output.video_url",
+  "video_result[0].url",
+  "output.results[0].url",
+  "data[0].url",
+  "output.video[0].url",
+  "result.url",
+];
+const DONE = new Set(["success", "succeeded", "completed", "done", "ok"]);
+const FAILED = new Set(["fail", "failed", "error", "cancelled", "canceled"]);
+
+/** Extension → mime for the formats video endpoints actually emit; anything else is left as mp4. */
+const VIDEO_MIME: Record<string, string> = { mp4: "video/mp4", webm: "video/webm", mov: "video/quicktime" };
+const mimeOfUrl = (url: string): string => {
+  const ext = /\.([a-z0-9]{2,4})(?:\?|#|$)/i.exec(url)?.[1]?.toLowerCase() ?? "";
+  return VIDEO_MIME[ext] ?? "video/mp4";
+};
+
+/**
+ * Explicit field paths, for an endpoint whose names are not in the lists above.
+ *
+ * Each is optional and, when given, is used INSTEAD of the corresponding list rather than in addition to it.
+ * That is the point: a user who has their vendor's documentation open knows the answer exactly, and mixing
+ * their answer with guesses would reintroduce the ambiguity they came here to remove — the `request_id`
+ * confusion was precisely two plausible fields in one response.
+ *
+ * Supports dotted paths and array indices, e.g. `output.results[0].url`.
+ */
+export interface AsyncJobPaths {
+  taskId?: string;
+  status?: string;
+  url?: string;
+}
+
+/**
+ * The generic async-job reader, optionally told where to look.
+ *
+ * With no paths it behaves exactly as documented above. With them it looks only where it is told, which
+ * turns a silent minutes-long failure into a configuration the user can verify against their vendor's docs
+ * in one reading.
+ */
+export function createAsyncJobAdapter(paths: AsyncJobPaths = {}): CapabilityAdapter {
+  const taskIdPaths = paths.taskId ? [paths.taskId] : TASK_ID_PATHS;
+  const statusPaths = paths.status ? [paths.status] : STATUS_PATHS;
+  const urlPaths = paths.url ? [paths.url] : URL_PATHS;
+  return {
+    toRequest: (prompt, model) => ({ model: model.id, prompt }),
+    fromResponse: (raw, status) => {
+      const json = (raw ?? {}) as Record<string, unknown>;
+      if (status < 200 || status >= 300) return httpError(json as never, status);
+      // A RESULT settles it, whatever else the response carries — see the note on the default reader below.
+      const url = firstString(json, urlPaths);
+      if (url) return { ok: true, artifacts: [{ src: url, mime: mimeOfUrl(url), servedBy: "custom" }] };
+      const taskId = firstString(json, taskIdPaths);
+      if (taskId) return { ok: true, pending: { taskId } };
+      return {
+        ok: false,
+        error: {
+          kind: "unknown",
+          message: `no result or task id in the response (looked for ${urlPaths.join(", ")}, ${taskIdPaths.join(", ")})`,
+        },
+      };
+    },
+    poll: {
+      url: (taskId, template) =>
+        template.includes("{id}")
+          ? template.replace("{id}", encodeURIComponent(taskId))
+          : `${template.replace(/\/+$/, "")}/${encodeURIComponent(taskId)}`,
+      from: (raw, status) => {
+        const json = (raw ?? {}) as Record<string, unknown>;
+        if (status < 200 || status >= 300) return httpError(json as never, status);
+        const state = (firstString(json, statusPaths) ?? "").toLowerCase();
+        if (FAILED.has(state)) {
+          return { ok: false, error: { kind: "unknown", message: `the job reported ${state}` } };
+        }
+        const url = firstString(json, urlPaths);
+        // A URL settles it whatever the status says: some vendors report "processing" on the same response
+        // that carries the finished result.
+        if (url) return { ok: true, artifacts: [{ src: url, mime: mimeOfUrl(url), servedBy: "custom" }] };
+        if (DONE.has(state)) {
+          return {
+            ok: false,
+            error: {
+              kind: "unknown",
+              message: `the job succeeded but no URL was found (looked for ${urlPaths.join(", ")})`,
+            },
+          };
+        }
+        return { ok: true, pending: { taskId: "" } };
+      },
+    },
+  };
+}
+
+/** The unconfigured reader, which is what an engine with no explicit paths gets. */
+export const asyncJobAdapter: CapabilityAdapter = createAsyncJobAdapter();
+

@@ -2,7 +2,9 @@ import { app, BrowserWindow, dialog, ipcMain, protocol, shell, utilityProcess } 
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { listTools, runTool, getWorkingDir, setWorkingDir, saveAttachment, setLLMConfig, getLLMConfig, setServiceEventHandler, stopProcess, listProcesses, initEngine, disposeEngines, getSandboxStatus, setSandboxMode, onSandboxStatus, restartSandbox, sandboxVmInfo, wsReadDir, wsReadFile, wsWriteFile } from "./tools/aiToolkit.mjs";
+import { listTools, runTool, getWorkingDir, setWorkingDir, setAssetDir, saveAttachment, setLLMConfig, getLLMConfig, setServiceEventHandler, stopProcess, listProcesses, initEngine, disposeEngines, getSandboxStatus, setSandboxMode, onSandboxStatus, restartSandbox, sandboxVmInfo, wsReadDir, wsReadFile, wsWriteFile } from "./tools/aiToolkit.mjs";
+import { setAssetHostDir } from "./tools/sandbox/qemu.mjs";
+import { setMediaDir, readIndex, writeIndex, saveMedia, openMediaDir, getMediaDir } from "./mediaStore.mjs";
 // Reports at startup whether the Rust sidecar is enabled, active, or unavailable — see warmUp.
 import { warmUp as warmUpRustRuntime } from "./tools/rustRuntime.mjs";
 import { discoverProjectSkills, setProjectSkillDecision, readProjectSkillFile, loadEnabledProjectSkills } from "./tools/projectSkills.mjs";
@@ -274,6 +276,31 @@ protocol.registerSchemesAsPrivileged([
 async function handleAppRequest(request) {
   const { pathname } = new URL(request.url);
   const decoded = decodeURIComponent(pathname);
+
+  /**
+   * Library files, served from the app's own origin.
+   *
+   * The renderer cannot show a local path — `<img src="C:\\…">` renders nothing — and refuses `file://`
+   * cross-origin. Serving them here puts them on the same origin as the UI, so a thumbnail is an ordinary
+   * <img> and a clip is an ordinary <video> with range requests.
+   *
+   * Only the BASENAME is honoured, resolved against the media folder: a stored entry is data, and data that
+   * can name `../../.ssh/id_rsa` would turn the library into a file-read primitive.
+   */
+  if (decoded.startsWith("/__media/")) {
+    const dir = getMediaDir();
+    const name = path.basename(decoded.slice("/__media/".length));
+    if (!dir || !name) return new Response("not found", { status: 404 });
+    try {
+      const file = path.join(dir, name);
+      const data = await fs.promises.readFile(file);
+      const type = MIME_TYPES[path.extname(file).toLowerCase()] ?? "application/octet-stream";
+      return new Response(data, { headers: { "content-type": type } });
+    } catch {
+      return new Response("not found", { status: 404 });
+    }
+  }
+
   // Strip leading slashes and prevent path traversal
   const rel = path
     .normalize(decoded)
@@ -484,7 +511,9 @@ function registerAiTools() {
   ipcMain.handle("ai-tools:save-attachment", (_e, payload) => saveAttachment(payload));
   // Generic "renderer -> main process" bulk-data transfer channel + attachment byte-transfer handler (synthetic files take this path).
   installTransferBridge();
-  onTransfer("save-attachment", (meta, buffer) => saveAttachment({ name: meta?.name, bytes: buffer }));
+  onTransfer("save-attachment", (meta, buffer) =>
+    saveAttachment({ name: meta?.name, bytes: buffer, subdir: meta?.subdir }),
+  );
   // Background service (dev server, etc.) start/stop events -> broadcast to all windows (GlobalNotifications shows "running projects").
   setServiceEventHandler((evt) => {
     for (const win of BrowserWindow.getAllWindows()) win.webContents.send("services:event", evt);
@@ -713,6 +742,32 @@ function registerBackground() {
   // ipcMain.on("background:set-tray-labels", (_e, labels) => setTrayLabels(labels));
 }
 
+
+/**
+ * Point both halves of the asset boundary at the media library.
+ *
+ * The library lives under the DATA STORAGE location (Settings → General), so it survives switching projects
+ * and is where the user already expects this app to keep its data. Two places have to be told: the host file
+ * tools, which enforce read-only for `read_file`/`write_file` and friends, and the sandbox bind set, which
+ * enforces it for `run_command`. Told separately because they are separate mechanisms — a rule applied to one
+ * and not the other would leave a shell able to write what the file tools refuse.
+ *
+ * Called at startup and again whenever the storage location changes, since the library moves with it.
+ */
+function syncAssetRoot() {
+  try {
+    const dir = path.join(getStorePath(), "media");
+    setAssetDir(dir);      // host file tools: readable, never writable
+    setAssetHostDir(dir);  // sandbox: --ro-bind
+    setMediaDir(dir);      // the app's own writes, which the two guards above do not apply to
+    return dir;
+  } catch (e) {
+    // Never fatal: an unset asset root simply means the tools behave as they did with one root.
+    console.warn("[assets] could not resolve the media folder:", e?.message ?? e);
+    return "";
+  }
+}
+
 function registerAgentStore() {
   ipcMain.handle("agent-store:load-index", () => loadIndex());
   ipcMain.handle("agent-store:load-project", (_e, id) => loadProject(id));
@@ -720,14 +775,29 @@ function registerAgentStore() {
   ipcMain.handle("agent-store:save-project", (_e, { id, conversations }) => saveProject(id, conversations));
   ipcMain.handle("agent-store:delete-project", (_e, id) => deleteProject(id));
   ipcMain.handle("agent-store:get-path", () => getStorePath());
-  ipcMain.handle("agent-store:set-path", (_e, dir) => setStorePath(dir));
+  ipcMain.handle("agent-store:media-path", () => syncAssetRoot());
+  // The media library. These bypass the read-only guards on purpose — see mediaStore.mjs: those guards exist
+  // to stop the MODEL altering originals, and the app is the thing that creates them.
+  ipcMain.handle("media:dir", () => getMediaDir() || syncAssetRoot());
+  ipcMain.handle("media:read-index", () => readIndex());
+  ipcMain.handle("media:write-index", (_e, json) => writeIndex(json));
+  ipcMain.handle("media:save", (_e, payload) => saveMedia(payload ?? {}));
+  ipcMain.handle("media:open", () => openMediaDir());
+  ipcMain.handle("agent-store:set-path", async (_e, dir) => {
+    const next = await setStorePath(dir);
+    // The library moves with the data, so both roots are re-pointed before the renderer reads anything back.
+    syncAssetRoot();
+    return next;
+  });
   // Pop up a native directory picker; the selection becomes the storage directory (migrate data and persist), returning the new file path; return null on cancel.
   ipcMain.handle("agent-store:choose-path", async (e) => {
     const win = BrowserWindow.fromWebContents(e.sender);
     const opts = { properties: ["openDirectory", "createDirectory"], defaultPath: path.dirname(getStorePath()) };
     const res = win ? await dialog.showOpenDialog(win, opts) : await dialog.showOpenDialog(opts);
     if (res.canceled || res.filePaths.length === 0) return null;
-    return setStorePath(res.filePaths[0]);
+    const next = await setStorePath(res.filePaths[0]);
+    syncAssetRoot();
+    return next;
   });
 }
 
@@ -924,6 +994,7 @@ app.whenReady().then(() => {
   registerTerminal();
   // Select the command-execution engine (start a qemu VM in the background if hardware virtualization is available, otherwise keep running natively on the host).
   // Runs asynchronously in the background; on failure it silently falls back to native without affecting startup.
+  syncAssetRoot();
   initEngine();
   registerLlmProxy();
   registerUploadProxy();

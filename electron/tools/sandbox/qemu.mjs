@@ -57,6 +57,46 @@ const GUEST_MNT = "/mnt/hostfs"; // Mount point of the host root inside the gues
 // stack trace carried it. A fixed mount point removes it, and gives the model one workspace path that is identical in
 // every conversation and on every install.
 const GUEST_WORKSPACE = "/workspace";
+
+/**
+ * Where the asset folder appears inside the guest (ASSET_ALIAS in tools/paths.mjs — keep in step).
+ *
+ * Bound READ-ONLY. It holds the media library, and the model is expected to read from it while never
+ * altering it: a generated video the user cannot get back must not be destroyable by a shell command that
+ * misfires. `--ro-bind` makes that a kernel refusal rather than an instruction, which is the same standard
+ * every other confinement in this file is held to.
+ */
+const GUEST_ASSETS = "/assets";
+
+/**
+ * The host asset folder, or "" when none is configured.
+ *
+ * Set by the app once the data-storage location is known; empty leaves the bind set exactly as it was, so
+ * nothing changes for a build that never configures one.
+ */
+let ASSET_HOST_DIR = "";
+
+/** Point the read-only asset bind at a host directory, or "" to remove it. */
+export function setAssetHostDir(dir) {
+  ASSET_HOST_DIR = typeof dir === "string" && dir.trim() ? path.resolve(dir) : "";
+  return ASSET_HOST_DIR;
+}
+
+/**
+ * The read-only asset bind, or nothing.
+ *
+ * Skipped when the folder does not exist: bwrap fails the whole command on a bind whose source is missing,
+ * so binding a not-yet-created library would break every sandbox command until the first asset was saved.
+ */
+function assetBind() {
+  if (!ASSET_HOST_DIR) return [];
+  try {
+    if (!fs.existsSync(ASSET_HOST_DIR)) return [];
+  } catch {
+    return [];
+  }
+  return ["--ro-bind", guestPath(ASSET_HOST_DIR), GUEST_ASSETS];
+}
 /**
  * Backing directory for the sandbox's /tmp, on the guest's DISK rather than in RAM.
  *
@@ -307,10 +347,11 @@ function ocrAdapterBind() {
 }
 
 function bwrapFlags(cwd) {
-  // Exactly one host directory is visible: this command's own cwd. Nothing has to be registered in advance for that to
-  // hold — the 9p share already covers the whole disk — so there is no mount set to keep in sync, and a command cannot
-  // reach a sibling session's files. This matches what the host-side file tools already enforce (resolveInside rejects
-  // anything outside the working directory); the old union of roots was the one way around it.
+  // Two host directories are visible: this command's own cwd, read-write, and the asset folder, read-only.
+  // Nothing else has to be registered in advance — the 9p share already covers the whole disk — so there is still no
+  // mount set to keep in sync, and a command cannot reach a sibling session's files. This matches what the host-side
+  // file tools enforce (tools/paths.mjs: the same two roots, the same read-only rule); the old union of roots was the
+  // one way around it, and the two halves must keep agreeing or a shell could write what the file tools refuse.
   const workspace = guestPath(cwd || homeRoot || HOME);
   return [
     "--ro-bind", "/usr", "/usr", "--ro-bind", "/etc", "/etc", "--ro-bind", "/opt", "/opt",
@@ -347,8 +388,12 @@ function bwrapFlags(cwd) {
     "--setenv", "LANG", "C.UTF-8",
     "--setenv", "PYTHONUNBUFFERED", "1",
     "--setenv", "JAVA_HOME", "/usr/lib/jvm/default-java",
-    // The one host directory this command can see, at the fixed mount point, and the cwd it starts in.
-    "--bind", workspace, GUEST_WORKSPACE, "--chdir", GUEST_WORKSPACE,
+    // The writable root: this command's own cwd, at the fixed mount point, and where it starts.
+    "--bind", workspace, GUEST_WORKSPACE,
+    // The second root: readable, never writable. See assetBind and tools/paths.mjs — the file tools enforce
+    // the identical split on the host side, and the two must not disagree about what is writable.
+    ...assetBind(),
+    "--chdir", GUEST_WORKSPACE,
     // NOT --unshare-user: bwrap runs as root in the guest, and a user namespace makes the 9p
     // share (security_model=none) refuse the bind source with EPERM. bwrap-as-root still confines
     // the filesystem view to the workspace (that's the goal here); the VM is the privilege boundary.

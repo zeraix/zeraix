@@ -24,6 +24,14 @@ export type ReminderState = {
   /** Whether `workdir` is reachable as /workspace: in the sandbox it is, so the line says which of the two names to use.
    *  Always changes together with `env` (the two engines produce different text), so it never forms a delta on its own. */
   sandboxed?: boolean;
+  /**
+   * The media library's path, in the name the model can actually use.
+   *
+   * Announced rather than left to be discovered: the folder is enforced read-only by both the file tools and
+   * the sandbox mount, so a model that has not been told about it finds out by being refused — which reads as
+   * a broken tool rather than as a boundary. "" when there is no library (a browser build).
+   */
+  assets?: string;
   /** Where run_command actually runs: the Linux sandbox, or the host directly. Flips when the VM comes up or falls back. */
   env?: string;
   ctx?: { date: string; model: string; tz: string };
@@ -150,6 +158,9 @@ export type DisplayMsg =
       ok: boolean;
       result: string;
       image?: string;
+      /** A generated VIDEO's src. Separate from `image` because they render differently and a <video> in an
+       *  <img> shows nothing at all — the two must never be conflated by a caller reaching for "the artifact". */
+      video?: string;
       servedBy?: string;
       steps?: SubAgentStep[];
     }

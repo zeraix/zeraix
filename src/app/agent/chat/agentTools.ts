@@ -182,6 +182,43 @@ export function imageGenerationTool() {
   };
 }
 
+/**
+ * Video generation. Same contract as image_generation, and the same non-configurability — but the wait is a
+ * different order of magnitude, which is the one thing the model has to understand.
+ *
+ * Every vendor runs video as an async job: the request returns a task id and the result arrives minutes
+ * later. That is handled inside the tool (the runtime polls), so the model just waits — but a model that
+ * does not know it costs minutes will call it speculatively, and the user pays for that in wall-clock time
+ * and quota. Hence the explicit warning in the description rather than a parameter.
+ */
+export function videoGenerationTool() {
+  return {
+    type: "function" as const,
+    function: {
+      name: "video_generation",
+      description:
+        "Generate a short video from a text description. Use this only when the user explicitly asks for a video, animation, or moving clip. " +
+        "Do NOT use it to find videos that already exist — use web_search for that, and do not use it for a still image (use image_generation). " +
+        "This takes MINUTES, not seconds, and consumes a large amount of the user's quota per call. Ask before generating if the request is at all ambiguous, " +
+        "call it once per video actually requested, and never speculatively.",
+      parameters: {
+        type: "object",
+        properties: {
+          prompt: {
+            type: "string",
+            description:
+              "A vivid, self-contained description of the clip: subject, action, camera movement, setting, lighting and style. " +
+              "Expand the user's request into a full shot rather than quoting it back. " +
+              "There are no separate parameters for length, aspect ratio or quality, so fold everything the user asked for into these words " +
+              "(e.g. \"a slow dolly-in on…\", \"16:9, cinematic, golden hour…\").",
+          },
+        },
+        required: ["prompt"],
+      },
+    },
+  };
+}
+
 export function saveMemoryTool() {
   return {
     type: "function" as const,

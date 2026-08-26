@@ -4,6 +4,13 @@ import { useEffect, useState } from "react";
 import { ImageOff, Plus, Trash2 } from "lucide-react";
 import { useLoginModalStore } from "@/store/loginModalStore";
 import {
+  DEFAULT_POLL_INTERVAL_MS,
+  MIN_POLL_INTERVAL_MS,
+  POLL_BUDGET_MS,
+  clampPollInterval,
+  pollsWithinBudget,
+} from "@/lib/ai/generation/polling";
+import {
   addCustomEngine,
   loadCustomEngines,
   removeCustomEngine,
@@ -68,7 +75,27 @@ export function ModelsSection({ t }: { t: TFunc }) {
    * engines (see lib/ai/generation/custom.ts). They are never mixed, because that was tried once and had to
    * be cleaned up afterwards by purgeLegacyImageModels.
    */
-  const [cKind, setCKind] = useState<"chat" | "image_generation">("chat");
+  const [cKind, setCKind] = useState<"chat" | "image_generation" | "video_generation">("chat");
+  const [cPollUrl, setCPollUrl] = useState("");
+  /**
+   * Poll cadence in SECONDS, because that is the unit a person thinks in; stored as milliseconds.
+   *
+   * Held as a string rather than a number so the field can be empty while being edited — a numeric state
+   * would snap a half-typed "1" to the floor under the user's cursor.
+   */
+  const [cPollSeconds, setCPollSeconds] = useState(String(DEFAULT_POLL_INTERVAL_MS / 1000));
+  /**
+   * Optional response field paths for an async engine, and the disclosure that hides them.
+   *
+   * Collapsed by default because the documented defaults cover the common case, and three JSON-path inputs
+   * on every add would be friction paid by everyone to help the few who need it. The error the generic
+   * reader produces names the fields it searched, so a user who needs these is told so at the moment it
+   * matters rather than having to guess that this section exists.
+   */
+  const [cAdvanced, setCAdvanced] = useState(false);
+  const [cPathTask, setCPathTask] = useState("");
+  const [cPathStatus, setCPathStatus] = useState("");
+  const [cPathUrl, setCPathUrl] = useState("");
   const [cImageFormat, setCImageFormat] = useState<EngineFormat>("openai-image");
   const [engines, setEngines] = useState<CustomEngine[]>([]);
   const [cBaseUrl, setCBaseUrl] = useState("");
@@ -148,17 +175,36 @@ export function ModelsSection({ t }: { t: TFunc }) {
   };
   const addCustom = () => {
     if (!cBaseUrl.trim() || !cModel.trim()) return;
-    if (cKind === "image_generation") {
-      // The URL is taken as given. An image endpoint's path is vendor-specific (/images/generations,
+    if (cKind !== "chat") {
+      // Video runs as a job on every vendor, so it needs somewhere to poll — and without one an accepted
+      // request would spend quota and then time out with nothing to collect. Refused here rather than stored
+      // and skipped later, so the reason is visible at the moment it can be fixed.
+      if (cKind === "video_generation" && !cPollUrl.trim()) return;
+      // The URL is taken as given. A generation endpoint's path is vendor-specific (/images/generations,
       // /v4/images/generations, :predict …), so appending one would be a guess that silently produces 404s.
       addCustomEngine({
-        capability: "image_generation",
+        capability: cKind,
         endpoint: cBaseUrl.trim(),
         model: cModel.trim(),
-        format: cImageFormat,
+        format: cKind === "video_generation" ? "async-job" : cImageFormat,
+        pollUrl: cKind === "video_generation" ? cPollUrl.trim() : undefined,
+        paths:
+          cKind === "video_generation"
+            ? { taskId: cPathTask, status: cPathStatus, url: cPathUrl }
+            : undefined,
+        // Clamped by the same function the runtime clamps with, so the value that is saved is the value that
+        // will actually be used — a form that accepted 1s and then polled at 3s would be lying quietly.
+        pollIntervalMs:
+          cKind === "video_generation" ? clampPollInterval(Number(cPollSeconds) * 1000) : undefined,
         apiKey: cKey,
       });
       setEngines(loadCustomEngines());
+      setCPollUrl("");
+      setCPollSeconds(String(DEFAULT_POLL_INTERVAL_MS / 1000));
+      setCPathTask("");
+      setCPathStatus("");
+      setCPathUrl("");
+      setCAdvanced(false);
     } else {
       addCustomModel({
         baseUrl: cBaseUrl.trim(),
@@ -409,12 +455,12 @@ export function ModelsSection({ t }: { t: TFunc }) {
                   <p className="truncate font-mono text-[11px] text-ink-subtle">{e.endpoint}</p>
                 </div>
                 <span className="shrink-0 rounded-md bg-surface px-2 py-0.5 text-[11px] text-ink-muted">
-                  {t("models.kindImage")}
+                  {t(e.capability === "video_generation" ? "models.kindVideo" : "models.kindImage")}
                 </span>
                 <button
                   type="button"
                   onClick={() => dropEngine(e.id)}
-                  aria-label={t("models.remove")}
+                  aria-label={t("ctx.delete")}
                   className="shrink-0 rounded-md p-1.5 text-ink-subtle transition-colors hover:bg-destructive/10 hover:text-destructive"
                 >
                   <Trash2 className="size-3.5" />
@@ -436,11 +482,12 @@ export function ModelsSection({ t }: { t: TFunc }) {
           </label>
           <select
             value={cKind}
-            onChange={(e) => setCKind(e.target.value as "chat" | "image_generation")}
+            onChange={(e) => setCKind(e.target.value as "chat" | "image_generation" | "video_generation")}
             className={cn(FIELD_CLS, "w-full")}
           >
             <option value="chat">{t("models.kindChat")}</option>
             <option value="image_generation">{t("models.kindImage")}</option>
+            <option value="video_generation">{t("models.kindVideo")}</option>
           </select>
         </div>
 
@@ -454,6 +501,10 @@ export function ModelsSection({ t }: { t: TFunc }) {
               <option value="openai-chat">{t("models.apiFormatOpenAI")}</option>
               <option value="openai-responses">{t("models.apiFormatResponses")}</option>
             </select>
+          ) : cKind === "video_generation" ? (
+            <p className="rounded-md bg-surface px-2.5 py-1.5 text-[11px] leading-relaxed text-ink-subtle">
+              ⓘ {t("models.videoFormatHint")}
+            </p>
           ) : (
             <>
               <select
@@ -494,7 +545,7 @@ export function ModelsSection({ t }: { t: TFunc }) {
           />
           <p className="mt-1 rounded-md bg-surface px-2.5 py-1.5 text-[11px] leading-relaxed text-ink-subtle">
             ⓘ{" "}
-            {cKind === "image_generation" || cFullUrl ? (
+            {cKind !== "chat" || cFullUrl ? (
               t("models.urlHintFull")
             ) : (
               <>
@@ -506,6 +557,78 @@ export function ModelsSection({ t }: { t: TFunc }) {
             )}
           </p>
         </div>
+
+        {/* Poll URL — video only. See custom.ts: the poll path is unrelated to the submit path on most
+            vendors, so it is asked for rather than derived. */}
+        {cKind === "video_generation" && (
+          <div>
+            <label className="mb-1 block text-xs font-medium text-ink">
+              <span className="text-destructive">*</span> {t("models.pollUrl")}
+            </label>
+            <input
+              value={cPollUrl}
+              onChange={(e) => setCPollUrl(e.target.value)}
+              placeholder={t("models.pollUrlPlaceholder")}
+              className={cn(FIELD_CLS, "w-full font-mono text-xs")}
+            />
+            <p className="mt-1 rounded-md bg-surface px-2.5 py-1.5 text-[11px] leading-relaxed text-ink-subtle">
+              ⓘ {t("models.pollUrlHint")}
+            </p>
+
+            {/* Poll cadence. Seconds here, milliseconds in storage. */}
+            <div className="mt-2">
+              <label className="mb-1 block text-xs font-medium text-ink">{t("models.pollEvery")}</label>
+              <input
+                type="number"
+                min={MIN_POLL_INTERVAL_MS / 1000}
+                step={1}
+                value={cPollSeconds}
+                onChange={(e) => setCPollSeconds(e.target.value)}
+                className={cn(FIELD_CLS, "w-full")}
+              />
+              <p className="mt-1 rounded-md bg-surface px-2.5 py-1.5 text-[11px] leading-relaxed text-ink-subtle">
+                ⓘ{" "}
+                {t("models.pollEveryHint", {
+                  min: String(MIN_POLL_INTERVAL_MS / 1000),
+                  polls: String(pollsWithinBudget(Number(cPollSeconds) * 1000)),
+                  budget: String(Math.round(POLL_BUDGET_MS / 60_000)),
+                })}
+              </p>
+            </div>
+
+            {/* Field overrides. Optional: each replaces the corresponding default list, and naming only the
+                one that is wrong is the common case. */}
+            <button
+              type="button"
+              onClick={() => setCAdvanced((v) => !v)}
+              className="mt-2 text-[11px] font-medium text-ink-muted underline-offset-2 hover:underline"
+            >
+              {cAdvanced ? t("models.fieldsHide") : t("models.fieldsShow")}
+            </button>
+            {cAdvanced && (
+              <div className="mt-2 space-y-2 rounded-md border border-line/60 px-3 py-2.5">
+                <p className="text-[11px] leading-relaxed text-ink-subtle">{t("models.fieldsHint")}</p>
+                {(
+                  [
+                    ["models.fieldTaskId", cPathTask, setCPathTask, "id"],
+                    ["models.fieldStatus", cPathStatus, setCPathStatus, "task_status"],
+                    ["models.fieldUrl", cPathUrl, setCPathUrl, "output.results[0].url"],
+                  ] as const
+                ).map(([key, value, set, placeholder]) => (
+                  <div key={key}>
+                    <label className="mb-1 block text-[11px] font-medium text-ink">{t(key)}</label>
+                    <input
+                      value={value}
+                      onChange={(e) => set(e.target.value)}
+                      placeholder={placeholder}
+                      className={cn(FIELD_CLS, "w-full font-mono text-xs")}
+                    />
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
 
         {/* Model ID + multimodal toggle */}
         <div>

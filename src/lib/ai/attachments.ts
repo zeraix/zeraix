@@ -1,8 +1,11 @@
 /**
  * Shared model and handling logic for chat attachments (reused by the home page /agent and the chat page /agent/chat).
  *  - image  → uploaded to OSS to get a publicUrl, sent as multimodal image_url (requires a vision model);
- *  - text   → text-like files whose content is inlined into the prompt;
- *  - binary → binary/oversized files, only the filename is noted, content is not inlined.
+ *  - binary → every other file: saved to the working directory on send, and given to the model as a PATH.
+ *
+ * The `text` kind is gone from new attachments. Inlining a file's contents put them in the context of every
+ * later turn and gave the model something it could read but not operate on; a path can be opened, sliced,
+ * edited or piped, and costs a few tokens once.
  */
 import { getUploadUrl, upLoadFileOSS } from "@/lib/api/upload";
 import { getPathForFile } from "@/lib/ai/toolkit";
@@ -22,9 +25,8 @@ export type Attachment = {
   file?: File; // The original File reference. binary: for synthetic files without a host path, bytes are read and written to disk via IPC on send; image: for local models, bytes are read and converted to base64 on send (previewUrl is revoked before sending, so it can't be relied on).
 };
 
-/** Attachment size limits: images go through multimodal (≤10MB); text-like files are inlined into the prompt with a stricter limit (≤2MB). */
+/** Images go through multimodal, which every provider bounds; ≤10MB is the common floor. */
 export const MAX_IMAGE_BYTES = 10 * 1024 * 1024;
-export const MAX_TEXT_BYTES = 2 * 1024 * 1024;
 
 /** Human-readable file size. */
 export const formatBytes = (n: number) =>
@@ -73,19 +75,14 @@ export function addFilesTo(
       // dropped in. Seeing it (image_url) and being able to edit it (a real path) are separate needs.
       const previewUrl = URL.createObjectURL(file);
       ctx.push({ ...meta, kind: "image", file, previewUrl, hostPath });
-    } else if (file.size > MAX_TEXT_BYTES) {
-      ctx.push({ ...meta, kind: "binary", hostPath, file });
-      ctx.onError(`「${file.name}」Exceeds 2 MB; content not inlined (filenames only).`);
     } else {
-      const reader = new FileReader();
-      reader.onload = () => {
-        const text = String(reader.result ?? "");
-        // Treat as binary if it contains NUL bytes, don't inline (avoids stuffing garbage into the prompt); record the host path for writing to disk on send.
-        if (text.includes("\u0000")) ctx.push({ ...meta, kind: "binary", hostPath, file });
-        else ctx.push({ ...meta, kind: "text", text });
-      };
-      reader.onerror = () => ctx.push({ ...meta, kind: "binary", hostPath, file });
-      reader.readAsText(file);
+      // Every non-image attachment is a FILE: written to disk on send, and handed to the model as a path.
+      //
+      // Text files used to be read here and inlined into the prompt. That was worse in both directions — a
+      // 13 KB note became 13 KB of context on every subsequent turn, and the model was given the contents
+      // instead of something it could open, edit, grep or run. A path costs a few tokens and can be read as
+      // many times as needed, in whatever slice is wanted.
+      ctx.push({ ...meta, kind: "binary", hostPath, file });
     }
   }
 }

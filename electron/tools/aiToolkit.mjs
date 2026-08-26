@@ -14,6 +14,7 @@
  */
 
 import fs from "node:fs/promises";
+import { resolvePath } from "./paths.mjs";
 import { constants as FS } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -296,7 +297,7 @@ export async function wsReadFile(relPath) {
 /** Save file content (the user's direct edit in the editor, not an AI change). Returns { ok } or { ok:false, error }. */
 export async function wsWriteFile(relPath, content) {
   try {
-    const abs = resolveInside(relPath);
+    const abs = resolveInside(relPath, { write: true });
     await fs.writeFile(abs, String(content ?? ""), "utf8");
     invalidateWalkCache(); // a new file may have been created; invalidate the file-list cache
     return { ok: true };
@@ -320,8 +321,21 @@ async function ensureWorkdir() {
  *     webview / a program-generated Blob); their bytes only ever exist in memory, with no other source,
  *     and are written to disk after being passed in over IPC.
  *  The filename is sanitized (illegal characters and whitespace → _) and de-duplicated on name collision (-1/-2…). */
-export async function saveAttachment({ name, srcPath, bytes, url }) {
+export async function saveAttachment({ name, srcPath, bytes, url, subdir }) {
   await ensureWorkdir();
+  /**
+   * Optional subfolder, relative to the working directory.
+   *
+   * The media library keeps its assets in one place (`.zeraix-media`) rather than scattered through the
+   * project root. It stays INSIDE the working directory deliberately: the sandbox mounts a command's cwd at
+   * /workspace and nothing else, so a folder anywhere else would be invisible to every file tool the model
+   * has — a generated clip it could not open, let alone process.
+   *
+   * Routed through resolveInside, which is the same traversal guard the workspace file tools use: `subdir`
+   * reaches here from the renderer, and "../../.ssh" must be an error rather than a write.
+   */
+  const dir = subdir ? resolveInside(String(subdir), { write: true }) : WORKDIR;
+  if (subdir) await fs.mkdir(dir, { recursive: true });
   // A URL-only image has no local File or host path — only a link. This happens when the user edits /
   // resends a message (images are reconstructed from their stored URLs), when an image is handed off from
   // the home-page composer, or when a conversation is restored from history: in all three the original
@@ -342,11 +356,11 @@ export async function saveAttachment({ name, srcPath, bytes, url }) {
   const named = !path.extname(base) && inferredExt ? `${base}.${inferredExt}` : base;
   const ext = path.extname(named);
   const stem = named.slice(0, named.length - ext.length) || "attachment";
-  let target = path.join(WORKDIR, named);
+  let target = path.join(dir, named);
   for (let i = 1; ; i++) {
     try {
       await fs.access(target);
-      target = path.join(WORKDIR, `${stem}-${i}${ext}`); // Already exists → try a different name
+      target = path.join(dir, `${stem}-${i}${ext}`); // Already exists → try a different name
     } catch {
       break; // Doesn't exist → available
     }
@@ -451,22 +465,27 @@ export function getLLMConfig() {
   };
 }
 
-/** The path the sandbox mounts the working directory at (GUEST_WORKSPACE in sandbox/qemu.mjs — keep in step).
- *  The model is told that name for its commands, so it uses it for file paths too. These tools run on the HOST, where
- *  the same folder is WORKDIR, and without this the model gets "path escapes the working directory: /workspace/x" for
- *  a path it was told to use. One folder, one name, on both sides of the tool surface. */
-const WORKSPACE_ALIAS = /^\/workspace(?:\/(.*))?$/;
+/**
+ * The asset folder: a SECOND root, readable but never writable. See tools/paths.mjs for the rules and why
+ * they live there rather than here.
+ *
+ * Empty means "not configured", and then these tools behave exactly as they did with one root.
+ */
+let ASSET_DIR = "";
 
-/** Resolve a user-given path inside WORKDIR, preventing out-of-bounds access (path traversal). */
-function resolveInside(p) {
-  if (typeof p !== "string") throw new Error("path must be a string");
-  const alias = WORKSPACE_ALIAS.exec(p);
-  const abs = path.resolve(WORKDIR, alias ? (alias[1] ?? "") : p);
-  const rel = path.relative(WORKDIR, abs);
-  if (rel === ".." || rel.startsWith(`..${path.sep}`) || path.isAbsolute(rel)) {
-    throw new Error(`path escapes the working directory: ${p}`);
-  }
-  return abs;
+/** Point the read-only root at a directory (absolute), or "" to disable it. */
+export function setAssetDir(dir) {
+  ASSET_DIR = typeof dir === "string" && dir.trim() ? path.resolve(dir) : "";
+  return ASSET_DIR;
+}
+
+export function getAssetDir() {
+  return ASSET_DIR;
+}
+
+/** Resolve a caller-given path against the two roots. Thin: the rules are in tools/paths.mjs, where they can be tested. */
+function resolveInside(p, { write = false } = {}) {
+  return resolvePath(p, { workdir: WORKDIR, assetDir: ASSET_DIR, write });
 }
 
 /**
@@ -1086,7 +1105,7 @@ const handlers = {
   },
 
   async write_file({ path: p, content }) {
-    const abs = resolveInside(p);
+    const abs = resolveInside(p, { write: true });
     const toLf = (s) => s.replace(/\r\n/g, "\n");
     const afterLf = toLf(String(content ?? ""));
     // Capture the existing file's traits so a rewrite keeps its encoding, BOM, and newline style instead of forcing
@@ -1112,7 +1131,7 @@ const handlers = {
   },
 
   async edit_file({ path: p, old_string, new_string, replace_all }) {
-    const abs = resolveInside(p);
+    const abs = resolveInside(p, { write: true });
     if (String(old_string ?? "") === "") throw new Error("old_string must not be empty");
 
     const { text: rawText, hasBom, newline } = await readTextForEdit(abs);
@@ -1176,7 +1195,7 @@ const handlers = {
   },
 
   async append_file({ path: p, content }) {
-    const abs = resolveInside(p);
+    const abs = resolveInside(p, { write: true });
     const add = String(content ?? "");
     // Only the appended text is normalized to the file's newline style; existing bytes (and any BOM at the start)
     // are left exactly as they are — an append must not rewrite content it isn't adding.
@@ -1198,22 +1217,24 @@ const handlers = {
   },
 
   async delete_file({ path: p }) {
-    const abs = resolveInside(p);
+    const abs = resolveInside(p, { write: true });
     await fs.unlink(abs);
     return `Deleted ${rel(abs)}.`;
   },
 
   async copy_file({ source, destination }) {
+    // The source is only read — copying an asset INTO the workspace is the intended way to work with one.
     const s = resolveInside(source);
-    const d = resolveInside(destination);
+    const d = resolveInside(destination, { write: true });
     await fs.mkdir(path.dirname(d), { recursive: true });
     await fs.copyFile(s, d);
     return `Copied ${rel(s)} -> ${rel(d)} (${d}).`;
   },
 
   async move_file({ source, destination }) {
-    const s = resolveInside(source);
-    const d = resolveInside(destination);
+    // Both are writes: a move REMOVES the source, which is exactly what the asset folder must not permit.
+    const s = resolveInside(source, { write: true });
+    const d = resolveInside(destination, { write: true });
     await fs.mkdir(path.dirname(d), { recursive: true });
     await fs.rm(d, { force: true });
     await fs.rename(s, d);
@@ -1256,7 +1277,7 @@ const handlers = {
   },
 
   async create_directory({ path: p }) {
-    const abs = resolveInside(p);
+    const abs = resolveInside(p, { write: true });
     await fs.mkdir(abs, { recursive: true });
     return `Created directory ${rel(abs)} (${abs}).`;
   },
