@@ -41,9 +41,14 @@ export function ContextUsageRing(props: {
   // already carrying 200K). Keep this in sync with compactNow's guard.
   const ctxBudgetK = getContextBudgetK();
   const canCompact = pct >= MANUAL_COMPACT_MIN_PCT * 100 || (ctxBudgetK > 0 && tokens >= ctxBudgetK * 1000);
-  // Exact counts, not the abbreviated ones the bar used to show: reading the precise number is the whole reason
-  // someone hovers this. Grouped in the user's own locale.
-  const exact = (n: number) => n.toLocaleString(locale);
+  // Compact counts in the reader's own numbering system — 225K/1M in English, 22.5万/100万 in Chinese and Japanese,
+  // 22.5만/100만 in Korean. Intl does the work; a hand-rolled K/M abbreviation would be English-only.
+  const compact = (n: number) =>
+    new Intl.NumberFormat(locale, { notation: "compact", maximumFractionDigits: 1 }).format(n);
+  // One decimal, and no trailing ".0" — the difference between 22% and 22.5% of a 1M window is 5,000 tokens.
+  const pctText = new Intl.NumberFormat(locale, { maximumFractionDigits: 1 }).format(
+    contextWindow > 0 ? Math.min(100, (tokens / contextWindow) * 100) : 0
+  );
 
   return (
     <Tooltip>
@@ -83,10 +88,13 @@ export function ContextUsageRing(props: {
         style={{ ["--tooltip-bg" as string]: "var(--color-surface)" }}
         className="w-56 border border-line bg-surface px-3 py-2 text-ink shadow-md"
       >
-        <p className="text-[11px] text-ink-subtle">{t("chat.contextUsage")}</p>
-        <p className="mt-0.5 text-sm tabular-nums text-ink">
-          {exact(tokens)} / {exact(contextWindow)} · {pct}%
-        </p>
+        {/* Label left, counts right, on one line — the numbers are what the eye goes to, so they get the edge. */}
+        <div className="flex items-baseline justify-between gap-3">
+          <span className="text-[11px] text-ink-subtle">{t("chat.contextUsage")}</span>
+          <span className="text-xs tabular-nums text-ink">
+            {compact(tokens)}/{compact(contextWindow)} ({pctText}%)
+          </span>
+        </div>
         {/* The bar the composer ring replaced, kept here where there is room for it: the ring answers "roughly how
             full", this answers "how full against the whole window" at a glance. */}
         <div className="mt-1.5 h-1.5 w-full overflow-hidden rounded-full bg-surface-hover">
