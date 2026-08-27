@@ -9,7 +9,13 @@ import AgentSidebar from "./AgentSidebar";
 import FilesSidebar from "./FilesSidebar";
 import FilesPanel from "@/app/agent/chat/FilesPanel";
 import { ChatAgentView } from "@/app/agent/chat/page";
-import WindowControls, { useWindowControlsPresent, WINDOW_CONTROLS_WIDTH } from "./WindowControls";
+import WindowControls, {
+  TrafficLights,
+  useTrafficLights,
+  useWindowControlsPresent,
+  TRAFFIC_LIGHTS_WIDTH,
+  WINDOW_CONTROLS_WIDTH,
+} from "./WindowControls";
 import { TitleBarSlotContext, FilesSidebarContext, TITLE_BAR_HEIGHT } from "./titleBar";
 import LocalModelSync from "@/components/ai/LocalModelSync";
 import TrayLabelSync from "@/components/ai/TrayLabelSync";
@@ -26,6 +32,11 @@ const EASE = [0.4, 0, 0.2, 1] as const;
  */
 export default function AgentShell({ children }: { children: React.ReactNode }) {
   const [collapsed, setCollapsed] = useState(false);
+  const lights = useTrafficLights();
+  // The floating top-left cluster: 8px inset + the expand button +, where they are drawn, the traffic lights and the
+  // gap after them. The title bar reserves exactly this, so nothing is ever laid out underneath it.
+  const COLLAPSED_CLUSTER_WIDTH =
+    8 + 32 + 4 + (lights.show ? TRAFFIC_LIGHTS_WIDTH + 8 : 0);
   // The title bar's left slot, handed to the conversation header so it can render into this row. State, not a ref, so
   // filling it re-renders the consumer; mounted only on the chat route, which is what keeps the header out of the bar
   // on every other page (the conversation view stays mounted there but hidden).
@@ -102,8 +113,11 @@ export default function AgentShell({ children }: { children: React.ReactNode }) 
             isChatRoute ? "border-b border-line" : ""
           }`}
         >
-          {/* Clears the floating "expand sidebar" button, which overlaps this row's left end while the sidebar is away. */}
-          {collapsed && !hideSidebar && !filesOpen && <div className="w-[44px] shrink-0" />}
+          {/* Clears the floating top-left cluster, which overlaps this row's left end while the sidebar is away.
+              Measured from the same constant the cluster is built from, so the two cannot drift apart. */}
+          {collapsed && !hideSidebar && !filesOpen && (
+            <div className="shrink-0" style={{ width: COLLAPSED_CLUSTER_WIDTH }} aria-hidden />
+          )}
           {isChatRoute && <div ref={setTitleSlot} className="flex min-w-0 flex-1 items-center" />}
           {hasWindowControls && (
             <div className="shrink-0" style={{ width: WINDOW_CONTROLS_WIDTH }} aria-hidden />
@@ -127,22 +141,31 @@ export default function AgentShell({ children }: { children: React.ReactNode }) 
         </div>
       </main>
 
-      {/* Expand button that appears at the top-left when collapsed (not shown on full-screen pages, which have no sidebar) */}
+      {/* Top-left cluster while the sidebar is away (not shown on full-screen pages, which have no sidebar).
+          The traffic lights come with it: they normally live in the sidebar, which animates to zero width when
+          collapsed — so on macOS, folding the sidebar took the window's close, minimize and zoom buttons with it and
+          left no way to control the window at all. They keep their place at the very left edge, the expand button
+          sits to their right, and on Windows / Linux the cluster is the button alone. */}
       <AnimatePresence>
         {collapsed && !hideSidebar && !filesOpen && (
-          <motion.button
-            type="button"
-            aria-label="Expand sidebar"
-            onClick={() => setCollapsed(false)}
+          <motion.div
             initial={{ opacity: 0, x: -8 }}
             animate={{ opacity: 1, x: 0 }}
             exit={{ opacity: 0, x: -8 }}
             transition={{ duration: 0.2, ease: EASE }}
-            style={{ WebkitAppRegion: "no-drag" } as React.CSSProperties}
-            className="absolute left-2 top-[9px] z-[60] flex size-8 items-center justify-center rounded-lg border border-line bg-surface text-foreground/70 shadow-sm transition-colors hover:bg-accent hover:text-foreground"
+            className="absolute left-2 top-[9px] z-[60] flex items-center gap-2"
           >
-            <PanelLeft className="size-4" />
-          </motion.button>
+            <TrafficLights />
+            <button
+              type="button"
+              aria-label="Expand sidebar"
+              onClick={() => setCollapsed(false)}
+              style={{ WebkitAppRegion: "no-drag" } as React.CSSProperties}
+              className="flex size-8 items-center justify-center rounded-lg border border-line bg-surface text-foreground/70 shadow-sm transition-colors hover:bg-accent hover:text-foreground"
+            >
+              <PanelLeft className="size-4" />
+            </button>
+          </motion.div>
         )}
       </AnimatePresence>
       {/* Windows / Linux: top-right window controls (not rendered on macOS, which uses the sidebar traffic lights) */}

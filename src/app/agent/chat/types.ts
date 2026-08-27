@@ -140,10 +140,13 @@ export type DisplayMsg =
   // rating: the user's rating of this reply (thumbs up/down), from StoredMessage.rating; storedIndex: its index in the session
   // messages array, used to persist the rating to the corresponding StoredMessage (only present for replies already written to disk).
   | { kind: "assistant"; content: string; rating?: "up" | "down"; storedIndex?: number }
-  | { kind: "reasoning"; content: string } // the "deep thinking" body of reasoning models (collapsible; distinct from the "thinking process" tool trace)
+  // The "deep thinking" body of reasoning models (distinct from the "thinking process" tool trace).
+  // `ms` is how long the round that produced it took the model, for the "took 6s" label on the thinking header;
+  // absent on records written before that was measured, and the label is simply omitted then.
+  | { kind: "reasoning"; content: string; ms?: number }
   // Dev-mode "phase summary": the body of a tool-call round (after cleanup) — shown as one entry in the "thinking process" timeline,
   // collected into the same card alongside deep thinking / the tool trace rather than as its own separate block (avoids splitting one round into multiple "done" reply blocks).
-  | { kind: "phase"; content: string }
+  | { kind: "phase"; content: string; ms?: number }
   // `image` / `servedBy` are set by image_generation only: the artifact is rendered here, in the
   // display layer, and deliberately never enters the model's context (a base64 payload would be
   // re-sent every turn). `servedBy` names the engine because the vendor may differ from the chat
@@ -219,3 +222,6 @@ export type RunCtx = {
   push: (m: DisplayMsg) => void;
   status: (s: string) => void;
 };
+
+/** A single tool-call message (the tool branch extracted from the DisplayMsg union). */
+export type ToolMsg = Extract<DisplayMsg, { kind: "tool" }>;

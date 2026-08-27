@@ -90,6 +90,15 @@ export interface StoredMessage {
    * rating is kept for audit only and is stripped from the wire before sending (see stripWireMetadata); the archived entry is never modified.
    */
   rating?: "up" | "down";
+  /**
+   * How long the model took on the round this message came from, in milliseconds (only when role==="assistant").
+   *
+   * Display-only, like name / image / steps: it feeds the "took 6s" label on the thinking-process header, is never fed
+   * to the model, and is not part of the integrity hash. Measured around the request itself rather than derived from
+   * `ts` deltas — the gap between two stored messages also contains tool execution and, for a background conversation,
+   * however long the user left it alone.
+   */
+  thinkMs?: number;
   ts: number;
 }
 

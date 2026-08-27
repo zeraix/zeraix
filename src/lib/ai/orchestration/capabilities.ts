@@ -76,6 +76,10 @@ const RISK: ReadonlyArray<readonly [string, RiskLevel]> = [
   ["init_command", "medium"],
   ["web_search", "medium"],
   ["fetch_url", "medium"],
+  // Loads a URL in a hidden window and returns its console output. Outbound like fetch_url, and one step
+  // beyond it: the page's own JavaScript runs. Still medium — it runs in a throwaway session with no
+  // credentials, the caller cannot script the page, and nothing it does touches the working directory.
+  ["page_console", "medium"],
   /**
    * `check_project` runs the project's own build and test scripts.
    *
@@ -306,6 +310,7 @@ const MOCK_REQUIRED: Readonly<Record<string, readonly string[]>> = Object.freeze
   run_command: ["command"],
   open_path: ["path"],
   fetch_url: ["url"],
+  page_console: ["url"],
   web_search: ["query"],
 });
 

@@ -17,6 +17,24 @@ import { useLocaleStore, useT } from "@/lib/i18n";
 const R = 8.75;
 const CIRCUMFERENCE = 2 * Math.PI * R;
 
+/**
+ * Formatters, cached per locale.
+ *
+ * This component sits inside the composer, so it re-renders on every keystroke, and constructing an
+ * Intl.NumberFormat is expensive enough to notice when it happens twice per character. The instances are
+ * immutable and depend only on the locale, so one of each per locale is all that is ever needed.
+ */
+const compactFormatters = new Map<string, Intl.NumberFormat>();
+const percentFormatters = new Map<string, Intl.NumberFormat>();
+function formatter(cache: Map<string, Intl.NumberFormat>, locale: string, options: Intl.NumberFormatOptions) {
+  let f = cache.get(locale);
+  if (!f) {
+    f = new Intl.NumberFormat(locale, options);
+    cache.set(locale, f);
+  }
+  return f;
+}
+
 export function ContextUsageRing(props: {
   /** Input tokens the next request would carry. */
   tokens: number;
@@ -44,9 +62,9 @@ export function ContextUsageRing(props: {
   // Compact counts in the reader's own numbering system — 225K/1M in English, 22.5万/100万 in Chinese and Japanese,
   // 22.5만/100만 in Korean. Intl does the work; a hand-rolled K/M abbreviation would be English-only.
   const compact = (n: number) =>
-    new Intl.NumberFormat(locale, { notation: "compact", maximumFractionDigits: 1 }).format(n);
+    formatter(compactFormatters, locale, { notation: "compact", maximumFractionDigits: 1 }).format(n);
   // One decimal, and no trailing ".0" — the difference between 22% and 22.5% of a 1M window is 5,000 tokens.
-  const pctText = new Intl.NumberFormat(locale, { maximumFractionDigits: 1 }).format(
+  const pctText = formatter(percentFormatters, locale, { maximumFractionDigits: 1 }).format(
     contextWindow > 0 ? Math.min(100, (tokens / contextWindow) * 100) : 0
   );
 

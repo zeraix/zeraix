@@ -31,7 +31,8 @@ export type BrowserAction =
   | "eval"
   | "a11y"
   | "list"
-  | "shot";
+  | "shot"
+  | "console";
 export interface BrowserActionResult {
   ok: boolean;
   result?: unknown;

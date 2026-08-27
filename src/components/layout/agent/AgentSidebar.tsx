@@ -9,8 +9,6 @@ import {
   ChevronsUpDown,
   PanelLeftClose,
   Pin,
-  Folder,
-  FolderOpen,
   Settings,
   CircleHelp,
   Coins,
@@ -55,11 +53,7 @@ import {
 import { PLUGINS_UI_ENABLED } from "@/constants/App";
 import { cn } from "@/lib/utils";
 import { formatWallet, isCnEdition } from "@/lib/edition";
-import { openPathInShell } from "@/lib/electron/shell";
 import {
-  minimizeWindow,
-  toggleMaximizeWindow,
-  closeWindow,
   setNativeWindowButtons,
   isWindowControlsAvailable,
   isWindowAlwaysOnTop,
@@ -67,8 +61,8 @@ import {
   onWindowAlwaysOnTopChange,
 } from "@/lib/electron/windowControls";
 import STORAGE_KEY from "@/constants/Storage";
-import SidebarLeaf, { formatAge } from "./SidebarLeaf";
-import CustomScrollbar from "@/components/CustomScrollbar";
+import SidebarTree from "./SidebarTree";
+import { TrafficLights, useTrafficLights } from "./WindowControls";
 /**
  * New Agent sidebar (independent of the legacy `sidebar.tsx`).
  * Fixed width 260px: window control dots + brand + main nav + project/conversation groups + bottom user.
@@ -128,75 +122,22 @@ const NAV_ITEM_VARIANTS = {
 };
 
 /**
- * macOS-style window controls (red = close / yellow = minimize / green = zoom).
- * In Electron they are clickable and drive the real window (the native traffic lights are hidden in the main process);
- * in the browser / Web they degrade to pure decoration and show no symbols on hover.
+ * Collapsible section (projects / conversations). A shrinkable flex column: the title stays fixed and the content takes
+ * the remaining space. Scrolling belongs to the content — SidebarTree owns its own scroller, because the virtualizer
+ * inside it needs the scrolling element.
  */
-function TrafficLights() {
-  const [state, setState] = useState({ electron: false, mac: false });
-
-  // Detect the platform on the client only, to avoid hydration mismatches.
-  useEffect(() => {
-    void (async () => {
-      const ua = typeof navigator !== "undefined" ? navigator.userAgent : "";
-      setState({ electron: ua.includes("Electron"), mac: ua.includes("Macintosh") });
-    })();
-  }, []);
-
-  // On Windows/Linux, Electron uses the top-right window controls (see WindowControls), so we don't render the traffic lights here.
-  if (state.electron && !state.mac) return null;
-
-  // Only under macOS Electron are they clickable to control the window; in the browser they are pure decoration.
-  const active = state.electron && state.mac;
-
-  const buttons = [
-    { color: "#ff5f57", label: "Close", glyph: "✕", onClick: closeWindow },
-    { color: "#febc2e", label: "Minimize", glyph: "−", onClick: minimizeWindow },
-    { color: "#28c840", label: "Zoom", glyph: "+", onClick: () => void toggleMaximizeWindow() },
-  ];
-
-  return (
-    <div className="group/lights flex items-center gap-2">
-      {buttons.map((b) => (
-        <button
-          key={b.label}
-          type="button"
-          aria-label={b.label}
-          title={b.label}
-          tabIndex={active ? 0 : -1}
-          onClick={active ? b.onClick : undefined}
-          style={{ backgroundColor: b.color, WebkitAppRegion: "no-drag" } as React.CSSProperties}
-          className={cn(
-            "flex size-3 items-center justify-center rounded-full",
-            active ? "cursor-pointer" : "pointer-events-none"
-          )}
-        >
-          <span className="text-[8px] font-bold leading-none text-black/55 opacity-0 transition-opacity group-hover/lights:opacity-100">
-            {active ? b.glyph : ""}
-          </span>
-        </button>
-      ))}
-    </div>
-  );
-}
-
-/** Collapsible section (projects / conversations). */
 function CollapsibleSection({
   title,
   children,
   className,
-  scroll = false,
 }: {
   title: string;
   children: React.ReactNode;
   className?: string;
-  /** Scroll within this section when content exceeds the available height (used for the conversation list, to avoid overflowing the sidebar and being unable to scroll). */
-  scroll?: boolean;
 }) {
   const [open, setOpen] = useState(true);
   return (
-    // When scroll is set, this section acts as a shrinkable flex column: the title stays fixed and the list scrolls in the remaining space.
-    <div className={cn(className, scroll && "flex min-h-0 flex-col")}>
+    <div className={cn(className, "flex min-h-0 flex-col")}>
       <button
         type="button"
         onClick={() => setOpen((v) => !v)}
@@ -207,18 +148,7 @@ function CollapsibleSection({
           className={cn("size-3 transition-transform", !open && "-rotate-90")}
         />
       </button>
-      {open && (
-        <CustomScrollbar>
-        <div
-          className={cn(
-            "mt-2 space-y-0.5",
-            scroll && "min-h-0 flex-1 overflow-y-auto pr-0.5",
-          )}
-        >
-          {children}
-        </div>
-        </CustomScrollbar>
-      )}
+      {open && children}
     </div>
   );
 }
@@ -230,6 +160,8 @@ export default function AgentSidebar({ onToggle }: { onToggle?: () => void }) {
   const requireLogin = useLoginModalStore((s) => s.requireLogin);
   const t = useT();
   const ime = useImeGuard();
+  // Whether the window's top-left corner is ours to reserve — see useTrafficLights.
+  const lights = useTrafficLights();
 
   // Guests can use the whole app; the account row falls back to a "sign in" label.
   const name = isLoggedIn ? userInfo?.username || userInfo?.name || "Username" : t("auth.signIn");
@@ -327,7 +259,7 @@ export default function AgentSidebar({ onToggle }: { onToggle?: () => void }) {
   // this is an override map rather than a set of open ids (a set would need an effect to seed itself).
   const [expandOverrides, setExpandOverrides] = useState<Record<string, boolean>>({});
   const expandedProjectIds = useMemo(
-    () => projects.filter((p) => expandOverrides[p.id] ?? true).map((p) => p.id),
+    () => new Set(projects.filter((p) => expandOverrides[p.id] ?? true).map((p) => p.id)),
     [projects, expandOverrides]
   );
   // Chats are now visible for any open project, not just the current one, so each open project needs its records loaded.
@@ -385,7 +317,7 @@ export default function AgentSidebar({ onToggle }: { onToggle?: () => void }) {
 
   // Click a project row: open it and make it current. Clicking the already-open current project folds it back up.
   const toggleProject = (p: { id: string; workdir?: string }) => {
-    const open = expandedProjectIds.includes(p.id);
+    const open = expandedProjectIds.has(p.id);
     if (open && p.id === currentProjectId) {
       setProjectExpanded(p.id, false);
       return;
@@ -450,7 +382,9 @@ export default function AgentSidebar({ onToggle }: { onToggle?: () => void }) {
       {/* Top: window control dots + brand + collapse button (the whole block is the drag region of the frameless window; interactive elements are no-drag) */}
       <div className="px-4 pt-4" style={{ WebkitAppRegion: "drag" } as React.CSSProperties}>
         <TrafficLights />
-        <div className="mt-4 flex items-center justify-between">
+        {/* The gap under the lights belongs to the lights: on Windows and Linux nothing is drawn up here, and
+            reserving macOS's inset anyway left a band of dead space above the brand. */}
+        <div className={cn("flex items-center justify-between", lights.show && "mt-4")}>
           {/* eslint-disable-next-line @next/next/no-img-element */}
           <img
             src={`${isDark ? "/image/agent/sidebar/DZeraix.svg" : "/image/agent/sidebar/Zeraix.svg"}`}
@@ -563,104 +497,26 @@ export default function AgentSidebar({ onToggle }: { onToggle?: () => void }) {
 
       {/* Projects + their chats, as one tree: clicking a project expands its chats underneath. Fills the remaining
           space (pushing the user area to the bottom) and scrolls internally when the tree gets long. */}
-      <CollapsibleSection title={t("section.projects")} className="mt-7 min-h-0 flex-1 px-3" scroll>
-        {projects.length === 0 ? (
-          <p className="px-2 py-1 text-xs text-muted-foreground">{t("sidebar.autoCreated")}</p>
-        ) : (
-          projects.map((p) => {
-            const expanded = expandedProjectIds.includes(p.id);
-            const convs = conversationsByProject.get(p.id) ?? [];
-            // Rolled up onto a collapsed project row: without this, a chat needing attention inside a folded project
-            // would show no signal at all.
-            const rollup = expanded
-              ? { generating: false, consent: false, question: false, unread: false }
-              : {
-                  generating: convs.some((c) => generating[c.id]),
-                  consent: convs.some((c) => pendingConsent[c.id]),
-                  question: convs.some((c) => pendingQuestion[c.id]),
-                  unread: convs.some((c) => unread[c.id]),
-                };
-            return (
-              <div key={p.id}>
-                <SidebarLeaf
-                  label={p.name}
-                  active={p.id === currentProjectId}
-                  icon={
-                    expanded ? (
-                      <FolderOpen className="size-[15px]" />
-                    ) : (
-                      <Folder className="size-[15px]" />
-                    )
-                  }
-                  generating={rollup.generating}
-                  pendingConsent={rollup.consent}
-                  pendingQuestion={rollup.question}
-                  unread={rollup.unread}
-                  expanded={expanded}
-                  onClick={() => toggleProject(p)}
-                  onNewChat={() => newChatInProject(p.workdir)}
-                  onOpenFolder={(() => {
-                    const dir = projectFolder(p);
-                    return dir ? () => void openPathInShell(dir) : undefined;
-                  })()}
-                  onRename={() => setRenameState({ kind: "project", id: p.id, value: p.name })}
-                  onDelete={() => setDeleteState({ kind: "project", id: p.id, name: p.name })}
-                />
-                <AnimatePresence initial={false}>
-                  {expanded && (
-                    <motion.div
-                      initial={{ height: 0, opacity: 0 }}
-                      animate={{ height: "auto", opacity: 1 }}
-                      exit={{ height: 0, opacity: 0 }}
-                      transition={{ duration: 0.18, ease: EASE }}
-                      className="overflow-hidden"
-                    >
-                      {/* No rule and no indent: the folder glyph in the gutter is what marks a project row, so chat
-                          labels line up directly under the project label they belong to. */}
-                      <div className="space-y-0.5 py-0.5">
-                        {convs.length === 0 ? (
-                          <p className="px-8 py-1 text-xs text-muted-foreground">
-                            {t("sidebar.noConversations")}
-                          </p>
-                        ) : (
-                          convs.map((c) => (
-                            <SidebarLeaf
-                              key={c.id}
-                              label={c.title || t("conversation.untitled")}
-                              active={c.id === activeConversationId}
-                              meta={formatAge(c.updatedAt, now, locale)}
-                              generating={!!generating[c.id]}
-                              pendingConsent={!!pendingConsent[c.id]}
-                              pendingQuestion={!!pendingQuestion[c.id]}
-                              unread={!!unread[c.id]}
-                              onClick={() => openConversation(c.id, c.projectId)}
-                              onNewChat={() => newChatInProject(p.workdir)}
-                              onOpenFolder={(() => {
-                                // A conversation prefers its own actual directory (under the default project each conversation has its own real directory); if missing, fall back to the project directory.
-                                const dir = c.workdir || p.workdir;
-                                return dir ? () => void openPathInShell(dir) : undefined;
-                              })()}
-                              onRename={() =>
-                                setRenameState({ kind: "conversation", id: c.id, value: c.title || "" })
-                              }
-                              onDelete={() =>
-                                setDeleteState({
-                                  kind: "conversation",
-                                  id: c.id,
-                                  name: c.title || t("conversation.untitled"),
-                                })
-                              }
-                            />
-                          ))
-                        )}
-                      </div>
-                    </motion.div>
-                  )}
-                </AnimatePresence>
-              </div>
-            );
-          })
-        )}
+      <CollapsibleSection title={t("section.projects")} className="mt-7 min-h-0 flex-1 px-3">
+        <SidebarTree
+          projects={projects}
+          conversationsByProject={conversationsByProject}
+          expandedIds={expandedProjectIds}
+          currentProjectId={currentProjectId}
+          activeConversationId={activeConversationId}
+          generating={generating}
+          pendingConsent={pendingConsent}
+          pendingQuestion={pendingQuestion}
+          unread={unread}
+          now={now}
+          locale={locale}
+          onToggleProject={toggleProject}
+          onOpenConversation={openConversation}
+          onNewChat={newChatInProject}
+          folderOf={projectFolder}
+          onRename={(kind, id, value) => setRenameState({ kind, id, value })}
+          onDelete={(kind, id, name) => setDeleteState({ kind, id, name })}
+        />
       </CollapsibleSection>
 
       {/* Bottom user */}

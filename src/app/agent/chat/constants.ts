@@ -12,6 +12,44 @@ import developmentModeMd from "./system/development.mode.md";
 // limit now lives in lib/agent/stopPolicy.ts. Their storage keys in constants/Agent.ts are left alone: those
 // are a persisted config surface (§16), not code.
 
+/**
+ * The chat's reading column.
+ *
+ * The transcript and the composer MUST share it: a composer wider than the messages above it reads as
+ * broken alignment, and two literals in two files drift the moment one of them is touched. Sized as a
+ * reading measure rather than to the window — at 5xl the column ran edge-to-edge on a normal window, with
+ * the collapsed browser button sitting on top of the text.
+ */
+export const CHAT_COLUMN = "mx-auto w-full max-w-3xl";
+
+/**
+ * Hard ceiling on the characters one outgoing message may carry.
+ *
+ * Enforced in two places, and both are needed: the composer's `maxLength` stops a paste at the source, and
+ * the send preflight stops the programmatic senders (the message queue, the home page's pending auto-send)
+ * that hand `send()` their text directly and never touch the composer.
+ */
+export const MAX_INPUT_CHARS = 1_000_000;
+
+/**
+ * Whether the engine sizes a textarea to its content in CSS (`field-sizing: content`, Chromium >= 123).
+ *
+ * Where it does, the composer's JS auto-fit must NOT run: writing a height and then reading scrollHeight
+ * forces a synchronous layout of the whole document on every keystroke, and the document is the entire
+ * transcript. The CSS lives in globals.css (.composer-autosize); this is only the switch that turns the
+ * fallback off. Cached because it is asked on every input change and the answer cannot change at runtime.
+ */
+let fieldSizing: boolean | null = null;
+export function supportsFieldSizing(): boolean {
+  if (fieldSizing === null) {
+    fieldSizing =
+      typeof CSS !== "undefined" &&
+      typeof CSS.supports === "function" &&
+      CSS.supports("field-sizing", "content");
+  }
+  return fieldSizing;
+}
+
 /** Read-only tools with no side effects and no UI interaction: when the model issues several of them together,
  *  they can run concurrently instead of one await at a time. Only consecutive runs are batched, so a read never
  *  overtakes an edit issued in the same round. */
@@ -265,6 +303,7 @@ const TOOL_LABELS: Record<string, string> = {
   update_todos: "Updating todos",
   web_search: "Searching the web",
   fetch_url: "Fetching page",
+  page_console: "Checking page console",
   mcp_discover: "Finding MCP servers",
   mcp_connect: "Connecting MCP server",
   mcp_tools: "Checking connected integrations",

@@ -51,6 +51,11 @@ export const ROUTED_TOOLS: ReadonlySet<string> = new Set([
   "browser",
   "openBrowser",
   "image_generation",
+  // Generating media and checking a page's console are both deliberate, occasional acts the model performs on
+  // request, not part of the loop it runs constantly — and their schemas argue for themselves in prose just as
+  // well. Their cases moved into the catalog in development.mode.md, per the rule at the end of this comment.
+  "video_generation",
+  "page_console",
   "open_path",
   "stop_service",
   "refine_question",

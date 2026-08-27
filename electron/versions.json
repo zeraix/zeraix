@@ -5,7 +5,7 @@
     "arm64": "sha-e1d67c55484e"
   },
   "seedPrefix": {
-    "dev": "f9653906daa94489"
+    "dev": "974cd399f6fe2c55"
   },
   "macLlama": {
     "tag": "mac-v9.3",

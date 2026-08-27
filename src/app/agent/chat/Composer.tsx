@@ -23,6 +23,7 @@ import type { Attachment } from "./types";
 import { formatBytes } from "./format";
 import { useT } from "@/lib/i18n";
 import { useImeGuard } from "@/lib/ime";
+import { CHAT_COLUMN, MAX_INPUT_CHARS } from "./constants";
 import { commandTokenLength, matchSlashCommands, type SlashCommand } from "./slashCommands";
 import { AnimatePresence, motion } from "framer-motion";
 import { useRef, useState } from "react";
@@ -127,7 +128,7 @@ export function Composer({
     !!selected && (selected.providerId === LOCAL_PROVIDER_ID || isLocalEndpoint(selected.endpoint ?? ""));
   return (
     <div className="border-t border-line bg-surface px-4 py-3">
-      <div className="mx-auto w-full max-w-4xl">
+      <div className={CHAT_COLUMN}>
         <div
           // `relative` anchors the slash-command menu, which is positioned against this box rather than the
           // textarea so it spans the full composer width.
@@ -368,13 +369,18 @@ export function Composer({
               onPaste={(e) => {
                 if (e.clipboardData.files.length > 0) onAddFiles(e.clipboardData.files);
               }}
-              rows={1}
+              rows={2}
+              // Stops an oversized paste at the source. The send preflight repeats the check for the
+              // programmatic senders, which never pass through this element. See MAX_INPUT_CHARS.
+              maxLength={MAX_INPUT_CHARS}
               placeholder={t("chat.composerPlaceholder")}
               // The metrics are shared with the mirror above, so the two layers wrap identically. The
               // textarea keeps its own background/caret concerns; only the type metrics are common.
+              // composer-autosize: sizes the box to its content in CSS where the engine supports it, which
+              // is what lets page.tsx skip measuring it on every keystroke. See globals.css.
               className={cn(
                 TEXT_METRICS,
-                "relative block max-h-[30vh] w-full resize-none border-0 bg-transparent text-ink outline-none placeholder:text-ink-subtle disabled:cursor-not-allowed disabled:opacity-60",
+                "composer-autosize relative block max-h-[30vh] w-full resize-none border-0 bg-transparent text-ink outline-none placeholder:text-ink-subtle disabled:cursor-not-allowed disabled:opacity-60",
               )}
             />
           </div>

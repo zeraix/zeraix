@@ -75,8 +75,22 @@ interface Tab {
 interface LogEntry {
   id: number;
   text: string;
-  kind: "status" | "trigger" | "error";
+  kind: "status" | "trigger" | "error" | "warn";
 }
+/** One message the page itself produced: console.* output, an uncaught error, or a failed load.
+ *  Buffered per tab so the AI can read it back with `browser → console` -- otherwise a page it opened
+ *  can be throwing on every render and the model sees a perfectly fine-looking screenshot. */
+interface ConsoleEntry {
+  level: "debug" | "info" | "warn" | "error";
+  text: string;
+  /** "sourceId:line" when the page reports one. */
+  source: string;
+}
+
+/** Per-tab console ring buffer size. Deep enough for a page that logs on every frame, small enough to keep in memory. */
+const CONSOLE_CAP = 300;
+/** Numeric <webview> console levels, in Electron's order: verbose / info / warning / error. */
+const CONSOLE_LEVELS = ["debug", "info", "warn", "error"] as const;
 
 const uid = () =>
   typeof crypto !== "undefined" && crypto.randomUUID
@@ -96,6 +110,7 @@ function TabView({
   onNav,
   onTitle,
   onReady,
+  onConsole,
 }: {
   tab: Tab;
   active: boolean;
@@ -104,6 +119,7 @@ function TabView({
   onNav: (id: string, url: string) => void;
   onTitle: (id: string, title: string) => void;
   onReady: () => void;
+  onConsole: (id: string, entry: ConsoleEntry) => void;
 }) {
   const hostRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
@@ -119,10 +135,40 @@ function TabView({
     const nav = () => onNav(tab.id, el.getURL());
     const title = (e: Event) => onTitle(tab.id, (e as unknown as { title: string }).title || "");
     const ready = () => onReady();
+    // The guest's own console. Electron forwards every console.* call, uncaught exception, unhandled rejection and
+    // failed sub-resource load of the page as this DOM event -- the listener is attached before the element enters the
+    // DOM, so nothing from the very first load is missed. `level` is numeric (0-3) on the <webview> event; the
+    // WebContents-side event uses strings, so accept both rather than depend on which one Electron hands us.
+    const consoleMsg = (ev: Event) => {
+      const e = ev as unknown as { level: number | string; message: string; line?: number; sourceId?: string };
+      const level =
+        typeof e.level === "number"
+          ? CONSOLE_LEVELS[e.level] ?? "info"
+          : e.level === "warning"
+            ? "warn"
+            : (["debug", "info", "warn", "error"] as const).find((l) => l === e.level) ?? "info";
+      onConsole(tab.id, {
+        level,
+        text: String(e.message ?? ""),
+        source: e.sourceId ? `${e.sourceId}${e.line ? `:${e.line}` : ""}` : "",
+      });
+    };
+    // Navigation-level failures (dev server not up yet, DNS, cert) never reach the page console, because there is no page.
+    const failLoad = (ev: Event) => {
+      const e = ev as unknown as { errorCode: number; errorDescription: string; validatedURL?: string };
+      if (e.errorCode === -3) return; // ERR_ABORTED: navigation superseded by a newer one, not a failure
+      onConsole(tab.id, {
+        level: "error",
+        text: `load failed: ${e.errorDescription || "unknown error"} (${e.errorCode})`,
+        source: e.validatedURL ?? "",
+      });
+    };
     el.addEventListener("did-navigate", nav);
     el.addEventListener("did-navigate-in-page", nav);
     el.addEventListener("page-title-updated", title);
     el.addEventListener("dom-ready", ready);
+    el.addEventListener("console-message", consoleMsg);
+    el.addEventListener("did-fail-load", failLoad);
     host.appendChild(el); // insert only after all attributes are set -> the guest mounts with allowpopups
     registerRef(tab.id, el);
     return () => {
@@ -131,6 +177,8 @@ function TabView({
       el.removeEventListener("did-navigate-in-page", nav);
       el.removeEventListener("page-title-updated", title);
       el.removeEventListener("dom-ready", ready);
+      el.removeEventListener("console-message", consoleMsg);
+      el.removeEventListener("did-fail-load", failLoad);
       el.remove();
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -162,6 +210,7 @@ export default function BrowserPanel({
   const [showLogs, setShowLogs] = useState(false);
 
   const webviewRefs = useRef<Map<string, WebviewEl>>(new Map());
+  const consoleRef = useRef<Map<string, ConsoleEntry[]>>(new Map()); // tab id -> captured page console output
   const startedRef = useRef(false);
   const logIdRef = useRef(0);
   const tabsRef = useRef<Tab[]>(tabs);
@@ -188,6 +237,7 @@ export default function BrowserPanel({
     setTabs(remaining);
     setActiveId((cur) => (cur === id ? remaining[remaining.length - 1]?.id ?? null : cur));
     webviewRefs.current.delete(id);
+    consoleRef.current.delete(id);
   }, []);
 
   const navigateActive = useCallback((rawUrl: string) => {
@@ -209,6 +259,32 @@ export default function BrowserPanel({
       if (action === "list") {
         const list = tabsRef.current.map((t, i) => `${i + 1}. ${t.title || t.url} — ${t.url}`).join("\n");
         return { ok: true, result: list || "(no open tabs)" };
+      }
+      // Read back what the active tab logged. Served from the buffer rather than the live page, so output from page
+      // load -- which is where the interesting errors are -- survives; it does not need the page to still be alive.
+      if (action === "console") {
+        const id = activeIdRef.current;
+        if (!id) return { ok: false, error: "There is no active built-in browser tab; use openBrowser to open a page first." };
+        const want = String(params.level ?? "all").toLowerCase();
+        const max = Math.max(1, Number(params.max ?? 50) || 50);
+        const all = consoleRef.current.get(id) ?? [];
+        const keep = all.filter((e) =>
+          want === "error" ? e.level === "error" : want === "warn" ? e.level === "error" || e.level === "warn" : true,
+        );
+        if (params.clear) consoleRef.current.set(id, []);
+        const shown = keep.slice(-max);
+        const where = tabsRef.current.find((t) => t.id === id)?.url ?? "the active tab";
+        if (shown.length === 0) {
+          return {
+            ok: true,
+            result:
+              `No ${want === "all" ? "" : `${want}-level `}console output captured from ${where} ` +
+              `(${all.length} message(s) buffered in total). Only what the page logged since this tab was opened is ` +
+              `captured — reload the page (browser → navigate, or eval location.reload()) to capture its load-time output.`,
+          };
+        }
+        const body = shown.map((e) => `[${e.level}] ${e.text}${e.source ? ` — ${e.source}` : ""}`).join("\n");
+        return { ok: true, result: `${shown.length} of ${keep.length} console message(s) from ${where}:\n${body}` };
       }
       const wv = activeWv();
       if (!wv) return { ok: false, error: "There is no active built-in browser tab; use openBrowser to open a page first." };
@@ -297,6 +373,18 @@ export default function BrowserPanel({
 
   const pushLog = (text: string, kind: LogEntry["kind"]) =>
     setLogs((l) => [...l.slice(-199), { id: ++logIdRef.current, text, kind }]);
+
+  // Page console output: every level goes into the per-tab buffer the AI reads, while warnings and errors also land in
+  // the visible log drawer, so the user sees the same thing without opening devtools.
+  const onTabConsole = useCallback((id: string, entry: ConsoleEntry) => {
+    const buf = consoleRef.current.get(id) ?? [];
+    buf.push(entry);
+    if (buf.length > CONSOLE_CAP) buf.splice(0, buf.length - CONSOLE_CAP);
+    consoleRef.current.set(id, buf);
+    if (entry.level === "error" || entry.level === "warn") {
+      pushLog(`${entry.level}: ${entry.text}${entry.source ? ` (${entry.source})` : ""}`, entry.level);
+    }
+  }, []);
 
   // Automation events -> logs (does not auto-expand).
   useEffect(
@@ -471,6 +559,7 @@ export default function BrowserPanel({
                     onNav={onTabNav}
                     onTitle={onTabTitle}
                     onReady={onTabReady}
+                    onConsole={onTabConsole}
                   />
                 </div>
               ))
@@ -495,7 +584,13 @@ export default function BrowserPanel({
                   <p
                     key={l.id}
                     className={
-                      l.kind === "error" ? "text-destructive" : l.kind === "trigger" ? "text-primary" : "text-muted-foreground"
+                      l.kind === "error"
+                        ? "text-destructive"
+                        : l.kind === "warn"
+                          ? "text-amber-600"
+                          : l.kind === "trigger"
+                            ? "text-primary"
+                            : "text-muted-foreground"
                     }
                   >
                     {l.text}

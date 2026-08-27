@@ -369,6 +369,26 @@
   }
 }
 
+/* Sidebar tree: a row appearing because its project folder was opened. Opacity only — the row's own transform carries
+   its position in the virtualized list, and the stock `animate-in` keyframe writes transform, which would yank the row
+   to the top of the list for the length of the animation. The delay lets the rows below it finish sliding out of the
+   way first, so a revealed row never paints over one that is still moving. */
+@keyframes sidebar-row-in {
+  from {
+    opacity: 0;
+  }
+}
+
+.animate-sidebar-row-in {
+  animation: sidebar-row-in 0.14s ease-out 0.09s both;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .animate-sidebar-row-in {
+    animation: none;
+  }
+}
+
 
 html.dark::view-transition-old(root) {
   z-index: 2147483646;
@@ -406,4 +426,21 @@ html.theme-transition::view-transition-new(root) {
   border-image: linear-gradient(135deg, #ef4444, #3b82f6, #22c55e, #ef4444) 1;
   filter: blur(9px);
   opacity: 0.85;
+}
+/* Composer textarea: size to content in CSS rather than by measuring it in JS.
+ *
+ * The JS fallback (the auto-fit effect in agent/chat/page.tsx) writes a height and then reads scrollHeight,
+ * and that read forces a synchronous layout of the whole document -- the entire transcript -- on every
+ * keystroke. Chromium >= 123, which is every Electron build this app ships, sizes the field natively, so
+ * there the measurement never runs at all (see supportsFieldSizing in agent/chat/constants.ts).
+ *
+ * `rows` is ignored under field-sizing, so the two-row resting height it used to give is restored with
+ * min-height: 2 line-heights plus the element's own 0.25rem vertical padding, top and bottom. */
+@supports (field-sizing: content) {
+  .composer-autosize {
+    field-sizing: content;
+    min-height: calc(2lh + 0.5rem);
+    max-height: 30vh;
+    overflow-y: auto;
+  }
 }

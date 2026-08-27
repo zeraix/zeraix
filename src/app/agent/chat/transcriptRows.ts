@@ -8,7 +8,7 @@
 import type { DisplayMsg } from "./types";
 // Type-only, and it must stay that way: MessageItem is a .tsx, and a value import would drag JSX into a
 // module the tests import directly.
-import type { ProcessItem } from "./MessageItem";
+import type { ProcessItem } from "./ProcessStream";
 
 /** A trace entry, which collapses into the "thinking process" card. See the exception in the header. */
 const inProcess = (m: DisplayMsg): boolean =>

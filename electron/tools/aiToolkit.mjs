@@ -18,6 +18,7 @@ import { resolvePath } from "./paths.mjs";
 import { constants as FS } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
 import { shell } from "electron";
 
 import { llmChat } from "../llm/proxy.mjs";
@@ -47,6 +48,9 @@ import { mcpAdminHandlers } from "./mcpAdmin.mjs";
 // only observable difference when it is unavailable is that it is not used. See its header and
 // docs/agent-runtime-migration.md.
 import { invalidateFileList as invalidateRustFileList, tryRunTool } from "./rustRuntime.mjs";
+// page_console's window lifecycle. Its own module because this one is already far past the file-size
+// ceiling, and because a hidden BrowserWindow has to be leak-proof on every exit path.
+import { capturePageConsole } from "./pageConsole.mjs";
 
 // Command execution is abstracted into a pluggable engine (native = run directly on the host
 // (legacy behavior); qemu = hardware-isolated VM, see the probing/selection in
@@ -1668,6 +1672,28 @@ const handlers = {
       `Fetched ${finalUrl}${statusNote}${typeNote}:\n\n${body || "(empty response body)"}` +
       (truncated ? `\n\n… (content truncated at ${WEB_FETCH_MAX_CHARS} characters)` : "")
     );
+  },
+
+  /**
+   * Load a page headlessly (JavaScript runs) and return what it logged: console output, uncaught errors,
+   * unhandled rejections, failed requests. The window lifecycle lives in ./pageConsole.mjs; what belongs
+   * here is turning the model's `url` into something safe to load — an http(s) URL, or a path resolved
+   * inside the working directory like every other path this toolkit accepts, never a raw file:// the model
+   * composed itself.
+   */
+  async page_console({ url, wait_ms, level, max } = {}) {
+    const raw = String(url ?? "").trim();
+    if (!raw) throw new Error("url is required");
+    let target = raw;
+    if (!/^https?:\/\//i.test(raw)) {
+      if (/^[a-z][a-z0-9+.-]*:\/\//i.test(raw)) {
+        throw new Error("url must be an http(s) URL, or a file path inside the working directory");
+      }
+      const abs = resolveInside(raw);
+      await fs.access(abs, FS.R_OK); // fail with "no such file" rather than a blank about:blank capture
+      target = pathToFileURL(abs).href;
+    }
+    return capturePageConsole({ url: target, waitMs: wait_ms, level, max });
   },
 
   // mcp_discover / mcp_connect. Spread rather than written inline: they operate on app configuration

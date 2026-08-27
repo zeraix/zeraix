@@ -17,7 +17,8 @@
  * them at whatever happened to be in that slot.
  */
 import React from "react";
-import { MessageItem, ProcessGroup } from "./MessageItem";
+import { MessageItem } from "./MessageItem";
+import { ProcessGroup } from "./ProcessStream";
 import { TranscriptSkeleton } from "./TranscriptSkeleton";
 import type { ChoiceAnswer, DisplayMsg } from "./types";
 import { groupTranscript, lastAssistantIndex } from "./transcriptRows";
@@ -64,6 +65,11 @@ export function ChatTranscript({
   onRateMessage,
 }: ChatTranscriptProps) {
   const lastAssistant = lastAssistantIndex(display);
+  // Memoised for IDENTITY, not for the fold's own cost. Every keystroke in the composer re-renders this
+  // component (the draft lives in the page), and a fresh fold hands ProcessGroup a brand-new `items` array
+  // each time, which defeats its memo and re-renders every trace segment and tool row on screen. Keyed on
+  // exactly what the fold reads, so a real transcript change still produces new rows.
+  const rows = React.useMemo(() => groupTranscript(display, visibleStart), [display, visibleStart]);
   return (
     <>
       {/* Switching conversations: a skeleton stands in for the message area, so the previous conversation's
@@ -98,7 +104,7 @@ export function ChatTranscript({
       )}
 
       {!switching &&
-        groupTranscript(display, visibleStart).map((row) =>
+        rows.map((row) =>
           row.kind === "group" ? (
             <ProcessGroup
               key={`pg-${row.start}`}

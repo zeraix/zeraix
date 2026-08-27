@@ -52,26 +52,30 @@ export function browserTool() {
         "click = click an element (pass selector or text); type = type into an input (pass selector + text; optionally clear to empty it first, submit to press Enter); " +
         "navigate = go to url; eval = evaluate a JS expression in the page context (pass expr) and return the result; " +
         "a11y = export the accessibility tree (role/name/state, handy for locating elements; pass root to limit to a subtree, full to include secondary nodes); " +
-        "list = list open pages/tabs (url); shot = take a screenshot (pass path, full for the whole page). " +
+        "list = list open pages/tabs (url); shot = take a screenshot (pass path, full for the whole page); " +
+        "console = read what the page logged (console.* output, uncaught exceptions, unhandled rejections, failed loads) since the tab was opened — " +
+        "pass level (error / warn / all, default all) and max; this is how you see a runtime error a screenshot cannot show, " +
+        "so after loading a page you are debugging, check console before concluding it works. " +
         "Typical 'open the Nth result': first use links to get the list, then navigate to the Nth item's href (or use click + text).",
       parameters: {
         type: "object",
         properties: {
           action: {
             type: "string",
-            enum: ["read", "links", "click", "type", "navigate", "eval", "a11y", "list", "shot"],
+            enum: ["read", "links", "click", "type", "navigate", "eval", "a11y", "list", "shot", "console"],
             description: "The page action to perform.",
           },
           url: { type: "string", description: "The target URL for navigate." },
           selector: { type: "string", description: "CSS selector for click / type." },
           text: { type: "string", description: "For click, matches by visible text; for type, the text to enter." },
-          clear: { type: "boolean", description: "Whether to clear the input before type." },
+          clear: { type: "boolean", description: "For type, clear the input first; for console, empty the captured buffer after reading it." },
           submit: { type: "boolean", description: "Whether to press Enter to submit after type." },
           expr: { type: "string", description: "The JS expression for eval to evaluate in the page context." },
           root: { type: "string", description: "CSS selector of the root element to scope the a11y snapshot." },
           full: { type: "boolean", description: "For a11y, include secondary nodes; for shot, capture the whole page." },
           path: { type: "string", description: "Save path for shot (defaults to a temp directory)." },
-          max: { type: "number", description: "Maximum number of links to return (default 40)." },
+          level: { type: "string", description: "For console, the minimum severity to return: error, warn, or all (default all)." },
+          max: { type: "number", description: "Maximum number of links to return (default 40); for console, messages to return (default 50)." },
         },
         required: ["action"],
       },

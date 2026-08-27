@@ -227,11 +227,29 @@ export function stripRemoteImagesForLocal(messages: ApiMsg[]): ApiMsg[] {
  * Dev-mode "phase summary" cleanup: reasoning models sometimes stuff the chain of thought + a leftover </think> into the
  * body of a "tool-call round". Phased streaming shows this body as that phase's summary, so keep only the body after the
  * last </think> (returned as-is if none), and strip leading whitespace, to avoid displaying chain-of-thought remnants.
+ *
+ * Used for the reply bubble that streams while a round is still running, where the chain of thought would be noise in
+ * the middle of the conversation. The finished round keeps all of it — see thinkingProcessText.
  */
 export function phaseSummaryText(raw: string): string {
   const marker = "</think>";
   const i = raw.lastIndexOf(marker);
   return (i >= 0 ? raw.slice(i + marker.length) : raw).replace(/^\s+/, "");
+}
+
+/**
+ * The same round body, kept whole, for the thinking-process stream.
+ *
+ * A model that inlines its reasoning writes it into `content` between <think> and </think>, and phaseSummaryText throws
+ * everything before that closing tag away — which is why a round that thought for eleven seconds could show a single
+ * trailing sentence and nothing else. That text is the thinking process; the stream exists to show it. Only the tag
+ * markers themselves are removed, and only because Markdown renders with `html:false`, so a literal `<think>` would be
+ * escaped and displayed as text. Every word the model wrote survives, in the order it wrote it.
+ *
+ * Display-only, like everything else in the stream: what reaches the model is `content` untouched.
+ */
+export function thinkingProcessText(raw: string): string {
+  return raw.replace(/<\/?think>/g, "").trim();
 }
 
 /**

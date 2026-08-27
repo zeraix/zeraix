@@ -48,7 +48,7 @@ import {
 } from "./contextDiag";
 import { isLocalEndpoint, localLlm, LOCAL_PROVIDER_ID } from "@/lib/ai/localModel";
 import { setSecureEnv as syncSecureEnv, onSandboxStatus, getSandboxStatus, getSandboxVmInfo, isSandboxEngine, DEFAULT_SECURE_ENV, type SandboxStatus } from "@/lib/ai/sandbox";
-import { useT } from "@/lib/i18n";
+import { useLocaleStore, useT } from "@/lib/i18n";
 import { toast } from "sonner";
 // Only the two types remain here: the delegation tools themselves moved to chatDelegation.ts.
 import type { DelegationMeta, PriorDelegation } from "@/lib/ai/subagents";
@@ -149,7 +149,10 @@ import {
   repeatedFailureNudge,
   equivalentCallNudge,
   repeatedResourceNudge,
+  CHAT_COLUMN,
   DELEGATION_TOOLS,
+  MAX_INPUT_CHARS,
+  supportsFieldSizing,
   MUTATING_FILE_TOOLS,
   PARALLEL_SAFE_TOOLS,
   RENDERER_HANDLED_TOOLS,
@@ -215,6 +218,7 @@ import {
   stripAllImagesForText,
   stripRemoteImagesForLocal,
   phaseSummaryText,
+  thinkingProcessText,
   stripWireMetadata,
   applyReasoningPolicy,
   toInstalledProjectSkill,
@@ -1002,10 +1006,15 @@ function ChatAgent() {
   }, [applyEffectiveModel]);
 
   // Input-box auto-fit height: grows with content, up to 30vh, then scrolls internally.
+  // FALLBACK ONLY. Where the engine has `field-sizing: content` the box sizes itself in CSS
+  // (.composer-autosize, globals.css) and this effect returns immediately -- setting a height and then
+  // reading scrollHeight forces a synchronous layout of the entire transcript, on every keystroke, which
+  // is the single most expensive thing typing used to do.
   // The deps include onChatRoute: this component is permanently mounted by AgentShell, so before the first entry the composer is hidden (scrollHeight=0),
   // and pinning the height to 0px then would keep it collapsed. So when hidden (scrollHeight=0), skip measuring and keep the rows=1 default single-line height,
   // then re-measure and correct after the route becomes active and visible.
   useEffect(() => {
+    if (supportsFieldSizing()) return;
     const el = taRef.current;
     if (!el) return;
     el.style.height = "auto";
@@ -1546,21 +1555,21 @@ function ChatAgent() {
         });
       } else if (m.role === "assistant") {
         // The deep-thinking block is restored before this round's content / tool trace (consistent with the real-time order).
-        if (m.reasoning) disp.push({ kind: "reasoning", content: m.reasoning });
-        // Final reply with no tool calls: the body is shown as-is. For the round that issues tool calls, its body is shown as
-        // that phase's summary (phaseSummaryText strips the chain of thought / leftover </think>), consistent with the
-        // real-time display. Daily-mode conversations used to skip it here, because their live view skipped it too; with the
-        // modes merged the live view is always phased, so the rebuild is unconditional and old records now render the same
-        // way a new one would — phaseSummaryText is what keeps the reasoning remnants out either way.
+        if (m.reasoning) disp.push({ kind: "reasoning", content: m.reasoning, ms: m.thinkMs });
+        // Final reply with no tool calls: the body is shown as-is. The body of a round that issued tool calls becomes that
+        // round's thinking-process text — whole, chain of thought included (thinkingProcessText), matching the real-time
+        // display. Daily-mode conversations used to skip it here, because their live view skipped it too; with the modes
+        // merged the live view is always phased, so the rebuild is unconditional and old records now render the same way
+        // a new one would.
         // storedIndex=mi + rating feed the action-bar rating: clicking persists it to that StoredMessage and highlights the chosen rating.
         if (m.content) {
           if (!m.tool_calls?.length) {
             disp.push({ kind: "assistant", content: m.content, rating: m.rating, storedIndex: mi });
           } else {
-            // The phase summary of a tool-call round: rebuilt as a "thinking process" timeline entry (phase), consistent with the real-time display —
-            // collected into the same card, not a standalone block, with no action bar (rating only belongs to the final reply).
-            const summary = phaseSummaryText(m.content);
-            if (summary) disp.push({ kind: "phase", content: summary });
+            // The body of a tool-call round: rebuilt as a "thinking process" entry (phase), consistent with the real-time
+            // display — part of the stream, not a standalone block, and with no action bar (rating belongs to the final reply).
+            const summary = thinkingProcessText(m.content);
+            if (summary) disp.push({ kind: "phase", content: summary, ms: m.thinkMs });
           }
         }
       }
@@ -2300,6 +2309,14 @@ function ChatAgent() {
    * Returns false when `send` must stop — every branch has already told the user why, or taken the message.
    */
   const passesSendPreflight = (text: string, atts: Attachment[], fromQueue: boolean): boolean => {
+    // Hard ceiling on message length. Checked here as well as by the composer's maxLength, because the queue
+    // and the home page's pending auto-send pass their text straight to send() without ever going through the
+    // textarea, so the attribute cannot see them.
+    if (text.length > MAX_INPUT_CHARS) {
+      const num = new Intl.NumberFormat(useLocaleStore.getState().locale);
+      setError(t("chat.inputTooLong", { n: num.format(text.length), max: num.format(MAX_INPUT_CHARS) }));
+      return false;
+    }
     // Generation in progress: enqueue the new message (auto-sent in order after this round ends) rather than dropping it. _fromQueue is the queue resume itself, so let it through.
     if (loading && !fromQueue) {
       const convId = convIdRef.current;
@@ -3035,17 +3052,23 @@ function ChatAgent() {
           // Shared by finalization / increments: rebuild this round's display as [baseline, deep-thinking?, body?] (only effective in the active view).
           // asPhase: the body is "the phase summary of a tool-call round" — collected into the card as a "thinking process" timeline entry,
           // rather than a standalone final reply; a final reply with no tool calls goes to assistant (a standalone bubble + action bar).
+          // When this round's request went out. The thinking-process header reports how long the model took, and this is
+          // the only honest place to measure it from: the gap between two stored messages also covers tool execution,
+          // and for a background conversation, however long the user left it sitting.
+          const roundStart = Date.now();
           const renderTurn = (reasoning: string, content: string, asPhase = false) => {
             if (!active()) return;
+            const ms = Date.now() - roundStart;
             const items: DisplayMsg[] = [];
-            if (reasoning) items.push({ kind: "reasoning", content: reasoning });
-            if (content) items.push(asPhase ? { kind: "phase", content } : { kind: "assistant", content });
+            if (reasoning) items.push({ kind: "reasoning", content: reasoning, ms });
+            if (content) items.push(asPhase ? { kind: "phase", content, ms } : { kind: "assistant", content });
             const next = [...liveBase, ...items];
             displayRef.current = next;
             setDisplay(next);
           };
           // Streaming always renders incrementally as a normal reply bubble (so the final reply forms smoothly); if this round ultimately carries tool calls,
           // the finalization below with asPhase=true folds that body into the "thinking process" timeline (exactly in sync with the tools starting to execute).
+          // Each delta re-measures, so the header counts up while the round runs instead of appearing only at the end.
           renderDelta = (content, reasoning) =>
             renderTurn(reasoning, showPhaseSummary ? phaseSummaryText(content) : content);
           // Routed through the boundary (§13): the request path emits a delta, the host decides what a delta
@@ -3080,11 +3103,12 @@ function ChatAgent() {
           if (active()) setCtxTokens(data.usage?.prompt_tokens ?? countMessagesTokens(wire));
           // Deep thinking (a reasoning model's reasoning_content): kept on the buffer; whether it is fed back is applyReasoningPolicy's call.
           const reasoningText = (msg.reasoning_content ?? msg.reasoning ?? "").trim();
-          // Finalize this round's display: the deep-thinking block + body. A final reply with no tool calls always shows the body;
-          // the body of a tool-call round is shown as a "phase summary" (after cleanup), consistent with the streaming path.
+          // Finalize this round's display: the deep-thinking block + body. A final reply with no tool calls always shows the
+          // body; the body of a tool-call round becomes this round's thinking-process text, kept whole — the streaming
+          // bubble above trimmed the chain of thought off to stay readable mid-turn, and this is where it comes back.
           const finalContent = msg.tool_calls?.length
             ? showPhaseSummary
-              ? phaseSummaryText(msg.content ?? "")
+              ? thinkingProcessText(msg.content ?? "")
               : ""
             : msg.content ?? "";
           // The phase summary of a tool-call round enters the "thinking process" timeline (asPhase); a final reply with no tool calls becomes a standalone bubble.
@@ -3108,6 +3132,9 @@ function ChatAgent() {
               content: msg.content ?? "",
               ...(msg.tool_calls?.length ? { tool_calls: msg.tool_calls } : {}),
               ...(reasoningText ? { reasoning: reasoningText } : {}),
+              // Persisted so a reopened conversation still reports how long each round took, rather than showing the
+              // duration only until the view is rebuilt from disk.
+              thinkMs: Date.now() - roundStart,
               ts: Date.now(),
             });
             // After persisting the final reply (no tool calls, has body): attach its archive index to the just-rendered display entry,
@@ -3903,7 +3930,7 @@ function ChatAgent() {
         viewportClassName="flex flex-col bg-surface"
         config={PAGE_SCROLLBAR}
       >
-        <div className="mx-auto flex w-full max-w-4xl flex-col gap-4 px-4 py-5">
+        <div className={cn(CHAT_COLUMN, "flex flex-col gap-4 px-4 py-5")}>
           <ChatTranscript
             switching={switching}
             display={display}
