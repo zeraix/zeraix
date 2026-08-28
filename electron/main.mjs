@@ -6,7 +6,7 @@ import { listTools, runTool, getWorkingDir, setWorkingDir, setAssetDir, saveAtta
 import { setAssetHostDir } from "./tools/sandbox/qemu.mjs";
 import { setMediaDir, readIndex, writeIndex, saveMedia, openMediaDir, getMediaDir } from "./mediaStore.mjs";
 // Reports at startup whether the Rust sidecar is enabled, active, or unavailable — see warmUp.
-import { warmUp as warmUpRustRuntime } from "./tools/rustRuntime.mjs";
+import { warmUp as warmUpRustRuntime, shutdown as shutdownRustRuntime } from "./tools/rustRuntime.mjs";
 import { discoverProjectSkills, setProjectSkillDecision, readProjectSkillFile, loadEnabledProjectSkills } from "./tools/projectSkills.mjs";
 import { createTerminal, writeTerminal, resizeTerminal, killTerminal, killByWebContents, killAllTerminals } from "./tools/terminal.mjs";
 import { llmChat, llmChatStream } from "./llm/proxy.mjs";
@@ -1108,6 +1108,15 @@ app.on("before-quit", () => {
   // leaves an orphan holding whatever it had open.
   try {
     void disposeMcp();
+  } catch {
+    /* ignore */
+  }
+  // Stop the Rust sidecar. It does exit on its own when stdin reaches EOF, which happens once this
+  // process is gone -- but that is the backstop, not the shutdown path. Asking it to stop lets it
+  // finish writing its own logs before the pipe closes, and matters more now that a packaged build
+  // spawns it for every user rather than only for a developer who opted in.
+  try {
+    void shutdownRustRuntime();
   } catch {
     /* ignore */
   }

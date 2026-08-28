@@ -1751,8 +1751,10 @@ export async function runTool(name, args = {}, { signal } = {}) {
     // indistinguishable from it not existing. Everything below -- the mutator invalidation, the
     // read observation, the { ok, content } contract, the catch -- is unchanged and still applies.
     //
-    // It is off unless ZERAIX_RUST_RUNTIME says otherwise, so the default path through this function
-    // is byte-for-byte what it was before.
+    // A packaged build routes these calls to the sidecar by default; development and this test suite
+    // stay on the JS handlers unless ZERAIX_RUST_RUNTIME says otherwise. Either way the rest of this
+    // function is untouched, and the two implementations are held to byte-identical output by
+    // scripts/ab-runtime-parity.mjs.
     const offloaded = await tryRunTool(name, args ?? {}, { signal, workdir: WORKDIR });
     if (offloaded) {
       if (FILE_LIST_MUTATORS.has(name)) {

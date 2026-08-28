@@ -19,8 +19,8 @@
  * Every failure mode here -- binary missing, spawn refused, protocol mismatch, crash mid-call, a tool
  * the runtime does not implement -- resolves to `null`, which means "the JS handler serves this call".
  * The runtime can therefore be absent, broken, or a version behind, and the app behaves exactly as it
- * did before it existed. That property is what makes it safe to enable by default later; until then it
- * is off unless ZERAIX_RUST_RUNTIME says otherwise.
+ * did before it existed. That property is what makes the default below safe: a PACKAGED app now runs the
+ * sidecar by default, while development and the test harness stay on the JS handlers. See flagState().
  */
 import { spawn } from "node:child_process";
 import fs from "node:fs";
@@ -43,7 +43,38 @@ const INIT_TIMEOUT_MS = 10_000;
 const MAX_SPAWN_FAILURES = 3;
 
 /**
- * Feature flag. Default OFF: the JS handlers stay authoritative until the A/B harness says otherwise.
+ * Is this a PACKAGED app, as opposed to `electron .` in development or a plain node process?
+ *
+ * Deliberately NOT `app.isPackaged`. This module imports node builtins and nothing else, because it is
+ * loaded outside Electron in two places that matter: the test suite reaches it through aiToolkit.mjs, and
+ * scripts/ab-runtime-parity.mjs imports it directly to drive both implementations. An
+ * `import { app } from "electron"` here would break each of them, and the breakage would look like a
+ * module-resolution error a long way from this decision.
+ *
+ * The two signals below cover the three environments exactly. `process.versions.electron` is absent under
+ * plain node, so the harness and the tests answer false. `process.defaultApp` is set only when Electron was
+ * launched with a path argument — which is what `electron .` does and what a packaged binary never does.
+ * Packaged is therefore the one combination of "running under Electron" and "not launched as a dev app".
+ */
+function isPackaged() {
+  return Boolean(process.versions.electron) && !process.defaultApp;
+}
+
+/**
+ * Feature flag. Default ON in a packaged app, OFF in development and under plain node.
+ *
+ * The default flipped once the fail-open property below had been demonstrated rather than assumed: a
+ * missing binary, a refused spawn, a protocol mismatch, a crash mid-call and an unimplemented tool all
+ * resolve to `null`, which routes the call to the JS handler. Turning it on by default therefore changes
+ * which implementation SERVES a call, never whether the call is served.
+ *
+ * Development stays off so that `npm run electron:dev` keeps exercising the JS handlers — they remain the
+ * reference implementation the parity harness diffs against, and a dev build that silently used the
+ * sidecar would stop testing them. `npm run electron:dev:rust` opts in.
+ *
+ * The env var overrides the default in BOTH directions, which is the point of recognising the off values:
+ * a packaged build now runs the sidecar by default, so there has to be a way to turn it off in the field
+ * without shipping a new installer. `ZERAIX_RUST_RUNTIME=off` is that switch.
  *
  * `shadow` used to be accepted here and returned as its own state, described as "run both, compare, still
  * return the JS answer". Nothing implemented that, and `ensureStarted` only refuses on `"off"` — so the
@@ -55,6 +86,7 @@ const MAX_SPAWN_FAILURES = 3;
 function flagState() {
   const raw = String(process.env.ZERAIX_RUST_RUNTIME ?? "").trim().toLowerCase();
   if (raw === "1" || raw === "on" || raw === "true") return "on";
+  if (raw === "0" || raw === "off" || raw === "false") return "off";
   if (raw === "shadow") {
     console.warn(
       "[rust-runtime] ZERAIX_RUST_RUNTIME=shadow is not implemented and is being treated as OFF. " +
@@ -62,7 +94,7 @@ function flagState() {
     );
     return "off";
   }
-  return "off";
+  return isPackaged() ? "on" : "off";
 }
 
 /** Where the compiled sidecar lives: packaged beside the app, or in the cargo target dir during development. */
@@ -289,10 +321,14 @@ export async function warmUp() {
   const flag = flagState();
   if (flag === "off") {
     const bin = binaryPath();
+    // Name the actual reason. "Unset" stopped being the only way to be off once packaged builds began
+    // defaulting to on: an operator who set ZERAIX_RUST_RUNTIME=off to chase a bug needs to see that
+    // their override is the thing in effect, not a default they would then go looking for.
+    const why = process.env.ZERAIX_RUST_RUNTIME ? "ZERAIX_RUST_RUNTIME=off" : "development build";
     console.info(
       bin
-        ? "[rust-runtime] disabled (ZERAIX_RUST_RUNTIME unset) — a built binary is present; `npm run electron:dev:rust` enables it"
-        : "[rust-runtime] disabled (ZERAIX_RUST_RUNTIME unset, no binary built)",
+        ? `[rust-runtime] disabled (${why}) — a built binary is present; \`npm run electron:dev:rust\` enables it`
+        : `[rust-runtime] disabled (${why}, no binary built)`,
     );
     return { enabled: false, ready: false, tools: [] };
   }
