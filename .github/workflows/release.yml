@@ -121,20 +121,19 @@ jobs:
       # Run the Rust tests on the platform that will ship the binary. Landlock, process groups and the
       # SIGTERM escalation are all platform behaviour, so a green Linux run says nothing about the
       # artefact a user installs. Cheap insurance against shipping a sidecar that cannot start.
-      # Wall-clock capped for the same reason as ci.yml: `cargo test` has no per-test timeout, and a
-      # hang here would otherwise burn the job's full 90 minutes before reporting anything useful.
-      # A release build runs faster than debug, so 20 minutes is generous.
+      # Wall-clock capped, and this is not belt-and-braces: a Windows run of these tests hung for
+      # 17 minutes and only ended when the JOB timed out, which costs a runner and tells you nothing.
+      # `cargo test` has no per-test timeout, so the cap goes here.
+      #
+      # `timeout-minutes` rather than the `timeout` command: coreutils' `timeout` is NOT on macOS
+      # runners (it is `gtimeout`, and only if coreutils was installed), so wrapping the command in
+      # it failed the macOS leg in 0s with `timeout: command not found`. The step-level field is
+      # built into Actions, works identically on all three runners, and marks the step as timed out
+      # rather than leaving a bare exit code to interpret.
       - name: Test Rust runtime
         working-directory: runtime
-        shell: bash
-        run: |
-          timeout --signal=KILL 20m cargo test --release --locked || {
-            code=$?
-            if [ $code -eq 137 ] || [ $code -eq 124 ]; then
-              echo "::error::the Rust test suite hung and was killed after 20 minutes"
-            fi
-            exit $code
-          }
+        timeout-minutes: 20
+        run: cargo test --release --locked
 
       # Build the sidecar before the parity gate below. dist:* would do this anyway; doing it here means
       # a sidecar that cannot even be produced fails in seconds rather than after a full Next build.
@@ -155,7 +154,7 @@ jobs:
       - name: Tests
         env:
           ZERAIX_REQUIRE_SIDECAR: "1"
-        run: npm test
+        run: npm run test:ci
 
       # The gate that says the sidecar may serve real tool calls. Stage 1 contract: the Rust tools must
       # return byte-IDENTICAL output to the JS handlers they stand in for, because a model reads those

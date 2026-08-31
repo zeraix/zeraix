@@ -82,19 +82,20 @@ jobs:
         working-directory: runtime
         run: cargo build --locked
 
-      # Same cap as the parity job, same reason. This job runs the Rust suite only indirectly (through
-      # the JS tests that drive the sidecar), but `npm test` can hang for the same underlying reasons.
+      # Same cap as the parity job, same reason.
       - name: Rust tests
         working-directory: runtime
-        shell: bash
-        run: timeout --signal=KILL 15m cargo test --locked
+        timeout-minutes: 15
+        run: cargo test --locked
 
       - name: Tests
+        # Capped too: these drive the real sidecar, so they can hang for the same reasons.
+        timeout-minutes: 15
         # Turns a missing sidecar into a red run instead of a silent skip, so removing the build step
         # above — or moving cargo's output path — cannot quietly delete that coverage again.
         env:
           ZERAIX_REQUIRE_SIDECAR: "1"
-        run: npm test
+        run: npm run test:ci
 
       - name: Typecheck
         run: npm run typecheck
@@ -168,22 +169,17 @@ jobs:
       # profile is still tested in release.yml before an installer is cut.
       # Wall-clock capped, and this is not belt-and-braces: a Windows run of these tests hung for
       # 17 minutes and only ended when the JOB timed out, which costs a runner and tells you nothing.
-      # `cargo test` has no per-test timeout, so the cap goes here. Fifteen minutes is roughly ten times
-      # the observed healthy duration; anything past that is a hang, not slowness, and 124 is `timeout`
-      # reporting exactly that.
+      # `cargo test` has no per-test timeout, so the cap goes here.
       #
-      # bash on the Windows runner is Git Bash, which ships coreutils `timeout`.
+      # `timeout-minutes` rather than the `timeout` command: coreutils' `timeout` is NOT on macOS
+      # runners (it is `gtimeout`, and only if coreutils was installed), so wrapping the command in
+      # it failed the macOS leg in 0s with `timeout: command not found`. The step-level field is
+      # built into Actions, works identically on all three runners, and marks the step as timed out
+      # rather than leaving a bare exit code to interpret.
       - name: Rust tests
         working-directory: runtime
-        shell: bash
-        run: |
-          timeout --signal=KILL 15m cargo test --locked || {
-            code=$?
-            if [ $code -eq 137 ] || [ $code -eq 124 ]; then
-              echo "::error::the Rust test suite hung and was killed after 15 minutes"
-            fi
-            exit $code
-          }
+        timeout-minutes: 15
+        run: cargo test --locked
 
       # Builds the release binary AND stages it to resources/runtime/, which is the path packaging
       # depends on. build-rust-runtime.mjs verifies the result (exists, not truncated, --version runs),

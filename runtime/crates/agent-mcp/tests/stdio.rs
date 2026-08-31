@@ -29,8 +29,18 @@ fn fixture(mode: Option<&str>) -> Option<StdioServer> {
         command: node,
         args,
         cwd: None,
-        // The allowlist the host sends in production. PATH is what node itself needs to re-exec.
-        env: std::env::vars().filter(|(k, _)| k == "PATH" || k == "HOME" || k == "SystemRoot").collect(),
+        // The WHOLE environment, deliberately.
+        //
+        // A hand-picked allowlist here was a mistake that cost a full Windows CI leg: `HOME` does not
+        // exist on Windows, `SystemRoot` was matched case-sensitively when Windows treats env names as
+        // case-insensitive, and node needs rather more than either — so `env_clear()` plus three names
+        // left node.exe unable to start, and all five stdio tests failed with "the server never became
+        // ready".
+        //
+        // The allowlist is the HOST's policy, not this crate's: `mcp/client.mjs` builds it from the MCP
+        // SDK's `getDefaultEnvironment()`, which has a Windows-specific set, and the parity harness
+        // exercises that real list on every platform. What these tests need is only for node to run.
+        env: std::env::vars().collect(),
         max_response_bytes: 64 * 1024,
     })
 }

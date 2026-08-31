@@ -20,6 +20,8 @@
     "prod-test": "next build && next start -p 9999",
     "lint": "eslint",
     "test": "node --test \"test/**/*.test.mjs\"",
+    "_comment:test:ci": "Same suite as `test`, with the spec reporter: it prints a summary of FAILURES AT THE END of the output. The default TAP reporter reports a failure inline, thousands of lines up, so a CI log tail shows only the counts — twice a red run has been unreadable without hunting for the one line that matters.",
+    "test:ci": "node --test-reporter=spec --test \"test/**/*.test.mjs\"",
     "electron": "electron .",
     "gen:google": "node scripts/gen-google-defaults.mjs",
     "preelectron:dev": "node scripts/gen-google-defaults.mjs && node scripts/gen-plugin-oauth-credentials.mjs",

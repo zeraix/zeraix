@@ -584,7 +584,7 @@ fn an_mcp_server_connects_declares_and_serves_a_call() {
             "id": "fix",
             "command": node,
             "args": [script],
-            "env": [["PATH", std::env::var("PATH").unwrap_or_default()]],
+            "env": std::env::vars().collect::<Vec<_>>(),
         }),
     );
     // Accepted immediately: a connecting server must never hold up the turn that configured it.
@@ -627,7 +627,7 @@ fn a_tool_that_reports_an_error_is_still_delivered() {
             "id": "fix",
             "command": node,
             "args": [script],
-            "env": [["PATH", std::env::var("PATH").unwrap_or_default()]],
+            "env": std::env::vars().collect::<Vec<_>>(),
         }),
     );
     await_mcp_ready(&mut rt, "fix");
@@ -660,7 +660,7 @@ fn disconnecting_stops_declaring_the_server() {
             "id": "bye",
             "command": node,
             "args": [script],
-            "env": [["PATH", std::env::var("PATH").unwrap_or_default()]],
+            "env": std::env::vars().collect::<Vec<_>>(),
         }),
     );
     await_mcp_ready(&mut rt, "bye");
