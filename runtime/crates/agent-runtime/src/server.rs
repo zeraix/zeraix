@@ -826,7 +826,12 @@ impl Server {
             .await;
 
         let Some(joined) = joined else {
-            let err = RuntimeError::new("tool.cancelled", ErrorClass::Cancelled, "The user stopped this operation.");
+            // `runtime.cancelled`, not a code of its own: `to_legacy_content` matches on exactly that
+            // code to produce the cancellation sentence the UI already renders, so a second spelling
+            // would give the model "Error in <tool>: The user stopped this operation." for a call
+            // cancelled while queued and the bare sentence for one cancelled while running. One user
+            // action, one string.
+            let err = RuntimeError::new("runtime.cancelled", ErrorClass::Cancelled, "The user stopped this operation.");
             return ToolCallResult {
                 ok: false,
                 content: to_legacy_content(&p.name, &err),
