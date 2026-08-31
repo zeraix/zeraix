@@ -121,9 +121,20 @@ jobs:
       # Run the Rust tests on the platform that will ship the binary. Landlock, process groups and the
       # SIGTERM escalation are all platform behaviour, so a green Linux run says nothing about the
       # artefact a user installs. Cheap insurance against shipping a sidecar that cannot start.
+      # Wall-clock capped for the same reason as ci.yml: `cargo test` has no per-test timeout, and a
+      # hang here would otherwise burn the job's full 90 minutes before reporting anything useful.
+      # A release build runs faster than debug, so 20 minutes is generous.
       - name: Test Rust runtime
         working-directory: runtime
-        run: cargo test --release --locked
+        shell: bash
+        run: |
+          timeout --signal=KILL 20m cargo test --release --locked || {
+            code=$?
+            if [ $code -eq 137 ] || [ $code -eq 124 ]; then
+              echo "::error::the Rust test suite hung and was killed after 20 minutes"
+            fi
+            exit $code
+          }
 
       # Build the sidecar before the parity gate below. dist:* would do this anyway; doing it here means
       # a sidecar that cannot even be produced fails in seconds rather than after a full Next build.

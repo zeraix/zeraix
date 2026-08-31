@@ -30,11 +30,24 @@ fn main() -> anyhow::Result<()> {
     }
 
     let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
-    runtime.block_on(async {
+    let result = runtime.block_on(async {
         tracing::info!(version = server::RUNTIME_VERSION, "agent runtime starting");
         let server = Arc::new(server::Server::new());
         let result = server.run(StdioTransport::new()).await;
         tracing::info!("agent runtime stopped");
         result
-    })
+    });
+
+    // Bounded shutdown, because dropping the runtime can otherwise block forever on Windows.
+    //
+    // Tokio wraps child stdio in `Blocking` there — Windows pipes cannot be polled, so a read runs on
+    // the blocking pool and, once started, cannot be cancelled. Dropping a runtime waits for that pool.
+    // A background service whose grandchild outlived the kill still holds its stdout, so the read never
+    // returns and the process never exits: the host then waits out its own shutdown timeout and kills
+    // the sidecar, which works but reads as a hang. This makes the exit the runtime's own decision.
+    //
+    // Everything that must be flushed has been by this point: the transport writes and flushes per
+    // message, and `run` has already stopped services and shut the scheduler down.
+    runtime.shutdown_timeout(std::time::Duration::from_secs(2));
+    result
 }

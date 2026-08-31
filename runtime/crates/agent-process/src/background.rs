@@ -305,15 +305,29 @@ mod tests {
     use std::time::Duration;
     use tokio::sync::oneshot;
 
-    /// A command that runs until it is killed, spelled for whichever shell the platform uses.
-    fn forever() -> &'static str {
-        if cfg!(windows) { "ping -n 100000 127.0.0.1 > nul" } else { "sleep 600" }
+    /// A service that runs long enough to be observed, and then ends ON ITS OWN.
+    ///
+    /// Bounded rather than endless, and that is not tidiness — on Windows it is the difference between
+    /// a test suite and a hung CI job. Tokio wraps child stdio in `Blocking` there, because Windows
+    /// pipes cannot be polled: a read runs on the blocking pool and, once started, **cannot be
+    /// cancelled**. Dropping a runtime waits for the blocking pool. So if anything still holds the
+    /// child's stdout when a test ends — a grandchild that outlived the kill, a `taskkill /T` that
+    /// raced the shell spawning its child — the read never returns and the runtime drop blocks
+    /// forever. That is exactly what happened: `output_is_readable_while_the_service_runs` sat for
+    /// 17 minutes on windows-latest until the job timed out.
+    ///
+    /// A few seconds is long enough for every assertion below and short enough that the pipe always
+    /// closes, whether or not the kill lands. Tests that stop a service still stop it; they simply no
+    /// longer depend on the kill winning a race to terminate.
+    fn briefly() -> &'static str {
+        // ping's interval is one second, so -n 5 is roughly five seconds.
+        if cfg!(windows) { "ping -n 5 127.0.0.1 > nul" } else { "sleep 5" }
     }
 
     #[tokio::test]
     async fn a_service_is_registered_and_listed() {
         let reg = BackgroundRegistry::new();
-        let pid = reg.start(forever(), None, |_| {}).expect("start");
+        let pid = reg.start(briefly(), None, |_| {}).expect("start");
         assert_eq!(reg.len(), 1);
         assert_eq!(reg.list()[0].0, pid);
         reg.stop_all();
@@ -323,9 +337,9 @@ mod tests {
     async fn output_is_readable_while_the_service_runs() {
         let reg = BackgroundRegistry::new();
         let cmd = if cfg!(windows) {
-            "echo hello-from-service && ping -n 100000 127.0.0.1 > nul"
+            "echo hello-from-service && ping -n 5 127.0.0.1 > nul"
         } else {
-            "echo hello-from-service && sleep 600"
+            "echo hello-from-service && sleep 5"
         };
         let pid = reg.start(cmd, None, |_| {}).expect("start");
         // The readiness scrape upstream polls; so does this, for the same reason.
@@ -365,7 +379,7 @@ mod tests {
         let (tx, rx) = oneshot::channel();
         let tx = Mutex::new(Some(tx));
         let pid = reg
-            .start(forever(), None, move |e| {
+            .start(briefly(), None, move |e| {
                 if let Some(tx) = tx.lock().unwrap_or_else(|p| p.into_inner()).take() {
                     let _ = tx.send(e);
                 }

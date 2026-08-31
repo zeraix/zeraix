@@ -141,6 +141,22 @@ pub fn prepare(limits: &ResourceLimits, name: &str) -> (Option<PathBuf>, LimitsA
     #[cfg(unix)]
     {
         let _ = name;
+        // A memory cap requested on anything but Linux is NOT delivered — see `apply_rlimits`. Saying
+        // so is the whole contract of this enum: limits are never silently dropped. CPU still is
+        // enforced, but a caller that asked to bound memory did not get what it asked for, and finding
+        // that out from a report is better than from a process that quietly used all of it.
+        #[cfg(not(target_os = "linux"))]
+        if limits.memory_bytes.is_some() {
+            return (
+                None,
+                LimitsApplied::Unsupported {
+                    reason: "memory cannot be bounded here: RLIMIT_AS caps ADDRESS SPACE, and this \
+                             platform's loader reserves far more of it than any sane cap, so applying \
+                             one stops every command from starting at all"
+                        .to_owned(),
+                },
+            );
+        }
         (None, LimitsApplied::Rlimit)
     }
     #[cfg(not(unix))]
@@ -191,6 +207,14 @@ pub fn cleanup(applied: &LimitsApplied) {
 pub unsafe fn apply_rlimits(limits: &ResourceLimits) -> std::io::Result<()> {
     use nix::sys::resource::{setrlimit, Resource};
 
+    // Linux only, and this is not conservatism — it is a bug found by CI on macOS.
+    //
+    // `RLIMIT_AS` bounds ADDRESS SPACE, not resident memory. macOS's dynamic loader reserves address
+    // space far beyond anything a caller would pick as a memory cap, so a 512 MB limit makes even
+    // `/bin/echo` fail to exec: the command runs, produces nothing, and reports success. A limit that
+    // silently turns every command into a no-op is worse than no limit, so this platform reports the
+    // memory cap as unsupported instead — see `prepare`.
+    #[cfg(target_os = "linux")]
     if let Some(bytes) = limits.memory_bytes {
         // Address space, not RSS — see the module header for why that distinction matters.
         setrlimit(Resource::RLIMIT_AS, bytes, bytes).map_err(std::io::Error::other)?;

@@ -82,6 +82,13 @@ jobs:
         working-directory: runtime
         run: cargo build --locked
 
+      # Same cap as the parity job, same reason. This job runs the Rust suite only indirectly (through
+      # the JS tests that drive the sidecar), but `npm test` can hang for the same underlying reasons.
+      - name: Rust tests
+        working-directory: runtime
+        shell: bash
+        run: timeout --signal=KILL 15m cargo test --locked
+
       - name: Tests
         # Turns a missing sidecar into a red run instead of a silent skip, so removing the build step
         # above — or moving cargo's output path — cannot quietly delete that coverage again.
@@ -159,9 +166,24 @@ jobs:
 
       # Debug profile: seconds faster to build than --release and exercises the same logic. The release
       # profile is still tested in release.yml before an installer is cut.
+      # Wall-clock capped, and this is not belt-and-braces: a Windows run of these tests hung for
+      # 17 minutes and only ended when the JOB timed out, which costs a runner and tells you nothing.
+      # `cargo test` has no per-test timeout, so the cap goes here. Fifteen minutes is roughly ten times
+      # the observed healthy duration; anything past that is a hang, not slowness, and 124 is `timeout`
+      # reporting exactly that.
+      #
+      # bash on the Windows runner is Git Bash, which ships coreutils `timeout`.
       - name: Rust tests
         working-directory: runtime
-        run: cargo test --locked
+        shell: bash
+        run: |
+          timeout --signal=KILL 15m cargo test --locked || {
+            code=$?
+            if [ $code -eq 137 ] || [ $code -eq 124 ]; then
+              echo "::error::the Rust test suite hung and was killed after 15 minutes"
+            fi
+            exit $code
+          }
 
       # Builds the release binary AND stages it to resources/runtime/, which is the path packaging
       # depends on. build-rust-runtime.mjs verifies the result (exists, not truncated, --version runs),
