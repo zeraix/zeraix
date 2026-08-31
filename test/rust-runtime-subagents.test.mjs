@@ -142,23 +142,39 @@ test("cancelling a turn stops a delegation the host is still working on", { skip
     const seen = new Promise((resolve) => {
       dispatched = resolve;
     });
-    // Never resolves: the host has taken the work and is still on it.
+    // Held rather than never-settling: the host has taken the work and stays on it for the duration of
+    // the test, then lets go.
+    //
+    // The first version returned `new Promise(() => {})`, which is a promise that can never settle. The
+    // bridge awaits the handler, so that left an async function pending for the life of the process —
+    // and when the event loop drained, node failed this test AND the next one with "Promise resolution
+    // is still pending but the event loop has already resolved". Invisible locally, red on CI.
+    let release;
+    const held = new Promise((resolve) => {
+      release = resolve;
+    });
     rust.onRequest("subagent.run", () => {
       dispatched();
-      return new Promise(() => {});
+      return held;
     });
 
-    await rust.subagentSpawn("turn-e", [{ meta: {} }]);
-    await seen;
+    try {
+      await rust.subagentSpawn("turn-e", [{ meta: {} }]);
+      await seen;
 
-    const started = Date.now();
-    await rust.subagentCancel("turn-e", "the user pressed stop");
-    // Blocking: a running delegation is given a grace window to return a partial conclusion before it
-    // is abandoned, so it is not settled the instant it is cancelled.
-    const joined = await rust.subagentJoin("turn-e", { timeoutMs: 20_000 });
-    assert.ok(Date.now() - started < 20_000, "cancel must not wait out the body's ceiling");
-    assert.equal(joined.ready.length, 1);
-    assert.equal(joined.ready[0].state, "cancelled", "a stopped delegation is not a failed one");
+      const started = Date.now();
+      await rust.subagentCancel("turn-e", "the user pressed stop");
+      // Blocking: a running delegation is given a grace window to return a partial conclusion before it
+      // is abandoned, so it is not settled the instant it is cancelled.
+      const joined = await rust.subagentJoin("turn-e", { timeoutMs: 20_000 });
+      assert.ok(Date.now() - started < 20_000, "cancel must not wait out the body's ceiling");
+      assert.equal(joined.ready.length, 1);
+      assert.equal(joined.ready[0].state, "cancelled", "a stopped delegation is not a failed one");
+    } finally {
+      // The job was cancelled long ago and the runtime discards a reply nobody is waiting for; this
+      // exists solely so the handler's promise settles and leaves nothing pending behind the test.
+      release({ result: "released after the test" });
+    }
   });
 });
 

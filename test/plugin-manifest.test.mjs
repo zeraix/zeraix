@@ -11,7 +11,7 @@
  */
 import test from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 
 import {
   SCHEMA_VERSION,
@@ -891,9 +891,29 @@ test("a host client is confidential, so no-PKCE providers become declarable", ()
   assert.equal(res.ok, true, res.errors.join("; "));
 });
 
-test("the shipped gmail-send plugin asks the user for nothing", () => {
+/**
+ * The shipped manifest lives outside the repository.
+ *
+ * `/plugins` is gitignored — it is where installed plugins land, not source — so this file exists on a
+ * developer machine that has the plugin and never in a fresh checkout. The test therefore passed
+ * locally and failed in CI with ENOENT the first time the pipeline ran it.
+ *
+ * Skipped rather than deleted, because the guard is worth keeping where the file does exist: it asserts
+ * that a PUBLISHED manifest carries no client secret. Skipped rather than made to pass against an inline
+ * copy, because a copy proves nothing about the artifact that actually ships.
+ *
+ * If this guard is wanted in CI — and "no secret in a published manifest" is a reasonable thing to want
+ * there — the manifest needs a tracked home. That is a decision about where plugin sources live, not
+ * something a test should quietly work around.
+ */
+const SHIPPED_MANIFEST = new URL("../plugins/zeraix/gmail-send/1.0.0/plugin.json", import.meta.url);
+const shippedManifestMissing = existsSync(SHIPPED_MANIFEST)
+  ? false
+  : "plugins/ is gitignored, so the shipped manifest is absent from a fresh checkout";
+
+test("the shipped gmail-send plugin asks the user for nothing", { skip: shippedManifestMissing }, () => {
   // Regression guard for the whole point of this shape: no needs[], no client id, no secret anywhere.
-  const raw = JSON.parse(readFileSync(new URL("../plugins/zeraix/gmail-send/1.0.0/plugin.json", import.meta.url), "utf8"));
+  const raw = JSON.parse(readFileSync(SHIPPED_MANIFEST, "utf8"));
   const res = validateManifest(raw, { mode: "registry" });
   assert.equal(res.ok, true, res.errors.join("; "));
   const auth = res.manifest.providers.google_auth;
