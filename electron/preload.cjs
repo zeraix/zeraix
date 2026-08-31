@@ -116,6 +116,32 @@ contextBridge.exposeInMainWorld("llm", {
   abortChatStream: (id) => ipcRenderer.send("llm:chat:abort", id),
 });
 
+// Sub-agent scheduling in the Rust runtime (Stage 4b). The runtime decides whether/when/how many; this
+// window still runs each delegation, because that means holding a model conversation.
+//
+// `onRun` is the inbound half and the reason this is not just three invokes: the runtime ASKS for work
+// and blocks a job on the answer, so every delegation handed over here must end in exactly one `reply`.
+// Exposed ONLY when opted in. The renderer decides which scheduler to use by asking whether this
+// object exists, so gating here is what actually keeps the runtime path off -- a flag that merely
+// changed a log line would leave the most-used path in the app switched on by default, which is the
+// opposite of what subagentBridge.mjs promises.
+const SUBAGENTS_ENABLED = ["1", "on", "true"].includes(
+  String(process.env.ZERAIX_RUST_SUBAGENTS ?? "").trim().toLowerCase(),
+);
+if (SUBAGENTS_ENABLED) contextBridge.exposeInMainWorld("subagents", {
+  spawn: (turnId, jobs) => ipcRenderer.invoke("subagent:spawn", { turnId, jobs }),
+  join: (turnId, opts) => ipcRenderer.invoke("subagent:join", { turnId, ...opts }),
+  cancel: (turnId, reason) => ipcRenderer.invoke("subagent:cancel", { turnId, reason }),
+  onRun: (cb) => {
+    const listener = (_e, payload) => cb(payload);
+    ipcRenderer.on("subagent:run", listener);
+    return () => ipcRenderer.removeListener("subagent:run", listener);
+  },
+  // One-way, like llm:chat:abort: this settles a promise created by a different call, so there is no
+  // invoke to reply to.
+  reply: (requestId, body) => ipcRenderer.send("subagent:reply", { requestId, ...body }),
+});
+
 // OSS upload proxy: the main process PUTs to a presigned URL, bypassing the CORS preflight block on the app:// origin.
 // payload = { url, contentType, data:ArrayBuffer }.
 contextBridge.exposeInMainWorld("upload", {

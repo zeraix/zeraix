@@ -93,6 +93,26 @@ interface Job<M> {
 
 export const CANCELLED_RESULT = "(cancelled: the turn was interrupted before this delegation finished)";
 
+/**
+ * The scheduler surface the delegation tools call.
+ *
+ * Extracted so a second implementation can stand behind it — the Rust runtime, in Stage 4b — without
+ * the call sites knowing which one they hold. `spawn` is allowed to be async there (it crosses two
+ * process boundaries) and stays synchronous here; awaiting a plain value costs a microtask and nothing
+ * else, which is why the call sites can simply `await` it either way.
+ */
+export interface SchedulerLike<M> {
+  spawn(meta: M, run: (job: JobView<M>) => Promise<string>): SpawnResult<M> | Promise<SpawnResult<M>>;
+  join(
+    ids: string[] | null,
+    opts: { mode: "all" | "any"; timeoutMs: number; block: boolean },
+  ): Promise<JoinResult<M>>;
+  drain(): Array<{ job: JobView<M>; outcome: JobOutcome }>;
+  counts(): { queued: number; running: number; settled: number; total: number };
+  outstanding(): string[];
+  cancelAll(): void;
+}
+
 export class SubAgentScheduler<M> {
   private readonly limit: number;
   private readonly maxJobs: number;

@@ -15,6 +15,13 @@
 import { spawn } from "node:child_process";
 
 import { emitService } from "./events.mjs";
+import {
+  EVENT_RUNTIME_DISCONNECTED,
+  onEvent,
+  peekProcess,
+  tryRunProcess,
+  tryStartBackground,
+} from "../rustRuntime.mjs";
 
 export const id = "native";
 
@@ -97,11 +104,35 @@ const KILL_GRACE_MS = 2000;
  * it is what the model needs to explain what happened. `canceled` distinguishes a user stop from the timeout,
  * which the caller words very differently.
  */
-export function run(cmd, { cwd, timeoutMs, maxBuffer, signal } = {}) {
+export async function run(cmd, { cwd, timeoutMs, maxBuffer, signal } = {}) {
   // Nothing has been started yet, so there is nothing to kill and no output to report.
   if (signal?.aborted) {
-    return Promise.resolve({ stdout: "", stderr: "", code: "?", killed: false, canceled: true });
+    return { stdout: "", stderr: "", code: "?", killed: false, canceled: true };
   }
+  // Rust Agent Runtime, Stage 2 (docs/agent-runtime-migration.md). This is the only hook the migration
+  // adds to this file, and it is placed here rather than in the run_command handler on purpose: this
+  // function is the engine contract, so both of its callers move at once -- the run_command tool and
+  // runShell, which is what check_project runs every one of its probes through -- while the policy above
+  // it stays exactly where it is. An automation *agent* node reaches this the same way, through
+  // run_command; an automation *shell* node does not, having its own streaming spawn in
+  // automation/runtimes/shell.mjs.
+  //
+  // The sidecar declines before it has started anything, and answers once it has. It never returns null
+  // after the command may have run, because falling back would run it a second time. See tryRunProcess.
+  const offloaded = await tryRunProcess(cmd, { cwd, timeoutMs, maxBuffer, signal });
+  if (offloaded) return offloaded;
+  return runOnNode(cmd, { cwd, timeoutMs, maxBuffer, signal });
+}
+
+/**
+ * The Node implementation: the original body of `run`, unchanged.
+ *
+ * Kept rather than deleted for two reasons. It is the fallback whenever the sidecar is off, absent or
+ * unreachable — which is every development run and every test — and it is the reference the A/B parity
+ * harness diffs the Rust path against, so removing it would remove the thing that proves the replacement
+ * behaves identically.
+ */
+function runOnNode(cmd, { cwd, timeoutMs, maxBuffer, signal } = {}) {
   return new Promise((resolve) => {
     let canceled = false;
     let timedOut = false;
@@ -185,7 +216,186 @@ export function run(cmd, { cwd, timeoutMs, maxBuffer, signal } = {}) {
  * output (returns early once a local address / readiness keyword appears, otherwise waits up to 8s) while the
  * process keeps running in the background. Returns the startup output + a pid hint.
  */
-export function startBackground(cmd, { cwd, notify } = {}) {
+/** Readiness heuristics and the model-facing wording, shared by both implementations. */
+const READY = /(?:localhost|127\.0\.0\.1|0\.0\.0\.0):\d+|listening|compiled|ready|started|running at/i;
+
+/** How long to wait for a service to look ready before reporting whatever it has printed. */
+const STARTUP_WINDOW_MS = 8000;
+/** How often to re-read the startup output while waiting. */
+const STARTUP_POLL_MS = 300;
+
+/** Extract the first local service address from the output (dev servers usually print one, e.g. http://localhost:8081). */
+function pickUrl(s) {
+  const m = s.match(/https?:\/\/(?:localhost|127\.0\.0\.1|0\.0\.0\.0)(?::\d+)?[^\s"'`)\]]*/i);
+  if (!m) return "";
+  try {
+    const u = new URL(m[0]);
+    const host = u.hostname === "0.0.0.0" ? "localhost" : u.hostname;
+    return `${u.protocol}//${host}${u.port ? `:${u.port}` : ""}`;
+  } catch {
+    return m[0];
+  }
+}
+
+/**
+ * Wait for a just-started service to look ready, then describe it.
+ *
+ * Shared by the Node and runtime paths, which is the point: the readiness regex, the URL extraction and
+ * every word below reach the model, so there is exactly one copy of them regardless of who spawned the
+ * process. The two paths differ only in `read`, which answers "is it still running, and what has it
+ * printed" -- from a local buffer, or from the sidecar.
+ */
+async function awaitStartup(pid, cmd, read) {
+  const startedAt = Date.now();
+  for (;;) {
+    // Sleep first: the original polled on an interval, so the first look happened one tick in, and a
+    // service is never ready at t=0 anyway.
+    await new Promise((r) => setTimeout(r, STARTUP_POLL_MS));
+    const { alive, out } = await read();
+    if (!READY.test(out) && alive && Date.now() - startedAt <= STARTUP_WINDOW_MS) continue;
+
+    const url = pickUrl(out);
+    // Record the address and notify the renderer to display it (GlobalNotifications shows "running project + address + stop").
+    if (alive) {
+      // Updated in place rather than replaced: the entry also carries `notify`, which the exit path
+      // reads, and rebuilding it here used to drop that.
+      const entry = bgProcs.get(pid);
+      if (entry) entry.url = url;
+      emitService({ type: "started", pid, url, command: cmd });
+    }
+    // The first line gives a clear conclusion so the model can directly tell it "started successfully" instead of poring over the raw logs.
+    const headline = alive
+      ? `✅ Service started successfully in the background and is running${url ? `: ${url}` : ""}${pid ? ` (pid ${pid})` : ""}.`
+      : "⚠️ Process has ended (possibly a one-off command, or it exited on startup).";
+    return (
+      `${headline}\n\n` +
+      `--- Startup output ---\n${out.trim() || "(no output yet)"}\n` +
+      (alive
+        ? "\nNote: the service keeps running in the background; this call does not block and won't be killed by the timeout." +
+          (url ? `You can open ${url} with openBrowser to preview it, or just tell the user it's "started". ` : "") +
+          "Do not run the same startup command again, and do not wait for it to finish."
+        : "")
+    );
+  }
+}
+
+/**
+ * Exits that arrived before the service they belong to was registered.
+ *
+ * A service can end before `startBackground` has recorded its pid, and it is not a rare case: the pid
+ * and the exit can be written by the sidecar in one breath, reaching `onData` in a single chunk. Both
+ * lines are then handled synchronously, and settling the start reply only SCHEDULES the caller's
+ * continuation -- so the registration has not happened yet when the exit arrives.
+ *
+ * Bounded, because an entry here is only ever waiting for a caller that is a microtask away. Anything
+ * that accumulates is for a pid nobody ever claimed, and the oldest is the safest to drop.
+ */
+const pendingExits = new Map();
+const MAX_PENDING_EXITS = 64;
+
+/** Report one ended service. False means its pid is not registered (yet). */
+function reportExit({ pid, code, signal, output, command }) {
+  const entry = bgProcs.get(pid);
+  if (!entry) return false;
+  bgProcs.delete(pid);
+  emitService({
+    type: "stopped",
+    pid,
+    reason: "exited",
+    command: command ?? entry.command ?? "",
+    code: code ?? null,
+    signal: signal ?? null,
+    // Clipped here rather than in the runtime, so the truncation notice a model reads is written in
+    // one place. The runtime sends the whole trailing buffer.
+    tail: tailOf(Buffer.from(String(output ?? ""), "utf8")),
+    notify: !!entry.notify,
+  });
+  return true;
+}
+
+/**
+ * A background process the Rust runtime owns has ended.
+ *
+ * The host cannot discover this on its own: `awaitStartup` stops polling once the service settles, so a
+ * dev server that dies an hour later, or an install the user asked to be notified about, has no other
+ * way to be noticed. Registered once at import; the bridge keeps it across a sidecar restart.
+ */
+onEvent("process.exited", (payload) => {
+  if (reportExit(payload)) return;
+  // Too early rather than unwanted -- see `pendingExits`. Dropping it here would leave the service in
+  // the listing for good: nothing else ever reports an exit, so the indicator would keep offering to
+  // stop a pid that owns nothing and a notify job would wait for a notice that never comes.
+  pendingExits.set(payload.pid, payload);
+  if (pendingExits.size > MAX_PENDING_EXITS) {
+    pendingExits.delete(pendingExits.keys().next().value);
+  }
+});
+
+/**
+ * The sidecar went away, taking its background services with it.
+ *
+ * Its children are killed when it dies, so those services are genuinely gone -- but no `process.exited`
+ * can arrive to say so. Left alone, the running-services indicator would keep offering to stop pids that
+ * no longer exist. Reported as `exited` with no code, which is what "it is gone and we cannot say how"
+ * already means everywhere else in this contract.
+ */
+onEvent(EVENT_RUNTIME_DISCONNECTED, () => {
+  pendingExits.clear();
+  for (const [pid, entry] of [...bgProcs.entries()]) {
+    if (!entry.remote) continue;
+    bgProcs.delete(pid);
+    emitService({
+      type: "stopped",
+      pid,
+      reason: "exited",
+      command: entry.command ?? "",
+      code: null,
+      signal: null,
+      tail: "",
+      notify: !!entry.notify,
+    });
+  }
+});
+
+/**
+ * Start a command in the background without blocking: not killed by the 60s timeout. Captures early startup
+ * output (returns early once a local address / readiness keyword appears, otherwise waits up to 8s) while the
+ * process keeps running in the background. Returns the startup output + a pid hint.
+ */
+export async function startBackground(cmd, { cwd, notify } = {}) {
+  // Rust Agent Runtime, Stage 2b. The runtime owns the process -- spawning it, reading it, reaping it --
+  // while everything a model or a user sees stays here. It declines before anything has started, so a
+  // fallback costs nothing and starts nothing twice.
+  const offloaded = await tryStartBackground(cmd, { cwd });
+  if (offloaded) {
+    const { pid } = offloaded;
+    bgProcs.set(pid, { command: cmd, url: "", notify: !!notify, remote: true });
+    // The service may already have ended -- possibly reported before this line ran. Draining here is
+    // what closes that window; `awaitStartup` then sees a process that is not alive and says so.
+    const early = pendingExits.get(pid);
+    if (early) {
+      pendingExits.delete(pid);
+      reportExit(early);
+    }
+    return awaitStartup(pid, cmd, async () => {
+      const seen = await peekProcess(pid);
+      // A failed peek is "cannot see it this tick", not "it is gone": the 8s ceiling above bounds the
+      // wait anyway, and treating a transient failure as an exit would report a healthy dev server as
+      // having died on startup.
+      if (!seen) return { alive: bgProcs.has(pid), out: "" };
+      return { alive: seen.alive, out: seen.output };
+    });
+  }
+  return startBackgroundOnNode(cmd, { cwd, notify });
+}
+
+/**
+ * The Node implementation, unchanged apart from the settle loop it now shares.
+ *
+ * Kept for the same two reasons as `runOnNode`: it serves every build where the sidecar is off or
+ * absent, and it is the reference the parity harness compares against.
+ */
+function startBackgroundOnNode(cmd, { cwd, notify } = {}) {
   return new Promise((resolve) => {
     let child;
     try {
@@ -215,6 +425,7 @@ export function startBackground(cmd, { cwd, notify } = {}) {
     });
     child.on("exit", (code, signal) => {
       if (pid && bgProcs.has(pid)) {
+        const entry = bgProcs.get(pid);
         bgProcs.delete(pid);
         // Still `stopped`, so the running-services indicator keeps working unchanged; the extra fields are
         // what a `notify` job needs — the model has to learn whether the install SUCCEEDED and what it said,
@@ -227,61 +438,35 @@ export function startBackground(cmd, { cwd, notify } = {}) {
           code: code ?? null,
           signal: signal ?? null,
           tail: tailOf(buf),
-          notify: !!notify,
+          notify: !!entry?.notify,
         });
       }
     });
     child.unref?.();
 
-    const READY = /(?:localhost|127\.0\.0\.1|0\.0\.0\.0):\d+|listening|compiled|ready|started|running at/i;
-    const startedAt = Date.now();
-    // Extract the first local service address from the output (dev servers usually print one, e.g. http://localhost:8081).
-    const pickUrl = (s) => {
-      const m = s.match(/https?:\/\/(?:localhost|127\.0\.0\.1|0\.0\.0\.0)(?::\d+)?[^\s"'`)\]]*/i);
-      if (!m) return "";
-      try {
-        const u = new URL(m[0]);
-        const host = u.hostname === "0.0.0.0" ? "localhost" : u.hostname;
-        return `${u.protocol}//${host}${u.port ? `:${u.port}` : ""}`;
-      } catch {
-        return m[0];
-      }
-    };
-    const timer = setInterval(() => {
-      const out = decodeConsole(buf);
-      const exited = !pid || !bgProcs.has(pid);
-      if (READY.test(out) || exited || Date.now() - startedAt > 8000) {
-        clearInterval(timer);
-        // The `data` handlers stay attached on purpose. They used to be removed here, which both threw away
-        // the output a completion notice reports and left the pipes with no reader — a chatty process then
-        // fills the OS pipe buffer and blocks on write. `buf` is capped at 64 KB above, so holding on costs
-        // a bounded amount of memory for the life of the process.
-        const alive = pid && bgProcs.has(pid);
-        const url = pickUrl(out);
-        // Record the address and notify the renderer to display it (GlobalNotifications shows "running project + address + stop").
-        if (alive) {
-          bgProcs.set(pid, { command: cmd, url });
-          emitService({ type: "started", pid, url, command: cmd });
-        }
-        // The first line gives a clear conclusion so the model can directly tell it "started successfully" instead of poring over the raw logs.
-        const headline = alive
-          ? `✅ Service started successfully in the background and is running${url ? `: ${url}` : ""}${pid ? ` (pid ${pid})` : ""}.`
-          : "⚠️ Process has ended (possibly a one-off command, or it exited on startup).";
-        resolve(
-          `${headline}\n\n` +
-            `--- Startup output ---\n${out.trim() || "(no output yet)"}\n` +
-            (alive
-              ? "\nNote: the service keeps running in the background; this call does not block and won't be killed by the timeout." +
-                (url ? `You can open ${url} with openBrowser to preview it, or just tell the user it's "started". ` : "") +
-                "Do not run the same startup command again, and do not wait for it to finish."
-              : ""),
-        );
-      }
-    }, 300);
+    // The `data` handlers stay attached on purpose. They used to be removed once startup settled, which both
+    // threw away the output a completion notice reports and left the pipes with no reader — a chatty process
+    // then fills the OS pipe buffer and blocks on write. `buf` is capped at 64 KB above, so holding on costs
+    // a bounded amount of memory for the life of the process.
+    resolve(
+      awaitStartup(pid, cmd, () => ({
+        alive: Boolean(pid) && bgProcs.has(pid),
+        out: decodeConsole(buf),
+      })),
+    );
   });
 }
 
-/** Stop a background process (by pid, killing the whole tree). Returns whether the stop was initiated. */
+/**
+ * Stop one background service by pid.
+ *
+ * Unchanged by the migration, and deliberately not routed through the sidecar even for a service the
+ * sidecar started. A pid and its process group are the operating system's, not the spawner's: the
+ * runtime starts every service in its own group, so the same signal reaches it whoever sends it. The
+ * runtime's reaper still notices the exit and reports it back, so the bookkeeping is identical either
+ * way -- and this stays synchronous, which `ipcMain.handle("ai-tools:stop-process")` and the
+ * `stop_service` tool both rely on.
+ */
 export function stopProcess(pid) {
   const n = Number(pid);
   if (!bgProcs.has(n)) return false;

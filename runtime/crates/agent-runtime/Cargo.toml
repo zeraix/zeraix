@@ -12,6 +12,13 @@ path = "src/main.rs"
 [dependencies]
 agent-core = { workspace = true }
 agent-tools = { workspace = true }
+agent-process = { workspace = true }
+agent-mcp = { workspace = true }
+agent-subagents = { workspace = true }
+agent-scheduler = { workspace = true }
+agent-resource = { workspace = true }
+agent-events = { workspace = true }
+agent-permission = { workspace = true }
 agent-ipc = { workspace = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true }

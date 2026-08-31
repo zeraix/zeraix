@@ -7,6 +7,8 @@ import { setAssetHostDir } from "./tools/sandbox/qemu.mjs";
 import { setMediaDir, readIndex, writeIndex, saveMedia, openMediaDir, getMediaDir } from "./mediaStore.mjs";
 // Reports at startup whether the Rust sidecar is enabled, active, or unavailable — see warmUp.
 import { warmUp as warmUpRustRuntime, shutdown as shutdownRustRuntime } from "./tools/rustRuntime.mjs";
+// Sub-agent scheduling in the runtime (Stage 4b). Opt-in; see subagentBridge.mjs.
+import { initSubagentBridge, subagentsEnabled } from "./agent/subagentBridge.mjs";
 import { discoverProjectSkills, setProjectSkillDecision, readProjectSkillFile, loadEnabledProjectSkills } from "./tools/projectSkills.mjs";
 import { createTerminal, writeTerminal, resizeTerminal, killTerminal, killByWebContents, killAllTerminals } from "./tools/terminal.mjs";
 import { llmChat, llmChatStream } from "./llm/proxy.mjs";
@@ -490,6 +492,8 @@ function registerAiTools() {
   // One-way, like llm:chat:abort: the renderer is telling us to stop, not asking for a result. Aborting an
   // id that has already finished is a no-op, which is what makes the race harmless — the call can complete
   // between the user's click and this arriving.
+  initSubagentBridge();
+
   ipcMain.on("ai-tools:cancel", (_e, callId) => {
     toolCallControllers.get(callId)?.abort();
   });
@@ -990,7 +994,17 @@ app.whenReady().then(() => {
   // Start the Rust sidecar now rather than on the first tool call, so its state is reported once at
   // boot instead of being inferred from behaviour. Fire-and-forget and never fatal: with the flag off it
   // prints one line and starts nothing, and every failure path leaves the JS handlers serving.
-  void warmUpRustRuntime().catch((e) => console.warn("[rust-runtime] warm-up failed:", e?.message ?? e));
+  void warmUpRustRuntime()
+    .then(() => {
+      // Said plainly, because the sub-agent path is opt-in and its absence is otherwise invisible:
+      // the app behaves identically either way, right up until you look for which scheduler ran.
+      console.info(
+        subagentsEnabled()
+          ? "[rust-runtime] sub-agent scheduling: RUNTIME (ZERAIX_RUST_SUBAGENTS)"
+          : "[rust-runtime] sub-agent scheduling: renderer (set ZERAIX_RUST_SUBAGENTS=on to use the runtime)",
+      );
+    })
+    .catch((e) => console.warn("[rust-runtime] warm-up failed:", e?.message ?? e));
   registerTerminal();
   // Select the command-execution engine (start a qemu VM in the background if hardware virtualization is available, otherwise keep running natively on the host).
   // Runs asynchronously in the background; on failure it silently falls back to native without affecting startup.

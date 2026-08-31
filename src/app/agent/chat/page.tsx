@@ -41,7 +41,7 @@ import { useLocaleStore, useT } from "@/lib/i18n";
 import { toast } from "sonner";
 // Only the two types remain here: the delegation tools themselves moved to chatDelegation.ts.
 import type { DelegationMeta, PriorDelegation } from "@/lib/ai/subagents";
-import { SubAgentScheduler } from "@/lib/ai/subagentScheduler";
+import type { SchedulerLike } from "@/lib/ai/subagentScheduler";
 import { SkillSelectPanel } from "./SkillSelectPanel";
 import BrowserPanel from "./BrowserPanel";
 import { getStorage } from "@zzcpt/zztool";
@@ -328,7 +328,8 @@ function ChatAgent() {
    */
   const schedulerRef = useRef<{
     turnId: string;
-    sched: SubAgentScheduler<DelegationMeta>;
+    /** Either implementation — the renderer's own, or the Rust runtime's. See chatDelegation's schedulerFor. */
+    sched: SchedulerLike<DelegationMeta>;
     /**
      * Stops the delegation loops themselves, which cancelling the scheduler alone cannot do: the scheduler
      * settles a job's *outcome* (so a waiting join unblocks), while the loop producing it keeps requesting

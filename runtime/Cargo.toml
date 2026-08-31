@@ -59,6 +59,14 @@ regex = "1"
 chrono = "0.4"
 encoding_rs = "0.8"
 landlock = "0.4"
+# HTTP client for remote/cloud MCP servers, and later for inference (D3).
+#
+# rustls rather than native-tls: it keeps the sidecar free of a system TLS dependency across all four
+# dist:* targets, which is what a native-tls build would add. Default features are off because they pull
+# in a second TLS stack and blocking support this runtime has no use for. Approved in
+# docs/agent-runtime-dependency-review.md (D14): 59 crates that compile, 85 in the lockfile.
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream", "charset", "http2"] }
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
 
 [workspace.dependencies.nix]
 version = "0.29"

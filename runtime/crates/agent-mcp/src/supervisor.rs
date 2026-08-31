@@ -22,7 +22,7 @@ use serde_json::{json, Value};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use tokio::sync::Semaphore;
+use tokio::sync::{watch, Semaphore};
 
 /// Where a connection is.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
@@ -115,6 +115,13 @@ impl Pool {
 
 struct Shared {
     state: Mutex<ConnState>,
+    /// Broadcasts every state transition, so a watcher learns of one without polling for it.
+    ///
+    /// A `watch` rather than a broadcast channel because state is a *current value*, not a stream of
+    /// facts: a subscriber that misses two transitions still wants the latest, and a slow one must
+    /// never hold up the supervisor. Kept next to the mutex it mirrors and written only in
+    /// `set_state`, which is the one place state changes.
+    state_tx: watch::Sender<ConnState>,
     /// Last good tool list. Retained across a degradation on purpose: the tools a server exposed do not
     /// stop existing because it briefly went away, and clearing them would rewrite the prompt prefix
     /// (and invalidate the cache) on every blip.
@@ -141,6 +148,7 @@ impl ConnectionSupervisor {
             config,
             shared: Arc::new(Shared {
                 state: Mutex::new(ConnState::Idle),
+                state_tx: watch::channel(ConnState::Idle).0,
                 tools: Mutex::new(Arc::new(Vec::new())),
                 pool: Mutex::new(None),
                 slots,
@@ -151,6 +159,11 @@ impl ConnectionSupervisor {
 
     pub fn id(&self) -> &str {
         &self.id
+    }
+
+    /// The transport's diagnostics — for stdio, the server's stderr tail.
+    pub fn diagnostics(&self) -> String {
+        self.factory.diagnostics()
     }
 
     pub fn state(&self) -> ConnState {
@@ -168,11 +181,22 @@ impl ConnectionSupervisor {
         self.shared.tools.lock().unwrap_or_else(|e| e.into_inner()).as_ref().clone()
     }
 
+    /// Subscribe to state transitions.
+    ///
+    /// What the UI needs and what the host bridge pushes to the renderer: today a connection's health
+    /// is discovered by the next tool call that fails, which is the failure this crate exists to fix.
+    pub fn watch_state(&self) -> watch::Receiver<ConnState> {
+        self.shared.state_tx.subscribe()
+    }
+
     fn set_state(&self, next: ConnState) {
         let mut guard = self.shared.state.lock().unwrap_or_else(|e| e.into_inner());
         if *guard != next {
             tracing::info!(server = %self.id, from = guard.label(), to = next.label(), "mcp connection state");
-            *guard = next;
+            *guard = next.clone();
+            // Sent while the lock is held so the published value can never run ahead of the stored one.
+            // A send with no subscribers is not an error; nobody is watching, and that is allowed.
+            let _ = self.shared.state_tx.send(next);
         }
     }
 
@@ -268,6 +292,11 @@ impl ConnectionSupervisor {
             .await
             .map_err(|_| TransportError::Timeout)??;
 
+        // Required by the protocol, and the handshake is not complete without it: a server may hold
+        // every later request until this arrives. Its absence is invisible against lenient servers,
+        // which is what makes it worth a line of its own here rather than an assumption.
+        primary.notify("notifications/initialized", json!({})).await?;
+
         let listed = tokio::time::timeout(
             self.config.connect_timeout,
             primary.request("tools/list", json!({})),
@@ -322,6 +351,22 @@ impl ConnectionSupervisor {
     ///
     /// Never fails — invariant 1. Every path returns a `ToolCallOutcome` the model can read.
     pub async fn call(&self, tool: &str, args: Value) -> ToolCallOutcome {
+        self.call_cancellable(tool, args, &CancellationToken::new()).await
+    }
+
+    /// The same call, stoppable.
+    ///
+    /// Cancellation has to reach an MCP call for two reasons, and the second is the one that bites. A
+    /// user pressing Stop should not wait out a slow server — but more importantly, an abandoned call
+    /// that kept its backpressure permit would leak an in-flight slot every time, and enough of those
+    /// leave a working server unable to accept anything. The permit is an RAII guard, so dropping this
+    /// future returns it.
+    pub async fn call_cancellable(
+        &self,
+        tool: &str,
+        args: Value,
+        cancel: &CancellationToken,
+    ) -> ToolCallOutcome {
         let state = self.state();
         if !state.is_ready() {
             // Degradation (TODO §4): answer immediately rather than waiting for a recovery that may
@@ -362,8 +407,16 @@ impl ConnectionSupervisor {
         };
 
         let params = json!({ "name": tool, "arguments": args });
-        let result =
-            tokio::time::timeout(self.config.call_timeout, conn.request("tools/call", params)).await;
+        let result = tokio::select! {
+            biased;
+            // Checked first so a token that is already cancelled never starts the call.
+            _ = cancel.cancelled() => {
+                return ToolCallOutcome::failed(format!(
+                    "the MCP tool '{tool}' was cancelled"
+                ));
+            }
+            r = tokio::time::timeout(self.config.call_timeout, conn.request("tools/call", params)) => r,
+        };
 
         match result {
             Ok(Ok(value)) => {
@@ -378,9 +431,20 @@ impl ConnectionSupervisor {
                     ));
                 }
                 if value.get("isError").and_then(Value::as_bool) == Some(true) {
-                    return ToolCallOutcome::failed(flatten_content(&value));
+                    // `ok: false`, but the reply is still carried: a tool that ran and refused DID
+                    // answer, and a caller that renders the result itself needs what the server
+                    // actually said. Dropping it here would make a failing tool indistinguishable
+                    // from a connection that never delivered the call — which is the difference
+                    // between reporting an error to the model and tearing down the server.
+                    return ToolCallOutcome {
+                        ok: false,
+                        content: flatten_content(&value),
+                        raw: Some(value),
+                    };
                 }
-                ToolCallOutcome::ok(flatten_content(&value))
+                // Both: the rendering for a caller that wants one, and the untouched reply for the
+                // host, which has its own and is the one users have been reading.
+                ToolCallOutcome::delivered(flatten_content(&value), value)
             }
             Ok(Err(e)) => ToolCallOutcome::failed(format!("the MCP tool '{tool}' failed: {}", e.describe())),
             Err(_) => ToolCallOutcome::failed(format!(
@@ -414,11 +478,7 @@ fn parse_tools(server: &str, listed: &Value) -> Vec<McpToolDescriptor> {
                 name: namespaced(server, remote),
                 remote_name: remote.to_owned(),
                 server: server.to_owned(),
-                description: t
-                    .get("description")
-                    .and_then(Value::as_str)
-                    .unwrap_or("")
-                    .to_owned(),
+                description: t.get("description").and_then(Value::as_str).map(str::to_owned),
                 parameters: t
                     .get("inputSchema")
                     .cloned()

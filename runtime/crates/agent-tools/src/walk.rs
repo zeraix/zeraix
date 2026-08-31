@@ -8,17 +8,29 @@
 //! JS one exactly: a depth-first pre-order traversal, recursing into a directory the moment it is
 //! encountered rather than after the current level is finished.
 //!
-//! **Entries are sorted by name bytes, and that is not cosmetic.** `fs.readdir` in Node looks like it
-//! returns raw filesystem order, and it does not: libuv implements it with `scandir()` sorted by a
-//! `strcmp` comparator, so Node hands back a byte-sorted list on every platform. Rust's `read_dir`
-//! really does return raw order — ext4 hash order, which is neither sorted nor stable across trees.
-//! Walking without sorting therefore produced a *correct set* of matches in a *different order*, which
-//! is invisible until a query hits the cap and then silently returns a different 200 files.
+//! **Entry order must match `fs.readdir`, and it is platform-specific.** The JS walk this mirrors
+//! (`walkFiles` in aiToolkit.mjs) does not sort at all — it iterates `fs.readdir` output verbatim — so
+//! whatever order libuv hands Node is the order that must come out of here. Getting it wrong is
+//! invisible until a query hits the match cap and then silently returns a different 200 files.
 //!
-//! This was not caught by reasoning about it; the A/B harness caught it on its first run, which is the
-//! argument for comparing whole outputs rather than spot-checking. `strcmp` is a byte comparison, not a
-//! collation, so this is locale-independent and does not need `locale_compare` — unlike
+//! On **POSIX**, libuv implements `fs.readdir` with `scandir()` under a `strcmp` comparator, so Node
+//! returns a byte-sorted list while Rust's `read_dir` returns raw order — ext4 hash order, neither
+//! sorted nor stable across trees. Hence the sort below. `strcmp` is a byte comparison, not a
+//! collation, so it is locale-independent and does not need `locale_compare` — unlike
 //! `list_directory`, which sorts its own output with `localeCompare` and genuinely does need it.
+//!
+//! On **Windows** that is not true, and assuming it was is what this code got wrong. libuv has no
+//! `scandir()` there: it reads the directory through `NtQueryDirectoryFile` and applies no comparator
+//! of its own, so Node returns the order NTFS supplies — case-insensitive, not byte-ordered. Sorting
+//! by bytes therefore *introduced* a divergence rather than removing one, putting `README.md` ahead of
+//! `crlf.txt` where Node on NTFS never does. Rust's `read_dir` reads that same directory index through
+//! the same OS facility, so on Windows the two already agree and the correct action is to leave the
+//! order alone.
+//!
+//! Neither half of this was caught by reasoning about it. The A/B harness caught the POSIX case on its
+//! first run and the Windows case the first time it was run on Windows — which is the argument both for
+//! comparing whole outputs rather than spot-checking, and for running the comparison on every platform
+//! that ships (see .github/workflows/ci.yml).
 //!
 //! ## Symlinks are skipped
 //!
@@ -28,6 +40,13 @@
 //! taken here — a walk that followed links would need cycle detection before it could be turned on.
 
 use crate::SKIP_DIRS;
+
+/// Whether the platform hands Rust and Node the same directory order without help.
+///
+/// True on Windows: both read the NTFS directory index through the same OS facility, so there is
+/// nothing to reconcile and sorting is what breaks parity. False on POSIX, where libuv byte-sorts
+/// via `scandir()` and Rust's `read_dir` does not. See the module header.
+const WINDOWS_READDIR_ORDER_ALREADY_MATCHES: bool = cfg!(windows);
 use agent_core::CancellationToken;
 use dashmap::DashMap;
 use std::path::{Path, PathBuf};
@@ -100,10 +119,20 @@ fn walk_into(dir: &Path, cancel: &CancellationToken, out: &mut Vec<PathBuf>) {
         Ok(e) => e,
         Err(_) => return,
     };
-    // Materialised and sorted before descending: see the module header. `as_encoded_bytes` gives the
-    // platform's own encoding, which is what `strcmp` compares in libuv.
+    // Materialised before descending so the order can be fixed up; see the module header for why the
+    // fix-up is POSIX-only. `as_encoded_bytes` gives the platform's own encoding, which is what
+    // `strcmp` compares in libuv. On Windows the OS already hands both runtimes the same order, and
+    // sorting here is precisely what broke parity — so the sort is compiled out rather than replaced
+    // by a different comparator, because there is no comparator to reproduce.
     let mut entries: Vec<std::fs::DirEntry> = entries.flatten().collect();
-    entries.sort_by(|a, b| a.file_name().as_encoded_bytes().cmp(b.file_name().as_encoded_bytes()));
+    // `cfg!` rather than `#[cfg]`: this is a one-line difference between platforms, and a `#[cfg]`
+    // block would mean the branch that does NOT apply to the host is never compiled here -- so a
+    // mistake in the POSIX ordering would first surface on a macOS CI runner, which is a slow and
+    // confusing place to learn about it. `cfg!` is a compile-time constant, so both arms are
+    // type-checked everywhere and the optimiser drops the dead one.
+    if !WINDOWS_READDIR_ORDER_ALREADY_MATCHES {
+        entries.sort_by(|a, b| a.file_name().as_encoded_bytes().cmp(b.file_name().as_encoded_bytes()));
+    }
 
     for entry in entries {
         if cancel.is_cancelled() {

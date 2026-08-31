@@ -36,7 +36,8 @@ import {
   MAX_PARALLEL_SUBAGENTS, MAX_SUBAGENTS_PER_TURN, JOIN_DEFAULT_TIMEOUT_MS, JOIN_MAX_TIMEOUT_MS,
   type DelegationMeta, type PriorDelegation,
 } from "@/lib/ai/subagents";
-import { SubAgentScheduler } from "@/lib/ai/subagentScheduler";
+import { SubAgentScheduler, type SchedulerLike } from "@/lib/ai/subagentScheduler";
+import { createRuntimeScheduler } from "./runtimeScheduler";
 import { logSubagentRun } from "@/lib/ai/usageLog";
 import { formatJobDelivery } from "@/lib/ai/services";
 import type { SandboxStatus } from "@/lib/ai/sandbox";
@@ -85,7 +86,8 @@ export interface DelegationTools {
 /** The turn's scheduler, held by the component so the turn's `finally` can still reach it. */
 export interface HeldScheduler {
   turnId: string;
-  sched: SubAgentScheduler<DelegationMeta>;
+  /** Either implementation — the renderer's own, or the Rust runtime's. See `schedulerFor`. */
+  sched: SchedulerLike<DelegationMeta>;
   stop: AbortController;
 }
 
@@ -181,24 +183,41 @@ export function createDelegationTools(deps: DelegationDeps): DelegationTools {
   };
 
   /** The scheduler for the current turn, rebuilt (and the previous one shut down) when the turn changes. */
-  const schedulerFor = (ctx: RunCtx): SubAgentScheduler<DelegationMeta> => {
+  const schedulerFor = (ctx: RunCtx): SchedulerLike<DelegationMeta> => {
     const held = schedulerRef.current;
     if (held && held.turnId === ctx.turnId) return held.sched;
     if (held) shutdownScheduler(held);
     const stop = new AbortController();
-    const sched = new SubAgentScheduler<DelegationMeta>({
+    const publishCounts = (s: SchedulerLike<DelegationMeta>) => {
+      const c = s.counts();
+      if (c.running + c.queued > 0) {
+        ctx.status(t("chat.subagentsWorking", { running: c.running, queued: c.queued }));
+      }
+    };
+
+    // Stage 4b: the Rust runtime schedules when it is available and switched on, and this window still
+    // runs every delegation. Off by default -- see subagentBridge.mjs for why this one stage is opt-in
+    // rather than flag-on-by-default like the others.
+    const fromRuntime = createRuntimeScheduler<DelegationMeta>(ctx.turnId, () => {
+      if (schedulerRef.current?.turnId === ctx.turnId) publishCounts(schedulerRef.current.sched);
+    });
+    if (fromRuntime) {
+      const heldRuntime = { turnId: ctx.turnId, sched: fromRuntime as SchedulerLike<DelegationMeta>, stop };
+      if (ctx.signal.aborted) shutdownScheduler(heldRuntime);
+      else ctx.signal.addEventListener("abort", () => shutdownScheduler(heldRuntime), { once: true });
+      schedulerRef.current = heldRuntime;
+      return heldRuntime.sched;
+    }
+
+    // Annotated because `onChange` refers to `sched`, and an inferred type cannot close that loop.
+    const sched: SubAgentScheduler<DelegationMeta> = new SubAgentScheduler<DelegationMeta>({
       limit: MAX_PARALLEL_SUBAGENTS,
       maxJobs: MAX_SUBAGENTS_PER_TURN,
       // The in-flight half of the repeat-delegation guard. The completed half (delegationsRef) can only
       // see delegations that already returned, so before this a model that spawned the same question
       // twice in one batch paid for both — the case fan-out makes easy and serial delegation never could.
       isDuplicate: (a, b) => isSameDelegation(a, b),
-      onChange: () => {
-        const c = sched.counts();
-        if (c.running + c.queued > 0) {
-          ctx.status(t("chat.subagentsWorking", { running: c.running, queued: c.queued }));
-        }
-      },
+      onChange: () => publishCounts(sched),
     });
     const held2 = { turnId: ctx.turnId, sched, stop };
     // Cancelling the turn has to reach the scheduler directly, not via the run loop's `finally`: when the
@@ -374,7 +393,7 @@ export function createDelegationTools(deps: DelegationDeps): DelegationTools {
         continue;
       }
       const meta: DelegationMeta = { agent: agentId, task, subject: delegationSubject(task) };
-      const res = sched.spawn(meta, async (job) => {
+      const res = await sched.spawn(meta, async (job) => {
         const { conclusion } = await runDelegation(jobCtx, {
           agentId,
           task,

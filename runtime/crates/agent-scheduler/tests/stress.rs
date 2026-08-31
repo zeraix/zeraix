@@ -52,14 +52,30 @@ async fn a_thousand_tasks_all_settle_and_leak_nothing() {
         .unwrap();
     }
 
-    // Drain rather than sleeping a fixed amount: a fixed sleep either flakes or wastes time.
+    // Drain on the SCHEDULER's state, not on the counter the bodies increment.
+    //
+    // `done` is bumped inside a body, which returns before the driver has recorded the outcome and
+    // before the permit guard has dropped. Waiting on it therefore asserts the bookkeeping is finished
+    // at the moment it demonstrably is not — invisible on an idle machine, and a flake under load,
+    // which is how it was found: this test failed in 0.22s, nowhere near its 30-second deadline.
     let deadline = std::time::Instant::now() + Duration::from_secs(30);
-    while done.load(Ordering::SeqCst) < 1000 && std::time::Instant::now() < deadline {
+    let snap = loop {
+        let snap = s.snapshot().await;
+        let settled = snap.len() == 1000 && snap.iter().all(|r| r.state.is_terminal());
+        let released = ResourceClass::ALL.iter().all(|c| rm.in_use(*c) == 0);
+        if settled && released {
+            break snap;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "tasks never settled: {} of {} terminal",
+            snap.iter().filter(|r| r.state.is_terminal()).count(),
+            snap.len()
+        );
         tokio::time::sleep(Duration::from_millis(20)).await;
-    }
+    };
 
     assert_eq!(done.load(Ordering::SeqCst), 1000, "not every task ran");
-    let snap = s.snapshot().await;
     assert_eq!(snap.len(), 1000);
     assert!(snap.iter().all(|r| r.state.is_terminal()), "some tasks never settled");
 

@@ -29,9 +29,11 @@
 //! The group must be a *new* one: a child sharing this process's group would mean `killpg` takes down
 //! the runtime itself.
 
+pub mod background;
 pub mod console;
 pub mod limits;
 
+pub use background::{BackgroundRegistry, Exited};
 pub use console::{decode_console, tail_of};
 pub use limits::{LimitsApplied, ResourceLimits};
 
@@ -190,12 +192,44 @@ impl ProcessResult {
 }
 
 /// Spawn a command in its own process group with piped output.
-fn spawn(req: &ProcessRequest) -> std::io::Result<Child> {
-    let mut cmd = if cfg!(windows) {
-        let mut c = Command::new("cmd");
-        c.arg("/C").arg(&req.command);
+///
+/// Shared with `background`, so a service and a foreground command are started the same way — same
+/// shell, same process group, same piping. A background service that spawned differently would drift
+/// from the foreground path exactly where it is hardest to notice.
+pub(crate) fn spawn_command(req: &ProcessRequest) -> std::io::Result<Child> {
+    #[cfg(windows)]
+    let mut cmd = {
+        // Reproduce what Node's `spawn(cmd, { shell: true })` builds, argument for argument. Node
+        // resolves the shell from %ComSpec%, passes `/d /s /c`, wraps the command in one pair of
+        // quotes, and sets `windowsVerbatimArguments` so the command line is handed to CreateProcess
+        // untouched (see normalizeSpawnArguments in node/lib/internal/child_process.js).
+        //
+        // Every part of that is load-bearing, and `cmd /C <command>` — what this used to do — matches
+        // none of it:
+        //
+        // - **`/d`** disables the AutoRun command in
+        //   `HKCU\Software\Microsoft\Command Processor\AutoRun`. Without it, every command the agent
+        //   runs would additionally execute whatever that key holds, on machines where it is set (Anaconda
+        //   and some corporate images set it). The JS path suppresses it; a divergence here would be a
+        //   command that behaves differently depending on a registry key nobody thinks to check.
+        // - **`/s` plus one enclosing quote pair** selects cmd.exe's simple quote rule: strip the first
+        //   and last quote, run the rest verbatim. Without `/s`, cmd re-parses the quotes, and a command
+        //   containing them (`git commit -m "x"`) is split differently.
+        // - **`raw_arg`** is what keeps std from escaping the argument for a C runtime that cmd.exe is
+        //   not. std would produce `cmd /C "git commit -m \"x\""`; cmd.exe reads `\"` as a literal quote.
+        //
+        // Untestable from the development environment (Linux/WSL), so it is compile-checked against
+        // the msvc target and proven by the parity job, which runs on windows-latest for exactly this
+        // class of bug — see .github/workflows/ci.yml.
+        let shell = std::env::var("ComSpec").unwrap_or_else(|_| "cmd.exe".to_owned());
+        let mut c = Command::new(shell);
+        c.arg("/d").arg("/s").arg("/c");
+        c.raw_arg(format!("\"{}\"", req.command));
         c
-    } else {
+    };
+
+    #[cfg(not(windows))]
+    let mut cmd = {
         let mut c = Command::new("/bin/sh");
         c.arg("-c").arg(&req.command);
         c
@@ -247,8 +281,17 @@ fn spawn(req: &ProcessRequest) -> std::io::Result<Child> {
 ///
 /// The group may already be gone (a normal exit racing the kill), which is not an error worth
 /// reporting — the caller's intent was "make sure it is not running", and it is not.
-fn kill_tree(child: &Child, force: bool) {
+pub(crate) fn kill_tree(child: &Child, force: bool) {
     let Some(pid) = child.id() else { return };
+    kill_pid(pid, force);
+}
+
+/// Kill a process group by pid.
+///
+/// Split out from `kill_tree` for the background registry, which has no `Child` to hand: the reaper
+/// task owns it, and a service is stopped by the pid the user sees. This is the same mechanism
+/// `stopProcess` uses in the JS implementation, for the same reason.
+pub(crate) fn kill_pid(pid: u32, force: bool) {
 
     #[cfg(unix)]
     {
@@ -340,7 +383,7 @@ pub async fn run(req: ProcessRequest, cancel: &CancellationToken) -> ProcessResu
 
     let (_cgroup, applied) = limits::prepare(&req.limits, &format!("p{}", std::process::id()));
 
-    let mut child = match spawn(&req) {
+    let mut child = match spawn_command(&req) {
         Ok(c) => c,
         Err(e) => {
             limits::cleanup(&applied);

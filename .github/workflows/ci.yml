@@ -1,0 +1,178 @@
+name: CI
+
+# Fast checks on every push and PR. Complements release.yml, which only runs on a version tag and is
+# therefore the *last* place a regression should be discovered rather than the first.
+#
+# Split into two jobs on purpose, because they answer different questions and cost very different
+# amounts. `checks` is the cheap Node-side gate and runs on one Linux box. `parity` is the expensive
+# one and deliberately runs on the platforms this app actually ships to — see the comment on that job,
+# which is the whole reason it is not a single ubuntu run.
+on:
+  push:
+    branches-ignore:
+      - "gh-pages"
+  pull_request:
+  workflow_dispatch:
+
+# A second push to the same branch makes the first run irrelevant; cancel it rather than queue behind it.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # The committed .npmrc points at China mirrors for local dev. GitHub's runners are outside mainland
+  # China, where those are slow and intermittently fail. Env vars beat .npmrc, so this redirects CI
+  # without touching the local setup. Same rationale — and same values — as release.yml.
+  NPM_CONFIG_REGISTRY: https://registry.npmjs.org/
+  # No trailing "v": @electron/get appends its own "v${version}/" and a trailing "v" 404s.
+  NPM_CONFIG_ELECTRON_MIRROR: https://github.com/electron/electron/releases/download/
+  NPM_CONFIG_ELECTRON_BUILDER_BINARIES_MIRROR: https://github.com/electron-userland/electron-builder-binaries/releases/download/
+
+jobs:
+  checks:
+    name: Tests, types, lint
+    runs-on: ubuntu-latest
+    # Raised from 20 when the job gained a Rust build: 205 crates cold is several minutes, and the
+    # cache only helps from the second run on a given lockfile.
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+
+      # Node 22, NOT the 20 that release.yml pins. `npm test` is
+      # `node --test "test/**/*.test.mjs"`, and glob patterns in the test runner need Node >= 21:
+      # on 20.19.0 that exact command fails with `Could not find '...test\**\*.test.mjs'` and exits 1.
+      # It fails loudly rather than silently running zero tests, but it does fail. 22 also matches
+      # what developers run locally and what vm-image.yml already uses.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      # The Electron binary is fetched during install and is the slowest part of it.
+      - name: Cache electron downloads
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/electron
+            ~/.cache/electron-builder
+          key: ${{ runner.os }}-electron-${{ hashFiles('pnpm-lock.yaml') }}
+          restore-keys: ${{ runner.os }}-electron-
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      # The sidecar is a PRECONDITION of `npm test`, not an extra.
+      #
+      # test/rust-runtime-subagents.test.mjs drives the real binary — it is the only coverage of the
+      # runtime→host request direction and of sub-agent scheduling. Without a build here those tests
+      # SKIP, and a skip reports as a pass: the job stayed green while five tests never ran. Debug
+      # rather than release because the tests only need it to exist, and debug is minutes faster.
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: runtime
+          key: checks
+
+      - name: Build the sidecar (debug)
+        working-directory: runtime
+        run: cargo build --locked
+
+      - name: Tests
+        # Turns a missing sidecar into a red run instead of a silent skip, so removing the build step
+        # above — or moving cargo's output path — cannot quietly delete that coverage again.
+        env:
+          ZERAIX_REQUIRE_SIDECAR: "1"
+        run: npm test
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      # Advisory, not gating: the tree currently has 45 eslint ERRORS on a clean checkout — 30
+      # react-hooks/set-state-in-effect, 7 react-hooks/refs, 4 no-require-imports, 2 rules-of-hooks,
+      # 2 no-explicit-any — essentially all pre-existing debt in src/. Gating on this today would fail
+      # every PR for reasons unrelated to the PR. Flip `continue-on-error` off once that backlog is
+      # cleared; until then the output is still visible in the log.
+      #
+      # (Running `npm run lint` locally reports ~508 errors instead of 45. The extra 463 come from
+      # linting Zeraix/, the Next.js build output — it is gitignored so CI never sees it. Adding it to
+      # eslint.config.mjs's ignores would make local match CI.)
+      - name: Lint
+        run: npm run lint
+        continue-on-error: true
+
+  parity:
+    # Rust unit tests, plus the A/B harness that is the ENTIRE justification for routing a tool call to
+    # the sidecar: Stage 1's contract is that the Rust tools return byte-identical output to the JS
+    # handlers they replace, and this is what proves it.
+    #
+    # It runs on windows + macos rather than ubuntu, and that is the point. The Stage 1 report's
+    # "43 identical, 0 divergent" was measured on Linux/WSL, and it did not hold on Windows: libuv
+    # byte-sorts readdir via scandir() on POSIX only, while on Windows Node returns NTFS order, so the
+    # walk sorted itself INTO a divergence that six search_in_files cases exposed the first time the
+    # harness was run there (fixed in agent-tools/src/walk.rs — see its module header). A green Linux
+    # run said nothing about the installer a Windows user gets. These are the two targets release.yml
+    # actually builds; adding ubuntu here would re-create exactly that blind spot.
+    #
+    # Packaging itself is NOT duplicated here — release.yml builds installers on these same two
+    # platforms and already verifies the sidecar landed in the bundle. Run it via workflow_dispatch to
+    # package without cutting a tag.
+    name: Runtime parity (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    # Raised from 40 when the runtime took its HTTP dependency: reqwest + rustls + ring roughly doubled
+    # the crate count, and a cold Windows build is the slowest thing in this pipeline.
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: windows
+            os: windows-latest # x64, matching the dist:win target
+          - name: macos
+            os: macos-14 # arm64, matching the dist:mac target
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      # Keyed on Cargo.lock by the action, scoped per matrix leg so the two do not trample each other.
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: runtime
+          key: ${{ matrix.name }}
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      # Debug profile: seconds faster to build than --release and exercises the same logic. The release
+      # profile is still tested in release.yml before an installer is cut.
+      - name: Rust tests
+        working-directory: runtime
+        run: cargo test --locked
+
+      # Builds the release binary AND stages it to resources/runtime/, which is the path packaging
+      # depends on. build-rust-runtime.mjs verifies the result (exists, not truncated, --version runs),
+      # so a sidecar that cannot start fails here rather than in an installer.
+      - name: Build and stage the sidecar
+        run: npm run build:runtime
+
+      - name: Verify the staged binary
+        run: npm run check:runtime
+
+      # The gate. Runs the REAL JS handlers (via the electron stub hook) and the REAL sidecar over its
+      # real protocol against one shared tree, and diffs every byte. Non-zero exit on any divergence.
+      - name: A/B parity
+        run: node --import ./scripts/electron-stub-hook.mjs scripts/ab-runtime-parity.mjs

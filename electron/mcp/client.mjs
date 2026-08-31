@@ -17,6 +17,14 @@
  */
 import { CONNECT_TIMEOUT_DOWNLOAD_MS, CONNECT_TIMEOUT_MS, getServer, listServers, usesPackageRunner } from "./config.mjs";
 import { pluginAuthHeaders } from "../plugins/auth.mjs";
+import {
+  EVENT_RUNTIME_DISCONNECTED,
+  hasFeature,
+  mcpCall,
+  mcpConnect,
+  mcpDisconnect,
+  onEvent,
+} from "../tools/rustRuntime.mjs";
 
 /**
  * The SDK is loaded on first connect, not at import time. aiToolkit imports this module, and
@@ -219,19 +227,28 @@ function patchPath() {
 }
 
 /** Refresh a connection's tool list and rebuild its slice of the reverse index. */
+/**
+ * Turn a server's own tool list into declarations.
+ *
+ * Shared by both implementations -- the SDK path below and the Rust runtime path -- and that is the
+ * point. These strings go into the prompt prefix ahead of `messages`, so a byte of difference between
+ * the two re-prefills every conversation from token 0. The runtime therefore sends raw MCP values and
+ * this is the one place they are converted.
+ */
+function mapTools(serverId, tools) {
+  return (tools ?? []).map((t) => ({
+    name: `${TOOL_PREFIX}${NAME_SEP}${safeSegment(serverId)}${NAME_SEP}${safeSegment(t.name)}`,
+    raw: t.name,
+    // The `[server]` prefix does more work than the name prefix: it is what the model actually
+    // reads when two servers expose near-identical tools.
+    description: `[${serverId}] ${t.description ?? t.name}`,
+    parameters: toParameters(t.inputSchema),
+  }));
+}
+
 async function refreshTools(e) {
   const { tools } = await e.client.listTools();
-  e.tools = (tools ?? []).map((t) => {
-    const name = `${TOOL_PREFIX}${NAME_SEP}${safeSegment(e.id)}${NAME_SEP}${safeSegment(t.name)}`;
-    return {
-      name,
-      raw: t.name,
-      // The `[server]` prefix does more work than the name prefix: it is what the model actually
-      // reads when two servers expose near-identical tools.
-      description: `[${e.id}] ${t.description ?? t.name}`,
-      parameters: toParameters(t.inputSchema),
-    };
-  });
+  e.tools = mapTools(e.id, tools);
   reindex();
 }
 
@@ -241,6 +258,163 @@ function reindex() {
     if (e.status !== "ready") continue;
     for (const t of e.tools) toolIndex.set(t.name, { serverId: e.id, toolName: t.raw });
   }
+}
+
+// ── Rust runtime ownership ────────────────────────────────────────────────────
+//
+// A stdio server can be owned by the Rust runtime instead of by the SDK in this process. Ownership is
+// per server and all-or-nothing: whoever holds the connection does the discovery, the calls and the
+// lifecycle. Two owners would mean two child processes for one server and two answers to "what does it
+// declare", so there is no half state and no fallback once a connection is live.
+//
+// Everything a model or a user sees stays here regardless. The runtime sends raw MCP values; `mapTools`
+// and `flattenContent` convert them, exactly as they do for the SDK path.
+
+/** Servers whose readiness a caller is waiting on. id -> resolve. */
+const runtimeWaiters = new Map();
+
+/**
+ * Whether the runtime should own this server.
+ *
+ * Both kinds now, which is the point of Stage 3c: a local program over stdio, and a remote or
+ * cloud-hosted endpoint over Streamable HTTP.
+ *
+ * The one exception is a server backed by a plugin's OAuth grant. `pluginAuthedFetch` resolves its
+ * token PER REQUEST on purpose — one fixed at connect time works until the first refresh and then 401s
+ * for the rest of the session — and token storage and refresh live here, not in the runtime. Those stay
+ * on this client until the runtime can ask for headers per call.
+ */
+async function runtimeOwns(cfg) {
+  if (!cfg) return false;
+  if (cfg.kind === "http") {
+    if (cfg.auth) return false; // per-request OAuth; see above
+    return hasFeature("mcp.http");
+  }
+  return hasFeature("mcp.stdio");
+}
+
+/** Map the runtime's connection states onto the vocabulary the settings panel already renders. */
+function statusFromRuntime(state) {
+  if (state === "ready") return "ready";
+  if (state === "idle" || state === "connecting") return "connecting";
+  // `closed` is a deliberate disconnect, which this file has always shown as idle rather than as a
+  // failure; `degraded` and `failed` are both "cannot serve a call right now".
+  return state === "closed" ? "idle" : "error";
+}
+
+/**
+ * The runtime reports a connection change.
+ *
+ * This is the half the SDK path cannot have: there, a dead server is discovered by the next tool call
+ * that fails. Here the supervisor notices on its own -- by heartbeat, or by the pipe closing -- and the
+ * panel updates without anybody calling a tool.
+ */
+onEvent("mcp.state", (payload) => {
+  const { id, state, reason, tools, stderr } = payload ?? {};
+  const e = conns.get(id);
+  if (!e?.remote) return; // not ours, or the SDK owns this one
+
+  e.status = statusFromRuntime(state);
+  e.error = e.status === "error" ? String(reason ?? "") : "";
+  if (typeof stderr === "string" && stderr) e.stderr = stderr;
+  // Declarations follow readiness exactly: a server that cannot serve a call must not be offering
+  // tools to the model, which is also what keeps the declared set stable rather than flickering.
+  e.tools = e.status === "ready" ? mapTools(id, tools) : [];
+  if (e.status === "ready" && !e.connectedAt) e.connectedAt = Date.now();
+  reindex();
+  emit();
+
+  // A caller inside connectServer is waiting for exactly this.
+  if (state !== "connecting" && state !== "idle") {
+    runtimeWaiters.get(id)?.();
+  }
+});
+
+/**
+ * The sidecar went away, taking every server it owned with it.
+ *
+ * Those child processes died with it, so the honest report is "not connected" rather than leaving the
+ * panel showing servers that no longer exist. They reconnect the next time anything asks for them,
+ * through whichever implementation is available then.
+ */
+onEvent(EVENT_RUNTIME_DISCONNECTED, () => {
+  let changed = false;
+  for (const e of conns.values()) {
+    if (!e.remote) continue;
+    e.status = "idle";
+    e.tools = [];
+    e.remote = false;
+    e.connectedAt = 0;
+    changed = true;
+    runtimeWaiters.get(e.id)?.();
+  }
+  if (changed) {
+    reindex();
+    emit();
+  }
+});
+
+/**
+ * Hand one server to the runtime and wait for it to settle.
+ *
+ * Waits, unlike `listMcpTools()` -- and the difference is deliberate. Listing feeds the prompt prefix
+ * and can never block; connecting is already an awaited operation whose callers (including
+ * `callMcpTool`'s lazy connect) depend on getting back an entry that is actually ready. Bounded by the
+ * same ceilings the SDK path uses.
+ */
+async function connectViaRuntime(cfg, e) {
+  // Marked BEFORE the call, not after. The runtime can report `ready` in the same stdout chunk as the
+  // reply to this request, and the bridge handles both synchronously -- so an event that arrived while
+  // this was still awaiting would be dropped by the `!e.remote` guard in the handler, and the server
+  // would sit in `connecting` until the budget below expired. This is the same shape as the exit-event
+  // race in sandbox/native.mjs; the fix is the same one: register first.
+  e.remote = true;
+  const started = await mcpConnect(
+    cfg.kind === "http"
+      ? { id: cfg.id, url: cfg.url, headers: cfg.headers ?? {} }
+      : {
+          id: cfg.id,
+          command: cfg.command,
+          args: cfg.args,
+          cwd: cfg.cwd || undefined,
+    // The identical environment the SDK path builds -- see buildTransport.
+    //
+    // Taken from the SDK rather than reimplemented, even though nothing else on this path needs the
+    // SDK. `getDefaultEnvironment()` is an allowlist whose job is keeping ELECTRON_RUN_AS_NODE and
+    // NODE_OPTIONS away from a node-based server, and a second copy of it here would be free to drift
+    // from the one every existing user's servers run under. If it cannot be loaded, this throws and
+    // the caller falls through to the SDK path -- which would fail for the same reason anyway.
+          env: { ...(await loadSdk()).getDefaultEnvironment(), ...patchPath(), ...cfg.env },
+        },
+  );
+  if (!started) {
+    e.remote = false;
+    return false;
+  }
+
+  e.pid = null; // the child belongs to the runtime; its pid is not this process's to report
+  const budget = usesPackageRunner(cfg) ? CONNECT_TIMEOUT_DOWNLOAD_MS : CONNECT_TIMEOUT_MS;
+  // Already settled while this was awaiting -- the same race again, one step later. Checked rather
+  // than assumed, or a server that connected instantly would be waited on for the full budget.
+  if (e.status !== "connecting") return true;
+  await new Promise((resolve) => {
+    const timer = setTimeout(() => {
+      runtimeWaiters.delete(cfg.id);
+      resolve();
+    }, budget);
+    runtimeWaiters.set(cfg.id, () => {
+      clearTimeout(timer);
+      runtimeWaiters.delete(cfg.id);
+      resolve();
+    });
+  });
+  // Still connecting when the budget ran out: report it the way a slow SDK connect is reported.
+  if (e.status === "connecting") {
+    e.status = "error";
+    e.error = `timed out after ${budget}ms`;
+    emit();
+  }
+  return true;
 }
 
 /**
@@ -265,6 +439,21 @@ export function connectServer(id) {
   emit();
 
   e.connecting = (async () => {
+    // The Rust runtime owns stdio servers when it is available. It declines before anything has been
+    // started, so falling through to the SDK below costs nothing and starts nothing twice.
+    if (await runtimeOwns(cfg)) {
+      try {
+        if (await connectViaRuntime(cfg, e)) {
+          e.connecting = null;
+          emit();
+          return e;
+        }
+      } catch (err) {
+        // A bridge failure is not a server failure: fall through and connect it here instead.
+        console.warn(`[mcp] runtime connect for "${cfg.id}" failed, using the SDK:`, err?.message ?? err);
+      }
+    }
+
     let sdk;
     try {
       sdk = await loadSdk();
@@ -355,6 +544,13 @@ export function connectServer(id) {
 export async function disconnectServer(id) {
   const e = conns.get(id);
   if (!e) return { ok: true };
+
+  // A runtime-owned server has no client here to close; the child belongs to the sidecar and only it
+  // can stop it. The state event that follows clears the entry, but the local state is cleared now
+  // regardless so the panel and the tool index never show a server this function has already ended.
+  const remote = e.remote;
+  e.remote = false;
+
   const client = e.client;
   e.client = null;
   e.transport = null;
@@ -364,8 +560,9 @@ export async function disconnectServer(id) {
   reindex();
   emit();
   try {
+    if (remote) await mcpDisconnect(id);
     // Closing the client closes the transport, which kills a stdio child process.
-    await client?.close();
+    else await client?.close();
   } catch {
     /* ignore */
   }
@@ -421,6 +618,17 @@ export async function callMcpTool(name, args = {}, { signal } = {}) {
 
   const e = conns.get(target.serverId);
   const cfg = getServer(target.serverId);
+
+  // A server the Rust runtime owns. The reply comes back untouched and is converted here, by the same
+  // `flattenContent` and the same `isError` rule the SDK path uses -- so what the model reads does not
+  // depend on which implementation held the connection.
+  if (e?.remote) {
+    const res = await mcpCall(target.serverId, target.toolName, args ?? {}, { signal });
+    if (!res) return { ok: false, content: `MCP server "${target.serverId}" is not connected.` };
+    if (!res.delivered) return { ok: false, content: `Error in ${name}: ${res.error ?? "the call was not delivered"}` };
+    return { ok: res.raw?.isError !== true, content: flattenContent(res.raw) };
+  }
+
   if (!e?.client) return { ok: false, content: `MCP server "${target.serverId}" is not connected.` };
 
   try {

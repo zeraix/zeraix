@@ -67,6 +67,18 @@ pub trait McpTransport: Send + Sync + 'static {
     /// Issue a JSON-RPC request and await its result.
     async fn request(&self, method: &str, params: Value) -> Result<Value, TransportError>;
 
+    /// Send a JSON-RPC notification: no id, no reply, nothing to await.
+    ///
+    /// Exists for exactly one message, and it is not optional. MCP requires the client to send
+    /// `notifications/initialized` once the `initialize` exchange has completed, and a server is
+    /// entitled to answer nothing until it arrives — so a client that skips it works against lenient
+    /// servers and hangs on correct ones.
+    ///
+    /// Defaulted to a no-op so a fake in a test only implements what it is testing.
+    async fn notify(&self, _method: &str, _params: Value) -> Result<(), TransportError> {
+        Ok(())
+    }
+
     /// Cheap liveness probe (MCP `ping`).
     async fn ping(&self) -> Result<(), TransportError>;
 
@@ -81,4 +93,14 @@ pub trait McpTransport: Send + Sync + 'static {
 pub trait TransportFactory: Send + Sync + 'static {
     async fn connect(&self) -> Result<Arc<dyn McpTransport>, TransportError>;
     fn kind(&self) -> TransportKind;
+
+    /// Whatever the last connection attempt left behind that a human would want to read.
+    ///
+    /// For stdio that is the server's stderr, and it is often the ONLY explanation of a server that
+    /// refuses to start — a missing package, a bad token, a stack trace. The JS implementation pipes it
+    /// for exactly this reason: the default of inheriting throws it into a console the user cannot see.
+    /// Defaulted to empty so a transport with nothing to say implements nothing.
+    fn diagnostics(&self) -> String {
+        String::new()
+    }
 }

@@ -21,7 +21,9 @@ jobs:
   build:
     name: Build ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 60
+    # Raised from 60: this job now builds a runtime of 205 crates, runs both test suites and packages an
+    # installer. A cold Windows leg is the slowest path through the whole pipeline.
+    timeout-minutes: 90
 
     # The committed .npmrc points at China mirrors (registry.npmmirror.com + npmmirror's
     # electron / electron-builder-binaries mirrors) for local dev. GitHub's runners are in
@@ -84,10 +86,13 @@ jobs:
       - name: Setup pnpm
         uses: pnpm/action-setup@v4
 
+      # 22, matching ci.yml. Not cosmetic: `npm test` below is `node --test "test/**/*.test.mjs"`, and
+      # glob patterns in the test runner need Node >= 21 — on 20 that exact command fails with
+      # "Could not find '...test\**\*.test.mjs'" and exits 1.
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
           cache: pnpm
 
       # Cache electron + electron-builder downloads (Electron binary, app-builder,
@@ -119,6 +124,40 @@ jobs:
       - name: Test Rust runtime
         working-directory: runtime
         run: cargo test --release --locked
+
+      # Build the sidecar before the parity gate below. dist:* would do this anyway; doing it here means
+      # a sidecar that cannot even be produced fails in seconds rather than after a full Next build.
+      - name: Build the sidecar
+        run: npm run build:runtime
+
+      # The JS side, gated here because NOTHING ELSE GATES IT ON A TAG.
+      #
+      # ci.yml triggers on `push: branches-ignore`, which matches branch pushes only — a tag push runs
+      # this workflow and nothing else. Without these two steps, tagging a commit whose tests were never
+      # green produces installers all the same, and the first person to find out is a user.
+      #
+      # After "Build the sidecar" on purpose: the sub-agent tests drive the real binary, and
+      # ZERAIX_REQUIRE_SIDECAR makes their absence a failure rather than a silent skip.
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Tests
+        env:
+          ZERAIX_REQUIRE_SIDECAR: "1"
+        run: npm test
+
+      # The gate that says the sidecar may serve real tool calls. Stage 1 contract: the Rust tools must
+      # return byte-IDENTICAL output to the JS handlers they stand in for, because a model reads those
+      # strings and the renderer parses them. Runs the real handlers and the real sidecar against one
+      # shared tree and diffs every byte; non-zero exit on any divergence.
+      #
+      # It runs on BOTH matrix legs deliberately. Directory iteration order is not the same on the two
+      # platforms -- libuv byte-sorts readdir via scandir() on POSIX, while Windows reads NTFS order --
+      # and a Windows-only divergence in search_in_files sat undetected behind a green Linux report
+      # until this was first run on Windows. Packaged builds now default to the sidecar, so this is the
+      # difference between shipping the JS behaviour and shipping something subtly unlike it.
+      - name: A/B parity
+        run: node --import ./scripts/electron-stub-hook.mjs scripts/ab-runtime-parity.mjs
 
       - name: Check required config
         shell: bash

@@ -27,9 +27,13 @@
 //! The second invariant is what makes the whole design safe: because a connection's state can never
 //! block a turn, the supervisor is free to take as long as it needs to recover.
 
+pub mod http;
+pub mod stdio;
 pub mod supervisor;
 pub mod transport;
 
+pub use http::{HttpFactory, HttpServer};
+pub use stdio::{StdioFactory, StdioServer};
 pub use supervisor::{ConnState, ConnectionSupervisor, ServerConfig};
 pub use transport::{McpTransport, TransportError, TransportFactory, TransportKind};
 
@@ -52,7 +56,12 @@ pub struct McpToolDescriptor {
     /// The server-local name, as sent back over the wire.
     pub remote_name: String,
     pub server: String,
-    pub description: String,
+    /// The server's description, or `None` when it gave none.
+    ///
+    /// Optional rather than defaulted to empty, because the host distinguishes the two: an absent
+    /// description falls back to the tool's own name (`t.description ?? t.name`), while an empty one
+    /// stays empty. Flattening both to `""` would quietly rewrite one server's declarations.
+    pub description: Option<String>,
     pub parameters: Value,
 }
 
@@ -62,14 +71,24 @@ pub struct ToolCallOutcome {
     pub ok: bool,
     /// Text destined for the model. On failure this is the explanation.
     pub content: String,
+    /// The server's reply, untouched.
+    ///
+    /// `content` is this crate's own rendering of it, and it is not what the app ships to the model:
+    /// `flattenContent` in `mcp/client.mjs` orders `structuredContent` ahead of the text blocks, names
+    /// binary blocks rather than inlining them, and is the version that has been in front of users.
+    /// Carrying the raw value lets the host apply its own conversion and keeps the two from drifting
+    /// — the same reason the readiness scrape stayed in JS in Stage 2b.
+    ///
+    /// `None` when the call never reached a server, which is exactly when there is nothing to convert.
+    pub raw: Option<Value>,
 }
 
 impl ToolCallOutcome {
-    fn ok(content: impl Into<String>) -> Self {
-        Self { ok: true, content: content.into() }
+    fn delivered(content: impl Into<String>, raw: Value) -> Self {
+        Self { ok: true, content: content.into(), raw: Some(raw) }
     }
     fn failed(content: impl Into<String>) -> Self {
-        Self { ok: false, content: content.into() }
+        Self { ok: false, content: content.into(), raw: None }
     }
 }
 
@@ -117,6 +136,17 @@ impl McpManager {
         Arc::clone(&sup).start();
         self.servers.insert(id, Arc::clone(&sup));
         sup
+    }
+
+    /// Every configured server id.
+    ///
+    /// `status()` answers "how are they", which is a different question and cannot carry the tool
+    /// descriptors a host needs to build declarations from.
+    pub fn ids(&self) -> Vec<String> {
+        let mut ids: Vec<String> = self.servers.iter().map(|e| e.key().clone()).collect();
+        // Sorted so a listing is stable between calls; the map's order is not.
+        ids.sort();
+        ids
     }
 
     pub fn get(&self, id: &str) -> Option<Arc<ConnectionSupervisor>> {
