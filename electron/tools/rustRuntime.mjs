@@ -168,7 +168,12 @@ const requestHandlers = new Map();
  */
 export function onRequest(method, handler) {
   requestHandlers.set(method, handler);
-  return () => requestHandlers.delete(method);
+  // Applied immediately: the point of registering is that a call may arrive at any moment after it.
+  if (state) updateRefs(state);
+  return () => {
+    requestHandlers.delete(method);
+    if (state) updateRefs(state);
+  };
 }
 
 /**
@@ -218,7 +223,16 @@ async function serveRuntimeRequest(s, msg) {
  * None, and its request loop breaks — which is the same path `runtime.shutdown` takes.
  */
 function updateRefs(s) {
-  const busy = s.pending.size > 0;
+  // Outbound calls are not the only reason to stay alive. Once the runtime can call US — which is what
+  // registering a request handler declares — the host must remain running to answer, even with nothing
+  // of its own outstanding.
+  //
+  // Without this, a sub-agent spawn resolves, the last pending call clears, everything is unref'd, and a
+  // short-lived host drains its event loop while the runtime is midway through asking it to run the
+  // delegation. Electron never notices (the app holds the loop open regardless); a test or a script
+  // exits, and node reports it as "Promise resolution is still pending but the event loop has already
+  // resolved" — which names neither the connection nor the request that never arrived.
+  const busy = s.pending.size > 0 || requestHandlers.size > 0;
   for (const handle of [s.child, s.child.stdin, s.child.stdout, s.child.stderr]) {
     try {
       if (busy) handle?.ref?.();
@@ -257,7 +271,15 @@ function teardown(reason) {
     entry.reject(new Error(reason));
   }
   s.pending.clear();
-  updateRefs(s);
+  // Unref'd unconditionally rather than through updateRefs: this connection is gone, and a registered
+  // handler must not keep its dead handles holding the loop open.
+  for (const handle of [s.child, s.child.stdin, s.child.stdout, s.child.stderr]) {
+    try {
+      handle?.unref?.();
+    } catch {
+      /* already closed */
+    }
+  }
   try {
     s.child.kill();
   } catch {
@@ -380,7 +402,8 @@ async function ensureStarted() {
     return null;
   }
 
-  const s = { child, pending: new Map(), buffer: "", tools: new Set(), features: new Set(), nextId: 0, ready: false };
+  // `closing` marks a teardown this host asked for, so the exit handler can tell it from a crash.
+  const s = { child, pending: new Map(), buffer: "", tools: new Set(), features: new Set(), nextId: 0, ready: false, closing: false };
   state = s;
 
   child.stdout.setEncoding("utf8");
@@ -391,6 +414,16 @@ async function ensureStarted() {
   child.stderr.on("data", (d) => process.stderr.write(`[rust-runtime] ${d}`));
   child.on("exit", (code, signal) => {
     if (state === s) teardown(`runtime exited (code=${code} signal=${signal ?? "-"})`);
+    // A shutdown WE asked for is not a failure, and counting it as one is how the latch below fires on
+    // a perfectly healthy runtime. `shutdown()` kills the child after its request is answered, so the
+    // exit arrives by signal with a null code -- which `code !== 0` reads as a crash. Three restarts
+    // later the bridge disables itself for the rest of the session and every call silently declines.
+    //
+    // Found in CI: a test file that shuts the runtime down between cases had its fourth case get `null`
+    // from every bridge method and hang on a delegation that was never dispatched. Locally the graceful
+    // exit usually won the race and the counter never moved, which is exactly the kind of difference a
+    // slower machine turns into a red run.
+    if (s.closing) return;
     if (code !== 0 && ++spawnFailures >= MAX_SPAWN_FAILURES) {
       disabled = true;
       console.warn(`[rust-runtime] disabled after ${spawnFailures} failures`);
@@ -806,6 +839,7 @@ export function isReady() {
 /** Stop the sidecar. Called on app quit so no orphan survives the window closing. */
 export async function shutdown() {
   const s = state;
+  if (s) s.closing = true; // deliberate: see the exit handler
   if (!s?.ready) {
     teardown("shutdown");
     return;

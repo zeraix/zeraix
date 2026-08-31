@@ -24,6 +24,24 @@ const BIN = ["release", "debug"]
   .find((p) => fs.existsSync(p));
 const skip = BIN ? false : "the sidecar has not been built (cargo build --release)";
 
+/**
+ * Await something that ought to happen, and say what did not if it does not.
+ *
+ * A test that hangs on an unfulfilled promise reports as
+ * "Promise resolution is still pending but the event loop has already resolved" — which names neither
+ * the step that stalled nor the reason, and takes the following test down with it. Every wait below is
+ * bounded so a failure says what it was waiting for.
+ */
+function within(ms, promise, what) {
+  let timer;
+  return Promise.race([
+    promise.finally(() => clearTimeout(timer)),
+    new Promise((_, reject) => {
+      timer = setTimeout(() => reject(new Error(`timed out after ${ms}ms waiting for: ${what}`)), ms);
+    }),
+  ]);
+}
+
 /** Run `fn` with the real runtime enabled, then shut it down. */
 async function withRuntime(fn) {
   const priorFlag = process.env.ZERAIX_RUST_RUNTIME;
@@ -159,8 +177,14 @@ test("cancelling a turn stops a delegation the host is still working on", { skip
     });
 
     try {
-      await rust.subagentSpawn("turn-e", [{ meta: {} }]);
-      await seen;
+      // Asserted rather than assumed: every bridge method returns null when the runtime declines, and a
+      // null here used to turn into an unexplained hang on the wait below rather than a failure that
+      // says the runtime was never asked.
+      assert.ok(
+        await rust.subagentSpawn("turn-e", [{ meta: {} }]),
+        "the runtime declined to schedule the delegation",
+      );
+      await within(20_000, seen, "the runtime to ask this host to run the delegation");
 
       const started = Date.now();
       await rust.subagentCancel("turn-e", "the user pressed stop");
