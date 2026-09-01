@@ -19,7 +19,10 @@ use agent_ipc::protocol::{
     McpToolDescriptor, Notification, PeekResult, PidParams, ProcessExitedEvent, ProcessRunParams,
     ProcessRunResult, Request, Response, ServiceDescriptor, ServiceListResult, StartBackgroundParams,
     StartBackgroundResult, StoppedResult, ToolCallParams, ToolCallResult, ToolDescriptor,
-    EVENT_MCP_STATE, EVENT_PROCESS_EXITED, FEATURES, PROTOCOL_VERSION,
+    AgentRunParams, AgentRunResult, EVENT_AGENT_DELTA, EVENT_MCP_STATE, EVENT_PROCESS_EXITED,
+    EVENT_AGENT_TOOL, EVENT_AGENT_TURN, EVENT_RUNTIME, FEATURES, HOST_REQUEST_ASK,
+    HOST_REQUEST_CONSENT,
+    PROTOCOL_VERSION,
 };
 use agent_ipc::protocol::{
     decode_incoming, HostRequest, Incoming, SubagentJoinParams, SubagentJoinResult, SubagentOutcome,
@@ -29,7 +32,8 @@ use agent_ipc::protocol::{
 use agent_events::EventBus;
 use agent_resource::{Limits, ResourceClass, ResourceManager};
 use agent_scheduler::{Outcome, Priority, Scheduler, TaskSpec};
-use agent_permission::Grant;
+use agent_journal::{Journal, RecoveryPlan};
+use agent_permission::{Grant, PermissionRuntime, Policy, Principal};
 use agent_subagents::{JoinMode, SubAgentSupervisor, JOIN_MAX_TIMEOUT};
 use agent_ipc::transport::{StdioSender, StdioTransport, Transport};
 use agent_tools::registry::to_legacy_content;
@@ -113,10 +117,78 @@ pub struct Server {
     /// `PARALLEL_SAFE_TOOLS` batching is per round, in one renderer. This is the first thing in the
     /// system that can say "sixteen tool calls at a time, across everything".
     scheduler: Arc<Scheduler>,
+    /// The capability ceiling for this session, set at `runtime.initialize` from the roots the host says the
+    /// user approved.
+    ///
+    /// Behind a `OnceLock` because it is not knowable until the handshake: only the host knows which
+    /// directories the user has consented to. Until it is set — and for a host that never sends any — the
+    /// ceiling grants nothing, which is the safe default rather than a permissive one.
+    permissions: Arc<OnceLock<Arc<PermissionRuntime>>>,
+    /// Derived metrics (TODO §11). Subscribed to the bus in `run`, so nothing has to be instrumented at its
+    /// call site — see `agent-audit`'s header for why that is the right shape.
+    metrics: Arc<agent_audit::MetricsCollector>,
+    /// Whether the host declared a permission policy at the handshake.
+    ///
+    /// Read only by the SANDBOX now: MCP enforcement became unconditional (§0.2 F7), but confining a command
+    /// to an empty allowlist would stop it exec'ing a shell at all, which is a different failure from denying
+    /// it — so an undeclared policy means "unconfined", not "confined to nothing".
+    policy_declared: Arc<std::sync::atomic::AtomicBool>,
+    /// What a previous run left unfinished, read once at startup.
+    ///
+    /// Reported to the host at handshake rather than acted on here. Whether an interrupted task may be run
+    /// again is a question about what it was — a search is safe to repeat, a deploy is not — and this process
+    /// no longer has the body that would answer it. See `agent-journal`'s header.
+    recovered: Arc<RecoveryPlan>,
 }
 
 impl Server {
+    /// A runtime with no durable state. Used by the tests and the parity harness, which have nowhere to write
+    /// and nothing to recover.
     pub fn new() -> Self {
+        Self::build(Journal::disabled(), RecoveryPlan::default())
+    }
+
+    /// A runtime that journals its task lifecycle under `state_dir`, recovering from whatever is there.
+    ///
+    /// Replay happens before the scheduler starts, so the plan describes the *previous* run only and cannot
+    /// be polluted by this one's first submissions. The journal is then rotated: the old file is kept for
+    /// diagnosis under a timestamped name, and this run starts a clean one. Without the rotation every
+    /// restart would re-report the same interrupted tasks forever, since nothing in this process can settle
+    /// a task whose body died with the last one.
+    pub async fn with_state_dir(state_dir: impl AsRef<std::path::Path>) -> Self {
+        let path = state_dir.as_ref().join("tasks.jsonl");
+        let recovered = match agent_journal::replay(&path).await {
+            Ok(plan) => plan,
+            Err(e) => {
+                // A journal that cannot be read must not stop the runtime from starting: that would turn one
+                // bad file into a runtime that never boots again.
+                tracing::error!(error = %e, "could not read the task journal; starting without recovery");
+                RecoveryPlan::default()
+            }
+        };
+        if !recovered.is_empty() || recovered.torn_tail || recovered.corrupt_lines > 0 {
+            tracing::warn!(
+                resumable = recovered.resumable.len(),
+                interrupted = recovered.interrupted.len(),
+                torn_tail = recovered.torn_tail,
+                corrupt_lines = recovered.corrupt_lines,
+                "recovered unfinished work from a previous run"
+            );
+        }
+        if let Err(e) = Journal::rotate(&path).await {
+            tracing::error!(error = %e, "could not rotate the task journal");
+        }
+        let journal = match Journal::open(&path).await {
+            Ok(journal) => journal,
+            Err(e) => {
+                tracing::error!(error = %e, "could not open the task journal; continuing without durability");
+                Journal::disabled()
+            }
+        };
+        Self::build(journal, recovered)
+    }
+
+    fn build(journal: Journal, recovered: RecoveryPlan) -> Self {
         let mut registry = ToolRegistry::new();
         agent_tools::tools::register_builtin(&mut registry);
         let bus = EventBus::new(agent_events::DEFAULT_CAPACITY);
@@ -134,8 +206,489 @@ impl Server {
             next_host_id: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             subagents: Arc::new(DashMap::new()),
             bus: bus.clone(),
-            scheduler: Arc::new(Scheduler::start(ResourceManager::new(Limits::default()), bus)),
+            scheduler: Arc::new(Scheduler::start_journalled(
+                ResourceManager::new(Limits::default()),
+                bus,
+                journal,
+            )),
+            metrics: Arc::new(agent_audit::MetricsCollector::new()),
+            permissions: Arc::new(OnceLock::new()),
+            policy_declared: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            recovered: Arc::new(recovered),
         }
+    }
+
+    /// Ask the host whether one action may proceed.
+    ///
+    /// This is what turns the capability check from a wall into a decision. `agent-dispatch` consults the
+    /// permission runtime, the permission runtime consults its `Approver`, and this is the approver that can
+    /// reach a person — through `HostChannel`, the same runtime→host request path the sub-agent body uses.
+    ///
+    /// Holds a `HostChannel` rather than the `Server`: asking a question needs the channel and nothing else,
+    /// and a long-lived `Arc<Server>` inside a permission object is a cycle waiting to be written.
+    ///
+    /// Denies on any failure — a timeout, a host that does not implement the method, a malformed reply. The
+    /// default approver denies for the same reason, and it is the only safe direction: a runtime that cannot
+    /// ask must not proceed as though it had asked and been told yes.
+    fn host_approver(&self) -> Arc<dyn agent_permission::Approver> {
+        struct HostApprover {
+            channel: HostChannel,
+        }
+        #[async_trait::async_trait]
+        impl agent_permission::Approver for HostApprover {
+            async fn approve(
+                &self,
+                principal: &agent_permission::Principal,
+                request: &agent_permission::Request,
+            ) -> bool {
+                let params = json!({
+                    "capability": request.kind.as_str(),
+                    "resource": format!("{:?}", request.resource),
+                    "call": request.call.to_string(),
+                    "agent": principal.agent.to_string(),
+                    "depth": principal.depth,
+                });
+                match self.channel.ask(HOST_REQUEST_CONSENT, params, CONSENT_TIMEOUT).await {
+                    Ok(v) => v.get("approved").and_then(Value::as_bool).unwrap_or(false),
+                    Err(e) => {
+                        tracing::warn!(error = %e, "consent request failed; denying");
+                        false
+                    }
+                }
+            }
+        }
+        Arc::new(HostApprover { channel: self.host_channel() })
+    }
+
+    /// The tools whose implementation is a person.
+    ///
+    /// Only `ask_user` today. Forwarded rather than answered because the runtime cannot render a dialog and
+    /// must not guess — a question the model asks and answers itself is not a question.
+    ///
+    /// A failure is reported to the MODEL rather than raised: a host that cannot ask, or a user who closed the
+    /// dialog, leaves the model needing to proceed without an answer, and telling it so is more useful than
+    /// ending the turn.
+    fn host_tools(&self) -> Arc<dyn agent_dispatch::HostTools> {
+        struct AskUser {
+            channel: HostChannel,
+        }
+        #[async_trait::async_trait]
+        impl agent_dispatch::HostTools for AskUser {
+            fn serves(&self, name: &str) -> bool {
+                name == "ask_user"
+            }
+            async fn call(&self, _name: &str, args: &Value) -> agent_loop::ToolOutcome {
+                match self.channel.ask(HOST_REQUEST_ASK, args.clone(), ASK_TIMEOUT).await {
+                    Ok(v) => {
+                        // The host returns whatever shape its dialog produced; it goes to the model verbatim.
+                        let text = v
+                            .get("answers")
+                            .map(|a| a.to_string())
+                            .unwrap_or_else(|| v.to_string());
+                        agent_loop::ToolOutcome::ok(text)
+                    }
+                    Err(e) => agent_loop::ToolOutcome::failed(format!(
+                        "The question could not be put to the user: {e}. Proceed without an answer, or say \
+                         what you need and stop."
+                    )),
+                }
+            }
+        }
+        Arc::new(AskUser { channel: self.host_channel() })
+    }
+
+    /// Run one agent turn to completion.
+    ///
+    /// Additive: nothing in the app calls this yet — `chatRequest.ts` and the TypeScript loop remain the live
+    /// path. What it demonstrates is that the runtime can hold a whole turn, which is the claim §2.1 makes and
+    /// the thing that could not previously be shown at all.
+    async fn run_agent(&self, p: AgentRunParams) -> Result<AgentRunResult, ErrorBody> {
+        use agent_loop::{AgentLoop, LoopConfig, Message, StopPolicyConfig};
+        use agent_provider::{HttpModel, ProviderConfig};
+
+        let messages: Vec<Message> = p
+            .messages
+            .into_iter()
+            .map(serde_json::from_value)
+            .collect::<std::result::Result<_, _>>()
+            .map_err(|e| {
+                RuntimeError::invalid("agent.bad_messages", format!("could not read the conversation: {e}"))
+            })?;
+
+        // Token streaming (TODO §10.1). The provider hands back the ACCUMULATED text on every chunk, so the
+        // increment is computed here and only that is sent: forwarding the accumulation would be quadratic in
+        // the answer's length, and a long reply would get slower to display the longer it grew.
+        //
+        // Through an unbounded channel rather than straight to the transport, for two reasons. The callback is
+        // synchronous and the transport is not; and a bounded queue would push backpressure from the host's
+        // stdout all the way into the model read, so a slow reader would stall the generation it is reading.
+        let (delta_tx, mut delta_rx) = tokio::sync::mpsc::unbounded_channel::<(String, String)>();
+        let forwarder = {
+            let events = Arc::clone(&self.events);
+            let run_id = p.run_id.clone();
+            tokio::spawn(async move {
+                while let Some((content, reasoning)) = delta_rx.recv().await {
+                    let Some(tx) = events.get().cloned() else { continue };
+                    let params = json!({ "run_id": run_id, "content": content, "reasoning": reasoning });
+                    if let Ok(line) =
+                        serde_json::to_string(&Notification { method: EVENT_AGENT_DELTA, params })
+                    {
+                        if tx.send(line).await.is_err() {
+                            break;
+                        }
+                    }
+                }
+            })
+        };
+        let sent = std::sync::Mutex::new((0usize, 0usize));
+        let on_delta: agent_provider::OnDelta = Box::new(move |content, reasoning| {
+            let mut sent = sent.lock().unwrap_or_else(|e| e.into_inner());
+            // Byte offsets into text that only ever grows by appending, so slicing at the previous length is
+            // always on a character boundary.
+            let (c_at, r_at) = *sent;
+            let c_new = content.get(c_at..).unwrap_or("");
+            let r_new = reasoning.get(r_at..).unwrap_or("");
+            if c_new.is_empty() && r_new.is_empty() {
+                return;
+            }
+            *sent = (content.len(), reasoning.len());
+            let _ = delta_tx.send((c_new.to_owned(), r_new.to_owned()));
+        });
+
+        let model = HttpModel::new(ProviderConfig {
+            endpoint: p.provider.endpoint,
+            api_key: p.provider.api_key,
+            model: p.provider.model.clone(),
+            capabilities: agent_loop::ModelCapabilities {
+                supports_per_turn_reasoning_effort: p.provider.supports_per_turn_reasoning_effort,
+                ..Default::default()
+            },
+            thinking_params: if p.provider.thinking_params.is_null() {
+                json!({})
+            } else {
+                p.provider.thinking_params
+            },
+            stream: p.provider.stream,
+            ..Default::default()
+        })?
+        .with_on_delta(on_delta);
+
+        // One token for the whole run, registered under the host's id so `call.cancel` reaches it. Registered
+        // BEFORE the first request goes out, so a cancel arriving during the opening round is not missed.
+        let token = self.root_cancel.child_token();
+        let task = agent_core::TaskId::from_host(p.run_id.clone());
+        self.inflight.insert(
+            p.run_id.clone(),
+            CallHandle { task: task.clone(), token: token.clone() },
+        );
+        // A cancel that arrived before this id was registered. The same race the scheduled path handles:
+        // the host can send `call.cancel` for a run whose request is still crossing the wire, and a cancel
+        // that found nothing to cancel must not be silently dropped.
+        let cancelled_early = {
+            let mut early = self.early_cancels.lock().unwrap_or_else(|e| e.into_inner());
+            early.iter().position(|c| *c == p.run_id).map(|pos| early.remove(pos)).is_some()
+        };
+        if cancelled_early {
+            token.cancel();
+        }
+
+        let workspace = agent_tools::workspace::Workspace::new(&p.workdir);
+        let executor = agent_dispatch::DispatchingExecutor::new(
+            Arc::clone(&self.registry),
+            Arc::new(
+                PermissionRuntime::new(self.permission_runtime().policy().clone())
+                    .with_approver(self.host_approver()),
+            ),
+            agent_dispatch::root_principal(
+                task,
+                agent_core::AgentId::from_host("main"),
+                self.permission_runtime().policy().ceiling.clone(),
+            ),
+            agent_tools::tool::ToolContext::new(
+                workspace,
+                token.clone(),
+                agent_core::CallId::from_host(p.run_id.clone()),
+                Arc::clone(&self.file_cache),
+            ),
+        )
+        .with_host_tools(self.host_tools());
+
+        // Tool activity, so a UI can show work in flight rather than only its result. Same channel shape as
+        // the deltas, and for the same reasons.
+        let (tool_tx, mut tool_rx) = tokio::sync::mpsc::unbounded_channel::<Value>();
+        let tool_forwarder = {
+            let events = Arc::clone(&self.events);
+            tokio::spawn(async move {
+                while let Some(params) = tool_rx.recv().await {
+                    let Some(tx) = events.get().cloned() else { continue };
+                    if let Ok(line) =
+                        serde_json::to_string(&Notification { method: EVENT_AGENT_TOOL, params })
+                    {
+                        if tx.send(line).await.is_err() {
+                            break;
+                        }
+                    }
+                }
+            })
+        };
+
+        struct RunObserver {
+            run_id: String,
+            tx: tokio::sync::mpsc::UnboundedSender<Value>,
+            turns: tokio::sync::mpsc::UnboundedSender<Value>,
+        }
+        impl agent_loop::LoopObserver for RunObserver {
+            fn round_started(&self, round: u32, decision: &agent_loop::ReasoningDecision) {
+                let _ = self.turns.send(json!({
+                    "run_id": self.run_id,
+                    "phase": "start",
+                    "round": round,
+                    "effort": decision.effort_param(),
+                }));
+            }
+            fn round_finished(&self, record: &agent_loop::AgentTurnRecord) {
+                let _ = self.turns.send(json!({
+                    "run_id": self.run_id,
+                    "phase": "end",
+                    "round": record.round,
+                    "tool_calls": record.tool_calls.len(),
+                    "prompt_tokens": record.usage.prompt_tokens,
+                    "completion_tokens": record.usage.completion_tokens,
+                    "ms": record.ms,
+                }));
+            }
+            fn tool_started(&self, call: &agent_loop::ToolCall) {
+                let _ = self.tx.send(json!({
+                    "run_id": self.run_id, "phase": "start", "id": call.id, "name": call.name
+                }));
+            }
+            fn tool_finished(&self, record: &agent_loop::ToolRecord) {
+                let _ = self.tx.send(json!({
+                    "run_id": self.run_id,
+                    "phase": "end",
+                    "id": record.tool_call_id,
+                    "name": record.name,
+                    "ok": record.ok,
+                    "ms": record.ms
+                }));
+            }
+        }
+        let (turn_tx, mut turn_rx) = tokio::sync::mpsc::unbounded_channel::<Value>();
+        let turn_forwarder = {
+            let events = Arc::clone(&self.events);
+            tokio::spawn(async move {
+                while let Some(params) = turn_rx.recv().await {
+                    let Some(tx) = events.get().cloned() else { continue };
+                    if let Ok(line) =
+                        serde_json::to_string(&Notification { method: EVENT_AGENT_TURN, params })
+                    {
+                        if tx.send(line).await.is_err() {
+                            break;
+                        }
+                    }
+                }
+            })
+        };
+        let observer: Arc<dyn agent_loop::LoopObserver> =
+            Arc::new(RunObserver { run_id: p.run_id.clone(), tx: tool_tx, turns: turn_tx });
+
+        // Scoped so the loop — and with it the model, the delta callback, and the channel sender it owns — is
+        // dropped before the forwarder is awaited below.
+        let outcome = {
+            let agent = AgentLoop::new(
+                Arc::new(model),
+                Arc::new(executor),
+                LoopConfig {
+                    model: p.provider.model,
+                    tools: p.tools,
+                    stop_policy: StopPolicyConfig { max_turns: p.max_turns, ..Default::default() },
+                    ..Default::default()
+                },
+            )
+            .with_observer(observer);
+            agent.run(messages, token).await
+        };
+
+        // Every delta is written before this method returns, and therefore before the reply.
+        //
+        // Without this the deltas race the answer: they are forwarded by a spawned task while the reply is
+        // written by this one, so a client could receive the finished text and then its tokens. A test caught
+        // exactly that — the run assembled "Hello world" correctly and not one delta had arrived.
+        let _ = forwarder.await;
+        let _ = tool_forwarder.await;
+        let _ = turn_forwarder.await;
+
+        self.inflight.remove(&p.run_id);
+        let outcome = outcome?;
+
+        let (prompt_tokens, completion_tokens) = outcome
+            .turns
+            .iter()
+            .fold((0, 0), |(p, c), t| (p + t.usage.prompt_tokens, c + t.usage.completion_tokens));
+
+        Ok(AgentRunResult {
+            stop_reason: outcome
+                .stop
+                .reason
+                .as_ref()
+                .and_then(|r| serde_json::to_value(r).ok().and_then(|v| v.as_str().map(str::to_owned)))
+                .unwrap_or_else(|| "unknown".to_owned()),
+            detail: outcome.stop.detail.clone(),
+            content: outcome.final_text().to_owned(),
+            rounds: outcome.state.round(),
+            tool_calls: outcome.state.tool_calls(),
+            messages: outcome
+                .messages
+                .iter()
+                .map(|m| serde_json::to_value(m).unwrap_or(Value::Null))
+                .collect(),
+            prompt_tokens,
+            completion_tokens,
+        })
+    }
+
+    /// The session's permission runtime, or a deny-everything one if the handshake set none.
+    ///
+    /// Never `None` at a call site: a missing ceiling must fail closed, and returning an `Option` here would
+    /// invite a caller to treat "not configured" as "unrestricted".
+    fn permission_runtime(&self) -> Arc<PermissionRuntime> {
+        self.permissions
+            .get()
+            .cloned()
+            .unwrap_or_else(|| {
+                Arc::new(PermissionRuntime::new(Policy {
+                    ceiling: Grant::empty(),
+                    approval_required: Vec::new(),
+                    max_depth: agent_permission::DEFAULT_MAX_DEPTH,
+                }))
+            })
+    }
+
+    /// The filesystem policy a command should run under, or `None` when the host declared none.
+    ///
+    /// Built on [`FilesystemPolicy::workspace`], which already knows the part that is easy to get wrong: a
+    /// toolchain lives outside the project, so `/usr`, `/lib` and `/bin` have to stay readable and executable
+    /// or the confined command cannot even exec `/bin/sh`. The first version of this listed only the approved
+    /// roots and every command failed with EACCES — caught by the test that exists to insist confinement must
+    /// not break work inside the workspace.
+    ///
+    /// The approved roots and the command's own working directory are added to that base: a build writes into
+    /// its own tree, and a policy allowing the roots but not the cwd would break every command run from a
+    /// subdirectory.
+    fn sandbox_policy(&self, cwd: Option<&str>) -> Option<agent_sandbox::SandboxPolicy> {
+        if !self.policy_declared.load(std::sync::atomic::Ordering::SeqCst) {
+            return None;
+        }
+        let permissions = self.permissions.get()?;
+        let mut roots: Vec<std::path::PathBuf> = permissions
+            .policy()
+            .ceiling
+            .capabilities()
+            .iter()
+            .filter_map(|c| match &c.scope {
+                agent_permission::Scope::Paths(paths) => Some(paths.clone()),
+                _ => None,
+            })
+            .flatten()
+            .collect();
+        if let Some(cwd) = cwd {
+            roots.push(std::path::PathBuf::from(cwd));
+        }
+        let first = roots.first()?.clone();
+
+        let mut filesystem = agent_sandbox::FilesystemPolicy::workspace(first);
+        for root in roots {
+            if !filesystem.read.contains(&root) {
+                filesystem.read.push(root.clone());
+            }
+            if !filesystem.write.contains(&root) {
+                filesystem.write.push(root);
+            }
+        }
+        Some(agent_sandbox::SandboxPolicy { filesystem, ..Default::default() })
+    }
+
+    /// The grant a delegation of `turn` should start with.
+    ///
+    /// Derived through `issue_child` rather than written here, so the rule lives in one place: sub-agents do
+    /// not inherit elevated capabilities, and beyond the depth limit they starve out to nothing rather than
+    /// erroring. Before this, the spawn site passed `Grant::empty()` literally — correct at the time, and the
+    /// kind of correct that stops being correct the moment a policy is configured and nobody remembers this
+    /// line exists.
+    ///
+    /// With no ceiling configured the result is still empty, so behaviour is unchanged for a host that sends
+    /// no `workspace_roots`.
+    fn child_grant(&self, turn: &str) -> Grant {
+        let Some(permissions) = self.permissions.get() else { return Grant::empty() };
+        // The turn's own principal. Depth 0: this is the main agent, and the delegation about to be spawned is
+        // its first level of children.
+        //
+        // The parent holds exactly what the user approved — the ceiling itself — rather than an unrestricted
+        // grant. `Scope::Unrestricted` is deliberately something no code path constructs: it is the one scope
+        // that has to be typed by a person into a config file, and manufacturing one here to then clamp it
+        // would be the runtime widening its own ceiling in a way review could not see.
+        let parent = Principal {
+            task: agent_core::TaskId::from_host(turn),
+            agent: agent_core::AgentId::from_host("main"),
+            depth: 0,
+            grant: permissions.policy().ceiling.clone(),
+        };
+        permissions.issue_child(&parent)
+    }
+
+    /// Forward every event the runtime publishes to the host, as `runtime.event` notifications.
+    ///
+    /// The bus has existed since the scheduler landed and, until now, had no subscriber outside the runtime:
+    /// Electron learned about a task only by asking. That is what made §10.2's event list unimplementable and
+    /// left the UI polling for state it could have been told about.
+    ///
+    /// ## Lag is dropped, not buffered
+    ///
+    /// The bus is a broadcast channel with a bounded backlog. A consumer that falls behind is told it lagged
+    /// and skips to the newest events, and this bridge does the same rather than trying to catch up: these
+    /// events drive presentation, and a UI showing a queue of stale transitions is worse than one that missed
+    /// some. The `seq` on every event is monotonic, so a host that cares can SEE the gap rather than being
+    /// silently misled — which is the property that makes dropping acceptable at all.
+    ///
+    /// ## It never blocks the runtime
+    ///
+    /// The send is `try_send`-shaped by construction: this runs in its own task, so a host that stops reading
+    /// its own stdin cannot apply backpressure to the scheduler through the event bus.
+    fn bridge_events(self: Arc<Self>) {
+        let mut rx = self.bus.subscribe();
+        let events = Arc::clone(&self.events);
+        let metrics = Arc::clone(&self.metrics);
+        let root = self.root_cancel.clone();
+        tokio::spawn(async move {
+            loop {
+                let event = tokio::select! {
+                    biased;
+                    _ = root.cancelled() => break,
+                    next = rx.recv() => match next {
+                        Ok(event) => event,
+                        // Lagged: skip to the newest rather than replaying stale transitions. The gap is
+                        // visible to the host through `seq`.
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                            tracing::warn!(skipped = n, "event consumer lagged; dropping to the newest");
+                            continue;
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                    },
+                };
+                // Derived first, then forwarded. The collector is the reason `agent-audit` exists and, until
+                // now, the reason it had no dependents: the metrics are relationships BETWEEN events, so they
+                // are computed here rather than threaded through the scheduler and the registry.
+                metrics.observe(&event);
+                let Some(tx) = events.get().cloned() else { continue };
+                if let Ok(line) = serde_json::to_string(&Notification { method: EVENT_RUNTIME, params: json!(event) })
+                {
+                    // A closed channel means the host is gone; the loop above ends on the same signal.
+                    if tx.send(line).await.is_err() {
+                        break;
+                    }
+                }
+            }
+        });
     }
 
     /// Serve until the host closes stdin or sends `runtime.shutdown`.
@@ -144,6 +697,7 @@ impl Server {
         // Events are pushed from reaper tasks that have no request to reply to, so the sender has to
         // outlive any one of them. Set here rather than in `new` because the transport is the caller's.
         let _ = self.events.set(sender.clone());
+        self.clone().bridge_events();
         loop {
             let line = tokio::select! {
                 biased;
@@ -252,12 +806,74 @@ impl Server {
                     .into());
                 }
                 self.initialized.store(true, Ordering::SeqCst);
-                tracing::info!(client = ?p.client, "initialized");
+                let roots: Vec<std::path::PathBuf> =
+                    p.workspace_roots.iter().map(std::path::PathBuf::from).collect();
+                // Did the host declare a policy at all? The distinction matters more than the contents.
+                let declared = !roots.is_empty() || !p.approved_mcp_servers.is_empty();
+                self.policy_declared.store(declared, Ordering::SeqCst);
+
+                let mut capabilities = Vec::new();
+                if !roots.is_empty() {
+                    // Read AND write. An approved root is a directory the user has told the agent to work in,
+                    // and a grant that allowed reading but not writing would deny `write_file` inside the very
+                    // workspace the sandbox already lets a command write to — two layers disagreeing about the
+                    // same directory.
+                    for kind in [
+                        agent_permission::CapabilityKind::FilesystemRead,
+                        agent_permission::CapabilityKind::FilesystemWrite,
+                    ] {
+                        capabilities.push(agent_permission::Capability::paths(kind, roots.clone()));
+                    }
+                }
+                if !p.approved_mcp_servers.is_empty() {
+                    capabilities.push(agent_permission::Capability::new(
+                        agent_permission::CapabilityKind::McpInvoke,
+                        agent_permission::Scope::Names(p.approved_mcp_servers.clone()),
+                    ));
+                }
+                let policy = Policy {
+                    ceiling: Grant::of(capabilities),
+                    approval_required: if p.require_approval_for_mutations {
+                        vec![
+                            agent_permission::CapabilityKind::FilesystemWrite,
+                            agent_permission::CapabilityKind::FilesystemDelete,
+                            agent_permission::CapabilityKind::ProcessSpawn,
+                        ]
+                    } else {
+                        Vec::new()
+                    },
+                    max_depth: agent_permission::DEFAULT_MAX_DEPTH,
+                };
+                let _ = self.permissions.set(Arc::new(PermissionRuntime::new(policy)));
+                if !declared {
+                    tracing::warn!(
+                        "the host declared no permission policy; MCP calls run unchecked for compatibility \
+                         with hosts that predate `workspace_roots` / `approved_mcp_servers`"
+                    );
+                }
+                tracing::info!(
+                    client = ?p.client,
+                    roots = roots.len(),
+                    mcp_servers = p.approved_mcp_servers.len(),
+                    "initialized"
+                );
                 Ok(json!(InitializeResult {
                     protocol_version: PROTOCOL_VERSION,
                     runtime_version: RUNTIME_VERSION,
                     tools: self.registry.list().iter().map(|m| m.name.to_string()).collect(),
+                    mutating_tools: self
+                        .registry
+                        .list()
+                        .iter()
+                        .filter(|m| !matches!(m.risk_level, agent_tools::tool::RiskLevel::ReadOnly))
+                        .map(|m| m.name.to_string())
+                        .collect(),
                     features: FEATURES.iter().map(|f| f.to_string()).collect(),
+                    // Reported at handshake because that is the only moment the host can still act on it:
+                    // once it starts sending work, an interrupted task from the last run is indistinguishable
+                    // from this run's. A host that does not know the field ignores it, exactly as with
+                    // `features`.
+                    recovered: (*self.recovered).clone(),
                 }))
             }
 
@@ -362,20 +978,86 @@ impl Server {
 
             "mcp.call" => {
                 let p: McpCallParams = parse(req.params)?;
+                // Minted before the server lookup so that EVERY outcome below can be audited, including the
+                // one where there is no server: "the agent tried to call something that is not connected" is
+                // exactly the kind of thing an audit trail exists to show, and the first version of this
+                // returned before any event was published.
+                let call_id = p.call_id.clone().unwrap_or_else(|| CallId::new().to_string());
+
                 // `ToolCallOutcome` has no error variant by construction: an external server must not
                 // be able to abort a turn, which is the same invariant `callMcpTool` carries in JS.
                 let Some(sup) = self.mcp.get(&p.server) else {
+                    let detail = format!("no MCP server named '{}' is connected", p.server);
+                    self.bus.publish(agent_events::EventKind::McpCalled {
+                        call: CallId::from_host(call_id),
+                        server: p.server.clone(),
+                        tool: p.tool.clone(),
+                        delivered: false,
+                        detail: Some(detail.clone()),
+                    });
+                    return Ok(json!(McpCallResult { delivered: false, raw: None, error: Some(detail) }));
+                };
+                // Permission, before the call goes out (TODO §4.1 MCP Capability, §12 MCP Permission Bypass).
+                //
+                // Unconditional as of 2026-09-01 (§0.2 F7 resolved). It was gated on the host having declared
+                // a policy, because a host that declared nothing got a ceiling granting nothing and would have
+                // lost MCP entirely. That gate is gone: §12's "MCP must not bypass Runtime Permission" is not
+                // a property that can hold for some hosts and not others.
+                //
+                // The consequence is deliberate and worth stating plainly: a host that does not send
+                // `approved_mcp_servers` at the handshake has no MCP tools. That is the same shape as the
+                // filesystem ceiling, and the same shape as fail-open's removal — the runtime no longer has a
+                // permissive mode to fall into.
+                let permissions = self.permission_runtime();
+                let decision = permissions
+                    .decide(
+                        &Principal {
+                            task: agent_core::TaskId::from_host(call_id.clone()),
+                            agent: agent_core::AgentId::from_host("main"),
+                            depth: 0,
+                            grant: permissions.policy().ceiling.clone(),
+                        },
+                        &agent_permission::Request {
+                            kind: agent_permission::CapabilityKind::McpInvoke,
+                            resource: agent_permission::Resource::Name(p.server.clone()),
+                            call: CallId::from_host(call_id.clone()),
+                            // No justification, for the reason `agent-dispatch` gives: text the model supplies
+                            // must have nothing to influence.
+                            justification: None,
+                        },
+                    )
+                    .await;
+                if !decision.is_allowed() {
+                    // A refusal is a RESULT, not an error: `McpCallResult` has no error variant that aborts a
+                    // turn, and a denied MCP call is something the model should read and work around.
+                    let reason = match &decision {
+                        agent_permission::Decision::Deny { reason } => reason.clone(),
+                        agent_permission::Decision::NeedsApproval { reason } => {
+                            format!("this needs the user's approval and none was given: {reason}")
+                        }
+                        agent_permission::Decision::Allow => unreachable!("checked above"),
+                    };
+                    self.bus.publish(agent_events::EventKind::McpCalled {
+                        call: CallId::from_host(call_id.clone()),
+                        server: p.server.clone(),
+                        tool: p.tool.clone(),
+                        delivered: false,
+                        detail: Some(format!("denied: {reason}")),
+                    });
                     return Ok(json!(McpCallResult {
                         delivered: false,
                         raw: None,
-                        error: Some(format!("no MCP server named '{}' is connected", p.server)),
+                        error: Some(format!(
+                            "Permission denied for MCP server '{}' (mcp.invoke): {reason}. Nothing was sent.",
+                            p.server
+                        )),
                     }));
-                };
+                }
+
                 // Scheduled like tools and commands, so `call.cancel` reaches an MCP call the same way
                 // it reaches anything else -- without which a stopped turn would leave the call holding
                 // its backpressure permit until the server answered. The per-server in-flight cap in
                 // `agent-mcp` still applies underneath; this one bounds MCP work across all servers.
-                let call_id = p.call_id.clone().unwrap_or_else(|| CallId::new().to_string());
                 let tool = p.tool.clone();
                 let args = p.args.clone();
                 let out = self
@@ -401,6 +1083,13 @@ impl Server {
                         error: Some("the call was cancelled".to_owned()),
                     }));
                 };
+                self.bus.publish(agent_events::EventKind::McpCalled {
+                    call: CallId::from_host(call_id.clone()),
+                    server: p.server.clone(),
+                    tool: p.tool.clone(),
+                    delivered: out.raw.is_some(),
+                    detail: out.raw.is_none().then(|| out.content.clone()),
+                });
                 // `raw` present means a server answered, whatever it said. The host reads `isError`
                 // off it and does its own flattening — see `McpToolDescriptor`.
                 Ok(json!(match out.raw {
@@ -466,7 +1155,7 @@ impl Server {
                                 })
                         })
                     });
-                    let r = sup.spawn(spec.meta, spec.key, Grant::empty(), body);
+                    let r = sup.spawn(spec.meta, spec.key, self.child_grant(&p.turn), body);
                     spawned.push(SubagentSpawned {
                         id: r.id,
                         coalesced: r.coalesced,
@@ -660,6 +1349,40 @@ impl Server {
                 Ok(json!({ "ok": true }))
             }
 
+            // ── The Agent Loop, inside the runtime (TODO §2.1) ────────────────────────────────────
+            //
+            // The whole Model → Agent → Tool → Result cycle, run here rather than in a renderer. The pieces
+            // are `agent-provider` (the model), `agent-dispatch` (the tools, behind the permission check) and
+            // `agent-loop` (the decisions). This method is what finally puts them together.
+            //
+            // Cancellable by `run_id` through the same `call.cancel` every other kind of work uses: "stop what
+            // you are doing" is one question, and having two answers to it is how a cancellation reaches one
+            // subsystem and not the other.
+            "agent.run" => {
+                let p: AgentRunParams = parse(req.params)?;
+                Ok(json!(self.run_agent(p).await?))
+            }
+
+            // Hold and release queued work (TODO §2.1). Deliberately by the same id every other kind of work
+            // is addressed by, so a caller does not have to know whether the thing it wants to hold is a tool
+            // call, a command or an agent run.
+            "task.pause" | "task.resume" => {
+                let p: CancelParams = parse(req.params)?;
+                let id = p.call_id;
+                // The scheduler's task id, not the host's call id: `inflight` is what maps between them.
+                let Some(task) = self.inflight.get(&id).map(|h| h.task.clone()) else {
+                    return Ok(json!({ "ok": false, "reason": "no such call" }));
+                };
+                let ok = if req.method == "task.pause" {
+                    self.scheduler.pause(&task).await
+                } else {
+                    self.scheduler.resume(&task).await
+                };
+                // `false` is an answer, not an error: pausing work that has already started is a question with
+                // a legitimate negative answer, and the caller needs to hear it rather than see a failure.
+                Ok(json!({ "ok": ok }))
+            }
+
             "runtime.status" => {
                 // The scheduler's own view, which is the only place that can answer "what is this
                 // runtime doing" now that every unit of work goes through it.
@@ -672,6 +1395,11 @@ impl Server {
                     "inflight": self.inflight.len(),
                     "cached_workspaces": self.file_cache.len(),
                     "scheduler": { "running": running, "queued": queued, "tasks": tasks },
+                    // Derived from the event stream rather than instrumented at call sites, and reported as
+                    // percentiles: a mean hides the tail, which is the only interesting part of "how long does
+                    // Stop take".
+                    "metrics": self.metrics.snapshot(),
+                    "recovered": *self.recovered,
                 }))
             }
 
@@ -718,6 +1446,17 @@ impl Server {
         if let Some(dir) = &p.cwd {
             req = req.in_dir(dir);
         }
+        // Confinement (TODO §4.2, §11 Sandbox Decision, §15 "Sandbox is enforced by Runtime").
+        //
+        // `agent-sandbox` has been complete and orphaned since it was built: nothing depended on it, so
+        // "Sandbox is enforced by Runtime" was a diagram. It is applied here because this is the only place a
+        // command is spawned, and Landlock has to be applied IN THE CHILD between fork and exec — applying it
+        // in the parent would confine this runtime irrevocably for the rest of its life.
+        //
+        // Gated on the host having declared a policy, for the same reason the MCP check is: a host that
+        // declared nothing gets an empty allowlist, and confining every command to nothing would break every
+        // build, test and git command that works today. See §0.2 F7.
+        let sandbox_policy = self.sandbox_policy(p.cwd.as_deref()).unwrap_or_default();
         if let Some(ms) = p.timeout_ms {
             req = req.with_timeout(std::time::Duration::from_millis(ms));
         }
@@ -739,9 +1478,31 @@ impl Server {
                 None,
                 move |cancel| {
                     let req = req.clone();
+                    let policy = sandbox_policy.clone();
                     // Spawned for the same reason `call_tool` spawns: a panic becomes this call's
                     // failure rather than a request the host waits out to its 180s timeout.
-                    Box::pin(async move { tokio::spawn(async move { agent_process::run(req, &cancel).await }).await })
+                    //
+                    // Always through the backend, even when the policy is empty. With nothing to enforce it
+                    // runs `agent_process::run` exactly as before and reports `NotRequested` — so there is one
+                    // spawn path rather than two, and the sandbox cannot be forgotten on one of them.
+                    Box::pin(async move {
+                        tokio::spawn(async move {
+                            let sandbox_req = agent_sandbox::SandboxRequest {
+                                command: req.command.clone(),
+                                cwd: req.cwd.clone(),
+                                env: req.env.clone(),
+                                policy,
+                                limits: req.limits,
+                                timeout: req.timeout,
+                                max_buffer: req.max_buffer,
+                            };
+                            // The trait has to be in scope for its method to be callable.
+                            use agent_sandbox::ExecutionBackend as _;
+                            let out = agent_sandbox::NativeBackend::new().execute(sandbox_req, &cancel).await;
+                            (out.process, out.report)
+                        })
+                        .await
+                    })
                 },
             )
             .await;
@@ -760,17 +1521,33 @@ impl Server {
         };
 
         match joined {
-            Ok(r) => ProcessRunResult {
-                stdout: r.stdout,
-                stderr: r.stderr,
-                code: match r.code {
-                    ExitCode::Code(c) => json!(c),
-                    ExitCode::Unknown => json!("?"),
-                },
-                killed: r.killed,
-                canceled: r.canceled,
-                truncated: r.truncated,
-            },
+            Ok((r, report)) => {
+                // What actually confined this command, published so the audit trail records a decision rather
+                // than an intention (TODO §11 Sandbox Decision). Reported even when nothing was enforced: "not
+                // requested" and "requested and unavailable" are different facts, and only one of them is a
+                // problem.
+                tracing::debug!(
+                    filesystem = %report.filesystem.describe(),
+                    network = %report.network.describe(),
+                    "command finished"
+                );
+                self.bus.publish(agent_events::EventKind::SandboxDecided {
+                    call: CallId::from_host(call_id.clone()),
+                    filesystem: report.filesystem.describe(),
+                    network: report.network.describe(),
+                });
+                ProcessRunResult {
+                    stdout: r.stdout,
+                    stderr: r.stderr,
+                    code: match r.code {
+                        ExitCode::Code(c) => json!(c),
+                        ExitCode::Unknown => json!("?"),
+                    },
+                    killed: r.killed,
+                    canceled: r.canceled,
+                    truncated: r.truncated,
+                }
+            }
             Err(join_err) => {
                 tracing::error!(error = %join_err, "process task failed");
                 // Shaped like a spawn failure, which is what the JS path reports when the child could
@@ -878,6 +1655,15 @@ impl Server {
 /// tool execution. It is a backstop against a host that has stopped answering, not a task deadline:
 /// the real bound is the caller's own cancellation, which reaches the delegation immediately.
 const SUBAGENT_BODY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30 * 60);
+
+/// How long a consent request waits for a person.
+///
+/// Generous, because the thing at the other end is a human reading a dialog — a timeout that fires while they
+/// are still deciding would deny an action they were about to allow, which reads as the app ignoring them.
+const CONSENT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
+
+/// How long a question to the user waits. Same reasoning as the consent timeout: a person is reading it.
+const ASK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
 
 /// Removes a pending host call when its future ends, however it ends.
 struct PendingGuard {

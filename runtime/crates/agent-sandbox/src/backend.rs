@@ -18,6 +18,12 @@ pub struct SandboxRequest {
     pub timeout: Option<std::time::Duration>,
     pub policy: SandboxPolicy,
     pub limits: ResourceLimits,
+    /// Output cap, in bytes. `None` leaves `agent-process`'s own default in place.
+    ///
+    /// Carried here rather than left to the caller because this type is the WHOLE request: a field the backend
+    /// does not know about is a field it silently drops, and the first version of this dropped exactly this
+    /// one — a command capped at 1KB returned 50KB, caught by `output_is_capped`.
+    pub max_buffer: Option<usize>,
 }
 
 impl SandboxRequest {
@@ -29,6 +35,7 @@ impl SandboxRequest {
             timeout: None,
             policy: SandboxPolicy::default(),
             limits: ResourceLimits::default(),
+            max_buffer: None,
         }
     }
 
@@ -46,6 +53,10 @@ impl SandboxRequest {
     }
     pub fn with_timeout(mut self, d: std::time::Duration) -> Self {
         self.timeout = Some(d);
+        self
+    }
+    pub fn with_max_buffer(mut self, bytes: usize) -> Self {
+        self.max_buffer = Some(bytes);
         self
     }
 }
@@ -142,6 +153,9 @@ impl ExecutionBackend for NativeBackend {
         }
         process.env = req.env;
         process.timeout = req.timeout;
+        if let Some(cap) = req.max_buffer {
+            process = process.with_max_buffer(cap);
+        }
 
         #[cfg(target_os = "linux")]
         {

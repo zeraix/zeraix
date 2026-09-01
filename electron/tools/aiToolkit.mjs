@@ -47,7 +47,11 @@ import { mcpAdminHandlers } from "./mcpAdmin.mjs";
 // mismatch or a tool it does not implement all resolve to "the JS handler serves this call", so the
 // only observable difference when it is unavailable is that it is not used. See its header and
 // docs/agent-runtime-migration.md.
-import { invalidateFileList as invalidateRustFileList, tryRunTool } from "./rustRuntime.mjs";
+import {
+  invalidateFileList as invalidateRustFileList,
+  isReady as isRuntimeReady,
+  tryRunTool,
+} from "./rustRuntime.mjs";
 // page_console's window lifecycle. Its own module because this one is already far past the file-size
 // ceiling, and because a hidden BrowserWindow has to be leak-proof on every exit path.
 import { capturePageConsole } from "./pageConsole.mjs";
@@ -129,10 +133,6 @@ function isAppKillingCommand(cmd) {
 // ── Limits / defaults ────────────────────────────────────────────────────────
 const MAX_READ_BYTES = 2 * 1024 * 1024; // read_file per-file cap: 2MB
 export const READ_DEFAULT_MAX_LINES = 2000; // read_file: lines returned when no explicit limit is given
-const READ_MAX_CHARS = 200_000; // read_file per-call ceiling; a line cap cannot bound a minified single-line file
-const MAX_MATCHES = 200; // search_* result cap
-const MAX_ENTRIES = 300; // list_directory result cap; a bare listing is cheaper per row than a search hit, so it runs higher
-const MAX_LINE_LEN = 400; // search_in_files per-line echo cap
 const CMD_TIMEOUT_MS = 60_000; // run_command timeout
 /**
  * The ceiling for commands whose job IS to fetch over the network.
@@ -236,8 +236,6 @@ const WEB_TIMEOUT_MS = 15_000; // per HTTP request
 const WEB_SEARCH_MAX = 10; // hard cap on results returned by web_search
 const WEB_SEARCH_DEFAULT = 6; // default result count
 const WEB_FETCH_MAX_CHARS = 8_000; // fetch_url readable-text cap
-// Heavy directories skipped during recursive traversal, to avoid noise and performance issues.
-const SKIP_DIRS = new Set([".git", "node_modules", ".next", "dist", "Zeraix"]);
 
 // ── Working directory ────────────────────────────────────────────────────────
 let WORKDIR = path.join(os.homedir(), "zeraix-workspace");
@@ -248,7 +246,8 @@ let WORKDIR = path.join(os.homedir(), "zeraix-workspace");
  *  engine to fold the directory into the VM's mount set). */
 export function setWorkingDir(dir) {
   WORKDIR = path.resolve(dir);
-  invalidateWalkCache(); // directory changed: the old file-list cache is now stale
+  // The runtime caches a file list per workspace and cannot see that the workspace changed.
+  invalidateRustFileList(WORKDIR);
   resetObservations(); // reads observed for the previous workspace say nothing about this one
   resetConversationCapture();
   return WORKDIR;
@@ -303,7 +302,7 @@ export async function wsWriteFile(relPath, content) {
   try {
     const abs = resolveInside(relPath, { write: true });
     await fs.writeFile(abs, String(content ?? ""), "utf8");
-    invalidateWalkCache(); // a new file may have been created; invalidate the file-list cache
+    invalidateRustFileList(WORKDIR); // a new file may have been created; the runtime's list is now stale
     return { ok: true };
   } catch (e) {
     return { ok: false, error: e?.message ?? String(e) };
@@ -527,10 +526,6 @@ function applyNewline(content, newline) {
   return newline === "\r\n" ? content.replace(/\n/g, "\r\n") : content;
 }
 
-/** Encode a working string (BOM-free, any newlines) back to bytes, re-attaching the UTF-8 BOM if the original had one. */
-function encodeText(text, hasBom) {
-  return Buffer.from(hasBom ? `﻿${text}` : text, "utf8");
-}
 
 /**
  * Read a text file for editing, capturing the byte-level traits a write must preserve.
@@ -562,55 +557,7 @@ async function readTextForEdit(abs) {
   return { text, hasBom, newline: detectNewline(text) };
 }
 
-/** Compile a glob (* ? and character classes) into a regex that matches the "filename". */
-function globToRegExp(glob) {
-  let re = "";
-  for (const ch of glob) {
-    if (ch === "*") re += "[^/]*";
-    else if (ch === "?") re += "[^/]";
-    else if ("\\^$.|+()[]{}".includes(ch)) re += `\\${ch}`;
-    else re += ch;
-  }
-  return new RegExp(`^${re}$`, "i");
-}
 
-/** Recursively list files under WORKDIR (skipping SKIP_DIRS), returning an array of absolute paths. */
-async function walkFiles(startAbs) {
-  const out = [];
-  async function walk(dir) {
-    let entries;
-    try {
-      entries = await fs.readdir(dir, { withFileTypes: true });
-    } catch {
-      return;
-    }
-    for (const e of entries) {
-      const abs = path.join(dir, e.name);
-      if (e.isDirectory()) {
-        if (SKIP_DIRS.has(e.name)) continue;
-        await walk(abs);
-      } else if (e.isFile()) {
-        out.push(abs);
-      }
-    }
-  }
-  await walk(startAbs);
-  return out;
-}
-
-// File-list cache: search_* originally walked the whole directory on every call, so dozens of searches in one investigation = dozens of full-tree walks.
-// Cache the result of a single walk (file path list only; content is still read fresh each time, so content changes are always visible). Invalidated on write / delete / move / command
-// or when the working directory changes (see runTool's MUTATING check and setWorkingDir).
-let _walkCache = null; // { workdir, files }
-function invalidateWalkCache() {
-  _walkCache = null;
-}
-async function walkFilesCached() {
-  if (_walkCache && _walkCache.workdir === WORKDIR) return _walkCache.files;
-  const files = await walkFiles(WORKDIR);
-  _walkCache = { workdir: WORKDIR, files };
-  return files;
-}
 
 // ── Unified diff (returned by write_file / edit_file, for the frontend to render + for the model to see changes) ──────
 const DIFF_MAX_LINES = 200; // diff line cap; truncated beyond this (to avoid feeding back too many tokens)
@@ -645,60 +592,6 @@ function diffLines(a, b) {
   return ops;
 }
 
-/**
- * Diagnose a failed edit_file match by locating the line where the supplied text stops agreeing with
- * the file.
- *
- * The dominant failure mode is a long block retyped from memory with a line or two wrong somewhere in
- * the middle: the exact match fails, and the whitespace-collapse check fails too because the
- * divergence is real text rather than spacing. Both leave the model with nothing to act on, so it
- * re-guesses at a variation and fails identically — the loop the user keeps hitting.
- *
- * So anchor on the first non-blank supplied line, walk forward while lines keep agreeing (comparing
- * trimmed, since indentation is the *other* common miss and is already reported separately), and name
- * the first line that differs, both sides quoted with line numbers. That turns "not found" into a
- * single targeted re-read.
- *
- * Returns "" when there is no anchor at all — the block genuinely isn't in this file, and the caller's
- * generic message is already the right advice.
- */
-function describeEditDivergence(text, oldStr) {
-  const fileLines = text.split("\n");
-  const oldLines = oldStr.split("\n");
-  const firstIdx = oldLines.findIndex((l) => l.trim());
-  if (firstIdx === -1) return "";
-  const anchor = oldLines[firstIdx].trim();
-
-  // Best anchor = the occurrence that keeps agreeing for the most lines. Ambiguous anchors (a common
-  // line like "}" or "try {") are why this picks the longest run instead of the first hit.
-  let best = null;
-  for (let i = 0; i < fileLines.length; i++) {
-    if (fileLines[i].trim() !== anchor) continue;
-    let n = 0;
-    while (
-      firstIdx + n < oldLines.length &&
-      i + n < fileLines.length &&
-      fileLines[i + n].trim() === oldLines[firstIdx + n].trim()
-    ) {
-      n++;
-    }
-    if (!best || n > best.matched) best = { start: i, matched: n };
-  }
-  if (!best) return "";
-
-  const oi = firstIdx + best.matched; // first supplied line that disagrees
-  const fi = best.start + best.matched; // the file line it was compared against
-  if (oi >= oldLines.length) return ""; // every supplied line agreed → a pure whitespace miss, reported by the caller's other branch
-
-  const clip = (s) => (s.length > 160 ? `${s.slice(0, 160)}…` : s);
-  const fileSide =
-    fi < fileLines.length ? JSON.stringify(clip(fileLines[fi].trim())) : "past the end of the file";
-  return (
-    ` Your first ${best.matched} line(s) DO match, starting at line ${best.start + 1} — the text diverges at` +
-    ` your line ${oi + 1}: you supplied ${JSON.stringify(clip(oldLines[oi].trim()))}, but line ${fi + 1}` +
-    ` of the file is ${fileSide}. Re-read that range and copy it verbatim rather than adjusting what you wrote.`
-  );
-}
 
 /**
  * Produce a unified diff (with @@ line-number headers and context), wrapped in a ```diff code block.
@@ -1062,40 +955,6 @@ const handlers = {
 
   // Returns a line range rather than always the whole file: a targeted read keeps the model's context
   // small, and — unlike a downstream character cap — never removes the middle of a file it is reasoning about.
-  async read_file({ path: p, offset, limit }) {
-    const abs = resolveInside(p);
-    const stat = await fs.stat(abs);
-    if (stat.size > MAX_READ_BYTES) {
-      throw new Error(`file too large (${stat.size} bytes > ${MAX_READ_BYTES})`);
-    }
-    const text = await fs.readFile(abs, "utf8");
-
-    const lines = text.split("\n");
-    // A trailing newline yields a final "" element; dropping it keeps the reported total honest.
-    if (lines.length > 1 && lines[lines.length - 1] === "") lines.pop();
-    const total = lines.length;
-
-    const start = Math.max(1, Math.floor(Number(offset) || 1));
-    const count = Math.max(1, Math.floor(Number(limit) || READ_DEFAULT_MAX_LINES));
-    if (start > total) {
-      return `[read_file] offset ${start} is past the end of ${p} — the file has ${total} lines.`;
-    }
-    const end = Math.min(total, start + count - 1);
-
-    let body = lines.slice(start - 1, end).join("\n");
-    let charTrimmed = false;
-    if (body.length > READ_MAX_CHARS) {
-      body = body.slice(0, READ_MAX_CHARS);
-      charTrimmed = true;
-    }
-
-    if (start === 1 && end === total && !charTrimmed) return body;
-
-    const notes = [`showing lines ${start}-${end} of ${total}`];
-    if (charTrimmed) notes.push(`trimmed at ${READ_MAX_CHARS} characters`);
-    if (end < total) notes.push(`read on with offset:${end + 1}`);
-    return `${body}\n\n[read_file] ${p}: ${notes.join("; ")}.`;
-  },
 
   // Open a file / folder in the HOST's default application (always runs on the host, never the sandbox).
   // "Opening" is a host GUI action; run_command in daily mode runs inside a headless Linux VM and cannot
@@ -1108,95 +967,7 @@ const handlers = {
     return `Opened in the host's default application: ${abs}`;
   },
 
-  async write_file({ path: p, content }) {
-    const abs = resolveInside(p, { write: true });
-    const toLf = (s) => s.replace(/\r\n/g, "\n");
-    const afterLf = toLf(String(content ?? ""));
-    // Capture the existing file's traits so a rewrite keeps its encoding, BOM, and newline style instead of forcing
-    // LF/no-BOM UTF-8 onto it. A missing file is a new file: LF, no BOM. A non-UTF-8 file is refused (readTextForEdit
-    // throws), because rewriting it as UTF-8 would convert it — exactly what "preserve encoding" forbids.
-    let before = "";
-    let hasBom = false;
-    let newline = detectNewline(afterLf);
-    try {
-      const info = await readTextForEdit(abs);
-      before = info.text;
-      hasBom = info.hasBom;
-      newline = info.newline;
-    } catch (e) {
-      if (e.code !== "ENOENT") throw e;
-    }
-    await fs.mkdir(path.dirname(abs), { recursive: true });
-    const bytes = encodeText(applyNewline(afterLf, newline), hasBom);
-    await fs.writeFile(abs, bytes);
-    const verb = before ? "Wrote" : "Created";
-    const diff = makeUnifiedDiff(toLf(before), afterLf);
-    return `${verb} ${bytes.length} bytes to ${rel(abs)} (${abs}).${diff}`;
-  },
 
-  async edit_file({ path: p, old_string, new_string, replace_all }) {
-    const abs = resolveInside(p, { write: true });
-    if (String(old_string ?? "") === "") throw new Error("old_string must not be empty");
-
-    const { text: rawText, hasBom, newline } = await readTextForEdit(abs);
-    // Match and splice in LF-space, then restore the file's own newline style on write. This means a match succeeds
-    // whether the model supplied "\n" or "\r\n", and the edit never leaves a CRLF file with mixed endings.
-    const toLf = (s) => s.replace(/\r\n/g, "\n");
-    const text = toLf(rawText);
-    const oldStr = toLf(String(old_string ?? ""));
-    const newStr = toLf(String(new_string ?? ""));
-    if (oldStr === newStr) throw new Error("old_string and new_string are identical");
-
-    // Literal count (not regex): count how many times old_string occurs.
-    let count = 0;
-    for (let i = text.indexOf(oldStr); i !== -1; i = text.indexOf(oldStr, i + oldStr.length)) {
-      count++;
-    }
-    if (count === 0) {
-      // A bare "not found" gives the model nothing to correct, so it re-guesses and fails the same way. Say which kind
-      // of miss this was: a whitespace mismatch (the text IS there — it just wasn't copied verbatim) is by far the most
-      // common, and needs the opposite fix from text that genuinely isn't in the file.
-      const collapse = (s) => s.replace(/\s+/g, " ").trim();
-      const loose = collapse(oldStr);
-      if (loose && collapse(text).includes(loose)) {
-        // Report where it starts, so the fix is one targeted read away.
-        const firstLine = oldStr.split("\n").find((l) => l.trim()) ?? "";
-        const at = text.indexOf(firstLine.trim());
-        const line = at === -1 ? null : text.slice(0, at).split("\n").length;
-        throw new Error(
-          `old_string not found in ${p}, but the same text IS present with different whitespace` +
-            (line ? ` (starts around line ${line})` : "") +
-            `. Do not retype it: read_file that range and copy the text exactly as returned, keeping its ` +
-            `indentation and line breaks byte-for-byte.`,
-        );
-      }
-      throw new Error(
-        `old_string not found in ${p} — that text is not in the file (the file has ${text.split("\n").length} lines).` +
-          describeEditDivergence(text, oldStr) +
-          ` Do not guess at another variation: read_file the relevant part first, then copy the exact text to replace.`,
-      );
-    }
-    if (!replace_all && count > 1) {
-      throw new Error(
-        `old_string is not unique (${count} occurrences); set replace_all or add more context`,
-      );
-    }
-
-    // Literal replacement: use split/join to avoid treating $ etc. as special regex-replacement symbols.
-    let next;
-    if (replace_all) {
-      next = text.split(oldStr).join(newStr);
-    } else {
-      const idx = text.indexOf(oldStr);
-      next = text.slice(0, idx) + newStr + text.slice(idx + oldStr.length);
-    }
-
-    await fs.writeFile(abs, encodeText(applyNewline(next, newline), hasBom));
-    const summary = replace_all
-      ? `Replaced ${count} occurrence(s) in ${rel(abs)}.`
-      : `Replaced 1 occurrence in ${rel(abs)}.`;
-    return `${summary}${makeUnifiedDiff(text, next)}`;
-  },
 
   async append_file({ path: p, content }) {
     const abs = resolveInside(p, { write: true });
@@ -1245,40 +1016,7 @@ const handlers = {
     return `Moved ${rel(s)} -> ${rel(d)} (${d}).`;
   },
 
-  async file_info({ path: p }) {
-    const abs = resolveInside(p);
-    const st = await fs.stat(abs);
-    const info = {
-      path: rel(abs),
-      type: st.isDirectory() ? "directory" : st.isFile() ? "file" : "other",
-      size: st.size,
-      modified: st.mtime.toISOString(),
-      created: st.birthtime.toISOString(),
-    };
-    return JSON.stringify(info, null, 2);
-  },
 
-  async list_directory({ path: p } = {}) {
-    const abs = p ? resolveInside(p) : WORKDIR;
-    const entries = await fs.readdir(abs, { withFileTypes: true });
-    if (entries.length === 0) return `(empty) ${rel(abs)}`;
-    const lines = entries
-      .slice()
-      .sort((a, b) => Number(b.isDirectory()) - Number(a.isDirectory()) || a.name.localeCompare(b.name))
-      .map((e) => `${e.isDirectory() ? "[dir] " : "      "}${e.name}`);
-    // Capped like the search tools. An uncapped listing was not actually uncapped: a node_modules-sized directory blew
-    // past capToolOutput's 8000-character limit and came back head+tail with the middle silently eaten, which is the
-    // worst shape a list can have — the entries that vanish are unnamed and the notice talks about characters, not files.
-    // Cutting it here instead means the count is honest and the omission is stated in entries.
-    const shown = lines.slice(0, MAX_ENTRIES);
-    const capped =
-      lines.length > shown.length
-        ? `\n\n[…TRUNCATED — showing the first ${shown.length} of ${lines.length} entries; ${lines.length - shown.length} not listed. ` +
-          `Use search_files with a glob to find specific names in here.]`
-        : "";
-    const header = lines.length > shown.length ? `${rel(abs)} (${lines.length} entries, showing ${shown.length}):` : `${rel(abs)}:`;
-    return `${header}\n${shown.join("\n")}${capped}`;
-  },
 
   async create_directory({ path: p }) {
     const abs = resolveInside(p, { write: true });
@@ -1286,100 +1024,7 @@ const handlers = {
     return `Created directory ${rel(abs)} (${abs}).`;
   },
 
-  async search_files({ pattern }) {
-    const re = globToRegExp(String(pattern));
-    const files = await walkFilesCached();
-    const hits = files.filter((f) => re.test(path.basename(f))).map(rel);
-    if (hits.length === 0) return `No files match "${pattern}".`;
-    const shown = hits.slice(0, MAX_MATCHES);
-    // The count line states shown-of-total, and the notice says TRUNCATED in as many words. "… and N more" reads as a
-    // footnote; a model skimming it acts on the first page as if it were the set. Naming the cap and the way past it
-    // (a tighter glob) is what turns a partial list into a next step instead of a wrong conclusion.
-    const more =
-      hits.length > shown.length
-        ? `\n\n[…TRUNCATED — showing the first ${shown.length} of ${hits.length} matches; ${hits.length - shown.length} not listed. ` +
-          `This list is incomplete: narrow the glob to see the rest, and do not act on it as if it were every match.]`
-        : "";
-    return `${hits.length} match(es)${hits.length > shown.length ? `, showing ${shown.length}` : ""}:\n${shown.join("\n")}${more}`;
-  },
 
-  async search_in_files({ query, pattern, regex, ignore_case, context }) {
-    const needle = String(query ?? "");
-    if (!needle) throw new Error("query must not be empty");
-    const ctx = Number.isFinite(context) ? Math.max(0, Math.min(5, Math.floor(context))) : 2;
-    const nameRe = pattern ? globToRegExp(String(pattern)) : null;
-    // Matcher: regex -> regular expression (case-insensitive optional); otherwise substring (case-insensitive optional).
-    let test;
-    if (regex) {
-      let re;
-      try {
-        re = new RegExp(needle, ignore_case ? "i" : "");
-      } catch (e) {
-        throw new Error(`invalid regex: ${e?.message ?? e}`);
-      }
-      test = (line) => re.test(line);
-    } else if (ignore_case) {
-      const low = needle.toLowerCase();
-      test = (line) => line.toLowerCase().includes(low);
-    } else {
-      test = (line) => line.includes(needle);
-    }
-    const clip = (s) => (s.length > MAX_LINE_LEN ? `${s.slice(0, MAX_LINE_LEN)}…` : s);
-    const files = (await walkFilesCached()).filter((f) => !nameRe || nameRe.test(path.basename(f)));
-    const blocks = [];
-    let total = 0;
-    for (const f of files) {
-      if (total >= MAX_MATCHES) break;
-      let text;
-      try {
-        const st = await fs.stat(f);
-        if (st.size > MAX_READ_BYTES) continue; // skip oversized / likely-binary files
-        text = await fs.readFile(f, "utf8");
-      } catch {
-        continue;
-      }
-      const lines = text.split(/\r?\n/);
-      const hits = [];
-      for (let i = 0; i < lines.length && total + hits.length < MAX_MATCHES; i++) {
-        if (test(lines[i])) hits.push(i);
-      }
-      if (hits.length === 0) continue;
-      // Merge matched lines into hunks by ±ctx (adjacent / overlapping ones are combined), output with line numbers: "N:" for a matched line, "N-" for context.
-      const hitSet = new Set(hits);
-      const hunks = [];
-      for (const h of hits) {
-        const start = Math.max(0, h - ctx);
-        const end = Math.min(lines.length - 1, h + ctx);
-        const last = hunks[hunks.length - 1];
-        if (last && start <= last.end + 1) last.end = Math.max(last.end, end);
-        else hunks.push({ start, end });
-      }
-      const parts = hunks.map((hunk) => {
-        const buf = [];
-        for (let i = hunk.start; i <= hunk.end; i++) {
-          buf.push(`${i + 1}${hitSet.has(i) ? ":" : "-"} ${clip(lines[i])}`);
-        }
-        return buf.join("\n");
-      });
-      blocks.push(`${rel(f)}:\n${parts.join("\n--\n")}`);
-      total += hits.length;
-    }
-    if (blocks.length === 0) {
-      return `No matches for ${regex ? `/${needle}/` : `"${needle}"`}${ignore_case ? " (case-insensitive)" : ""}.`;
-    }
-    // When the cap is hit, `total` is the cap, not the number of matches in the tree — the walk stops there, so the real
-    // total is unknown and unknowable from this call. Say that rather than printing a count that reads as complete.
-    const capped =
-      total >= MAX_MATCHES
-        ? `\n\n[…TRUNCATED — stopped at the ${MAX_MATCHES}-match cap. There are more matches than shown and the true ` +
-          `total is unknown. Narrow the query or add a name pattern; do not treat these as every match.]`
-        : "";
-    return (
-      `${total} match(es) with ±${ctx} context lines ` +
-      `(working-directory-relative paths; "N:" = match line, "N-" = context):\n\n` +
-      `${blocks.join("\n\n")}${capped}`
-    );
-  },
 
   async run_command({ command, background, sandbox, notify }, { signal } = {}) {
     await ensureWorkdir();
@@ -1742,23 +1387,20 @@ export async function runTool(name, args = {}, { signal } = {}) {
   // Same arrangement for installed plugins: `plugin__<publisher>_<name>__<capability>` cannot collide
   // with a handler, and callPluginTool honours the { ok, content } contract for every failure mode.
   if (isPluginTool(name)) return callPluginTool(name, args ?? {});
-  const handler = handlers[name];
-  if (!handler) return { ok: false, content: `Unknown tool: ${name}` };
   try {
     await ensureWorkdir();
-    // Rust Agent Runtime (see docs/agent-runtime-migration.md, Stage 1). This is the ONLY hook the
-    // migration adds to this file: the sidecar either serves the call or declines, and declining is
-    // indistinguishable from it not existing. Everything below -- the mutator invalidation, the
-    // read observation, the { ok, content } contract, the catch -- is unchanged and still applies.
+    // The Rust Agent Runtime is asked FIRST, and for most tools it is the only implementation there is.
     //
-    // A packaged build routes these calls to the sidecar by default; development and this test suite
-    // stay on the JS handlers unless ZERAIX_RUST_RUNTIME says otherwise. Either way the rest of this
-    // function is untouched, and the two implementations are held to byte-identical output by
-    // scripts/ab-runtime-parity.mjs.
+    // The order matters now in a way it did not before. While every tool had a JS handler, the handler lookup
+    // could come first and the sidecar was an optional shortcut. The handlers for the migrated tools are gone
+    // (TODO §0.2 F1), so looking them up first would report `read_file` as an unknown tool and never reach the
+    // runtime that implements it.
+    //
+    // What is left below this line is for the tools the runtime does NOT serve — `append_file`, the ones that
+    // touch app state, MCP and plugin tools — which still have handlers of their own.
     const offloaded = await tryRunTool(name, args ?? {}, { signal, workdir: WORKDIR });
     if (offloaded) {
       if (FILE_LIST_MUTATORS.has(name)) {
-        invalidateWalkCache();
         invalidateRustFileList(WORKDIR);
       }
       if (name === "read_file" && offloaded.ok) {
@@ -1771,12 +1413,24 @@ export async function runTool(name, args = {}, { signal } = {}) {
       }
       return offloaded;
     }
+
+    const handler = handlers[name];
+    if (!handler) {
+      // No handler, and the runtime did not serve it. Which of the two problems this is depends on whether the
+      // runtime is up, and the difference matters: one is a typo the model can fix, the other is an
+      // installation the user has to fix, and telling them apart is the whole reason this branch is not one
+      // sentence.
+      return {
+        ok: false,
+        content: isRuntimeReady()
+          ? `Unknown tool: ${name}`
+          : `${name} is served by the Zeraix agent runtime, which is not running. No fallback exists for it — ` +
+            `the JS implementations were removed at 2.0. Check the runtime binary is installed and see the ` +
+            `logs for why it did not start.`,
+      };
+    }
     const content = await handler(args ?? {}, { signal });
     if (FILE_LIST_MUTATORS.has(name)) {
-      invalidateWalkCache(); // the file list may have changed: the next search_* re-walks
-      // The Rust runtime caches its own file list and cannot see a mutation performed by a JS handler.
-      // Needed only while the two share a tree -- once the mutating tools migrate, the tool that made
-      // the change reports it itself.
       invalidateRustFileList(WORKDIR);
     }
     // Observe reads so project memory can learn from what was actually opened. This is the right

@@ -37,6 +37,7 @@ pub use task::{Outcome, Priority, RetryPolicy, TaskBody, TaskContext, TaskFuture
 
 use agent_core::{CancellationToken, Result, RuntimeError, TaskId, TaskState};
 use agent_events::{EventBus, EventKind};
+use agent_journal::{Journal, JournalEvent};
 use agent_resource::ResourceManager;
 use queue::ReadyQueue;
 use std::collections::HashMap;
@@ -72,6 +73,15 @@ enum Command {
     },
     Cancel {
         id: TaskId,
+    },
+    /// Hold a task that has not started. See `Driver::on_pause`.
+    Pause {
+        id: TaskId,
+        reply: oneshot::Sender<bool>,
+    },
+    Resume {
+        id: TaskId,
+        reply: oneshot::Sender<bool>,
     },
     Snapshot {
         reply: oneshot::Sender<Vec<TaskRecord>>,
@@ -111,8 +121,21 @@ pub struct Scheduler {
 }
 
 impl Scheduler {
-    /// Start a scheduler on the current Tokio runtime.
+    /// Start a scheduler on the current Tokio runtime, with no durable state.
+    ///
+    /// Equivalent to `start_journalled` with `Journal::disabled()`. Kept as the default because durability is
+    /// a deployment choice: the tests, the parity harness and any embedder that has nowhere to write should
+    /// not have to name a path they will never read.
     pub fn start(resources: ResourceManager, events: EventBus) -> Self {
+        Self::start_journalled(resources, events, Journal::disabled())
+    }
+
+    /// Start a scheduler that records the task lifecycle to `journal`.
+    ///
+    /// What that buys is in `agent-journal`'s header: after a crash, [`agent_journal::replay`] can say which
+    /// tasks were merely queued (safe to submit again) and which had begun (may have had side effects, and so
+    /// are reported rather than repeated).
+    pub fn start_journalled(resources: ResourceManager, events: EventBus, journal: Journal) -> Self {
         // Unbounded because the *producer* here is the runtime itself reporting settled tasks; a
         // bounded channel would let a full queue deadlock the driver against its own workers. Growth
         // is bounded instead by the resource quotas, which is where a limit belongs.
@@ -123,6 +146,7 @@ impl Scheduler {
             tx: tx.clone(),
             resources,
             events,
+            journal,
             root: root.clone(),
             entries: HashMap::new(),
             ready: ReadyQueue::new(),
@@ -158,6 +182,31 @@ impl Scheduler {
     /// Cancel a task and everything beneath it.
     pub fn cancel(&self, id: &TaskId) {
         let _ = self.tx.send(Command::Cancel { id: id.clone() });
+    }
+
+    /// Hold a task that has not started yet.
+    ///
+    /// Returns whether it was paused. `false` means it could not be — it is already running, already finished,
+    /// or unknown — and that is an answer rather than an error, because "pause this" against work that has
+    /// already begun is a question with a legitimate negative answer that the caller needs to hear.
+    ///
+    /// A RUNNING task is deliberately not pausable: its body may hold a child process or a half-written file,
+    /// and there is no way to freeze that honestly. Cancelling is the operation for work in flight.
+    pub async fn pause(&self, id: &TaskId) -> bool {
+        let (reply, rx) = oneshot::channel();
+        if self.tx.send(Command::Pause { id: id.clone(), reply }).is_err() {
+            return false;
+        }
+        rx.await.unwrap_or(false)
+    }
+
+    /// Return a paused task to the queue. Returns whether it was resumed.
+    pub async fn resume(&self, id: &TaskId) -> bool {
+        let (reply, rx) = oneshot::channel();
+        if self.tx.send(Command::Resume { id: id.clone(), reply }).is_err() {
+            return false;
+        }
+        rx.await.unwrap_or(false)
     }
 
     /// Current state of every known task.
@@ -197,6 +246,7 @@ struct Driver {
     tx: mpsc::UnboundedSender<Command>,
     resources: ResourceManager,
     events: EventBus,
+    journal: Journal,
     root: CancellationToken,
     entries: HashMap<TaskId, Entry>,
     ready: ReadyQueue,
@@ -227,6 +277,14 @@ impl Driver {
                     self.on_cancel(&id);
                     self.pump();
                 }
+                Command::Pause { id, reply } => {
+                    let _ = reply.send(self.on_pause(&id));
+                }
+                Command::Resume { id, reply } => {
+                    let paused = self.on_resume(&id);
+                    let _ = reply.send(paused);
+                    self.pump();
+                }
                 Command::Snapshot { reply } => {
                     let _ = reply.send(self.snapshot());
                 }
@@ -240,6 +298,21 @@ impl Driver {
                     for id in queued {
                         self.finish(&id, Outcome::Cancelled);
                     }
+                    // Paused work is not on the ready queue, so draining it does not reach these. A caller
+                    // awaiting a paused task's outcome would otherwise hang on a sender that is never used.
+                    let paused: Vec<TaskId> = self
+                        .entries
+                        .iter()
+                        .filter(|(_, e)| e.state == TaskState::Paused)
+                        .map(|(id, _)| id.clone())
+                        .collect();
+                    for id in paused {
+                        self.finish(&id, Outcome::Cancelled);
+                    }
+                    // Durable, and last: this record is what tells a later replay that the runtime stopped on
+                    // purpose. Its ABSENCE is the crash signal, so writing it without waiting would leave a
+                    // clean shutdown occasionally indistinguishable from a kill -9.
+                    let _ = self.journal.shut_down().await;
                     let _ = reply.send(());
                     return;
                 }
@@ -290,6 +363,16 @@ impl Driver {
             task: id.clone(),
             parent: spec.parent.clone(),
             priority: spec.priority.as_str().to_string(),
+        });
+        // Recorded even for a task that is about to fail on an unsatisfiable dependency: the journal is a
+        // history of what the scheduler was asked to do, and a submission that failed immediately is still
+        // something it was asked to do. The `Settled` record below closes it out.
+        self.journal.record(JournalEvent::Submitted {
+            task: id.to_string(),
+            label: spec.label.clone(),
+            priority: spec.priority.as_str().to_string(),
+            resource: spec.resource.as_str().to_string(),
+            parent: spec.parent.as_ref().map(|p| p.to_string()),
         });
 
         let priority = spec.priority;
@@ -384,7 +467,17 @@ impl Driver {
 
         let tx = self.tx.clone();
         let task_id = id.clone();
+        let journal = self.journal.clone();
         tokio::spawn(async move {
+            // Durable, and awaited HERE rather than in the driver: the record has to be on the disk before
+            // anything with side effects begins, but paying for that on the driver would put a disk
+            // round-trip in the loop that serves cancellations. This way the cost lands on the task's own
+            // startup. A journal write that fails is logged inside the journal and does not stop the work —
+            // refusing to run because the crash log is unavailable would be a worse failure than the one it
+            // insures against.
+            let _ = journal
+                .record_durable(JournalEvent::Started { task: task_id.to_string(), attempt })
+                .await;
             let fut = body(ctx);
             let outcome = run_attempt(fut, timeout, &token).await;
             // Released at the end of the attempt, before the driver is told — so the pump triggered by
@@ -464,6 +557,17 @@ impl Driver {
     fn finish(&mut self, id: &TaskId, outcome: Outcome) {
         let Some(entry) = self.entries.get_mut(id) else { return };
         entry.state = outcome.state();
+        // Not durable: losing this record makes a finished task read as interrupted, which costs a caller one
+        // needless question. Losing a `Started` would cost a command run twice. See the journal's header.
+        self.journal.record(JournalEvent::Settled {
+            task: id.to_string(),
+            state: entry.state,
+            detail: match &outcome {
+                Outcome::Failed(e) => Some(e.message.clone()),
+                Outcome::DependencyFailed(dep) => Some(format!("dependency {dep} did not complete")),
+                _ => None,
+            },
+        });
         entry.body = None;
         entry.outcome = Some(outcome.clone());
         for w in entry.waiters.drain(..) {
@@ -518,6 +622,45 @@ impl Driver {
         if entry.state == TaskState::Pending {
             self.finish(id, Outcome::Cancelled);
         }
+    }
+
+    /// Hold a task that has not started.
+    ///
+    /// Taking it off the ready queue is the whole mechanism: `pump` only starts what the queue holds, so a
+    /// task that is not in it cannot be picked up however many slots free up. Nothing has to be told to skip it.
+    fn on_pause(&mut self, id: &TaskId) -> bool {
+        let Some(entry) = self.entries.get_mut(id) else { return false };
+        if !entry.state.can_transition(TaskState::Paused) {
+            return false;
+        }
+        entry.state = TaskState::Paused;
+        self.ready.remove(id);
+        self.events.publish(EventKind::TaskPaused { task: id.clone() });
+        true
+    }
+
+    /// Put a paused task back on the queue, where the next pump will find it.
+    fn on_resume(&mut self, id: &TaskId) -> bool {
+        let Some(entry) = self.entries.get_mut(id) else { return false };
+        if entry.state != TaskState::Paused {
+            return false;
+        }
+        // A pause does not survive a cancellation: cancelling reaches every non-terminal state, including this
+        // one, and resuming afterwards must not resurrect the work.
+        if entry.token.is_cancelled() {
+            self.finish(id, Outcome::Cancelled);
+            return false;
+        }
+        entry.state = TaskState::Pending;
+        let priority = entry.spec.priority;
+        // Dependencies are re-checked by construction: a task with unmet ones was never on the ready queue,
+        // and `finish` is what puts it there. Pausing does not change that, so a paused task whose dependency
+        // is still outstanding resumes into Pending and waits, exactly as it would have.
+        if entry.pending_deps.is_empty() {
+            self.ready.push(id.clone(), priority);
+        }
+        self.events.publish(EventKind::TaskResumed { task: id.clone() });
+        true
     }
 
     fn snapshot(&self) -> Vec<TaskRecord> {

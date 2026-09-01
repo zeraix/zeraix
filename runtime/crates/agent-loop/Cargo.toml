@@ -1,0 +1,22 @@
+[package]
+name = "agent-loop"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+agent-core = { workspace = true }
+async-trait = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
+async-trait = { workspace = true }
+# Dev-only, and that direction is what keeps the cycle out: agent-context depends on agent-loop, so the loop
+# may only reach for it in tests.
+agent-context = { workspace = true }

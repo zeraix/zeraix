@@ -89,21 +89,37 @@ function isValidDay(day) {
 
 // ── Enable switch ─────────────────────────────────────────────────────────────────────────────
 
-/** Whether logging is on. Source of truth is app.config, so a headless run reads the same answer. */
+/**
+ * Whether logging is on. Source of truth is app.config, so a headless run reads the same answer.
+ *
+ * **Default ON.** It used to be off, which meant the log was empty exactly when someone went looking for
+ * it — after the run they wanted to understand had already happened. Retention makes that affordable: day
+ * files older than RETENTION_DAYS are pruned at startup and a single day stops accepting writes past
+ * MAX_FILE_BYTES, so "on and forgotten" is bounded rather than unbounded.
+ *
+ * Only an explicit "0"/"false" turns it off. An ABSENT value now means on, which is the part that had to
+ * change in step with the writer below: while off was stored as an absent key, flipping this default alone
+ * would have read every explicit "off" back as "on".
+ */
 export function isUsageLogEnabled() {
   if (enabled === null) {
     const v = getAppConfig()?.[CONFIG_SECTION]?.[CONFIG_KEY];
-    enabled = v === "1" || v === "true";
+    enabled = !(v === "0" || v === "false");
   }
   return enabled;
 }
 
-/** Turn logging on/off and persist it. Flushes on the way down so nothing already recorded is lost. */
+/**
+ * Turn logging on/off and persist it. Flushes on the way down so nothing already recorded is lost.
+ *
+ * Off is written as an explicit "0" rather than by clearing the key. Clearing it was correct while absent
+ * meant off; now that absent means on, clearing would silently re-enable the thing the user just turned off.
+ */
 export function setUsageLogEnabled(on) {
   const next = !!on;
   if (next === enabled) return next;
   enabled = next;
-  setAppConfig(CONFIG_SECTION, CONFIG_KEY, next ? "1" : null);
+  setAppConfig(CONFIG_SECTION, CONFIG_KEY, next ? "1" : "0");
   if (!next) void flushUsageLog();
   return next;
 }

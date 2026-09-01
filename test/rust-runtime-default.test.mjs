@@ -1,16 +1,14 @@
 /**
- * Which runtime serves a tool call, per build type (see electron/tools/rustRuntime.mjs, `flagState`).
+ * Which runtime serves a tool call (see electron/tools/rustRuntime.mjs, `flagState`).
  *
- * The rule is not "on" or "off": a PACKAGED app defaults to the Rust sidecar, while `electron .` and this
- * test suite default to the JS handlers, and `ZERAIX_RUST_RUNTIME` overrides either way. That decision is
- * made by sniffing two process fields rather than by asking Electron -- `rustRuntime.mjs` imports node
- * builtins and nothing else on purpose, because the parity harness and these tests load it outside
- * Electron entirely, and `import { app } from "electron"` there would fail a long way from the decision.
+ * **The truth table collapsed at 2.0.** It used to be per build type — a packaged app defaulted to the Rust
+ * sidecar while `electron .` and this suite defaulted to the JS handlers — and that mattered because there
+ * were two implementations to choose between. Deleting the JS handlers (TODO §0.2 F1) removed the choice: the
+ * runtime is on everywhere, because a runtime that is off is an app with no file tools and no commands.
  *
- * Sniffing is exactly the kind of thing that breaks silently. Every failure mode in the bridge is
- * fail-open, so a detection bug does not raise anything: it just means a shipped app quietly runs the JS
- * handlers forever, or a dev build quietly stops exercising them, and both look precisely like working.
- * Hence pinning the truth table here rather than trusting a manual check of one installer.
+ * What is still worth pinning is the override. `ZERAIX_RUST_RUNTIME=0` is now a debugging switch rather than a
+ * supported configuration, and it has to keep working in every spelling — it is what makes a bad sidecar
+ * diagnosable without shipping a new installer.
  *
  * `warmUp()` is the observable: it reports `enabled` straight from the flag, before any spawn is
  * attempted, so these assertions never depend on a built binary. `ZERAIX_RUST_RUNTIME_BIN` points at a
@@ -54,20 +52,12 @@ async function enabledWhen({ electron, defaultApp, flag }) {
   }
 }
 
-test("a packaged app defaults to the Rust runtime", async () => {
-  // Under Electron and NOT launched with a path argument -- the one combination a packaged binary has.
-  assert.equal(await enabledWhen({ electron: true, defaultApp: false }), true);
-});
-
-test("`electron .` defaults to the JS handlers", async () => {
-  // process.defaultApp is what separates a dev launch from a packaged one; without this branch,
-  // `npm run electron:dev` would stop exercising the handlers the parity harness diffs against.
-  assert.equal(await enabledWhen({ electron: true, defaultApp: true }), false);
-});
-
-test("plain node defaults to the JS handlers", async () => {
-  // The A/B harness and this suite. They drive the sidecar explicitly when they want it.
-  assert.equal(await enabledWhen({ electron: false, defaultApp: false }), false);
+test("the runtime is on in every environment, because there is nothing to fall back to", async () => {
+  // Packaged, `electron .`, and plain node. All three, because the JS handlers that used to serve two of
+  // them no longer exist.
+  assert.equal(await enabledWhen({ electron: true, defaultApp: false }), true, "packaged");
+  assert.equal(await enabledWhen({ electron: true, defaultApp: true }), true, "electron .");
+  assert.equal(await enabledWhen({ electron: false, defaultApp: false }), true, "plain node");
 });
 
 test("ZERAIX_RUST_RUNTIME overrides the default in both directions", async () => {
@@ -76,7 +66,7 @@ test("ZERAIX_RUST_RUNTIME overrides the default in both directions", async () =>
   for (const off of ["0", "off", "false", "OFF"]) {
     assert.equal(await enabledWhen({ electron: true, defaultApp: false, flag: off }), false, off);
   }
-  // On in development is `npm run electron:dev:rust`, and on under plain node is the parity harness.
+  // Explicitly on is still accepted, and still means on.
   for (const on of ["1", "on", "true", "ON"]) {
     assert.equal(await enabledWhen({ electron: true, defaultApp: true, flag: on }), true, on);
     assert.equal(await enabledWhen({ electron: false, defaultApp: false, flag: on }), true, on);
@@ -89,7 +79,8 @@ test("`shadow` is refused rather than silently meaning `on`", async () => {
   assert.equal(await enabledWhen({ electron: true, defaultApp: false, flag: "shadow" }), false);
 });
 
-test("an unrecognised value falls back to the build-type default, not to on", async () => {
-  assert.equal(await enabledWhen({ electron: true, defaultApp: true, flag: "yes-please" }), false);
+test("an unrecognised value falls back to the default rather than being read as off", async () => {
+  // The failure to avoid is a typo in the env var silently disabling every tool the app has.
+  assert.equal(await enabledWhen({ electron: true, defaultApp: true, flag: "yes-please" }), true);
   assert.equal(await enabledWhen({ electron: true, defaultApp: false, flag: "yes-please" }), true);
 });

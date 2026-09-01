@@ -7,6 +7,11 @@
  * four tools that cap (read_file, list_directory, search_files, search_in_files) only work as a set if they
  * say so the same way; a notice reworded in one of them leaves that tool's truncation unrecognisable while the
  * others still announce theirs. Nothing fails when that drifts, which is why the vocabulary is pinned here.
+ *
+ * **Those four tools moved to Rust at 2.0** and their JS handlers were deleted (TODO §0.2 F1), so the source
+ * searched below moved with them. The property is unchanged and so are the words — the port carried them
+ * deliberately, because the renderer's stale-read dedup parses `read_file`'s span notice and the model reads
+ * all four.
  */
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -18,12 +23,17 @@ import { register } from "node:module";
 register("./helpers/srcResolve.mjs", import.meta.url);
 const { capToolOutput, MAX_TOOL_OUTPUT_CHARS } = await import("../src/app/agent/chat/compress.ts");
 
-const toolkitSource = fs.readFileSync(new URL("../electron/tools/aiToolkit.mjs", import.meta.url), "utf8");
+/** The Rust tools that now cap, concatenated — the source the markers have to appear in. */
+const toolkitSource = ["read_file", "list_directory", "search_files", "search_in_files"]
+  .map((name) =>
+    fs.readFileSync(new URL(`../runtime/crates/agent-tools/src/tools/${name}.rs`, import.meta.url), "utf8"),
+  )
+  .join("\n");
 
 /**
- * The shared vocabulary of a partial result. Matched as literals against the toolkit source rather than
- * against a live call: the toolkit needs Electron to import, and what is being pinned is the wording, which
- * is visible in the source.
+ * The shared vocabulary of a partial result. Matched as literals against the tools' source rather than
+ * against a live call: running them would need a built sidecar, and what is being pinned is the wording,
+ * which is visible in the source either way.
  */
 const MARKERS = [
   "TRUNCATED", //            the word itself, on every capped path except read_file

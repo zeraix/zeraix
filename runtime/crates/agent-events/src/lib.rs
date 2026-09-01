@@ -40,6 +40,9 @@ pub enum EventKind {
     /// actually took — the number spec §22 wants and nothing currently reports.
     TaskCancelRequested { task: TaskId },
     TaskCancelled { task: TaskId },
+    /// Held at someone's request, and released again. Distinct from the runtime's own `Waiting`.
+    TaskPaused { task: TaskId },
+    TaskResumed { task: TaskId },
     TaskTimedOut { task: TaskId, after_ms: u64 },
     TaskRetrying { task: TaskId, attempt: u32, delay_ms: u64 },
 
@@ -50,6 +53,14 @@ pub enum EventKind {
 
     ToolRequested { call: CallId, name: String },
     ToolCompleted { call: CallId, name: String, ok: bool, duration_ms: u64 },
+
+    /// What confined one command. `"not requested"` and `"requested and unavailable"` are different
+    /// facts, and the audit trail needs to tell them apart.
+    SandboxDecided { call: CallId, filesystem: String, network: String },
+
+    /// One MCP call, and whether it reached the server. `delivered: false` covers a refusal, a disconnected
+    /// server and a timeout alike — the `detail` says which.
+    McpCalled { call: CallId, server: String, tool: String, delivered: bool, detail: Option<String> },
 
     PermissionRequested { call: CallId, capability: String },
     PermissionDecided { call: CallId, capability: String, granted: bool },

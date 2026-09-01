@@ -9,8 +9,8 @@
  *    attribution the proxy has no way to derive.
  *  - reading: the settings viewer lists days, reads entries and asks for per-day aggregates.
  *
- * Logging is OFF by default. `enabledSync()` is a cached mirror of the main-process switch so the hot
- * path (a log call per tool call) costs a boolean rather than an IPC round trip; the main process
+ * Logging is ON by default (docs/TODO). `enabledSync()` is a cached mirror of the main-process switch so the
+ * hot path (a log call per tool call) costs a boolean rather than an IPC round trip; the main process
  * re-checks the real switch anyway, so a stale mirror can only cost a dropped entry, never a rogue write.
  * Outside Electron every function here is an inert no-op.
  */
@@ -181,13 +181,20 @@ export function isUsageLogAvailable(): boolean {
   return !!bridge();
 }
 
-let cachedEnabled = false;
+let cachedEnabled = true;
 let primed: Promise<boolean> | null = null;
 
 /**
- * The cached switch. False until primeUsageLog() has resolved, which is the safe direction: the worst
- * case is that the first few entries of a session are dropped, not that a user who left logging off
- * starts writing to disk.
+ * The cached switch, optimistic until primeUsageLog() has resolved.
+ *
+ * It started `false` while logging was off by default, on the reasoning that dropping the first few entries of
+ * a session was safer than a user who left logging off starting to write to disk. Flipping the default
+ * inverted that: `false` now drops entries from exactly the start of the session someone is most likely to be
+ * investigating, and it does so for every user rather than the few who opted in.
+ *
+ * Optimism is safe in either direction because this mirror is not authoritative — the main process re-checks
+ * the real switch on every write, so a user who HAS turned logging off still writes nothing. The only thing
+ * this value can change is whether an entry is offered, never whether it is stored.
  */
 export function isUsageLogEnabledSync(): boolean {
   return cachedEnabled;
@@ -196,7 +203,12 @@ export function isUsageLogEnabledSync(): boolean {
 /** Read the real switch once and cache it. Idempotent; safe to call from several components. */
 export function primeUsageLog(): Promise<boolean> {
   const b = bridge();
-  if (!b) return Promise.resolve(false);
+  if (!b) {
+    // No bridge means no main process to write to — in the browser, logging is not "off", it is absent. The
+    // optimistic default above is about a switch whose value is not known yet; here it is known.
+    cachedEnabled = false;
+    return Promise.resolve(false);
+  }
   primed ??= b
     .isEnabled()
     .then((on) => {

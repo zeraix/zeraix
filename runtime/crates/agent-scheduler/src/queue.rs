@@ -56,6 +56,21 @@ impl ReadyQueue {
         std::mem::take(&mut self.heap).into_iter().map(|s| s.id)
     }
 
+    /// Take one task out of the queue, wherever it sits. Returns whether it was there.
+    ///
+    /// Rebuilds the heap rather than reaching into it, because `BinaryHeap` has no removal by value and a
+    /// heap edited in place is a heap whose invariant nobody can check. Rebuilding preserves arrival order,
+    /// which matters: the sequence numbers are what make ties FIFO, and they are carried through unchanged.
+    ///
+    /// Linear in the queue's length, which is the right cost for an operation a person performs — pausing is
+    /// a click, not something the scheduler does in a loop.
+    pub fn remove(&mut self, id: &TaskId) -> bool {
+        let before = self.heap.len();
+        let kept: Vec<Slot> = std::mem::take(&mut self.heap).into_iter().filter(|s| &s.id != id).collect();
+        self.heap = kept.into_iter().collect();
+        self.heap.len() != before
+    }
+
     /// Queue depth. Not used by the driver — exposed for `runtime.status`, so "why is nothing
     /// progressing?" can distinguish an empty queue from a starved one.
     #[allow(dead_code)]
@@ -114,5 +129,41 @@ mod tests {
         assert_eq!(q.drain().count(), 2);
         assert!(q.is_empty());
         assert_eq!(q.len(), 0);
+    }
+
+    fn pause_id(n: &str) -> TaskId {
+        TaskId::from_host(n)
+    }
+
+    #[test]
+    fn removing_a_task_leaves_the_rest_in_arrival_order() {
+        let mut q = ReadyQueue::new();
+        q.push(pause_id("a"), Priority::Normal);
+        q.push(pause_id("b"), Priority::Normal);
+        q.push(pause_id("c"), Priority::Normal);
+
+        assert!(q.remove(&pause_id("b")));
+        assert_eq!(q.pop(), Some(pause_id("a")));
+        assert_eq!(q.pop(), Some(pause_id("c")), "FIFO within a priority must survive a removal");
+        assert_eq!(q.pop(), None);
+    }
+
+    #[test]
+    fn removing_a_task_that_is_not_queued_reports_it() {
+        let mut q = ReadyQueue::new();
+        q.push(pause_id("a"), Priority::Normal);
+        assert!(!q.remove(&pause_id("zzz")));
+        assert_eq!(q.pop(), Some(pause_id("a")));
+    }
+
+    #[test]
+    fn removal_does_not_disturb_priority_order() {
+        let mut q = ReadyQueue::new();
+        q.push(pause_id("low"), Priority::Background);
+        q.push(pause_id("high"), Priority::Critical);
+        q.push(pause_id("mid"), Priority::Normal);
+        assert!(q.remove(&pause_id("mid")));
+        assert_eq!(q.pop(), Some(pause_id("high")));
+        assert_eq!(q.pop(), Some(pause_id("low")));
     }
 }

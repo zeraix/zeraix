@@ -80,10 +80,49 @@ test("every documented clear alias clears", () => {
   for (const alias of GOAL_CLEAR_ALIASES) assert.equal(parseGoalCommand(`/goal ${alias}`).kind, "clear", alias);
 });
 
-test("an unknown single word is reported, not silently made the goal", () => {
-  // The real failure: a typo'd subcommand starting a self-driving loop toward a nonsense condition.
-  const cmd = parseGoalCommand("/goal stpo");
-  assert.deepEqual(cmd, { kind: "error", code: "unknownSub", detail: "stpo" });
+test("a single word that looks like a fumbled clear alias is questioned, not made the goal", () => {
+  // The real failure this guards: a typo'd subcommand starting a self-driving loop toward a nonsense
+  // condition. `stpo` is one edit from `stop`, so it is asked about rather than acted on.
+  assert.deepEqual(parseGoalCommand("/goal stpo"), { kind: "error", code: "unknownSub", detail: "stpo" });
+  assert.equal(parseGoalCommand("/goal clea").kind, "error");
+  assert.equal(parseGoalCommand("/goal offf").kind, "error");
+});
+
+test("an ordinary single word IS the goal", () => {
+  // The bug: every single word was refused, including ones no reasonable person would read as a subcommand —
+  // and the refusal message itself said "/goal <condition> to set a goal", which is what the user had typed.
+  for (const word of ["ship", "deploy", "refactor", "green"]) {
+    assert.deepEqual(
+      parseGoalCommand(`/goal ${word}`),
+      { kind: "set", condition: word, long: false },
+      word,
+    );
+  }
+});
+
+test("/goal set <condition> consumes the subcommand instead of keeping it in the goal", () => {
+  // The bug: `/goal set deploy the site` set a goal literally called "set deploy the site", so the loop drove
+  // toward an instruction with a stray verb in front of it.
+  assert.deepEqual(parseGoalCommand("/goal set deploy the site"), {
+    kind: "set",
+    condition: "deploy the site",
+    long: false,
+  });
+  // Case and spacing are the user's business, not the parser's.
+  assert.equal(parseGoalCommand("/goal SET   ship it  ").condition, "ship it");
+  // And it is the escape hatch for a word that would otherwise be read as a typo.
+  assert.deepEqual(parseGoalCommand("/goal set clea"), { kind: "set", condition: "clea", long: false });
+});
+
+test("/goal set with nothing after it is reported rather than becoming a goal called \"set\"", () => {
+  assert.deepEqual(parseGoalCommand("/goal set"), { kind: "error", code: "unknownSub", detail: "set" });
+});
+
+test("a clear alias still clears even though single words now set", () => {
+  // The one case that must not regress: the aliases are checked before anything is treated as a condition.
+  for (const alias of ["clear", "stop", "off", "reset", "none", "cancel"]) {
+    assert.equal(parseGoalCommand(`/goal ${alias}`).kind, "clear", alias);
+  }
 });
 
 test("a long condition is accepted in full, never refused and never truncated", () => {
@@ -783,4 +822,20 @@ test("every registered command is reachable through the dispatcher", () => {
 test("/clear is tagged in the input box like any other command", () => {
   assert.equal(commandTokenLength("/clear"), 6);
   assert.equal(commandTokenLength("/clea"), 0);
+});
+
+test("a transposed alias is caught, because that is the typo people actually make", () => {
+  // `stpo` is two Levenshtein edits from `stop` but one keystroke away from it. A guard that scored it as
+  // distance 2 would wave through the single commonest way to fumble a subcommand — which is what an earlier
+  // version of this check did.
+  for (const typo of ["stpo", "clera", "rest", "noen", "cancle"]) {
+    assert.equal(parseGoalCommand(`/goal ${typo}`).kind, "error", typo);
+  }
+});
+
+test("words that merely share letters with an alias are still goals", () => {
+  // The guard has to be narrow, or it starts refusing ordinary one-word goals.
+  for (const word of ["ship", "deploy", "compile", "release", "document"]) {
+    assert.equal(parseGoalCommand(`/goal ${word}`).kind, "set", word);
+  }
 });

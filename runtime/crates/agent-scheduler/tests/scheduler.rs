@@ -457,3 +457,189 @@ async fn root_cancellation_reaches_every_task() {
     );
     s.shutdown().await;
 }
+
+// ── Pause and resume (TODO §2.1) ──────────────────────────────────────────────────────────────────
+
+/// Pausing holds work that has not started, and resuming lets it run.
+#[tokio::test]
+async fn a_queued_task_can_be_paused_and_resumed() {
+    // One slot, so the second task is queued behind the first and can be paused before it starts.
+    let resources = ResourceManager::new(Limits { tools: 1, ..Limits::default() });
+    let scheduler = Scheduler::start(resources, EventBus::default());
+    let started = Arc::new(tokio::sync::Notify::new());
+    let ran = Arc::new(AtomicU32::new(0));
+
+    let signal = Arc::clone(&started);
+    scheduler
+        .submit(
+            TaskSpec::new("blocker", ResourceClass::Tool).with_id(TaskId::from_host("blocker")),
+            Box::new(move |ctx| {
+                let signal = Arc::clone(&signal);
+                Box::pin(async move {
+                    signal.notify_one();
+                    ctx.cancel.cancelled().await;
+                    Ok(())
+                })
+            }),
+        )
+        .await
+        .unwrap();
+    started.notified().await;
+
+    let counter = Arc::clone(&ran);
+    scheduler
+        .submit(
+            TaskSpec::new("held", ResourceClass::Tool).with_id(TaskId::from_host("held")),
+            Box::new(move |_ctx| {
+                let counter = Arc::clone(&counter);
+                Box::pin(async move {
+                    counter.fetch_add(1, Ordering::SeqCst);
+                    Ok(())
+                })
+            }),
+        )
+        .await
+        .unwrap();
+
+    let held = TaskId::from_host("held");
+    assert!(scheduler.pause(&held).await, "a queued task must be pausable");
+
+    // Free the slot. The paused task must NOT be picked up.
+    scheduler.cancel(&TaskId::from_host("blocker"));
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    assert_eq!(ran.load(Ordering::SeqCst), 0, "a paused task must not run when a slot frees up");
+
+    assert!(scheduler.resume(&held).await);
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    assert_eq!(ran.load(Ordering::SeqCst), 1, "a resumed task should have run");
+
+    scheduler.shutdown().await;
+}
+
+/// A running body may hold a child process or a half-written file. Cancelling is the operation for it.
+#[tokio::test]
+async fn a_running_task_cannot_be_paused() {
+    let scheduler = Scheduler::start(ResourceManager::default(), EventBus::default());
+    let started = Arc::new(tokio::sync::Notify::new());
+    let signal = Arc::clone(&started);
+
+    scheduler
+        .submit(
+            TaskSpec::new("running", ResourceClass::Tool).with_id(TaskId::from_host("running")),
+            Box::new(move |ctx| {
+                let signal = Arc::clone(&signal);
+                Box::pin(async move {
+                    signal.notify_one();
+                    ctx.cancel.cancelled().await;
+                    Ok(())
+                })
+            }),
+        )
+        .await
+        .unwrap();
+    started.notified().await;
+
+    assert!(!scheduler.pause(&TaskId::from_host("running")).await, "a running task must not be pausable");
+    scheduler.shutdown().await;
+}
+
+#[tokio::test]
+async fn pausing_or_resuming_an_unknown_task_is_answered_rather_than_failing() {
+    let scheduler = Scheduler::start(ResourceManager::default(), EventBus::default());
+    assert!(!scheduler.pause(&TaskId::from_host("nope")).await);
+    assert!(!scheduler.resume(&TaskId::from_host("nope")).await);
+    scheduler.shutdown().await;
+}
+
+/// Spec §14: nothing may become un-stoppable by being paused.
+#[tokio::test]
+async fn a_paused_task_is_still_cancellable_and_does_not_resume_afterwards() {
+    let resources = ResourceManager::new(Limits { tools: 1, ..Limits::default() });
+    let scheduler = Scheduler::start(resources, EventBus::default());
+    let started = Arc::new(tokio::sync::Notify::new());
+    let ran = Arc::new(AtomicU32::new(0));
+
+    let signal = Arc::clone(&started);
+    scheduler
+        .submit(
+            TaskSpec::new("blocker", ResourceClass::Tool).with_id(TaskId::from_host("blocker")),
+            Box::new(move |ctx| {
+                let signal = Arc::clone(&signal);
+                Box::pin(async move {
+                    signal.notify_one();
+                    ctx.cancel.cancelled().await;
+                    Ok(())
+                })
+            }),
+        )
+        .await
+        .unwrap();
+    started.notified().await;
+
+    let counter = Arc::clone(&ran);
+    scheduler
+        .submit(
+            TaskSpec::new("held", ResourceClass::Tool).with_id(TaskId::from_host("held")),
+            Box::new(move |_ctx| {
+                let counter = Arc::clone(&counter);
+                Box::pin(async move {
+                    counter.fetch_add(1, Ordering::SeqCst);
+                    Ok(())
+                })
+            }),
+        )
+        .await
+        .unwrap();
+
+    let held = TaskId::from_host("held");
+    assert!(scheduler.pause(&held).await);
+    scheduler.cancel(&held);
+    tokio::time::sleep(Duration::from_millis(100)).await;
+
+    // Resuming a cancelled task must not resurrect it.
+    assert!(!scheduler.resume(&held).await, "a cancelled task must not resume");
+    scheduler.cancel(&TaskId::from_host("blocker"));
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    assert_eq!(ran.load(Ordering::SeqCst), 0, "a cancelled-while-paused task must never run");
+
+    scheduler.shutdown().await;
+}
+
+/// Paused work is not on the ready queue, so shutdown has to reach it explicitly or a waiter hangs.
+#[tokio::test]
+async fn shutdown_settles_paused_work_rather_than_leaving_it_unanswered() {
+    let resources = ResourceManager::new(Limits { tools: 1, ..Limits::default() });
+    let scheduler = Scheduler::start(resources, EventBus::default());
+    let started = Arc::new(tokio::sync::Notify::new());
+    let signal = Arc::clone(&started);
+
+    scheduler
+        .submit(
+            TaskSpec::new("blocker", ResourceClass::Tool).with_id(TaskId::from_host("blocker")),
+            Box::new(move |ctx| {
+                let signal = Arc::clone(&signal);
+                Box::pin(async move {
+                    signal.notify_one();
+                    ctx.cancel.cancelled().await;
+                    Ok(())
+                })
+            }),
+        )
+        .await
+        .unwrap();
+    started.notified().await;
+
+    scheduler
+        .submit(
+            TaskSpec::new("held", ResourceClass::Tool).with_id(TaskId::from_host("held")),
+            Box::new(|_ctx| Box::pin(async { Ok(()) })),
+        )
+        .await
+        .unwrap();
+    assert!(scheduler.pause(&TaskId::from_host("held")).await);
+
+    // Must return rather than hang.
+    tokio::time::timeout(Duration::from_secs(5), scheduler.shutdown())
+        .await
+        .expect("shutdown must settle paused work");
+}

@@ -8,6 +8,7 @@ license.workspace = true
 [dependencies]
 agent-core = { workspace = true }
 agent-events = { workspace = true }
+agent-journal = { workspace = true }
 agent-resource = { workspace = true }
 serde = { workspace = true }
 tokio = { workspace = true }
@@ -16,6 +17,8 @@ tracing = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "time", "sync"] }
+agent-journal = { workspace = true }
+tempfile = "3"
 
 [target.'cfg(loom)'.dev-dependencies]
 loom = "0.7"

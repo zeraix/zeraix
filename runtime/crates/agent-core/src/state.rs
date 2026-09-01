@@ -75,6 +75,16 @@ pub enum TaskState {
     Pending,
     Running,
     Waiting,
+    /// Held at the user's request (TODO §2.1).
+    ///
+    /// Distinct from `Waiting`, which the runtime enters on its own while a retry backs off or a dependency
+    /// settles. `Paused` is a decision someone made, and only the matching decision undoes it — so the two
+    /// must not share a state, or a resume would race a backoff and "continue" a task the runtime had already
+    /// decided to continue by itself.
+    ///
+    /// Only work that has not started can be paused. A running body cannot be suspended mid-call: it may hold
+    /// a child process or a half-written file, and the honest way to stop one is to cancel it.
+    Paused,
     Completed,
     Failed,
     Cancelled,
@@ -95,7 +105,15 @@ impl TaskState {
         }
         matches!(
             (self, next),
-            (Pending, Running) | (Running, Waiting) | (Waiting, Running) | (Running, Completed)
+            (Pending, Running)
+                | (Running, Waiting)
+                | (Waiting, Running)
+                | (Running, Completed)
+                // Pause and resume, both directions. `Waiting` may be paused too: a task backing off before a
+                // retry is exactly the kind a user wants to hold.
+                | (Pending, Paused)
+                | (Waiting, Paused)
+                | (Paused, Pending)
         )
     }
 }
@@ -127,6 +145,29 @@ mod tests {
         ] {
             assert!(s.can_transition(AgentState::Cancelled), "{s:?} must be cancellable");
         }
+    }
+
+    #[test]
+    fn a_paused_task_can_be_resumed_and_is_never_stuck() {
+        assert!(TaskState::Pending.can_transition(TaskState::Paused));
+        assert!(TaskState::Waiting.can_transition(TaskState::Paused));
+        assert!(TaskState::Paused.can_transition(TaskState::Pending));
+        // Paused is not terminal — a paused task is still work the runtime owes an answer for.
+        assert!(!TaskState::Paused.is_terminal());
+    }
+
+    /// A running body may hold a child process or a half-written file; there is no honest way to freeze it.
+    #[test]
+    fn a_running_task_cannot_be_paused_only_cancelled() {
+        assert!(!TaskState::Running.can_transition(TaskState::Paused));
+        assert!(TaskState::Running.can_transition(TaskState::Cancelled));
+    }
+
+    /// Spec §14 again, for the state this change adds: nothing may become un-stoppable by being paused.
+    #[test]
+    fn a_paused_task_is_still_cancellable() {
+        assert!(TaskState::Paused.can_transition(TaskState::Cancelled));
+        assert!(TaskState::Paused.can_transition(TaskState::Failed));
     }
 
     #[test]

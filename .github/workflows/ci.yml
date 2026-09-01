@@ -129,7 +129,7 @@ jobs:
     # Packaging itself is NOT duplicated here — release.yml builds installers on these same two
     # platforms and already verifies the sidecar landed in the bundle. Run it via workflow_dispatch to
     # package without cutting a tag.
-    name: Runtime parity (${{ matrix.name }})
+    name: Runtime smoke (${{ matrix.name }})
     runs-on: ${{ matrix.os }}
     # Raised from 40 when the runtime took its HTTP dependency: reqwest + rustls + ring roughly doubled
     # the crate count, and a cold Windows build is the slowest thing in this pipeline.
@@ -192,5 +192,5 @@ jobs:
 
       # The gate. Runs the REAL JS handlers (via the electron stub hook) and the REAL sidecar over its
       # real protocol against one shared tree, and diffs every byte. Non-zero exit on any divergence.
-      - name: A/B parity
-        run: node --import ./scripts/electron-stub-hook.mjs scripts/ab-runtime-parity.mjs
+      - name: Runtime smoke
+        run: node --import ./scripts/electron-stub-hook.mjs scripts/runtime-smoke.mjs

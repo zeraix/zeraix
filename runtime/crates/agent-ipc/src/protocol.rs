@@ -4,6 +4,7 @@
 //! removing or retyping one is a major-version change.
 
 use agent_core::error::ErrorPayload;
+use agent_journal::RecoveryPlan;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -19,7 +20,8 @@ pub const PROTOCOL_VERSION: &str = "1.1";
 /// A host feature-detects against this rather than against the version number. The two can disagree in
 /// exactly the case that matters: `ZERAIX_RUST_RUNTIME_BIN` pointing at an older binary, or a
 /// development tree whose sidecar was built before the host code that calls it.
-pub const FEATURES: &[&str] = &["process.run", "process.background", "mcp.stdio", "mcp.http", "subagent.scheduler"];
+pub const FEATURES: &[&str] =
+    &["process.run", "process.background", "mcp.stdio", "mcp.http", "subagent.scheduler", "runtime.events", "task.pause", "agent.stream"];
 
 /// Parse a `major.minor` version string.
 fn parse_version(v: &str) -> Option<(u32, u32)> {
@@ -156,6 +158,31 @@ pub struct InitializeParams {
     /// Host name and version, for the runtime's logs. Diagnostic only.
     #[serde(default)]
     pub client: Option<String>,
+    /// Filesystem roots the user has approved for this session.
+    ///
+    /// Becomes the permission ceiling: nothing in the runtime widens it, and a capability outside it is denied
+    /// rather than escalated. **Absent means nothing is granted**, which is the safe default and is exactly
+    /// what a host that predates this field gets — its behaviour is unchanged, because the runtime's own tool
+    /// path does not consult the ceiling yet (see `agent-dispatch`, wired in a later stage).
+    #[serde(default)]
+    pub workspace_roots: Vec<String>,
+    /// MCP servers the user has approved for this session, by id.
+    ///
+    /// Separate from `workspace_roots` because they answer different questions: what a given MCP server may be
+    /// asked to do is about that server, not about a directory. A filesystem bridge and a Blender bridge are
+    /// not interchangeable, so the grant names them individually.
+    #[serde(default)]
+    pub approved_mcp_servers: Vec<String>,
+    /// Ask the host before anything that CHANGES something inside the approved roots.
+    ///
+    /// Off by default, which keeps an older host working: with it on, every write asks, and a host that does
+    /// not answer `host.consent` would have every write denied. On, it is the runtime equivalent of the app's
+    /// existing consent prompt.
+    ///
+    /// Note this is *within* the ceiling. A capability the ceiling forbids is denied outright and never
+    /// escalated — approving it would not make it permitted, so asking would be a lie.
+    #[serde(default)]
+    pub require_approval_for_mutations: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -169,6 +196,24 @@ pub struct InitializeResult {
     /// Non-tool capabilities, for the same reason: the host routes per feature, not per version.
     /// A host that does not know this field ignores it and behaves exactly as it did at 1.0.
     pub features: Vec<String>,
+    /// Of `tools`, the ones that CHANGE something.
+    ///
+    /// The host needs this to decide what a lost reply means. For a read-only tool, re-running it on the JS
+    /// handler after a transport failure costs a little time and nothing else. For a mutating one it is a
+    /// second edit: `edit_file` replacing `a` with `ab` twice produces `abb`. Reported rather than inferred
+    /// from the name, so adding a mutating tool cannot forget to update a list in another process.
+    ///
+    /// Additive: a host that does not know the field falls back as it always did, which is why this landed in
+    /// the same change as the first mutating tool rather than after it.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub mutating_tools: Vec<String>,
+    /// Work a previous run left unfinished, split by whether it had begun.
+    ///
+    /// Empty on an ordinary start. `interrupted` entries may already have had side effects and must never be
+    /// re-run without a per-task decision — see `agent-journal`'s header for why that split is the whole
+    /// point. Additive: a host that does not know the field ignores it.
+    #[serde(skip_serializing_if = "RecoveryPlan::is_empty")]
+    pub recovered: RecoveryPlan,
 }
 
 // ── tool.list ─────────────────────────────────────────────────────────────────────────────────────
@@ -573,6 +618,39 @@ pub const HOST_RUN_SUBAGENT: &str = "subagent.run";
 /// running-services indicator both depend on learning it.
 pub const EVENT_PROCESS_EXITED: &str = "process.exited";
 
+/// Every structured state change the runtime publishes, forwarded verbatim from the event bus.
+///
+/// One method rather than one per kind: the payload is already tagged (`{"type": "task_started", …}`), and a
+/// host that wants to filter can do so on that tag. Splitting it into a dozen methods would make adding an
+/// event kind a protocol change, which is exactly what an additive bus exists to avoid.
+pub const EVENT_RUNTIME: &str = "runtime.event";
+
+/// Tokens from a running `agent.run`, as they arrive (TODO §10.1 Streaming).
+///
+/// Carries the INCREMENT, not the accumulated text: a run that emits four thousand tokens would otherwise send
+/// four thousand messages of growing length, which is quadratic in the answer's size and would make a long
+/// reply slower to display the longer it got.
+pub const EVENT_AGENT_DELTA: &str = "agent.delta";
+
+/// A run's tool calls, as they happen, so a UI can show work in flight rather than only its result.
+pub const EVENT_AGENT_TOOL: &str = "agent.tool";
+
+/// Runtime → host: may this action proceed?
+///
+/// The counterpart of the TypeScript loop's `onConsent`. A capability check that can only ever deny is not a
+/// permission system, it is a wall — the runtime has to be able to ask, and only the host can put the question
+/// to a person.
+pub const HOST_REQUEST_CONSENT: &str = "host.consent";
+
+/// Runtime → host: put these questions to the user and return their answers.
+///
+/// The counterpart of the TypeScript loop's `onAsk`. The runtime cannot render a dialog and must not guess an
+/// answer, so `ask_user` is a tool whose implementation is the host's.
+pub const HOST_REQUEST_ASK: &str = "host.ask";
+
+/// A run's turn boundaries, so a UI can show a turn opening and what it cost.
+pub const EVENT_AGENT_TURN: &str = "agent.turn";
+
 /// A background process ended, for any reason including a kill this runtime performed.
 ///
 /// `code` and `signal` carry Node's shape (`null` for whichever does not apply). `output` is the whole
@@ -669,4 +747,65 @@ mod tests {
         let r: Request = serde_json::from_str(r#"{"id":1,"method":"tool.list"}"#).unwrap();
         assert!(!r.is_notification());
     }
+}
+
+// ── agent.run (TODO §2.1) ─────────────────────────────────────────────────────────────────────────
+
+/// Everything needed to reach the provider for one run.
+///
+/// Sent per run rather than configured once, because a session can switch models mid-conversation and the
+/// credentials belong to the host: the runtime holds them for the length of a request and never persists them.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ProviderParams {
+    pub endpoint: String,
+    #[serde(default)]
+    pub api_key: String,
+    pub model: String,
+    /// Provider fields for the thinking configuration, spread into the request body.
+    ///
+    /// Supplied rather than computed: which spelling a model family wants is the host's existing
+    /// `thinkingParams` decision, and a second implementation would give the two request paths two answers.
+    #[serde(default)]
+    pub thinking_params: Value,
+    #[serde(default)]
+    pub stream: bool,
+    #[serde(default)]
+    pub supports_per_turn_reasoning_effort: bool,
+}
+
+/// Run one agent turn inside the runtime.
+#[derive(Debug, Clone, Deserialize)]
+pub struct AgentRunParams {
+    /// The host's handle for this run, so it can be cancelled by the same id it was started with.
+    pub run_id: String,
+    /// The workspace tool calls are scoped to.
+    pub workdir: String,
+    pub provider: ProviderParams,
+    /// The conversation so far, in the provider's message shape.
+    pub messages: Vec<Value>,
+    /// Tool declarations, already in the provider's shape. Empty means the run has no tools.
+    #[serde(default)]
+    pub tools: Vec<Value>,
+    /// Provider turns allowed in this run. Absent is unbounded.
+    #[serde(default)]
+    pub max_turns: Option<u32>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct AgentRunResult {
+    /// Why the run ended: `completed`, `cancelled`, `error`, `doom-loop`, `max-turns`, …
+    pub stop_reason: String,
+    /// Human-readable detail, when there is any.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+    /// The last assistant text — what a caller shows the user.
+    pub content: String,
+    /// Provider turns issued.
+    pub rounds: u32,
+    /// Tool calls executed across every round.
+    pub tool_calls: u32,
+    /// The conversation as it now stands, including everything the loop appended.
+    pub messages: Vec<Value>,
+    pub prompt_tokens: u64,
+    pub completion_tokens: u64,
 }

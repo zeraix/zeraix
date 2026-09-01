@@ -11,12 +11,18 @@ path = "src/main.rs"
 
 [dependencies]
 agent-core = { workspace = true }
+agent-journal = { workspace = true }
+agent-dispatch = { workspace = true }
+agent-provider = { workspace = true }
+agent-loop = { workspace = true }
 agent-tools = { workspace = true }
 agent-process = { workspace = true }
+agent-sandbox = { workspace = true }
 agent-mcp = { workspace = true }
 agent-subagents = { workspace = true }
 agent-scheduler = { workspace = true }
 agent-resource = { workspace = true }
+agent-audit = { workspace = true }
 agent-events = { workspace = true }
 agent-permission = { workspace = true }
 agent-ipc = { workspace = true }
@@ -27,6 +33,7 @@ serde_json = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 anyhow = { workspace = true }
+async-trait = { workspace = true }
 dashmap = { workspace = true }
 
 [dev-dependencies]

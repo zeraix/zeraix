@@ -16,6 +16,7 @@
 //! Where an exact match is impossible without reimplementing a JS or ICU behaviour, the divergence is
 //! named in a comment at the site and covered by the A/B harness rather than left to be discovered.
 
+pub mod edittext;
 pub mod glob;
 pub mod nodeerr;
 pub mod registry;

@@ -20,7 +20,13 @@ struct Runtime {
 
 impl Runtime {
     fn start() -> Self {
+        Self::start_with(&[])
+    }
+
+    /// Start with extra command-line arguments — `--state-dir`, for the recovery tests.
+    fn start_with(args: &[&str]) -> Self {
         let mut child = Command::new(env!("CARGO_BIN_EXE_zeraix-agent-runtime"))
+            .args(args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
@@ -39,6 +45,13 @@ impl Runtime {
         writeln!(self.stdin, "{msg}").unwrap();
         self.stdin.flush().unwrap();
         id
+    }
+
+    /// Answer a request the RUNTIME made of us. Same shape `serve_until` writes.
+    fn reply(&mut self, id: serde_json::Value, result: serde_json::Value) {
+        let msg = serde_json::json!({ "id": id, "result": result });
+        writeln!(self.stdin, "{msg}").unwrap();
+        self.stdin.flush().unwrap();
     }
 
     /// Write a notification (no id, no reply).
@@ -93,6 +106,14 @@ impl Runtime {
 
     fn init(&mut self) -> serde_json::Value {
         self.call("runtime.initialize", serde_json::json!({ "protocol_version": "1.0", "client": "test" }))
+    }
+
+    /// Handshake declaring which roots the user approved — the ceiling every tool call is decided against.
+    fn init_with_roots(&mut self, roots: &[&str]) -> serde_json::Value {
+        self.call(
+            "runtime.initialize",
+            serde_json::json!({ "protocol_version": "1.1", "client": "test", "workspace_roots": roots }),
+        )
     }
 }
 
@@ -236,13 +257,16 @@ fn requests_are_served_concurrently() {
     );
     let fast_id = rt.send("runtime.status", serde_json::json!({}));
 
-    let first = rt.read();
+    // `read_reply` rather than `read`: since the event bridge landed, `runtime.event` notifications share
+    // this stream and can arrive before either answer. The claim under test is about the order of REPLIES —
+    // that the cheap one is not stuck behind the expensive one — and notifications say nothing about it.
+    let first = rt.read_reply();
     assert_eq!(
         first["id"].as_u64(),
         Some(fast_id),
         "the cheap request should not have queued behind the expensive one"
     );
-    let second = rt.read();
+    let second = rt.read_reply();
     assert_eq!(second["id"].as_u64(), Some(slow_id));
 }
 
@@ -602,7 +626,16 @@ fn await_mcp_ready(rt: &mut Runtime, id: &str) -> serde_json::Value {
 fn an_mcp_server_connects_declares_and_serves_a_call() {
     let Some((node, script)) = mcp_fixture() else { return };
     let mut rt = Runtime::start();
-    rt.init();
+    // Approved, because MCP enforcement is unconditional (§0.2 F7): connecting a server is not the
+    // same as being allowed to call it.
+    rt.call(
+        "runtime.initialize",
+        serde_json::json!({
+            "protocol_version": "1.1",
+            "client": "test",
+            "approved_mcp_servers": ["fix"]
+        }),
+    );
 
     let accepted = rt.call(
         "mcp.connect",
@@ -646,7 +679,16 @@ fn an_mcp_server_connects_declares_and_serves_a_call() {
 fn a_tool_that_reports_an_error_is_still_delivered() {
     let Some((node, script)) = mcp_fixture() else { return };
     let mut rt = Runtime::start();
-    rt.init();
+    // Approved, because MCP enforcement is unconditional (§0.2 F7): connecting a server is not the
+    // same as being allowed to call it.
+    rt.call(
+        "runtime.initialize",
+        serde_json::json!({
+            "protocol_version": "1.1",
+            "client": "test",
+            "approved_mcp_servers": ["fix"]
+        }),
+    );
     rt.call(
         "mcp.connect",
         serde_json::json!({
@@ -1008,4 +1050,1216 @@ fn a_cancel_that_arrives_first_is_not_lost() {
             break;
         }
     }
+}
+
+// ── Crash recovery (TODO §10.3) ───────────────────────────────────────────────────────────────────
+
+/// A runtime started with no state directory must behave exactly as it always has.
+#[test]
+fn a_runtime_without_a_state_directory_reports_no_recovered_work() {
+    let mut rt = Runtime::start();
+    let r = rt.init();
+    // Absent rather than empty: the field is skipped when there is nothing in it, so a host that predates
+    // recovery sees the same handshake it always saw.
+    assert!(r["result"].get("recovered").is_none(), "unexpected: {}", r["result"]);
+}
+
+/// The end-to-end shape of §10.3: a task that was running when the process died is reported at the next
+/// handshake, and reported as *interrupted* — never as work that is safe to run again.
+#[test]
+fn work_interrupted_by_a_killed_runtime_is_reported_at_the_next_handshake() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let state = dir.path().to_str().expect("utf-8 path");
+
+    {
+        let mut rt = Runtime::start_with(&["--state-dir", state]);
+        rt.init();
+        // A long command, then a kill before it can finish. A command is the right illustration: it is the
+        // case where re-running the recovered task would actually do something to the machine a second time.
+        rt.send(
+            "process.run",
+            serde_json::json!({ "command": slow_command(30), "timeout_ms": 60_000, "call_id": "doomed" }),
+        );
+        // Give it long enough to be admitted and started, then kill without shutting down.
+        std::thread::sleep(Duration::from_millis(400));
+        rt.child.kill().expect("kill the runtime");
+        let _ = rt.child.wait();
+        std::mem::forget(rt); // Drop would try to shut down a process that is already gone.
+    }
+
+    let mut rt = Runtime::start_with(&["--state-dir", state]);
+    let r = rt.init();
+    let recovered = &r["result"]["recovered"];
+    assert!(!recovered.is_null(), "the second handshake must report the first run: {}", r["result"]);
+    let interrupted = recovered["interrupted"].as_array().expect("interrupted array");
+    assert_eq!(interrupted.len(), 1, "expected one interrupted task, got {recovered}");
+    assert_eq!(recovered["resumable"].as_array().map(|a| a.len()), Some(0));
+    assert_eq!(recovered["clean_shutdown"], false);
+}
+
+/// Recovery is reported once. A restart that re-reported the same interrupted task forever would make the
+/// warning meaningless, and nothing in a later process can ever settle a task whose body died two runs ago.
+#[test]
+fn a_recovered_journal_is_rotated_so_the_next_start_is_clean() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let state = dir.path().to_str().expect("utf-8 path");
+
+    {
+        let mut rt = Runtime::start_with(&["--state-dir", state]);
+        rt.init();
+        rt.send(
+            "process.run",
+            serde_json::json!({ "command": slow_command(30), "timeout_ms": 60_000, "call_id": "doomed" }),
+        );
+        std::thread::sleep(Duration::from_millis(400));
+        rt.child.kill().expect("kill the runtime");
+        let _ = rt.child.wait();
+        std::mem::forget(rt);
+    }
+
+    // Second start: reports the interruption.
+    {
+        let mut rt = Runtime::start_with(&["--state-dir", state]);
+        let r = rt.init();
+        assert!(!r["result"]["recovered"].is_null(), "the first restart must report it");
+    }
+
+    // Third start: the journal was rotated, so there is nothing left to report.
+    let mut rt = Runtime::start_with(&["--state-dir", state]);
+    let r = rt.init();
+    assert!(
+        r["result"].get("recovered").is_none(),
+        "the same interruption must not be reported forever: {}",
+        r["result"]
+    );
+}
+
+/// A clean stop is not a crash, however much work was in flight when it began.
+#[test]
+fn a_runtime_that_shuts_down_cleanly_leaves_nothing_to_recover() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let state = dir.path().to_str().expect("utf-8 path");
+
+    {
+        let mut rt = Runtime::start_with(&["--state-dir", state]);
+        rt.init();
+        rt.call("tool.call", serde_json::json!({
+            "name": "file_info",
+            "args": { "path": "Cargo.toml" },
+            "workdir": ".",
+            "call_id": "quick"
+        }));
+        rt.call("runtime.shutdown", serde_json::json!({}));
+        std::thread::sleep(Duration::from_millis(200));
+    }
+
+    let mut rt = Runtime::start_with(&["--state-dir", state]);
+    let r = rt.init();
+    assert!(r["result"].get("recovered").is_none(), "a clean stop leaves nothing: {}", r["result"]);
+}
+
+// ── Runtime events (TODO §3.3, §6.3, §10.1, §10.2) ────────────────────────────────────────────────
+
+/// The bus has existed since the scheduler landed and had no subscriber outside the runtime. This is the
+/// bridge that makes §10.2's event list something a host can actually receive.
+#[test]
+fn the_runtime_pushes_task_events_for_work_the_host_asked_for() {
+    let mut rt = Runtime::start();
+    rt.init();
+    rt.send(
+        "tool.call",
+        serde_json::json!({
+            "name": "file_info",
+            "args": { "path": "Cargo.toml" },
+            "workdir": ".",
+            "call_id": "c1"
+        }),
+    );
+
+    // Read past the reply, not up to it. The tool's answer is written when the CALL finishes; the scheduler
+    // publishes `task_completed` when it settles the task afterwards, so a loop that stopped at the reply
+    // would assert on a set of events that is genuinely incomplete at that instant.
+    let mut kinds: Vec<String> = Vec::new();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !kinds.iter().any(|k| k == "task_completed") {
+        assert!(Instant::now() < deadline, "no task_completed within the deadline; saw {kinds:?}");
+        let msg = rt.read();
+        if msg["method"] == "runtime.event" {
+            if let Some(kind) = msg["params"]["type"].as_str() {
+                kinds.push(kind.to_owned());
+            }
+        }
+    }
+
+    for expected in ["task_submitted", "task_started", "task_completed"] {
+        assert!(kinds.iter().any(|k| k == expected), "{expected} missing from {kinds:?}");
+    }
+}
+
+/// `seq` is what lets a host detect a gap rather than merely be told it lagged, so it has to be monotonic.
+#[test]
+fn runtime_events_carry_a_monotonic_sequence_number() {
+    let mut rt = Runtime::start();
+    rt.init();
+    for i in 0..3 {
+        rt.send(
+            "tool.call",
+            serde_json::json!({
+                "name": "file_info",
+                "args": { "path": "Cargo.toml" },
+                "workdir": ".",
+                "call_id": format!("c{i}")
+            }),
+        );
+    }
+
+    // Wait for EVENTS, not for replies. A reply is written when its call finishes; the scheduler publishes
+    // the task's settle afterwards, so a loop that stopped at the third reply would sometimes have seen only
+    // two events and sometimes nine — which is how this test was flaky before.
+    const WANTED: usize = 6;
+    let mut seqs: Vec<u64> = Vec::new();
+    let deadline = Instant::now() + Duration::from_secs(20);
+    while seqs.len() < WANTED {
+        assert!(Instant::now() < deadline, "only saw {} events: {seqs:?}", seqs.len());
+        let msg = rt.read();
+        if msg["method"] == "runtime.event" {
+            if let Some(seq) = msg["params"]["seq"].as_u64() {
+                seqs.push(seq);
+            }
+        }
+    }
+
+    assert!(seqs.windows(2).all(|w| w[0] < w[1]), "sequence numbers must increase: {seqs:?}");
+}
+
+/// The feature is advertised, so a host routes on capability rather than on version.
+#[test]
+fn the_event_bridge_is_announced_as_a_feature() {
+    let mut rt = Runtime::start();
+    let r = rt.init();
+    let features = r["result"]["features"].as_array().expect("features");
+    assert!(features.iter().any(|f| f == "runtime.events"), "{features:?}");
+}
+
+/// A host that sends no approved roots must behave exactly as it did before the field existed.
+#[test]
+fn a_handshake_without_approved_roots_is_accepted_and_grants_nothing() {
+    let mut rt = Runtime::start();
+    let r = rt.call(
+        "runtime.initialize",
+        serde_json::json!({ "protocol_version": "1.0", "client": "test" }),
+    );
+    assert_eq!(r["result"]["protocol_version"], "1.1");
+    // Nothing to assert about the grant from out here — what matters is that the absence of the field is not
+    // an error, which is what keeps an older host working against a newer runtime.
+    assert!(r["error"].is_null());
+}
+
+#[test]
+fn approved_roots_are_accepted_at_the_handshake() {
+    let mut rt = Runtime::start();
+    let r = rt.call(
+        "runtime.initialize",
+        serde_json::json!({
+            "protocol_version": "1.1",
+            "client": "test",
+            "workspace_roots": ["/tmp/approved"]
+        }),
+    );
+    assert!(r["error"].is_null(), "{r}");
+    assert_eq!(r["result"]["runtime_version"], RUNTIME_VERSION_FOR_TEST);
+}
+
+/// Kept beside the test that uses it so a version bump does not silently make the assertion vacuous.
+const RUNTIME_VERSION_FOR_TEST: &str = "0.1.0";
+
+// ── agent.run: the whole turn inside the runtime (TODO §2.1) ──────────────────────────────────────
+
+/// A provider that answers from a script, on a real socket, in a background thread.
+///
+/// Deliberately not a mock inside the process: the point of `agent.run` is that the SIDECAR holds the turn,
+/// so the model has to be something the sidecar can actually reach over the network.
+fn fake_provider(replies: Vec<String>) -> (String, std::thread::JoinHandle<()>) {
+    use std::io::Read;
+    use std::net::TcpListener;
+
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    let handle = std::thread::spawn(move || {
+        for (i, reply) in replies.into_iter().enumerate() {
+            let Ok((mut socket, _)) = listener.accept() else { return };
+            // Read the request headers and body far enough to let the client finish writing.
+            let mut buf = [0u8; 8192];
+            let _ = socket.read(&mut buf);
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                reply.len(),
+                reply
+            );
+            let _ = std::io::Write::write_all(&mut socket, response.as_bytes());
+            let _ = std::io::Write::flush(&mut socket);
+            let _ = i;
+        }
+    });
+    (format!("http://{addr}/v1/chat/completions"), handle)
+}
+
+/// An SSE provider: one `data:` frame per chunk, then `[DONE]`.
+fn sse_provider(chunks: Vec<&str>) -> (String, std::thread::JoinHandle<()>) {
+    use std::io::Read;
+    use std::net::TcpListener;
+
+    let mut body = String::new();
+    for c in chunks {
+        let frame = serde_json::json!({ "choices": [{ "delta": { "content": c } }] });
+        body.push_str(&format!("data: {frame}\n\n"));
+    }
+    body.push_str("data: [DONE]\n\n");
+
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+    let addr = listener.local_addr().expect("addr");
+    let handle = std::thread::spawn(move || {
+        let Ok((mut socket, _)) = listener.accept() else { return };
+        let mut buf = [0u8; 8192];
+        let _ = socket.read(&mut buf);
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        );
+        let _ = std::io::Write::write_all(&mut socket, response.as_bytes());
+        let _ = std::io::Write::flush(&mut socket);
+    });
+    (format!("http://{addr}/v1/chat/completions"), handle)
+}
+
+fn assistant_text(text: &str) -> String {
+    serde_json::json!({
+        "choices": [{ "message": { "content": text } }],
+        "usage": { "prompt_tokens": 11, "completion_tokens": 7 }
+    })
+    .to_string()
+}
+
+fn assistant_tool_call(id: &str, name: &str, args: serde_json::Value) -> String {
+    serde_json::json!({
+        "choices": [{ "message": { "content": "", "tool_calls": [
+            { "id": id, "function": { "name": name, "arguments": args.to_string() } }
+        ]}}],
+        "usage": { "prompt_tokens": 5, "completion_tokens": 3 }
+    })
+    .to_string()
+}
+
+fn run_params(endpoint: &str, workdir: &str, run_id: &str, messages: serde_json::Value) -> serde_json::Value {
+    serde_json::json!({
+        "run_id": run_id,
+        "workdir": workdir,
+        "provider": { "endpoint": endpoint, "model": "test-model" },
+        "messages": messages,
+        "max_turns": 8
+    })
+}
+
+#[test]
+fn the_runtime_runs_a_whole_agent_turn_without_the_host_driving_it() {
+    let (endpoint, _server) = fake_provider(vec![assistant_text("the answer is 42")]);
+    let mut rt = Runtime::start();
+    rt.init();
+
+    let r = rt.call(
+        "agent.run",
+        run_params(&endpoint, ".", "run-1", serde_json::json!([{ "role": "user", "content": "what is it" }])),
+    );
+    let result = &r["result"];
+    assert!(r["error"].is_null(), "{r}");
+    assert_eq!(result["stop_reason"], "completed");
+    assert_eq!(result["content"], "the answer is 42");
+    assert_eq!(result["rounds"], 1);
+    assert_eq!(result["tool_calls"], 0);
+    assert_eq!(result["prompt_tokens"], 11);
+    // The transcript comes back with the assistant turn appended.
+    let messages = result["messages"].as_array().expect("messages");
+    assert_eq!(messages.len(), 2);
+    assert_eq!(messages[1]["role"], "assistant");
+}
+
+/// The whole cycle: the model asks for a tool, the RUNTIME runs it, and the model answers from its result.
+#[test]
+fn a_tool_call_is_executed_by_the_runtime_and_fed_back_to_the_model() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    std::fs::write(dir.path().join("note.txt"), "the file says hello").unwrap();
+
+    let (endpoint, _server) = fake_provider(vec![
+        assistant_tool_call("c1", "read_file", serde_json::json!({ "path": "note.txt" })),
+        assistant_text("it says hello"),
+    ]);
+    let mut rt = Runtime::start();
+    // The workdir is approved, so the loop's tool calls are inside the ceiling. Without this the run is
+    // denied — see `a_tool_call_outside_the_approved_roots_is_denied_inside_the_run`.
+    rt.init_with_roots(&[dir.path().to_str().unwrap()]);
+
+    let r = rt.call(
+        "agent.run",
+        run_params(
+            &endpoint,
+            dir.path().to_str().unwrap(),
+            "run-2",
+            serde_json::json!([{ "role": "user", "content": "read note.txt" }]),
+        ),
+    );
+    let result = &r["result"];
+    assert!(r["error"].is_null(), "{r}");
+    assert_eq!(result["stop_reason"], "completed");
+    assert_eq!(result["rounds"], 2, "one round to call the tool, one to answer");
+    assert_eq!(result["tool_calls"], 1);
+
+    // user, assistant+call, tool result, assistant — in the order it happened.
+    let messages = result["messages"].as_array().expect("messages");
+    let roles: Vec<&str> = messages.iter().map(|m| m["role"].as_str().unwrap_or("")).collect();
+    assert_eq!(roles, vec!["user", "assistant", "tool", "assistant"]);
+    assert!(
+        messages[2]["content"].as_str().unwrap_or("").contains("the file says hello"),
+        "the tool's real output must reach the model: {}",
+        messages[2]["content"]
+    );
+    // Usage is summed across every round of the turn, not just the last.
+    assert_eq!(result["prompt_tokens"], 16);
+}
+
+/// A turn stopped by its own limit is reported as stopped, not as finished.
+#[test]
+fn a_run_that_hits_its_turn_cap_says_so_rather_than_reporting_success() {
+    let looping: Vec<String> = (0..12)
+        .map(|i| assistant_tool_call(&format!("c{i}"), "file_info", serde_json::json!({ "path": "." })))
+        .collect();
+    let (endpoint, _server) = fake_provider(looping);
+    let mut rt = Runtime::start();
+    rt.init();
+
+    let mut params = run_params(&endpoint, ".", "run-3", serde_json::json!([{ "role": "user", "content": "go" }]));
+    params["max_turns"] = serde_json::json!(3);
+    let r = rt.call("agent.run", params);
+    let result = &r["result"];
+    let reason = result["stop_reason"].as_str().unwrap_or("");
+    assert!(reason == "max-turns" || reason == "doom-loop", "unexpected reason: {reason} in {result}");
+    assert_ne!(reason, "completed", "a run cut short must never read as finished");
+}
+
+/// Stop reaches a run the same way it reaches every other kind of work.
+#[test]
+fn a_run_is_cancellable_by_the_id_it_was_started_with() {
+    // The provider never answers, so the run is still waiting when the cancel arrives.
+    let (endpoint, _server) = fake_provider(vec![]);
+    let mut rt = Runtime::start();
+    rt.init();
+
+    let run_id = rt.send(
+        "agent.run",
+        run_params(&endpoint, ".", "run-4", serde_json::json!([{ "role": "user", "content": "go" }])),
+    );
+    std::thread::sleep(Duration::from_millis(300));
+    rt.send("call.cancel", serde_json::json!({ "call_id": "run-4" }));
+
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        assert!(Instant::now() < deadline, "the run did not answer after being cancelled");
+        let msg = rt.read();
+        if msg["id"].as_u64() == Some(run_id) && !msg["method"].is_string() {
+            // Either a cancelled stop reason or a transport failure is acceptable — the provider was
+            // killed mid-request. What must NOT happen is the run reporting success.
+            let reason = msg["result"]["stop_reason"].as_str().unwrap_or("");
+            assert_ne!(reason, "completed", "a cancelled run must not report success: {msg}");
+            break;
+        }
+    }
+}
+
+/// The permission ceiling is enforced on the agent path too, and a denial does not end the turn.
+///
+/// This is what fail-closed looks like from the outside: a host that approves nothing gets a runtime whose
+/// agent can call no tools, rather than one that quietly runs them.
+#[test]
+fn a_tool_call_outside_the_approved_roots_is_denied_inside_the_run() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    std::fs::write(dir.path().join("note.txt"), "SHOULD NOT BE READABLE").unwrap();
+
+    let (endpoint, _server) = fake_provider(vec![
+        assistant_tool_call("c1", "read_file", serde_json::json!({ "path": "note.txt" })),
+        assistant_text("I could not read it"),
+    ]);
+    let mut rt = Runtime::start();
+    // No approved roots at all.
+    rt.init();
+
+    let r = rt.call(
+        "agent.run",
+        run_params(
+            &endpoint,
+            dir.path().to_str().unwrap(),
+            "run-5",
+            serde_json::json!([{ "role": "user", "content": "read note.txt" }]),
+        ),
+    );
+    let result = &r["result"];
+    let messages = result["messages"].as_array().expect("messages");
+    let tool_result = messages[2]["content"].as_str().unwrap_or("");
+    assert!(tool_result.contains("Permission denied"), "{tool_result}");
+    assert!(!tool_result.contains("SHOULD NOT BE READABLE"), "the file leaked: {tool_result}");
+    // The turn continues: a denial is something the model answers, not something that aborts the run.
+    assert_eq!(result["stop_reason"], "completed");
+    assert_eq!(result["content"], "I could not read it");
+}
+
+/// The host needs to know which tools change something, or a lost reply becomes a second edit.
+#[test]
+fn the_handshake_names_the_tools_that_mutate() {
+    let mut rt = Runtime::start();
+    let r = rt.init();
+    let result = &r["result"];
+
+    let tools = result["tools"].as_array().expect("tools");
+    for expected in ["write_file", "edit_file"] {
+        assert!(tools.iter().any(|t| t == expected), "{expected} missing from {tools:?}");
+    }
+
+    let mutating = result["mutating_tools"].as_array().expect("mutating_tools");
+    for expected in ["write_file", "edit_file"] {
+        assert!(mutating.iter().any(|t| t == expected), "{expected} missing from {mutating:?}");
+    }
+    // And the read-only ones are NOT in it — a host that treated every tool as unsafe to retry would lose
+    // the fallback that makes the sidecar optional.
+    for read_only in ["read_file", "list_directory", "file_info", "search_files", "search_in_files"] {
+        assert!(!mutating.iter().any(|t| t == read_only), "{read_only} must not be listed as mutating");
+    }
+}
+
+/// The mutating tools work over the real protocol, with their guarantees intact.
+#[test]
+fn write_file_and_edit_file_work_over_the_wire_and_preserve_the_files_newlines() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let workdir = dir.path().to_str().expect("utf-8 path");
+    std::fs::write(dir.path().join("crlf.txt"), "one\r\ntwo\r\n").unwrap();
+
+    let mut rt = Runtime::start();
+    rt.init();
+
+    let r = rt.call(
+        "tool.call",
+        serde_json::json!({
+            "name": "write_file",
+            "args": { "path": "new.txt", "content": "hello\n" },
+            "workdir": workdir,
+            "call_id": "w1"
+        }),
+    );
+    assert_eq!(r["result"]["ok"], true, "{r}");
+    assert_eq!(std::fs::read_to_string(dir.path().join("new.txt")).unwrap(), "hello\n");
+
+    // The model sends LF; the CRLF file must stay CRLF.
+    let r = rt.call(
+        "tool.call",
+        serde_json::json!({
+            "name": "edit_file",
+            "args": { "path": "crlf.txt", "old_string": "one\ntwo", "new_string": "one\nTWO" },
+            "workdir": workdir,
+            "call_id": "e1"
+        }),
+    );
+    assert_eq!(r["result"]["ok"], true, "{r}");
+    assert_eq!(std::fs::read_to_string(dir.path().join("crlf.txt")).unwrap(), "one\r\nTWO\r\n");
+}
+
+// ── MCP permission (TODO §4.1, §12) ───────────────────────────────────────────────────────────────
+
+/// MCP reached the outside world without the capability check every native tool passes. It does not now —
+/// but only once the host has said what it approves.
+///
+/// Uses a genuinely CONNECTED server, because existence is checked before permission (a typo should be
+/// reported as a typo, not as a refusal — the order `agent-dispatch` established). Denial is therefore only
+/// observable on a server that is actually there.
+#[test]
+fn a_connected_but_unapproved_mcp_server_is_denied_and_nothing_is_sent() {
+    let Some((node, script)) = mcp_fixture() else { return };
+    let mut rt = Runtime::start();
+    // A policy IS declared, and it approves a DIFFERENT server than the one connected below.
+    rt.call(
+        "runtime.initialize",
+        serde_json::json!({
+            "protocol_version": "1.1",
+            "client": "test",
+            "approved_mcp_servers": ["something-else"]
+        }),
+    );
+
+    rt.call(
+        "mcp.connect",
+        serde_json::json!({
+            "id": "fix",
+            "command": node,
+            "args": [script],
+            "env": std::env::vars().collect::<Vec<_>>(),
+        }),
+    );
+    await_mcp_ready(&mut rt, "fix");
+
+    let r = rt.call(
+        "mcp.call",
+        serde_json::json!({ "server": "fix", "tool": "echo", "args": {}, "call_id": "m1" }),
+    );
+    let result = &r["result"];
+    assert_eq!(result["delivered"], false, "a denied call must not reach the server: {result}");
+    let error = result["error"].as_str().unwrap_or("");
+    assert!(error.contains("Permission denied"), "{error}");
+    assert!(error.contains("Nothing was sent"), "{error}");
+}
+
+/// The same server, approved, reaches the server it was denied to before.
+#[test]
+fn an_approved_mcp_server_is_reached() {
+    let Some((node, script)) = mcp_fixture() else { return };
+    let mut rt = Runtime::start();
+    rt.call(
+        "runtime.initialize",
+        serde_json::json!({
+            "protocol_version": "1.1",
+            "client": "test",
+            "approved_mcp_servers": ["fix"]
+        }),
+    );
+    rt.call(
+        "mcp.connect",
+        serde_json::json!({
+            "id": "fix",
+            "command": node,
+            "args": [script],
+            "env": std::env::vars().collect::<Vec<_>>(),
+        }),
+    );
+    await_mcp_ready(&mut rt, "fix");
+
+    let r = rt.call(
+        "mcp.call",
+        serde_json::json!({ "server": "fix", "tool": "echo", "args": { "text": "hi" }, "call_id": "m2" }),
+    );
+    let error = r["result"]["error"].as_str().unwrap_or("");
+    assert!(!error.contains("Permission denied"), "an approved server must pass the check: {r}");
+}
+
+/// A host that declares nothing has no MCP tools. The gate that used to exempt it is gone (§0.2 F7).
+///
+/// This is the deliberate cost of making §12's "MCP must not bypass Runtime Permission" unconditional: it is
+/// not a property that can hold for some hosts and not others.
+#[test]
+fn a_host_that_declared_no_policy_has_no_mcp_access_at_all() {
+    let Some((node, script)) = mcp_fixture() else { return };
+    let mut rt = Runtime::start();
+    rt.init(); // no workspace_roots, no approved_mcp_servers // no workspace_roots, no approved_mcp_servers
+
+    rt.call(
+        "mcp.connect",
+        serde_json::json!({
+            "id": "fix",
+            "command": node,
+            "args": [script],
+            "env": std::env::vars().collect::<Vec<_>>(),
+        }),
+    );
+    await_mcp_ready(&mut rt, "fix");
+
+    let r = rt.call(
+        "mcp.call",
+        serde_json::json!({ "server": "fix", "tool": "echo", "args": {}, "call_id": "m2" }),
+    );
+    let result = &r["result"];
+    assert_eq!(result["delivered"], false, "a connected but unapproved server must not be reached");
+    assert!(
+        result["error"].as_str().unwrap_or("").contains("Permission denied"),
+        "{result}"
+    );
+}
+
+// ── Pause and resume over the wire (TODO §2.1) ────────────────────────────────────────────────────
+
+#[test]
+fn pause_and_resume_are_announced_as_a_feature() {
+    let mut rt = Runtime::start();
+    let r = rt.init();
+    let features = r["result"]["features"].as_array().expect("features");
+    assert!(features.iter().any(|f| f == "task.pause"), "{features:?}");
+}
+
+/// Pausing work that has already started is a question with a legitimate negative answer.
+#[test]
+fn pausing_a_running_call_answers_no_rather_than_failing() {
+    let dir = big_tree(600);
+    let mut rt = Runtime::start();
+    rt.init();
+
+    rt.send(
+        "tool.call",
+        serde_json::json!({
+            "name": "search_in_files",
+            "args": { "query": "zzz-appears-nowhere-zzz" },
+            "workdir": dir.path(),
+            "call_id": "slow-1"
+        }),
+    );
+    // Long enough to be admitted and started.
+    std::thread::sleep(Duration::from_millis(200));
+
+    let r = rt.call("task.pause", serde_json::json!({ "call_id": "slow-1" }));
+    assert!(r["error"].is_null(), "a refusal must be an answer, not a protocol error: {r}");
+    assert_eq!(r["result"]["ok"], false, "a running call is not pausable");
+}
+
+#[test]
+fn pausing_an_unknown_call_is_answered_rather_than_failing() {
+    let mut rt = Runtime::start();
+    rt.init();
+    let r = rt.call("task.pause", serde_json::json!({ "call_id": "never-existed" }));
+    assert!(r["error"].is_null(), "{r}");
+    assert_eq!(r["result"]["ok"], false);
+    assert_eq!(r["result"]["reason"], "no such call");
+}
+
+// ── Sandbox and command hardening (TODO §4.2, §11, §12) ───────────────────────────────────────────
+
+/// The differential proof: the SAME command, unconfined and confined.
+///
+/// Asserting that a policy struct has the right shape proves nothing about the kernel. This runs a real
+/// command that reads a real secret outside the workspace, twice, and the only difference is whether the host
+/// declared a policy.
+#[test]
+#[cfg(target_os = "linux")]
+fn a_command_cannot_read_outside_the_approved_roots_when_a_policy_is_declared() {
+    // NOT under /tmp: `FilesystemPolicy::workspace` makes the whole of /tmp writable, because build tools
+    // need temp space — so a "secret" placed there is legitimately inside the allowlist and the test would be
+    // asserting against its own fixture rather than against the sandbox.
+    let base = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("sandbox-differential");
+    let _ = std::fs::remove_dir_all(&base);
+    let workspace = base.join("proj");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let secret = base.join("secret.txt");
+    std::fs::write(&secret, "SHOULD-NOT-BE-READABLE").unwrap();
+    let cmd = format!("cat {}", secret.display());
+
+    // Unconfined: the host declared nothing, so nothing is enforced and the read succeeds. This half is what
+    // makes the other half meaningful — without it, a failure could just mean the command was wrong.
+    let unconfined = {
+        let mut rt = Runtime::start();
+        rt.init();
+        let r = rt.call(
+            "process.run",
+            serde_json::json!({ "command": cmd, "cwd": workspace.to_str().unwrap(), "timeout_ms": 20000 }),
+        );
+        r["result"]["stdout"].as_str().unwrap_or("").to_owned()
+    };
+    if !unconfined.contains("SHOULD-NOT-BE-READABLE") {
+        // The unconfined read did not work, so this machine cannot demonstrate the difference. Skipping is
+        // honest; asserting would certify a boundary the test never actually observed.
+        eprintln!("skipping: the unconfined read did not succeed, so there is no difference to measure");
+        return;
+    }
+
+    // Confined: the same command, with only the workspace approved.
+    let mut rt = Runtime::start();
+    rt.init_with_roots(&[workspace.to_str().unwrap()]);
+    let r = rt.call(
+        "process.run",
+        serde_json::json!({ "command": cmd, "cwd": workspace.to_str().unwrap(), "timeout_ms": 20000 }),
+    );
+    let stdout = r["result"]["stdout"].as_str().unwrap_or("");
+    assert!(
+        !stdout.contains("SHOULD-NOT-BE-READABLE"),
+        "the sandbox did not confine the command; it read: {stdout}"
+    );
+}
+
+/// A command inside the approved roots must still work — confinement that breaks the build is not a feature.
+#[test]
+fn a_command_inside_the_approved_roots_still_runs() {
+    let base = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("sandbox-inside");
+    let _ = std::fs::remove_dir_all(&base);
+    let workspace = base.join("proj");
+    std::fs::create_dir_all(&workspace).unwrap();
+    std::fs::write(workspace.join("inside.txt"), "READABLE").unwrap();
+
+    let mut rt = Runtime::start();
+    rt.init_with_roots(&[workspace.to_str().unwrap()]);
+    let r = rt.call(
+        "process.run",
+        serde_json::json!({
+            "command": "cat inside.txt",
+            "cwd": workspace.to_str().unwrap(),
+            "timeout_ms": 20000
+        }),
+    );
+    assert!(
+        r["result"]["stdout"].as_str().unwrap_or("").contains("READABLE"),
+        "confinement must not break work inside the workspace: {}",
+        r["result"]
+    );
+}
+
+/// §12's command-injection row.
+///
+/// `run_command` takes a shell command line by design — the model is *supposed* to be able to write
+/// `a && b`, and calling that "injection" would be calling the feature a vulnerability. What must hold is
+/// narrower and is what these check: the shell metacharacters a model emits are passed through to the shell
+/// as written, they cannot escape the sandbox, and they cannot reach the protocol.
+#[test]
+fn shell_metacharacters_are_executed_as_written_and_do_not_corrupt_the_protocol() {
+    let mut rt = Runtime::start();
+    rt.init();
+
+    // Quotes, newlines, NUL-adjacent bytes and JSON metacharacters in the OUTPUT must not break the stream:
+    // the protocol is newline-delimited JSON, and a command that prints a newline-laden blob is ordinary.
+    let cases = [
+        (r#"echo 'a"b'"#, "a\"b"),
+        ("printf 'one\ntwo\n'", "one"),
+        (r#"echo '{"id":1,"method":"runtime.shutdown"}'"#, "runtime.shutdown"),
+        ("echo $((1+1))", "2"),
+    ];
+    for (command, expected) in cases {
+        let r = rt.call(
+            "process.run",
+            serde_json::json!({ "command": command, "timeout_ms": 20000 }),
+        );
+        let stdout = r["result"]["stdout"].as_str().unwrap_or("");
+        assert!(stdout.contains(expected), "{command} → {stdout:?}");
+    }
+
+    // The runtime is still alive and answering: a command that printed a protocol frame did not inject one.
+    let status = rt.call("runtime.status", serde_json::json!({}));
+    assert_eq!(status["result"]["protocol_version"], "1.1", "the stream was corrupted by command output");
+}
+
+/// A command that fails is a result, not a protocol error — the same contract the JS path has.
+#[test]
+fn a_command_that_exits_non_zero_is_reported_rather_than_thrown() {
+    let mut rt = Runtime::start();
+    rt.init();
+    let r = rt.call("process.run", serde_json::json!({ "command": "exit 3", "timeout_ms": 20000 }));
+    assert!(r["error"].is_null(), "{r}");
+    assert_eq!(r["result"]["code"], 3);
+}
+
+// ── Audit (TODO §11) ──────────────────────────────────────────────────────────────────────────────
+
+/// `agent-audit` was complete and depended on by nothing. It is now subscribed to the bus, and its numbers
+/// reach the host.
+#[test]
+fn runtime_status_reports_metrics_derived_from_the_event_stream() {
+    let mut rt = Runtime::start();
+    rt.init();
+    for i in 0..3 {
+        rt.call(
+            "tool.call",
+            serde_json::json!({
+                "name": "file_info",
+                "args": { "path": "Cargo.toml" },
+                "workdir": ".",
+                "call_id": format!("m{i}")
+            }),
+        );
+    }
+    // The settle events arrive after the replies, so give the bus a moment to drain.
+    std::thread::sleep(Duration::from_millis(200));
+
+    let r = rt.call("runtime.status", serde_json::json!({}));
+    let metrics = &r["result"]["metrics"];
+    assert!(!metrics.is_null(), "metrics missing from status: {}", r["result"]);
+    // Percentiles, not averages: a mean hides the tail, which is the interesting part.
+    let scheduling = &metrics["scheduling_latency_ms"];
+    assert!(scheduling["count"].as_u64().unwrap_or(0) >= 3, "expected samples, got {scheduling}");
+}
+
+/// An MCP call is recorded whether or not it reached the server.
+#[test]
+fn an_mcp_call_publishes_an_audit_event_even_when_it_is_refused() {
+    let mut rt = Runtime::start();
+    rt.init();
+    rt.send(
+        "mcp.call",
+        serde_json::json!({ "server": "not-connected", "tool": "x", "args": {}, "call_id": "mc1" }),
+    );
+
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        assert!(Instant::now() < deadline, "no mcp_called event arrived");
+        let msg = rt.read();
+        if msg["method"] == "runtime.event" && msg["params"]["type"] == "mcp_called" {
+            assert_eq!(msg["params"]["server"], "not-connected");
+            assert_eq!(msg["params"]["delivered"], false);
+            return;
+        }
+    }
+}
+
+/// A command's confinement is recorded as a decision, not an intention.
+#[test]
+fn a_command_publishes_what_actually_confined_it() {
+    let mut rt = Runtime::start();
+    rt.init();
+    rt.send("process.run", serde_json::json!({ "command": "echo audited", "timeout_ms": 20000, "call_id": "s1" }));
+
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        assert!(Instant::now() < deadline, "no sandbox_decided event arrived");
+        let msg = rt.read();
+        if msg["method"] == "runtime.event" && msg["params"]["type"] == "sandbox_decided" {
+            // "not requested" and "requested and unavailable" are different facts; both are recorded.
+            assert!(msg["params"]["filesystem"].is_string(), "{msg}");
+            assert!(msg["params"]["network"].is_string(), "{msg}");
+            return;
+        }
+    }
+}
+
+// ── Token streaming (TODO §10.1, M8) ──────────────────────────────────────────────────────────────
+
+#[test]
+fn streaming_is_announced_as_a_feature() {
+    let mut rt = Runtime::start();
+    let r = rt.init();
+    let features = r["result"]["features"].as_array().expect("features");
+    assert!(features.iter().any(|f| f == "agent.stream"), "{features:?}");
+}
+
+/// Tokens reach the host while the run is still going, as INCREMENTS rather than growing snapshots.
+#[test]
+fn a_streamed_run_pushes_its_tokens_as_they_arrive() {
+    let (endpoint, _server) = sse_provider(vec!["Hel", "lo ", "world"]);
+    let mut rt = Runtime::start();
+    rt.init();
+
+    let run_id = rt.send(
+        "agent.run",
+        serde_json::json!({
+            "run_id": "stream-1",
+            "workdir": ".",
+            "provider": { "endpoint": endpoint, "model": "test-model", "stream": true },
+            "messages": [{ "role": "user", "content": "hi" }],
+            "max_turns": 4
+        }),
+    );
+
+    let mut pieces: Vec<String> = Vec::new();
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        assert!(Instant::now() < deadline, "the run never answered; deltas so far: {pieces:?}");
+        let msg = rt.read();
+        if msg["method"] == "agent.delta" {
+            assert_eq!(msg["params"]["run_id"], "stream-1");
+            pieces.push(msg["params"]["content"].as_str().unwrap_or("").to_owned());
+            continue;
+        }
+        if msg["id"].as_u64() == Some(run_id) && !msg["method"].is_string() {
+            assert_eq!(msg["result"]["content"], "Hello world");
+            break;
+        }
+    }
+
+    assert!(pieces.len() > 1, "expected several deltas, got {pieces:?}");
+    // Increments, not snapshots: concatenating them reconstructs the answer exactly once. A stream that sent
+    // the accumulation would concatenate to "HelHello Hello world".
+    assert_eq!(pieces.concat(), "Hello world", "deltas must be increments: {pieces:?}");
+}
+
+/// A non-streamed run must not push deltas at all.
+#[test]
+fn a_run_that_did_not_ask_for_streaming_pushes_no_deltas() {
+    let (endpoint, _server) = fake_provider(vec![assistant_text("all at once")]);
+    let mut rt = Runtime::start();
+    rt.init();
+
+    let run_id = rt.send(
+        "agent.run",
+        run_params(&endpoint, ".", "quiet-1", serde_json::json!([{ "role": "user", "content": "hi" }])),
+    );
+
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        assert!(Instant::now() < deadline, "the run never answered");
+        let msg = rt.read();
+        assert_ne!(msg["method"], "agent.delta", "a non-streamed run must not push deltas");
+        if msg["id"].as_u64() == Some(run_id) && !msg["method"].is_string() {
+            assert_eq!(msg["result"]["content"], "all at once");
+            break;
+        }
+    }
+}
+
+// ── Consent and tool events (TODO §2.1: what the loop needs from a host) ──────────────────────────
+
+/// A capability check that can only ever deny is a wall, not a permission system.
+///
+/// The runtime asks the host, and the host's answer decides. This is the counterpart of the TypeScript loop's
+/// `onConsent`, and without it switching the app onto `agent.run` would silently lose every consent prompt.
+#[test]
+fn a_denied_tool_asks_the_host_and_honours_a_yes() {
+    let base = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("consent-yes");
+    let _ = std::fs::remove_dir_all(&base);
+    let workspace = base.join("proj");
+    std::fs::create_dir_all(&workspace).unwrap();
+
+    let (endpoint, _server) = fake_provider(vec![
+        assistant_tool_call(
+            "c1",
+            "write_file",
+            serde_json::json!({ "path": "written.txt", "content": "APPROVED-CONTENT\n" }),
+        ),
+        assistant_text("wrote it"),
+    ]);
+
+    let mut rt = Runtime::start();
+    // A write INSIDE the approved root: permitted by the ceiling, and gated on a human. A capability the
+    // ceiling forbids is denied outright and never escalated, so it could not exercise consent at all.
+    rt.call(
+        "runtime.initialize",
+        serde_json::json!({
+            "protocol_version": "1.1",
+            "client": "test",
+            "workspace_roots": [workspace.to_str().unwrap()],
+            "require_approval_for_mutations": true
+        }),
+    );
+
+    let run_id = rt.send(
+        "agent.run",
+        run_params(
+            &endpoint,
+            workspace.to_str().unwrap(),
+            "consent-1",
+            serde_json::json!([{ "role": "user", "content": "read it" }]),
+        ),
+    );
+
+    let mut asked = false;
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        assert!(Instant::now() < deadline, "the run never answered (asked={asked})");
+        let msg = rt.read();
+        // A request FROM the runtime: it has an id AND a method.
+        if msg["method"] == "host.consent" && msg["id"].is_number() {
+            asked = true;
+            assert_eq!(msg["params"]["capability"], "filesystem.write");
+            let id = msg["id"].clone();
+            rt.reply(id, serde_json::json!({ "approved": true }));
+            continue;
+        }
+        if msg["id"].as_u64() == Some(run_id) && !msg["method"].is_string() {
+            assert!(asked, "the runtime denied without ever asking the host");
+            assert_eq!(
+                std::fs::read_to_string(workspace.join("written.txt")).unwrap_or_default(),
+                "APPROVED-CONTENT\n",
+                "a granted consent must let the call through"
+            );
+            break;
+        }
+    }
+}
+
+/// And a no is a no — the file is not read.
+#[test]
+fn a_host_that_refuses_consent_stops_the_call() {
+    let base = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("consent-no");
+    let _ = std::fs::remove_dir_all(&base);
+    let workspace = base.join("proj");
+    std::fs::create_dir_all(&workspace).unwrap();
+
+    let (endpoint, _server) = fake_provider(vec![
+        assistant_tool_call(
+            "c1",
+            "write_file",
+            serde_json::json!({ "path": "refused.txt", "content": "SHOULD-NOT-EXIST\n" }),
+        ),
+        assistant_text("could not"),
+    ]);
+
+    let mut rt = Runtime::start();
+    rt.call(
+        "runtime.initialize",
+        serde_json::json!({
+            "protocol_version": "1.1",
+            "client": "test",
+            "workspace_roots": [workspace.to_str().unwrap()],
+            "require_approval_for_mutations": true
+        }),
+    );
+    let run_id = rt.send(
+        "agent.run",
+        run_params(
+            &endpoint,
+            workspace.to_str().unwrap(),
+            "consent-2",
+            serde_json::json!([{ "role": "user", "content": "read it" }]),
+        ),
+    );
+
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        assert!(Instant::now() < deadline, "the run never answered");
+        let msg = rt.read();
+        if msg["method"] == "host.consent" && msg["id"].is_number() {
+            rt.reply(msg["id"].clone(), serde_json::json!({ "approved": false }));
+            continue;
+        }
+        if msg["id"].as_u64() == Some(run_id) && !msg["method"].is_string() {
+            assert!(
+                !workspace.join("refused.txt").exists(),
+                "a refused consent must stop the write; the file was created anyway"
+            );
+            break;
+        }
+    }
+}
+
+/// A UI needs to show work in flight, not only its result.
+#[test]
+fn a_run_pushes_tool_activity_as_it_happens() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    std::fs::write(dir.path().join("note.txt"), "contents").unwrap();
+
+    let (endpoint, _server) = fake_provider(vec![
+        assistant_tool_call("c1", "read_file", serde_json::json!({ "path": "note.txt" })),
+        assistant_text("done"),
+    ]);
+    let mut rt = Runtime::start();
+    rt.init_with_roots(&[dir.path().to_str().unwrap()]);
+
+    let run_id = rt.send(
+        "agent.run",
+        run_params(
+            &endpoint,
+            dir.path().to_str().unwrap(),
+            "tools-1",
+            serde_json::json!([{ "role": "user", "content": "read it" }]),
+        ),
+    );
+
+    let mut phases: Vec<String> = Vec::new();
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        assert!(Instant::now() < deadline, "the run never answered; phases {phases:?}");
+        let msg = rt.read();
+        if msg["method"] == "agent.tool" {
+            assert_eq!(msg["params"]["run_id"], "tools-1");
+            assert_eq!(msg["params"]["name"], "read_file");
+            phases.push(msg["params"]["phase"].as_str().unwrap_or("").to_owned());
+            continue;
+        }
+        if msg["id"].as_u64() == Some(run_id) && !msg["method"].is_string() {
+            break;
+        }
+    }
+    assert_eq!(phases, vec!["start", "end"], "a tool must be announced before it runs, not only after");
+}
+
+/// `ask_user` is a tool whose implementation is a person, so the runtime forwards it and waits.
+///
+/// The last of the loop's host callbacks (§0.2 F9). Without it, a model that needs to ask something would get
+/// "unknown tool" and answer its own question.
+#[test]
+fn ask_user_is_forwarded_to_the_host_and_its_answer_reaches_the_model() {
+    let (endpoint, _server) = fake_provider(vec![
+        assistant_tool_call(
+            "c1",
+            "ask_user",
+            serde_json::json!({ "questions": [{ "question": "Which database?" }] }),
+        ),
+        assistant_text("using postgres then"),
+    ]);
+    let mut rt = Runtime::start();
+    rt.init();
+
+    let run_id = rt.send(
+        "agent.run",
+        run_params(&endpoint, ".", "ask-1", serde_json::json!([{ "role": "user", "content": "set it up" }])),
+    );
+
+    let mut asked = false;
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        assert!(Instant::now() < deadline, "the run never answered (asked={asked})");
+        let msg = rt.read();
+        if msg["method"] == "host.ask" && msg["id"].is_number() {
+            asked = true;
+            assert_eq!(msg["params"]["questions"][0]["question"], "Which database?");
+            rt.reply(msg["id"].clone(), serde_json::json!({ "answers": ["postgres"] }));
+            continue;
+        }
+        if msg["id"].as_u64() == Some(run_id) && !msg["method"].is_string() {
+            assert!(asked, "the runtime never put the question to the host");
+            let messages = msg["result"]["messages"].as_array().expect("messages");
+            let answer = messages[2]["content"].as_str().unwrap_or("");
+            assert!(answer.contains("postgres"), "the user's answer must reach the model: {answer}");
+            break;
+        }
+    }
+}
+
+/// A host that cannot ask leaves the model needing to proceed without an answer — and told so.
+#[test]
+fn a_question_the_host_cannot_answer_is_reported_to_the_model_rather_than_ending_the_run() {
+    let (endpoint, _server) = fake_provider(vec![
+        assistant_tool_call("c1", "ask_user", serde_json::json!({ "questions": [] })),
+        assistant_text("proceeded anyway"),
+    ]);
+    let mut rt = Runtime::start();
+    rt.init();
+
+    let run_id = rt.send(
+        "agent.run",
+        run_params(&endpoint, ".", "ask-2", serde_json::json!([{ "role": "user", "content": "go" }])),
+    );
+
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        assert!(Instant::now() < deadline, "the run never answered");
+        let msg = rt.read();
+        if msg["method"] == "host.ask" && msg["id"].is_number() {
+            // Answer with an ERROR, as a host with no UI would. `HostReply::error` is a STRING — sending an
+            // object here fails to decode, and the runtime then waits out the full ask timeout on a reply it
+            // could not read.
+            let reply = serde_json::json!({ "id": msg["id"], "error": "no UI available" });
+            writeln!(rt.stdin, "{reply}").unwrap();
+            rt.stdin.flush().unwrap();
+            continue;
+        }
+        if msg["id"].as_u64() == Some(run_id) && !msg["method"].is_string() {
+            assert_eq!(msg["result"]["stop_reason"], "completed", "a failed question must not end the run");
+            break;
+        }
+    }
+}
+
+/// Turn boundaries, so a UI can show a turn opening and what it cost.
+#[test]
+fn a_run_pushes_its_turn_boundaries() {
+    let (endpoint, _server) = fake_provider(vec![assistant_text("done")]);
+    let mut rt = Runtime::start();
+    rt.init();
+
+    let run_id = rt.send(
+        "agent.run",
+        run_params(&endpoint, ".", "turn-1", serde_json::json!([{ "role": "user", "content": "hi" }])),
+    );
+
+    let mut phases: Vec<String> = Vec::new();
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        assert!(Instant::now() < deadline, "the run never answered; phases {phases:?}");
+        let msg = rt.read();
+        if msg["method"] == "agent.turn" {
+            assert_eq!(msg["params"]["run_id"], "turn-1");
+            phases.push(msg["params"]["phase"].as_str().unwrap_or("").to_owned());
+            continue;
+        }
+        if msg["id"].as_u64() == Some(run_id) && !msg["method"].is_string() {
+            break;
+        }
+    }
+    assert_eq!(phases, vec!["start", "end"], "a turn must be announced before the request, not only after");
 }

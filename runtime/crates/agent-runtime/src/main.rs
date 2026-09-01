@@ -13,6 +13,20 @@ use agent_ipc::transport::StdioTransport;
 use std::sync::Arc;
 use tracing_subscriber::EnvFilter;
 
+/// Read `--state-dir <path>` (or `--state-dir=<path>`) from the command line.
+fn state_dir_arg() -> Option<std::path::PathBuf> {
+    let args: Vec<String> = std::env::args().collect();
+    for (i, arg) in args.iter().enumerate() {
+        if let Some(value) = arg.strip_prefix("--state-dir=") {
+            return Some(value.into());
+        }
+        if arg == "--state-dir" {
+            return args.get(i + 1).map(Into::into);
+        }
+    }
+    None
+}
+
 fn main() -> anyhow::Result<()> {
     // Explicitly to stderr: a log line on stdout would be parsed as a protocol frame and corrupt the
     // stream for everything after it.
@@ -29,25 +43,41 @@ fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
+    // `--state-dir <path>`: where the task journal lives, so an interrupted run can be reported at the next
+    // handshake. Supplied by the host because only it knows the app's user-data directory. Absent — the
+    // parity harness, a manual run — the runtime works exactly as before, with no durability and nothing to
+    // recover.
+    let state_dir = state_dir_arg();
+
     let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
     let result = runtime.block_on(async {
-        tracing::info!(version = server::RUNTIME_VERSION, "agent runtime starting");
-        let server = Arc::new(server::Server::new());
+        tracing::info!(version = server::RUNTIME_VERSION, state_dir = ?state_dir, "agent runtime starting");
+        let server = Arc::new(match &state_dir {
+            Some(dir) => server::Server::with_state_dir(dir).await,
+            None => server::Server::new(),
+        });
         let result = server.run(StdioTransport::new()).await;
         tracing::info!("agent runtime stopped");
         result
     });
 
-    // Bounded shutdown, because dropping the runtime can otherwise block forever on Windows.
+    // Do not wait for the blocking pool at all.
     //
-    // Tokio wraps child stdio in `Blocking` there — Windows pipes cannot be polled, so a read runs on
-    // the blocking pool and, once started, cannot be cancelled. Dropping a runtime waits for that pool.
-    // A background service whose grandchild outlived the kill still holds its stdout, so the read never
-    // returns and the process never exits: the host then waits out its own shutdown timeout and kills
-    // the sidecar, which works but reads as a hang. This makes the exit the runtime's own decision.
+    // Dropping a runtime waits for it, and on Windows that can be forever: tokio wraps child stdio in
+    // `Blocking` there — Windows pipes cannot be polled, so a read runs on the blocking pool and, once
+    // started, cannot be cancelled. A background service whose grandchild outlived the kill still holds its
+    // stdout, so the read never returns and the process never exits.
     //
-    // Everything that must be flushed has been by this point: the transport writes and flushes per
-    // message, and `run` has already stopped services and shut the scheduler down.
-    runtime.shutdown_timeout(std::time::Duration::from_secs(2));
+    // The first fix was `shutdown_timeout(2s)`, which bounded that. Measurement showed it did not merely bound
+    // the bad case — it cost two seconds on EVERY exit (`scripts/runtime-bench.mjs shutdown` reported a p50 of
+    // 2008ms, which is the constant, not a coincidence). The reason is `tokio::io::stdin()`: it is also a
+    // blocking read, and after `runtime.shutdown` the host has not closed the pipe, so it never returns and the
+    // full grace period elapses on a perfectly clean stop. Two seconds on every quit reads to the user as a
+    // hang, which is the failure that timeout existed to prevent.
+    //
+    // Not waiting is safe because there is nothing left to wait FOR: the transport writes and flushes per
+    // message, and `run` has already stopped the background services and shut the scheduler down. The only
+    // task still alive is the stdin read, and its result is a request nobody will answer.
+    runtime.shutdown_background();
     result
 }

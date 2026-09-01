@@ -14,13 +14,20 @@
  * asarUnpack when packaging) and explicitly avoided a second time by choosing node:sqlite over
  * better-sqlite3 -- see the header of electron/automation/db.mjs.
  *
- * ## Fail open, always
+ * ## Fail open is GONE (TODO §0.2 F1, decided 2026-09-01)
  *
- * Every failure mode here -- binary missing, spawn refused, protocol mismatch, crash mid-call, a tool
- * the runtime does not implement -- resolves to `null`, which means "the JS handler serves this call".
- * The runtime can therefore be absent, broken, or a version behind, and the app behaves exactly as it
- * did before it existed. That property is what makes the default below safe: a PACKAGED app now runs the
- * sidecar by default, while development and the test harness stay on the JS handlers. See flagState().
+ * This module used to resolve every failure -- binary missing, spawn refused, protocol mismatch, crash
+ * mid-call -- to `null`, meaning "the JS handler serves this call". That made the sidecar optional: it could be
+ * absent, broken or a version behind and the app behaved exactly as before.
+ *
+ * The JS handlers for every migrated tool have been deleted, so there is nothing left to fall back to. A
+ * failure here is now a failure the model sees, and a runtime that will not start is an app that cannot read a
+ * file or run a command. That is the decision the roadmap asked for -- §3's "core tool execution must no longer
+ * bypass Rust Runtime through direct Electron / JavaScript execution" cannot be true while a second
+ * implementation is sitting behind it -- and it is worth being plain about what it costs.
+ *
+ * `null` still means "not served here", but it now means it only for tools the runtime genuinely does not
+ * implement (an MCP tool, a plugin tool, `append_file`), which still have handlers of their own.
  *
  * ## Except once a command is running: then never fall back (Stage 2)
  *
@@ -37,6 +44,7 @@
  * not start. The model sees a command that failed, never a command that silently happened twice.
  */
 import { spawn } from "node:child_process";
+import { createRequire } from "node:module";
 import fs from "node:fs";
 import path from "node:path";
 import process from "node:process";
@@ -57,45 +65,20 @@ const INIT_TIMEOUT_MS = 10_000;
 const MAX_SPAWN_FAILURES = 3;
 
 /**
- * Is this a PACKAGED app, as opposed to `electron .` in development or a plain node process?
- *
- * Deliberately NOT `app.isPackaged`. This module imports node builtins and nothing else, because it is
- * loaded outside Electron in two places that matter: the test suite reaches it through aiToolkit.mjs, and
- * scripts/ab-runtime-parity.mjs imports it directly to drive both implementations. An
- * `import { app } from "electron"` here would break each of them, and the breakage would look like a
- * module-resolution error a long way from this decision.
- *
- * The two signals below cover the three environments exactly. `process.versions.electron` is absent under
- * plain node, so the harness and the tests answer false. `process.defaultApp` is set only when Electron was
- * launched with a path argument — which is what `electron .` does and what a packaged binary never does.
- * Packaged is therefore the one combination of "running under Electron" and "not launched as a dev app".
- */
-function isPackaged() {
-  return Boolean(process.versions.electron) && !process.defaultApp;
-}
-
-/**
  * Feature flag. Default ON in a packaged app, OFF in development and under plain node.
  *
- * The default flipped once the fail-open property below had been demonstrated rather than assumed: a
- * missing binary, a refused spawn, a protocol mismatch, a crash mid-call and an unimplemented tool all
- * resolve to `null`, which routes the call to the JS handler. Turning it on by default therefore changes
- * which implementation SERVES a call, never whether the call is served.
- *
- * Development stays off so that `npm run electron:dev` keeps exercising the JS handlers — they remain the
- * reference implementation the parity harness diffs against, and a dev build that silently used the
- * sidecar would stop testing them. `npm run electron:dev:rust` opts in.
- *
- * The env var overrides the default in BOTH directions, which is the point of recognising the off values:
- * a packaged build now runs the sidecar by default, so there has to be a way to turn it off in the field
- * without shipping a new installer. `ZERAIX_RUST_RUNTIME=off` is that switch.
+ * `ZERAIX_RUST_RUNTIME=off` is a DEBUGGING switch, not a supported configuration. It used to be the field
+ * escape hatch — flip it off and a bad sidecar fell back to the JS handlers — but those handlers are gone, so
+ * turning the runtime off now turns off every file tool and every command. It is kept because being able to
+ * start the app with the sidecar out of the picture is useful when diagnosing the sidecar; recovering from a
+ * broken one means shipping a fixed binary, not setting this.
  *
  * `shadow` used to be accepted here and returned as its own state, described as "run both, compare, still
  * return the JS answer". Nothing implemented that, and `ensureStarted` only refuses on `"off"` — so the
  * value behaved EXACTLY like `on`: real calls went to the sidecar and the sidecar's answer was returned.
  * A flag whose safest-sounding setting silently enables the thing is worse than no flag, so it is refused
- * outright and says why. Shadow comparison lives in scripts/ab-runtime-parity.mjs, which runs both
- * implementations against the same tree and diffs every byte.
+ * outright and says why. There is no longer a second implementation to compare it against either — see
+ * scripts/runtime-smoke.mjs, which checks the sidecar serves what the app needs.
  */
 function flagState() {
   const raw = String(process.env.ZERAIX_RUST_RUNTIME ?? "").trim().toLowerCase();
@@ -104,11 +87,19 @@ function flagState() {
   if (raw === "shadow") {
     console.warn(
       "[rust-runtime] ZERAIX_RUST_RUNTIME=shadow is not implemented and is being treated as OFF. " +
-        "For a side-by-side comparison run scripts/ab-runtime-parity.mjs.",
+        "There is no second implementation to compare against since 2.0; run scripts/runtime-smoke.mjs to " +
+        "check the sidecar serves what the app needs.",
     );
     return "off";
   }
-  return isPackaged() ? "on" : "off";
+  // On everywhere, because there is no longer anything to fall back TO.
+  //
+  // While the JS handlers existed this defaulted to packaged-only, so development and the test suite
+  // exercised the JS path and a packaged build exercised the sidecar. Deleting those handlers (TODO §0.2 F1,
+  // decided 2026-09-01) removes the alternative: a runtime that is off is a runtime with no file tools and no
+  // commands at all. `ZERAIX_RUST_RUNTIME=0` still forces it off, which is now a debugging switch rather than
+  // a supported configuration.
+  return "on";
 }
 
 /** Where the compiled sidecar lives: packaged beside the app, or in the cargo target dir during development. */
@@ -152,6 +143,45 @@ export function onEvent(method, handler) {
 }
 
 /**
+ * Subscribers to the runtime's structured state changes (`runtime.event`).
+ *
+ * A list rather than the single handler `onEvent` keeps, because these have several legitimate consumers at
+ * once — a UI showing what the agent is doing, the usage log, an audit view — and they should not have to
+ * cooperate over one slot.
+ */
+const runtimeEventListeners = new Set();
+
+/**
+ * Listen to every structured state change the runtime publishes.
+ *
+ * Payloads are the runtime's own event shape, tagged with `type` (`task_started`, `tool_completed`,
+ * `permission_decided`, …) and carrying a monotonic `seq`. **The sequence is what makes a gap visible**: the
+ * runtime drops events rather than buffering them when a consumer falls behind, because these drive
+ * presentation and a queue of stale transitions is worse than a hole. A listener that cares can watch `seq`
+ * for jumps; one that does not can ignore it safely.
+ *
+ * Returns an unsubscribe function.
+ */
+export function onRuntimeEvent(listener) {
+  runtimeEventListeners.add(listener);
+  return () => runtimeEventListeners.delete(listener);
+}
+
+// Registered on the module rather than per connection, for the reason the other handlers are: it has to
+// survive a sidecar restart. A listener that had to re-subscribe after every crash would miss exactly the
+// events that explain the crash.
+onEvent("runtime.event", (params) => {
+  for (const listener of runtimeEventListeners) {
+    try {
+      listener(params);
+    } catch (e) {
+      // One bad listener must not stop the others, and must never propagate into the read loop.
+      console.warn("[rust-runtime] a runtime.event listener threw:", e?.message ?? e);
+    }
+  }
+});
+
+/**
  * Handlers for runtime→host REQUESTS, by method name.
  *
  * A request differs from an event in one way that matters: the runtime is waiting. Every path below
@@ -160,14 +190,29 @@ export function onEvent(method, handler) {
 const requestHandlers = new Map();
 
 /**
+ * Of those, the ones the runtime can call WITHOUT the host having a request outstanding.
+ *
+ * The distinction decides whether the host must stay alive merely because it registered a handler. A
+ * sub-agent body is asked for long after `subagent.spawn` returned, so its handler has to hold the loop open.
+ * `host.consent` and `host.ask` can only arrive while an `agent.run` is in flight — which is an outbound call
+ * that already holds it open — so counting them would keep every host running forever.
+ *
+ * That is not hypothetical: registering the consent and ask handlers at module load made `requestHandlers`
+ * permanently non-empty, and every test file that touched the runtime stopped exiting.
+ */
+const unpromptedHandlers = new Set();
+
+/**
  * Answer requests the runtime makes.
  *
  * The handler returns a value, which becomes the reply; throwing sends an error instead. Registered
  * per method for the same reason events are: exactly one part of the host is responsible for a given
  * question, and a fan-out would make "who answered" ambiguous.
  */
-export function onRequest(method, handler) {
+export function onRequest(method, handler, { keepsHostAlive = true } = {}) {
   requestHandlers.set(method, handler);
+  if (keepsHostAlive) unpromptedHandlers.add(method);
+  else unpromptedHandlers.delete(method);
   // Applied immediately: the point of registering is that a call may arrive at any moment after it.
   if (state) updateRefs(state);
   return () => {
@@ -223,16 +268,17 @@ async function serveRuntimeRequest(s, msg) {
  * None, and its request loop breaks — which is the same path `runtime.shutdown` takes.
  */
 function updateRefs(s) {
-  // Outbound calls are not the only reason to stay alive. Once the runtime can call US — which is what
-  // registering a request handler declares — the host must remain running to answer, even with nothing
-  // of its own outstanding.
+  // Outbound calls are not the only reason to stay alive. Once the runtime can call US *unprompted* — which
+  // is what registering an unprompted handler declares — the host must remain running to answer, even with
+  // nothing of its own outstanding. A handler that can only fire during an outbound call does not count: the
+  // call itself is already holding the loop open, and counting it would mean the host never exits.
   //
   // Without this, a sub-agent spawn resolves, the last pending call clears, everything is unref'd, and a
   // short-lived host drains its event loop while the runtime is midway through asking it to run the
   // delegation. Electron never notices (the app holds the loop open regardless); a test or a script
   // exits, and node reports it as "Promise resolution is still pending but the event loop has already
   // resolved" — which names neither the connection nor the request that never arrived.
-  const busy = s.pending.size > 0 || requestHandlers.size > 0;
+  const busy = s.pending.size > 0 || unpromptedHandlers.size > 0;
   for (const handle of [s.child, s.child.stdin, s.child.stdout, s.child.stderr]) {
     try {
       if (busy) handle?.ref?.();
@@ -381,6 +427,159 @@ function notify(s, method, params) {
   }
 }
 
+/**
+ * Where the sidecar keeps its task journal, so an interrupted run can be reported at the next handshake.
+ *
+ * Under Electron this is the app's user-data directory, which is the only per-install writable location the
+ * host can name. Outside it -- the test suite, the parity harness -- there is no such directory and no reason
+ * to want one, so no argument is passed and the runtime starts without durability, exactly as before.
+ *
+ * `app` is resolved lazily for the reason given at the top of this module: this file is loaded under plain
+ * node in two places, and a static `import { app } from "electron"` would break both. `createRequire` is used
+ * rather than a dynamic `import()` because this function is synchronous and its caller is the spawn path.
+ */
+function stateDirArgs() {
+  if (!process.versions.electron) return [];
+  try {
+    const { app } = createRequire(import.meta.url)("electron");
+    const dir = path.join(app.getPath("userData"), "runtime-state");
+    return ["--state-dir", dir];
+  } catch (e) {
+    // No Electron app object (a preload-less context, a stubbed harness). Logged rather than swallowed: this
+    // is the difference between "durability is off because nobody asked for it" and "durability is off and
+    // nobody noticed", and only the second one is a bug.
+    console.warn("[rust-runtime] no state directory; the runtime will start without durability:", e?.message ?? e);
+    return [];
+  }
+}
+
+/**
+ * What a previous run left unfinished, from the last handshake. `null` until one has happened.
+ *
+ * Kept rather than merely logged because the decision it needs is not this module's: `interrupted` tasks may
+ * already have changed the user's machine, and whether repeating one is safe depends on what it was.
+ */
+let recovered = null;
+
+/** Log what the last run left behind. Interrupted work is a warning; queued work is not. */
+function reportRecovered(plan) {
+  if (!plan) return;
+  const queued = plan.resumable?.length ?? 0;
+  const started = plan.interrupted?.length ?? 0;
+  if (started > 0) {
+    console.warn(
+      `[rust-runtime] ${started} task(s) were RUNNING when the previous runtime stopped and may have had ` +
+        `side effects; they are reported, never re-run: ` +
+        plan.interrupted.map((t) => `${t.label} (${t.id})`).join(", "),
+    );
+  }
+  if (queued > 0) {
+    console.info(`[rust-runtime] ${queued} task(s) were queued and never started when the previous runtime stopped`);
+  }
+  if (plan.torn_tail || plan.corrupt_lines) {
+    console.warn(
+      `[rust-runtime] the task journal was damaged (torn tail: ${!!plan.torn_tail}, ` +
+        `unreadable lines: ${plan.corrupt_lines ?? 0}); recovery used the readable part`,
+    );
+  }
+}
+
+/**
+ * Subscribers to a run's tokens as they arrive (`agent.delta`).
+ *
+ * Keyed by nothing: a listener receives every run's deltas and filters on `run_id` itself. One dispatch rather
+ * than a registry, because a UI showing one conversation and a log recording all of them want different
+ * subsets and neither is the natural owner of the map.
+ */
+const agentDeltaListeners = new Set();
+
+/**
+ * Listen to tokens from `agent.run`, as they are generated.
+ *
+ * Each payload is `{ run_id, content, reasoning }` carrying the INCREMENT since the last one — appending them
+ * in order reconstructs the reply exactly once. The runtime flushes every delta before it answers the run, so a
+ * listener never sees the finished text before the tokens that make it up.
+ *
+ * Returns an unsubscribe function.
+ */
+export function onAgentDelta(listener) {
+  agentDeltaListeners.add(listener);
+  return () => agentDeltaListeners.delete(listener);
+}
+
+onEvent("agent.delta", (params) => {
+  for (const listener of agentDeltaListeners) {
+    try {
+      listener(params);
+    } catch (e) {
+      console.warn("[rust-runtime] an agent.delta listener threw:", e?.message ?? e);
+    }
+  }
+});
+
+/**
+ * Answer the runtime's questions.
+ *
+ * `host.consent` and `host.ask` are REQUESTS, not events: the runtime is waiting, and a turn is blocked until
+ * one of these returns. Both therefore have a safe default — deny, and no answers — so a host that has not
+ * registered a handler still lets the run continue rather than stalling it until the runtime's timeout.
+ *
+ * Registering these is what makes `agent.run` usable by the app: without them a run can never take a gated
+ * action and can never ask a question.
+ */
+let consentHandler = null;
+let askHandler = null;
+
+/** Decide whether one gated action may proceed. `req` is { capability, resource, call, agent, depth }. */
+export function onConsentRequest(handler) {
+  consentHandler = handler;
+  return () => {
+    if (consentHandler === handler) consentHandler = null;
+  };
+}
+
+/** Put questions to the user. Receives the model's own `ask_user` arguments; returns whatever it answered. */
+export function onAskRequest(handler) {
+  askHandler = handler;
+  return () => {
+    if (askHandler === handler) askHandler = null;
+  };
+}
+
+// `keepsHostAlive: false`: both of these can only arrive while an `agent.run` is in flight, and that call
+// already holds the event loop open. Registering them as unprompted would mean a host that merely imported
+// this module could never exit.
+onRequest(
+  "host.consent",
+  async (params) => {
+  if (!consentHandler) {
+    // Denied rather than stalled. A runtime that cannot ask must not proceed as though it had asked, and a
+    // host with no handler is exactly that case seen from the other side.
+    console.warn("[rust-runtime] a consent request arrived with no handler registered; denying");
+    return { approved: false };
+  }
+    return { approved: Boolean(await consentHandler(params)) };
+  },
+  { keepsHostAlive: false },
+);
+
+onRequest(
+  "host.ask",
+  async (params) => {
+  if (!askHandler) {
+    console.warn("[rust-runtime] a question arrived with no handler registered; answering nothing");
+    return { answers: [] };
+  }
+    return { answers: await askHandler(params) };
+  },
+  { keepsHostAlive: false },
+);
+
+/** What the previous run left unfinished, or null if no handshake has completed. */
+export function recoveredWork() {
+  return recovered;
+}
+
 /** Spawn and handshake. Returns the live state, or null if the runtime is unavailable for any reason. */
 async function ensureStarted() {
   if (disabled || flagState() === "off") return null;
@@ -395,7 +594,7 @@ async function ensureStarted() {
 
   let child;
   try {
-    child = spawn(bin, [], { stdio: ["pipe", "pipe", "pipe"], windowsHide: true });
+    child = spawn(bin, stateDirArgs(), { stdio: ["pipe", "pipe", "pipe"], windowsHide: true });
   } catch (e) {
     if (++spawnFailures >= MAX_SPAWN_FAILURES) disabled = true;
     console.warn("[rust-runtime] spawn failed:", e?.message ?? e);
@@ -403,7 +602,18 @@ async function ensureStarted() {
   }
 
   // `closing` marks a teardown this host asked for, so the exit handler can tell it from a crash.
-  const s = { child, pending: new Map(), buffer: "", tools: new Set(), features: new Set(), nextId: 0, ready: false, closing: false };
+  const s = {
+    child,
+    pending: new Map(),
+    buffer: "",
+    tools: new Set(),
+    /// Of `tools`, those that change something — see tryRunTool's catch.
+    mutatingTools: new Set(),
+    features: new Set(),
+    nextId: 0,
+    ready: false,
+    closing: false,
+  };
   state = s;
 
   child.stdout.setEncoding("utf8");
@@ -441,6 +651,12 @@ async function ensureStarted() {
       INIT_TIMEOUT_MS,
     );
     for (const name of init?.tools ?? []) s.tools.add(name);
+    // Which of them CHANGE something. See tryRunTool: a lost reply means something different for these.
+    for (const name of init?.mutating_tools ?? []) s.mutatingTools.add(name);
+    // Work the LAST run left unfinished. Reported here because this is the only moment it is still
+    // distinguishable from this run's own work -- see the runtime's `with_state_dir`.
+    recovered = init?.recovered ?? null;
+    reportRecovered(recovered);
     // Feature-detected rather than inferred from the version: an additive protocol bump still
     // negotiates against an older binary, so the version alone cannot say whether process.run is there.
     for (const name of init?.features ?? []) s.features.add(name);
@@ -474,6 +690,10 @@ async function ensureStarted() {
  */
 export async function tryRunTool(name, args, { signal, workdir, callId } = {}) {
   const s = await ensureStarted();
+  // `null` still means "not served here" — but only for a tool this runtime genuinely does not implement
+  // (`append_file`, an MCP tool, a plugin tool), which has a handler of its own. When the runtime is DOWN,
+  // `s` is null and every migrated tool falls through to `runTool`'s "runtime is not running" message rather
+  // than to an implementation, because there no longer is one.
   if (!s || !s.tools.has(name)) return null;
   if (!workdir) return null; // no workspace to scope the call to
 
@@ -498,8 +718,24 @@ export async function tryRunTool(name, args, { signal, workdir, callId } = {}) {
     if (res.error?.code === "tool.unsupported_pattern") return null;
     return { ok: Boolean(res.ok), content: String(res.content ?? "") };
   } catch (e) {
-    console.warn(`[rust-runtime] ${name} fell back to the JS handler:`, e?.message ?? e);
-    return null;
+    // A failure is a failure. There is no JS handler behind this any more (TODO §0.2 F1), so returning `null`
+    // would report the tool as unknown rather than as broken — the wrong diagnosis, and one the model would
+    // waste a turn acting on.
+    //
+    // `notSent` still distinguishes the two shapes, because the ADVICE differs: a request that never left this
+    // process definitely did nothing, while one that failed after dispatch may already have taken effect, and
+    // for write_file or edit_file that is the difference between "try again" and "look before you touch it".
+    const why = e?.message ?? String(e);
+    console.warn(`[rust-runtime] ${name} failed:`, why);
+    const mayHaveRun = !e?.notSent && s.mutatingTools.has(name);
+    return {
+      ok: false,
+      content: mayHaveRun
+        ? `${name} could not be completed by the agent runtime: ${why}. It may have already taken effect and ` +
+          `is NOT being retried automatically — read the file to see its current state before deciding what ` +
+          `to do.`
+        : `${name} could not be completed by the agent runtime: ${why}. Nothing ran.`,
+    };
   } finally {
     signal?.removeEventListener("abort", onAbort);
   }
@@ -789,11 +1025,11 @@ export async function warmUp() {
     // Name the actual reason. "Unset" stopped being the only way to be off once packaged builds began
     // defaulting to on: an operator who set ZERAIX_RUST_RUNTIME=off to chase a bug needs to see that
     // their override is the thing in effect, not a default they would then go looking for.
-    const why = process.env.ZERAIX_RUST_RUNTIME ? "ZERAIX_RUST_RUNTIME=off" : "development build";
-    console.info(
-      bin
-        ? `[rust-runtime] disabled (${why}) — a built binary is present; \`npm run electron:dev:rust\` enables it`
-        : `[rust-runtime] disabled (${why}, no binary built)`,
+    // Only an explicit override reaches here now that the default is on everywhere, so the reason is never
+    // ambiguous — but it is still worth naming, because the consequence is severe and easy to forget.
+    console.warn(
+      `[rust-runtime] DISABLED by ZERAIX_RUST_RUNTIME=off${bin ? "" : " (and no binary is built)"} — ` +
+        `no file tools and no command execution will be available. Unset it to restore them.`,
     );
     return { enabled: false, ready: false, tools: [] };
   }

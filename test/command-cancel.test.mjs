@@ -77,3 +77,25 @@ test("the child process is killed, not merely abandoned", async () => {
   await assert.rejects(fs.access(marker), "the child kept running after the abort");
   await fs.rm(dir, { recursive: true, force: true });
 });
+
+/**
+ * Stop pressed while the runtime was still starting.
+ *
+ * `run` checks the signal at its top and then AWAITS the sidecar, so a stop landing during that await reaches
+ * the Node fallback with an already-aborted signal. `addEventListener("abort", …)` does not fire for one of
+ * those, so the child would be spawned with nothing left to kill it and would run to its full timeout —
+ * sixty seconds of a command the user had already stopped, reported as a clean completion.
+ *
+ * This was invisible while the runtime was off by default under plain node: the await returned in
+ * microseconds and the window did not exist. It appeared the moment the runtime became the default.
+ */
+test("a stop that lands before the child is spawned is still a stop", async () => {
+  const ac = new AbortController();
+  ac.abort(); // already aborted, exactly as it would be after a slow sidecar start
+  const started = Date.now();
+  const r = await run(SLEEP_60S, { timeoutMs: 60_000, signal: ac.signal });
+  const elapsed = Date.now() - started;
+
+  assert.ok(elapsed < 5_000, `expected an immediate return, took ${elapsed}ms`);
+  assert.equal(r.canceled, true, "the result must say it was canceled");
+});

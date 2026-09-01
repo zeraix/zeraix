@@ -5,15 +5,21 @@
 #
 # Crate boundaries are deliberate (spec §3): no `runtime.rs` / `utils.rs` catch-alls. A crate is added
 # by the stage that first needs it, so an empty crate never sits in the tree pretending to be a
-# boundary. Still to come: context.
+# boundary.
+#
+# agent-loop is the Agent Loop itself (TODO §2.1). Additive: nothing routes to it yet, the same way the
+# scheduler, the process runtime and the permission runtime each landed a stage before their wiring.
 [workspace]
 resolver = "3"
 members = [
     "crates/agent-audit",
+    "crates/agent-context",
     "crates/agent-core",
+    "crates/agent-dispatch",
     "crates/agent-events",
     "crates/agent-mcp",
     "crates/agent-permission",
+    "crates/agent-provider",
     "crates/agent-process",
     "crates/agent-sandbox",
     "crates/agent-resource",
@@ -21,6 +27,8 @@ members = [
     "crates/agent-subagents",
     "crates/agent-tools",
     "crates/agent-ipc",
+    "crates/agent-journal",
+    "crates/agent-loop",
     "crates/agent-runtime",
 ]
 
@@ -32,10 +40,13 @@ license = "Apache-2.0"
 
 [workspace.dependencies]
 agent-audit = { path = "crates/agent-audit" }
+agent-context = { path = "crates/agent-context" }
 agent-core = { path = "crates/agent-core" }
+agent-dispatch = { path = "crates/agent-dispatch" }
 agent-events = { path = "crates/agent-events" }
 agent-mcp = { path = "crates/agent-mcp" }
 agent-permission = { path = "crates/agent-permission" }
+agent-provider = { path = "crates/agent-provider" }
 agent-process = { path = "crates/agent-process" }
 agent-sandbox = { path = "crates/agent-sandbox" }
 agent-resource = { path = "crates/agent-resource" }
@@ -43,6 +54,8 @@ agent-scheduler = { path = "crates/agent-scheduler" }
 agent-subagents = { path = "crates/agent-subagents" }
 agent-tools = { path = "crates/agent-tools" }
 agent-ipc = { path = "crates/agent-ipc" }
+agent-journal = { path = "crates/agent-journal" }
+agent-loop = { path = "crates/agent-loop" }
 
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "fs", "io-std", "io-util", "sync", "time", "process"] }
 tokio-util = { version = "0.7", features = ["rt"] }

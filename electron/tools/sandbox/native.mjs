@@ -133,6 +133,16 @@ export async function run(cmd, { cwd, timeoutMs, maxBuffer, signal } = {}) {
  * behaves identically.
  */
 function runOnNode(cmd, { cwd, timeoutMs, maxBuffer, signal } = {}) {
+  // Re-checked here, not only in `run`. The two checks look redundant and are not: `run` awaits the sidecar
+  // before reaching this, and the user can press Stop during that await — so a signal that was live at the
+  // top of `run` can be aborted by the time this is called.
+  //
+  // Getting this wrong is silent and expensive. `addEventListener("abort", …)` on an ALREADY-aborted signal
+  // never fires, so the child would be spawned with nothing left to kill it and would run to its full
+  // timeout — sixty seconds of a command the user had already stopped, reported as a normal completion.
+  if (signal?.aborted) {
+    return Promise.resolve({ stdout: "", stderr: "", code: "?", killed: false, canceled: true });
+  }
   return new Promise((resolve) => {
     let canceled = false;
     let timedOut = false;

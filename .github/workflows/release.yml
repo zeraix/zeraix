@@ -166,8 +166,8 @@ jobs:
       # and a Windows-only divergence in search_in_files sat undetected behind a green Linux report
       # until this was first run on Windows. Packaged builds now default to the sidecar, so this is the
       # difference between shipping the JS behaviour and shipping something subtly unlike it.
-      - name: A/B parity
-        run: node --import ./scripts/electron-stub-hook.mjs scripts/ab-runtime-parity.mjs
+      - name: Runtime smoke
+        run: node --import ./scripts/electron-stub-hook.mjs scripts/runtime-smoke.mjs
 
       - name: Check required config
         shell: bash
