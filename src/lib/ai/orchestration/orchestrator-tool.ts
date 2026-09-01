@@ -143,11 +143,28 @@ export interface OrchestratorContext {
   maxTokens?: number;
 }
 
-/** Shape check only. Deliberately not a permission check — see the note below. */
+/**
+ * Shape check only. Deliberately not a permission check — see the note below.
+ *
+ * `tools` is accepted as a spelling of `requestedTools`, and a JSON-encoded array as a spelling of an array. Neither loosens
+ * anything that matters: the broker still decides what is granted, and a name that is not a real tool is withheld exactly as
+ * before. What they avoid is a guaranteed wasted round trip — this tool is routed, so its schema is not on the wire and the
+ * catalog signature is all the model has, and `tools` is the shorter name a model reaches for when writing from memory.
+ */
 function parseInput(input: unknown): SpawnSubAgentInput | null {
   if (typeof input !== "object" || input === null) return null;
-  const { task, requestedTools } = input as Record<string, unknown>;
+  const raw = input as Record<string, unknown>;
+  const task = raw.task;
   if (typeof task !== "string" || task.trim() === "") return null;
+
+  let requestedTools = raw.requestedTools ?? raw.tools;
+  if (typeof requestedTools === "string" && requestedTools.trim().startsWith("[")) {
+    try {
+      requestedTools = JSON.parse(requestedTools) as unknown;
+    } catch {
+      return null;
+    }
+  }
   if (!Array.isArray(requestedTools)) return null;
   if (!requestedTools.every((t) => typeof t === "string")) return null;
   return { task, requestedTools: requestedTools as string[] };

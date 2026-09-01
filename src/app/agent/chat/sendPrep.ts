@@ -13,7 +13,8 @@
 import { formatBytes, uploadFileToOSS, type Attachment } from "@/lib/ai/attachments";
 import { isSandboxEngine, sandboxEnvHint, type SandboxStatus } from "@/lib/ai/sandbox";
 import { ASSET_MOUNT, modelPathFor, saveToLibrary } from "@/lib/ai/mediaLibrary";
-import { resolveToolCall } from "@/lib/ai/toolRouter";
+import { DISPATCHER_NAME, resolveToolCall } from "@/lib/ai/toolRouter";
+import { parseToolArguments } from "@/lib/ai/toolArgs";
 import type { ReminderState, ToolCall } from "./types";
 
 /** An image as it travels on the wire: an OSS link (cloud) or an inline data URI (local model). */
@@ -182,18 +183,28 @@ export function composeWireText(
  * wire and the persisted tool_calls keep exactly what the model emitted, which is what keeps the prefix stable
  * and the assistant turn valid on the next request.
  */
-export function resolveToolCalls(
-  calls: ToolCall[],
-): Map<ToolCall, { name: string; args: Record<string, unknown> }> {
-  const resolved = new Map<ToolCall, { name: string; args: Record<string, unknown> }>();
+/** A resolved call, plus the reason it cannot run when its `arguments` were not readable JSON. */
+export type ResolvedCall = { name: string; args: Record<string, unknown>; argError?: string };
+
+export function resolveToolCalls(calls: ToolCall[]): Map<ToolCall, ResolvedCall> {
+  const resolved = new Map<ToolCall, ResolvedCall>();
   for (const tc of calls) {
-    let parsed: Record<string, unknown> = {};
-    try {
-      parsed = JSON.parse(tc.function.arguments || "{}");
-    } catch {
-      /* Invalid JSON arguments, call with an empty object */
+    const parsed = parseToolArguments(tc.function.arguments);
+    if (!parsed.ok) {
+      // Unreadable arguments used to become `{}` and run anyway, so the model got the tool's own "required parameter
+      // missing" for a parameter it had sent — most visibly on spawn_subagents, whose batch is the largest payload on the
+      // wire and so the one truncation reaches first. The failure is carried instead, and turnRound reports it verbatim.
+      //
+      // A truncated dispatch still names its inner tool (the envelope's `name` precedes the arguments it cut off), so the
+      // failure is attributed to the tool the model reached for rather than to `call_tool`, which it never wrote.
+      const inner =
+        tc.function.name === DISPATCHER_NAME && typeof parsed.partial?.name === "string"
+          ? parsed.partial.name.trim()
+          : "";
+      resolved.set(tc, { name: inner || tc.function.name, args: {}, argError: parsed.error });
+      continue;
     }
-    resolved.set(tc, resolveToolCall(tc.function.name, parsed));
+    resolved.set(tc, resolveToolCall(tc.function.name, parsed.args));
   }
   return resolved;
 }

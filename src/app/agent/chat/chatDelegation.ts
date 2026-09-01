@@ -32,8 +32,9 @@ import { listTools, type ToolSchema } from "@/lib/ai/toolkit";
 import {
   SUBAGENTS,
   delegationSubject, findRepeatDelegation, isSameDelegation, repeatDelegationResult,
+  normalizeSpawnTasks, readJoinArgs,
   formatAutoDelivery, formatJoinResult, formatSpawnResult,
-  MAX_PARALLEL_SUBAGENTS, MAX_SUBAGENTS_PER_TURN, JOIN_DEFAULT_TIMEOUT_MS, JOIN_MAX_TIMEOUT_MS,
+  MAX_PARALLEL_SUBAGENTS, MAX_SUBAGENTS_PER_TURN,
   type DelegationMeta, type PriorDelegation,
 } from "@/lib/ai/subagents";
 import { SubAgentScheduler, type SchedulerLike } from "@/lib/ai/subagentScheduler";
@@ -279,11 +280,17 @@ export function createDelegationTools(deps: DelegationDeps): DelegationTools {
 
   // run_subagent: one delegation, awaited in place. The simple path, unchanged in behaviour.
   const runSubAgent = async (ctx: RunCtx, rawArgs: Record<string, unknown>): Promise<string> => {
-    const agentId = String(rawArgs.agent ?? "");
-    const task = String(rawArgs.task ?? "").trim();
+    // Same reader as the concurrent path, so `prompt`/`role` and the other near-misses cost no round trip here either.
+    const normalized = normalizeSpawnTasks(rawArgs);
+    if ("error" in normalized) {
+      return `run_subagent needs both agent and task, e.g. {"agent":"explore","task":"…the full self-contained brief…"}. Sub-agents: ${SUBAGENTS.map((a) => a.id).join(", ")}.`;
+    }
+    if (normalized.entries.length > 1) {
+      return "run_subagent starts exactly one delegation. For several at once call spawn_subagents with the same entries — they then run concurrently.";
+    }
+    const { agent: agentId, task } = normalized.entries[0];
     const def = SUBAGENTS.find((a) => a.id === agentId);
-    if (!def) return `Unknown subagent: ${agentId}`;
-    if (!task) return "task must not be empty.";
+    if (!def) return `Unknown sub-agent "${agentId}" — use one of: ${SUBAGENTS.map((a) => a.id).join(", ")}`;
 
     const bucket = ensureTurnBucket(ctx);
     const repeat = findRepeatDelegation(agentId, task, bucket.done);
@@ -339,8 +346,10 @@ export function createDelegationTools(deps: DelegationDeps): DelegationTools {
    * join_subagents, instead of asking "are they done yet" every round.
    */
   const spawnSubagents = async (ctx: RunCtx, rawArgs: Record<string, unknown>): Promise<string> => {
-    const entries = Array.isArray(rawArgs.tasks) ? rawArgs.tasks : [];
-    if (entries.length === 0) return "tasks must be a non-empty array of { agent, task } objects.";
+    // Near-misses on the nested shape are read rather than refused; see normalizeSpawnTasks for which ones and why.
+    const normalized = normalizeSpawnTasks(rawArgs);
+    if ("error" in normalized) return normalized.error;
+    const entries = normalized.entries;
 
     const bucket = ensureTurnBucket(ctx);
     const sched = schedulerFor(ctx);
@@ -371,17 +380,17 @@ export function createDelegationTools(deps: DelegationDeps): DelegationTools {
 
     const spawned: Array<{ id: string; agent: string; coalesced: boolean; refused?: string }> = [];
     const answered: string[] = [];
-    for (const raw of entries) {
-      const entry = (raw ?? {}) as Record<string, unknown>;
-      const agentId = String(entry.agent ?? "");
-      const task = String(entry.task ?? "").trim();
+    for (const { agent: agentId, task } of entries) {
       const def = SUBAGENTS.find((a) => a.id === agentId);
       if (!def) {
-        spawned.push({ id: "", agent: agentId || "(missing)", coalesced: false, refused: `unknown sub-agent "${agentId}"` });
-        continue;
-      }
-      if (!task) {
-        spawned.push({ id: "", agent: agentId, coalesced: false, refused: "task must not be empty" });
+        // The roster travels with the refusal: a routed tool's schema is not on the wire, so an entry that named
+        // "code-reviewer" or nothing at all has no other way to learn what the valid ids actually are.
+        spawned.push({
+          id: "",
+          agent: agentId || "(missing)",
+          coalesced: false,
+          refused: `unknown sub-agent "${agentId}" — use one of: ${SUBAGENTS.map((a) => a.id).join(", ")}`,
+        });
         continue;
       }
       // Completed-delegation guard: answer from the earlier conclusion instead of spawning a second copy.
@@ -430,17 +439,10 @@ export function createDelegationTools(deps: DelegationDeps): DelegationTools {
     const sched = held && held.turnId === ctx.turnId ? held.sched : null;
     if (!sched) return "No delegations have been spawned in this turn — call spawn_subagents first.";
 
-    const ids = Array.isArray(rawArgs.ids)
-      ? rawArgs.ids.map((v) => String(v)).filter((v) => v.length > 0)
-      : null;
-    const mode = rawArgs.mode === "any" ? "any" : "all";
-    // Non-blocking collect: the model still has work in hand and wants what has already finished. The main
-    // agent has exactly one thread of control, so a blocking join costs it every other action until the
-    // delegations land — this is the escape hatch that lets it keep that time when it can still use it.
-    const block = rawArgs.block !== false;
-    const secs = typeof rawArgs.timeout_seconds === "number" ? rawArgs.timeout_seconds : null;
-    const timeoutMs =
-      secs != null && secs > 0 ? Math.min(secs * 1000, JOIN_MAX_TIMEOUT_MS) : JOIN_DEFAULT_TIMEOUT_MS;
+    // The arguments are read in subagents.ts, tolerantly and in one place: a non-blocking collect is the escape hatch that
+    // lets the model keep its one thread of control, and an `ids` list misread as "no ids" silently waits for every
+    // delegation instead of the two it named. See readJoinArgs.
+    const { ids, mode, block, timeoutMs } = readJoinArgs(rawArgs);
 
     const before = sched.counts();
     if (block) ctx.status(t("chat.subagentsJoin", { done: before.settled, total: before.total }));
@@ -453,7 +455,7 @@ export function createDelegationTools(deps: DelegationDeps): DelegationTools {
     };
     ctx.push(bubble);
 
-    const r = await sched.join(ids && ids.length > 0 ? ids : null, { mode, timeoutMs, block });
+    const r = await sched.join(ids, { mode, timeoutMs, block });
     const text = formatJoinResult(
       r.ready.map((x) => ({
         meta: x.job.meta,

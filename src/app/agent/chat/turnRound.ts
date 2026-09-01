@@ -20,7 +20,7 @@ import type { RuntimeBoundary } from "@/lib/agent/runtimeBoundary";
 import { describeContext } from "./contextDiag";
 import { capToolOutput } from "./compress";
 import { phaseSummaryText, thinkingProcessText } from "./wireHelpers";
-import { groupParallelCalls, resolveToolCalls } from "./sendPrep";
+import { groupParallelCalls, resolveToolCalls, type ResolvedCall } from "./sendPrep";
 import { isGoalActive, recordEvidence, type GoalState } from "./goalState";
 import type { RendererTool } from "./chatTools";
 import type { TurnBuffer } from "./turnBuffer";
@@ -312,7 +312,8 @@ export function createRoundRunner(deps: RoundRunnerDeps) {
       // Resolved ONCE, up front: everything downstream keys on the RESOLVED name, never on what the model
       // emitted (see resolveToolCalls).
       const resolved = resolveToolCalls(calls);
-      const callOf = (tc: ToolCall) => resolved.get(tc) ?? { name: tc.function.name, args: {} };
+      const callOf = (tc: ToolCall): ResolvedCall =>
+        resolved.get(tc) ?? { name: tc.function.name, args: {} };
 
       // ask_user: pop a choice card and wait for the user to click.
       // update_todos: update the task list above the input box.
@@ -320,8 +321,29 @@ export function createRoundRunner(deps: RoundRunnerDeps) {
       // run_subagent: delegate to a subagent and feed back its final conclusion as the tool result.
       // Other tools: executed through the unified path (including sensitive-operation confirmation).
       const runToolCall = async (tc: ToolCall) => {
-        const { name, args } = callOf(tc);
+        const { name, args, argError } = callOf(tc);
         const startedAt = Date.now();
+        // Arguments that could not be read: report that, and run nothing. Executing with `{}` instead made the tool answer
+        // with its own "missing required parameter", which reads as a schema disagreement over arguments the model can see
+        // itself having sent — and sends it off correcting a shape that was already right. See parseToolArguments.
+        if (argError) {
+          ctx.push({ kind: "tool", name, args: {}, ok: false, result: argError });
+          // Logged here because neither logging site downstream is reached: execToolCall never runs, and the
+          // renderer-tool log below is past the return. A round that burned a full prompt and produced no call is
+          // exactly what someone reading the usage log is looking for.
+          logToolCall({
+            actor: "main",
+            name,
+            args: {},
+            ok: false,
+            result: argError,
+            resultTokens: isUsageLogEnabledSync() ? countTokens(argError) : undefined,
+            ms: Date.now() - startedAt,
+            convId: genConvId,
+            turnId,
+          });
+          return { tc, name, args, content: argError, ok: false };
+        }
         // Renderer-handled tools dispatch by name to their local handler (see rendererTools); everything
         // else falls through to execToolCall (the unified sandbox/consent path).
         const handler = rendererTools[name];

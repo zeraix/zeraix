@@ -12,6 +12,7 @@
 import { detectServices } from "@/store/servicesStore";
 import { useAgentChatStore } from "@/store/agentChatStore";
 import { isLocalEndpoint } from "@/lib/ai/localModel";
+import { parseToolArguments } from "@/lib/ai/toolArgs";
 import { isSandboxEngine, sandboxEnvHint, type SandboxStatus } from "@/lib/ai/sandbox";
 import {
   delegationSubject,
@@ -312,12 +313,17 @@ export function createRunDelegation(deps: {
         }
 
         const runOne = async (tc: (typeof calls)[number]) => {
-          let a: Record<string, unknown> = {};
-          try {
-            a = JSON.parse(tc.function.arguments || "{}");
-          } catch {
-            /* Invalid JSON arguments, call with an empty object */
+          // Same reading as the main loop: a payload that is merely fenced or doubly encoded is recovered, and one that is
+          // truncated is reported as such rather than run with `{}` — which had the tool answer "missing required parameter"
+          // to a sub-agent that had sent it, and cost a round of its (capped) budget to a message it could not act on.
+          const parsed = parseToolArguments(tc.function.arguments);
+          if (!parsed.ok) {
+            // Through collectCtx.push, so the failed call still appears in the delegation's trace: every other
+            // call the sub-agent makes is visible there, and a silent gap reads as a step that never happened.
+            collectCtx.push({ kind: "tool", name: tc.function.name, args: {}, ok: false, result: parsed.error });
+            return { tc, args: {} as Record<string, unknown>, content: parsed.error, ok: false };
           }
+          const a = parsed.args;
           let ok = true;
           const content = await execToolCall(
             collectCtx,

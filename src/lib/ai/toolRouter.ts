@@ -145,8 +145,19 @@ export function resolveToolCall(
   const inner = typeof args.name === "string" ? args.name.trim() : "";
   if (!inner) return { name, args };
   const raw = args.arguments;
-  // Tolerated because models emit both: the declared shape is an object, but a JSON string is a common near-miss and
-  // rejecting it would cost a whole round trip to correct something we can simply read.
+  /**
+   * Flattened: call_tool{name, …the inner tool's own parameters}, with no envelope at all.
+   *
+   * The last resort for every branch below, because it is what a model produces when it treats the wrapper as ceremony —
+   * common, and commonest on exactly the large nested payloads (a spawn_subagents batch) where losing the arguments hurts
+   * most. Reading the siblings is unambiguous; discarding them produced the WRAPPED tool complaining that a required
+   * parameter was missing, against arguments the model can see itself having sent.
+   */
+  const { name: _dispatched, arguments: _envelope, ...siblings } = args;
+  const fallback = () => ({ name: inner, args: Object.keys(siblings).length > 0 ? siblings : {} });
+
+  // A JSON string is tolerated because models emit both: the declared shape is an object, but rejecting the string would cost
+  // a whole round trip to correct something we can simply read.
   if (typeof raw === "string") {
     try {
       const parsed: unknown = JSON.parse(raw || "{}");
@@ -154,14 +165,14 @@ export function resolveToolCall(
         return { name: inner, args: parsed as Record<string, unknown> };
       }
     } catch {
-      /* Not JSON: fall through to the empty-argument case, where the tool reports what it actually needs. */
+      /* Not JSON: fall through, and the tool reports what it actually needs. */
     }
-    return { name: inner, args: {} };
+    return fallback();
   }
   if (raw && typeof raw === "object" && !Array.isArray(raw)) {
     return { name: inner, args: raw as Record<string, unknown> };
   }
-  return { name: inner, args: {} };
+  return fallback();
 }
 
 /** Levenshtein distance, bounded use: called once on a failed dispatch against ~32 candidates. */

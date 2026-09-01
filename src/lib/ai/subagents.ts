@@ -248,6 +248,210 @@ export function spawnSubagentsTool() {
   };
 }
 
+/** One delegation `spawn_subagents` will start: the two fields the tool declares, after normalisation. */
+export interface SpawnTaskEntry {
+  agent: string;
+  task: string;
+}
+
+/**
+ * Why the arguments are normalised at all rather than checked against the declared shape.
+ *
+ * The tool used to test `Array.isArray(rawArgs.tasks)` and reject everything else with one line about the declared shape. That
+ * rejection was the single most common delegation failure in practice, and almost never because the model misunderstood the
+ * schema — it is a nested array of objects, which is the shape models get wrong in a handful of predictable, mechanical ways:
+ * the array arrives JSON-encoded as a string (a whole class of provider does this to any non-scalar), a lone delegation arrives
+ * as the object itself rather than a one-element array, or the entry keys come back as the synonyms the description uses in
+ * prose (`prompt`, `role`) rather than the two it declares. Each one costs a full round trip to correct, and a model that fails
+ * twice abandons the concurrent path for serial `run_subagent` calls, which is the worst outcome available: correct, and several
+ * times slower than what it asked for.
+ *
+ * So the near-misses are read rather than refused. What is NOT accepted is an entry with no identifiable task text — that one is
+ * genuinely ambiguous, and guessing at it would spend minutes of sub-agent time on a task nobody wrote.
+ */
+
+/** Keys a model plausibly uses for the two declared fields. Order matters: the declared name is checked first. */
+const AGENT_KEYS = ["agent", "agent_id", "agentId", "role", "subagent", "sub_agent", "type", "name"];
+const TASK_KEYS = [
+  "task",
+  "prompt",
+  "description",
+  "instructions",
+  "instruction",
+  "content",
+  "goal",
+  "query",
+  "message",
+];
+
+/** Keys the batch itself arrives under. `tasks` is declared; the rest are what the prose in the description suggests. */
+const BATCH_KEYS = ["tasks", "subagents", "sub_agents", "delegations", "agents", "jobs", "items"];
+
+/**
+ * Which of the entry's fields names the sub-agent.
+ *
+ * A real id wins over position in the alias list, because the loosest aliases are also the ambiguous ones: `name` is as often a
+ * label for the delegation ("review architecture") as it is the role. Matching against the roster first means such an entry runs
+ * on the role it did name elsewhere, and an entry that named no real role still reports the string the model wrote — which is
+ * what the refusal has to quote back for the correction to make sense.
+ */
+const readAgent = (entry: Record<string, unknown>): string => {
+  const candidates = AGENT_KEYS.map((key) => entry[key]).filter(
+    (v): v is string => typeof v === "string" && v.trim() !== "",
+  );
+  const known = candidates.find((v) => SUBAGENTS.some((a) => a.id === v.trim()));
+  return (known ?? candidates[0] ?? "").trim();
+};
+
+const firstString = (entry: Record<string, unknown>, keys: readonly string[]): string => {
+  for (const key of keys) {
+    const value = entry[key];
+    if (typeof value === "string" && value.trim()) return value.trim();
+  }
+  return "";
+};
+
+/** A JSON-encoded array or object, which is how several providers serialise any non-scalar argument. */
+const decodeIfJson = (value: unknown): unknown => {
+  if (typeof value !== "string") return value;
+  const text = value.trim();
+  if (!text.startsWith("[") && !text.startsWith("{")) return value;
+  try {
+    return JSON.parse(text) as unknown;
+  } catch {
+    return value;
+  }
+};
+
+const isEntryLike = (value: unknown): value is Record<string, unknown> =>
+  !!value &&
+  typeof value === "object" &&
+  !Array.isArray(value) &&
+  firstString(value as Record<string, unknown>, TASK_KEYS) !== "";
+
+/** Describes what arrived, so a rejected call tells the model about ITS payload rather than repeating the schema at it. */
+function describeReceived(rawArgs: Record<string, unknown>): string {
+  const keys = Object.keys(rawArgs);
+  if (keys.length === 0) return "the call arrived with no arguments at all";
+  const shape = (v: unknown): string =>
+    Array.isArray(v) ? `array(${v.length})` : v === null ? "null" : typeof v;
+  return `received ${keys.map((k) => `${k}=${shape(rawArgs[k])}`).join(", ")}`;
+}
+
+/**
+ * Read `spawn_subagents` arguments into runnable entries.
+ *
+ * Returns the entries it could make sense of, or an error naming what actually arrived. Never throws and never partially
+ * rejects: an entry it cannot read is reported by the caller per-entry, which is where the sub-agent roster lives.
+ */
+export function normalizeSpawnTasks(
+  rawArgs: Record<string, unknown>,
+): { entries: SpawnTaskEntry[] } | { error: string } {
+  let batch: unknown;
+  for (const key of BATCH_KEYS) {
+    if (rawArgs[key] !== undefined) {
+      batch = decodeIfJson(rawArgs[key]);
+      break;
+    }
+  }
+  // A single delegation sent as the arguments themselves — {agent, task} with no wrapper — is unambiguous, so it runs.
+  if (batch === undefined && isEntryLike(rawArgs)) batch = [rawArgs];
+
+  let list: unknown[];
+  if (Array.isArray(batch)) list = batch;
+  else if (isEntryLike(batch)) list = [batch];
+  // {"0": {...}, "1": {...}} — an array that lost its brackets somewhere in serialisation.
+  else if (batch && typeof batch === "object" && Object.values(batch).every(isEntryLike))
+    list = Object.values(batch);
+  else list = [];
+
+  const entries: SpawnTaskEntry[] = [];
+  for (const raw of list) {
+    const decoded = decodeIfJson(raw);
+    if (!decoded || typeof decoded !== "object" || Array.isArray(decoded)) continue;
+    const entry = decoded as Record<string, unknown>;
+    const task = firstString(entry, TASK_KEYS);
+    if (!task) continue;
+    entries.push({ agent: readAgent(entry), task });
+  }
+
+  if (entries.length === 0) {
+    return {
+      error:
+        `spawn_subagents needs tasks: a non-empty array of {agent, task} objects, e.g. ` +
+        `{"tasks":[{"agent":"reviewer","task":"…the full self-contained brief…"}]}. ` +
+        `Nothing runnable was found in this call — ${describeReceived(rawArgs)}. ` +
+        `Pass the array itself, not a JSON string of it, and give every entry both fields. ` +
+        `If you only have one delegation, call run_subagent instead.`,
+    };
+  }
+  return { entries };
+}
+
+/** What `join_subagents` was asked for, after the same tolerant reading `spawn_subagents` gets. */
+export interface JoinRequest {
+  /** The ids to wait for, or null for "everything still outstanding". */
+  ids: string[] | null;
+  mode: "all" | "any";
+  block: boolean;
+  timeoutMs: number;
+}
+
+/** A number a provider may have delivered as a string — they differ on whether a numeric argument survives as one. */
+const numeric = (v: unknown): number | null => {
+  if (typeof v === "number" && Number.isFinite(v)) return v;
+  if (typeof v === "string" && v.trim() !== "" && Number.isFinite(Number(v))) return Number(v);
+  return null;
+};
+
+/**
+ * The delegation ids to join: an array, a JSON-encoded array, or a single id.
+ *
+ * Misreading this one does not fail loudly, which is why it is worth reading properly: an unrecognised `ids` becomes "join
+ * everything", and under the default `block: true` that is the difference between waiting for the two delegations the model
+ * named and waiting for every one it started.
+ */
+function readIds(raw: unknown): string[] | null {
+  let value = raw;
+  if (typeof value === "string") {
+    const text = value.trim();
+    if (!text) return null;
+    if (text.startsWith("[")) {
+      try {
+        value = JSON.parse(text) as unknown;
+      } catch {
+        /* Not an encoded array: read it as the single id it looks like. */
+      }
+    }
+  }
+  const list = Array.isArray(value) ? value : typeof value === "string" ? [value] : null;
+  if (!list) return null;
+  const ids = list.map((v) => String(v).trim()).filter((v) => v.length > 0);
+  return ids.length > 0 ? ids : null;
+}
+
+/**
+ * Read `join_subagents` arguments.
+ *
+ * `timeout_ms` is accepted alongside the declared `timeout_seconds` because both have been documented: the declaration says
+ * seconds and the routed catalog said milliseconds, and a routed tool's schema is never on the wire — so the catalog was the
+ * only signature the model could read, and the bound it asked for was silently dropped for the 10-minute default. The catalog
+ * is corrected; the alias stays, since the unit is unambiguous from the name and refusing it would only cost a round trip.
+ */
+export function readJoinArgs(rawArgs: Record<string, unknown>): JoinRequest {
+  const secs = numeric(rawArgs.timeout_seconds);
+  const millis = numeric(rawArgs.timeout_ms);
+  const requestedMs = secs != null && secs > 0 ? secs * 1000 : millis != null && millis > 0 ? millis : null;
+  return {
+    ids: readIds(rawArgs.ids),
+    mode: rawArgs.mode === "any" ? "any" : "all",
+    // Non-blocking collect: the model still has work in hand and wants what has already finished. Anything other than an
+    // explicit `false` blocks, which is the documented default.
+    block: rawArgs.block !== false && String(rawArgs.block ?? "").toLowerCase() !== "false",
+    timeoutMs: requestedMs != null ? Math.min(requestedMs, JOIN_MAX_TIMEOUT_MS) : JOIN_DEFAULT_TIMEOUT_MS,
+  };
+}
+
 /** Build the `join_subagents` declaration: the blocking collect. */
 export function joinSubagentsTool() {
   return {
