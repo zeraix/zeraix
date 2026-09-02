@@ -139,7 +139,11 @@ export async function checkTurnGoal(deps: GoalCheckDeps): Promise<string | null>
   }
 
   setGoalFor(convId, evaluated);
-  const maxRounds = Number(getStorage(AGENT_MAX_GOAL_ROUNDS_KEY)) || MAX_GOAL_AUTO_ROUNDS;
+  // An explicit positive setting still caps the loop; anything else (unset, 0, junk) means unbounded, which
+  // is now the default. `|| MAX_GOAL_AUTO_ROUNDS` already collapsed 0 and NaN to the default, so the only
+  // change is what that default is.
+  const configured = Number(getStorage(AGENT_MAX_GOAL_ROUNDS_KEY));
+  const maxRounds = Number.isFinite(configured) && configured > 0 ? configured : MAX_GOAL_AUTO_ROUNDS;
   const decision = decideNextRound(evaluated, {
     met: false,
     reason,

@@ -100,6 +100,22 @@ export const AGENT_FULLSCREEN_PATHS: string[] = [
   "/agent/automation/new",
 ];
 
+/**
+ * Fullscreen paths that draw the top band themselves, so AgentShell must not reserve it.
+ *
+ * The shell's title bar spans the whole window. That is right for a fullscreen page laid out as
+ * one column (the workflow editors), but wrong for one with its own left rail: the rail then
+ * starts below a full-width strip of content tone instead of reaching the window's top edge.
+ * A page listed here takes on what that row provided -- its height, the window drag region, and
+ * the clearance macOS's traffic lights need.
+ */
+export const AGENT_SELF_TITLED_PATHS: string[] = ["/agent/settings"];
+
+/** Whether the page at this path draws its own top band instead of the shell's title bar. */
+export function pageDrawsOwnTitleBar(pathname: string): boolean {
+  return AGENT_SELF_TITLED_PATHS.some((p) => pathname === p || pathname.startsWith(`${p}/`));
+}
+
 /** Determine whether a given path should hide the left main sidebar (fullscreen display). */
 export function shouldHideAgentSidebar(pathname: string): boolean {
   return AGENT_FULLSCREEN_PATHS.some((p) => pathname === p || pathname.startsWith(`${p}/`));

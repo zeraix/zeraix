@@ -38,7 +38,7 @@ import { useT } from "@/lib/i18n";
 import { useImeGuard } from "@/lib/ime";
 
 /** Brand pink from the design mockup (send button / accent). */
-const ACCENT = "#f5327d";
+const ACCENT = "var(--accent-ink)";
 
 /**
  * Task input box (used on the new-conversation home page).
@@ -201,12 +201,12 @@ export default function AgentComposer({
                   {/* eslint-disable-next-line @next/next/no-img-element */}
                   <img src={a.previewUrl || a.url} alt={a.name} title={a.name} className="h-full w-full object-cover" />
                   {a.uploading && (
-                    <div className="absolute inset-0 flex items-center justify-center bg-black/50 text-[10px] font-semibold text-white">
+                    <div className="absolute inset-0 flex items-center justify-center bg-black/50 text-[10px] font-semibold text-danger-on">
                       {a.progress ?? 0}%
                     </div>
                   )}
                   {a.uploadError && (
-                    <div className="absolute inset-0 flex items-center justify-center bg-destructive/70 text-[10px] font-semibold text-white">
+                    <div className="absolute inset-0 flex items-center justify-center bg-destructive/75 text-[10px] font-semibold text-danger-on">
                       Failed
                     </div>
                   )}
@@ -227,7 +227,7 @@ export default function AgentComposer({
                 type="button"
                 onClick={() => removeAttachment(a.id)}
                 title="Remove"
-                className="absolute -right-1.5 -top-1.5 flex h-5 w-5 items-center justify-center rounded-full bg-neutral-800 text-[11px] font-bold text-white shadow transition hover:bg-neutral-900"
+                className="absolute -right-1.5 -top-1.5 flex h-5 w-5 items-center justify-center rounded-full bg-primary text-[11px] font-bold text-primary-foreground shadow transition hover:brightness-110"
               >
                 ✕
               </button>

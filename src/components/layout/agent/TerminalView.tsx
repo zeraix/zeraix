@@ -15,19 +15,63 @@ import { useT } from "@/lib/i18n";
 import { terminalBridge, isTerminalAvailable } from "@/lib/terminal";
 import { toast } from "sonner";
 
-/** xterm light/dark color scheme (roughly matches the app's surface tones, styling follows VS Code). */
+/**
+ * xterm color scheme, keyed to the app palette rather than to VS Code's.
+ *
+ * Background/foreground/cursor mirror the `--code-surface` / `--code-ink` tokens in
+ * globals.css -- xterm needs literal colors (it paints to a canvas), so these are the
+ * one place the palette is duplicated; change them together with those tokens.
+ *
+ * The 16 ANSI slots are the same hue family as the status tokens, pulled down in
+ * chroma: stock ANSI red/green/yellow are fully saturated and shout over everything
+ * else on screen. `bright*` is a lightness step, not a second hue.
+ */
 const THEMES = {
   dark: {
-    background: "#1e1e1e",
-    foreground: "#d4d4d4",
-    cursor: "#d4d4d4",
-    selectionBackground: "#264f78",
+    background: "#131316",
+    foreground: "#e6e4e1",
+    cursor: "#e6e4e1",
+    cursorAccent: "#131316",
+    selectionBackground: "rgba(127, 160, 217, 0.30)",
+    black: "#2a2a30",
+    red: "#f0574f",
+    green: "#2bc48a",
+    yellow: "#e0a93a",
+    blue: "#5b9bef",
+    magenta: "#b08ce8",
+    cyan: "#4bc4c4",
+    white: "#c8c6c2",
+    brightBlack: "#7a7772",
+    brightRed: "#ff8078",
+    brightGreen: "#4ed8a0",
+    brightYellow: "#f0c46a",
+    brightBlue: "#8cbaf5",
+    brightMagenta: "#cfbbf3",
+    brightCyan: "#7fdcdc",
+    brightWhite: "#f0eeeb",
   },
   light: {
-    background: "#ffffff",
-    foreground: "#1f2328",
-    cursor: "#1f2328",
-    selectionBackground: "#add6ff",
+    background: "#f0eee7",
+    foreground: "#201f1c",
+    cursor: "#201f1c",
+    cursorAccent: "#f0eee7",
+    selectionBackground: "rgba(47, 74, 122, 0.20)",
+    black: "#171614",
+    red: "#b42222",
+    green: "#0e7a4a",
+    yellow: "#9a6200",
+    blue: "#1f55a8",
+    magenta: "#6d4aa8",
+    cyan: "#0f6f74",
+    white: "#8b877e",
+    brightBlack: "#5f5c55",
+    brightRed: "#dc2b2b",
+    brightGreen: "#17a667",
+    brightYellow: "#d08700",
+    brightBlue: "#2f6fcf",
+    brightMagenta: "#8a5cc4",
+    brightCyan: "#1a8f95",
+    brightWhite: "#171614",
   },
 } as const;
 
@@ -201,6 +245,6 @@ export default function TerminalView({ active = true }: { active?: boolean }) {
     );
   }
 
-  // Dark background, a little padding on all sides so text doesn't touch the edges.
-  return <div ref={hostRef} className="h-full w-full overflow-hidden bg-[#ffffff] px-2 py-1.5 dark:bg-[#1e1e1e]" />;
+  // Matches THEMES.background so the padding ring around the canvas is not a different shade.
+  return <div ref={hostRef} className="h-full w-full overflow-hidden bg-code-surface px-2 py-1.5" />;
 }

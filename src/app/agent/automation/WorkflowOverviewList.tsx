@@ -79,7 +79,7 @@ export default function WorkflowOverviewList({
                         <span aria-hidden>·</span>
                         <span
                           className={`tabular-nums ${
-                            w.succeeded === w.finished ? "text-emerald-600 dark:text-emerald-400" : ""
+                            w.succeeded === w.finished ? "text-success-ink" : ""
                           }`}
                         >
                           {t("auto.overview.successRate", {
@@ -102,7 +102,7 @@ export default function WorkflowOverviewList({
               {/* A failure is worth a line of its own — the whole point of the board is that a broken
                   schedule announces itself instead of being inferred from a success rate. */}
               {w.lastState === "FAILED" && w.lastError && (
-                <p className="mt-1 flex items-start gap-1 text-[11px] text-red-600 dark:text-red-400">
+                <p className="mt-1 flex items-start gap-1 text-[11px] text-danger-ink">
                   <AlertCircle className="mt-px size-3 shrink-0" />
                   <span className="min-w-0 flex-1 truncate">{w.lastError}</span>
                 </p>
@@ -119,12 +119,12 @@ export default function WorkflowOverviewList({
 function Health({ state, t }: { state: RunState | null; t: (k: string, v?: Record<string, string>) => string }) {
   const tone =
     state === "SUCCEEDED"
-      ? "bg-emerald-500"
+      ? "bg-success"
       : state === "FAILED" || state === "TIMED_OUT"
-        ? "bg-red-500"
+        ? "bg-danger"
         : state === null
           ? "bg-muted-foreground/30"
-          : "bg-amber-500";
+          : "bg-warning";
   return (
     <span
       className={`size-1.5 shrink-0 rounded-full ${tone}`}

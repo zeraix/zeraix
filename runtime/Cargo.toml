@@ -85,6 +85,13 @@ futures-util = { version = "0.3", default-features = false, features = ["std"] }
 version = "0.29"
 features = ["signal", "process", "resource"]
 
+# Job objects, so a spawned command tree cannot outlive the runtime that started it. Only the three
+# feature groups the job code touches: windows-sys compiles per feature, and taking the whole Win32
+# surface would add build time for bindings nothing calls. See agent-process/src/job.rs.
+[workspace.dependencies.windows-sys]
+version = "0.61"
+features = ["Win32_Foundation", "Win32_Security", "Win32_System_JobObjects"]
+
 [profile.release]
 opt-level = 3
 lto = "thin"

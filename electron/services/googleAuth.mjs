@@ -86,7 +86,8 @@ function callbackHtml(ok) {
   const title = ok ? "Sign-in successful" : "Sign-in not completed";
   const tip = ok ? "You're all set! Return to the Zeraix app to continue." : "Authorization was not completed. Please return to the app and try again.";
   // Success: brand teal check; failure: amber exclamation. Icons use inline SVG, self-contained with no external links.
-  const accent = ok ? "#34d3a6" : "#f5a524";
+  // --success / --warning from the app palette (src/app/globals.css, dark values).
+  const accent = ok ? "#2bc48a" : "#e0a93a";
   const icon = ok
     ? `<path d="M5 13.5l4.5 4.5L19 8" fill="none" stroke="currentColor" stroke-width="2.4"
         stroke-linecap="round" stroke-linejoin="round"/>`
@@ -124,7 +125,7 @@ h1{font-size:21px;font-weight:650;letter-spacing:.2px;margin:0 0 10px}
 p{font-size:14px;line-height:1.6;opacity:.62;margin:0}
 .btn{display:inline-flex;align-items:center;justify-content:center;gap:8px;margin-top:26px;
   padding:12px 26px;border-radius:12px;text-decoration:none;font-size:14px;font-weight:600;
-  color:#04140e;background:linear-gradient(180deg,color-mix(in srgb,${accent} 92%,#fff),${accent});
+  color:#05231a;background:linear-gradient(180deg,color-mix(in srgb,${accent} 92%,#fff),${accent});
   box-shadow:0 10px 26px -10px color-mix(in srgb,${accent} 70%,transparent);
   transition:transform .12s ease,box-shadow .12s ease}
 .btn:hover{transform:translateY(-1px);box-shadow:0 14px 30px -10px color-mix(in srgb,${accent} 80%,transparent)}

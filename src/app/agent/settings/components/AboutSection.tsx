@@ -113,7 +113,7 @@ export function AboutSection({ t }: { t: TFunc }) {
         {!supported ? (
           <p className="mt-2 text-[11px] text-ink-subtle">{t("about.unsupported")}</p>
         ) : status === "not-available" ? (
-          <p className="mt-2 flex items-center gap-1.5 text-[11px] text-emerald-600 dark:text-emerald-400">
+          <p className="mt-2 flex items-center gap-1.5 text-[11px] text-success-ink">
             <CheckCircle2 className="size-3.5" /> {t("about.upToDate")}
           </p>
         ) : status === "available" ? (
@@ -137,7 +137,7 @@ export function AboutSection({ t }: { t: TFunc }) {
             {t("update.ready.body", { version: state?.version ?? "" })} {t("update.later.hint")}
           </p>
         ) : status === "error" ? (
-          <p className="mt-2 text-[11px] text-amber-600 dark:text-amber-400">
+          <p className="mt-2 text-[11px] text-warning-ink">
             {t(errorKey(state?.error ?? null))}
           </p>
         ) : null}

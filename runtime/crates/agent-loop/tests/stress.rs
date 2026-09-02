@@ -211,10 +211,18 @@ async fn cancelling_a_large_fan_out_stops_promptly_and_leaves_a_consistent_recor
     assert!(out.turns[0].tool_results.len() < PER_ROUND);
 }
 
-/// A delegation's caps have to hold under load, since nobody is watching one.
+/// A delegation under sustained load is not stopped for the volume of work it did.
+///
+/// The counterpart of the same test before the caps came off, which asserted that 2000 calls were cut short at
+/// ~120. That bound fired on the tally rather than on anything going wrong, so a delegation doing distinct,
+/// successful work at scale was ended mid-task and reported as having hit a limit.
+///
+/// Two thousand calls across two hundred rounds, every result distinct so nothing else has grounds to stop it:
+/// the run must reach the end of its script under its own steam.
 #[tokio::test]
-async fn a_sub_agent_under_load_is_stopped_by_its_tool_call_cap() {
-    let script: Vec<NormalizedTurn> = (0..200).map(|i| round(i, 10)).collect();
+async fn a_sub_agent_under_load_is_not_stopped_by_a_tally() {
+    let mut script: Vec<NormalizedTurn> = (0..200).map(|i| round(i, 10)).collect();
+    script.push(NormalizedTurn::text("done"));
     let cfg = LoopConfig { stop_policy: StopPolicyConfig::for_sub_agent(), ..Default::default() };
 
     let out = AgentLoop::new(Arc::new(ScriptedModel::new(script)), Distinct::new(16), cfg)
@@ -222,11 +230,6 @@ async fn a_sub_agent_under_load_is_stopped_by_its_tool_call_cap() {
         .await
         .expect("the run");
 
-    let reason = out.stop.reason.expect("a stop reason");
-    assert!(
-        matches!(reason, StopReason::MaxToolCalls | StopReason::MaxTurns),
-        "expected a cap to stop it, got {reason:?}"
-    );
-    assert!(!reason.is_successful());
-    assert!(out.state.tool_calls() <= 130, "the cap should bound it: {}", out.state.tool_calls());
+    assert_eq!(out.stop.reason, Some(StopReason::Completed), "volume alone must not end a delegation");
+    assert_eq!(out.state.tool_calls(), 2000, "every scripted call should have run");
 }

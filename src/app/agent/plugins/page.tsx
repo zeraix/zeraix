@@ -66,8 +66,8 @@ const GHOST_BTN =
 /** Tier badge styling. `host` is deliberately the loudest thing on the card. */
 const TIER_STYLE: Record<PluginTier, string> = {
   text: "border-line-strong bg-surface-muted/60 text-ink-muted",
-  sandboxed: "border-amber-500/30 bg-amber-500/10 text-amber-600 dark:text-amber-400",
-  host: "border-red-500/30 bg-red-500/10 text-red-600 dark:text-red-400",
+  sandboxed: "border-warning/30 bg-warning/10 text-warning-ink",
+  host: "border-danger/30 bg-danger/10 text-danger-ink",
 };
 
 /**
@@ -76,12 +76,12 @@ const TIER_STYLE: Record<PluginTier, string> = {
  * Fixed palette rather than a generated hue: these have to stay legible in both themes.
  */
 const AVATAR_TINTS = [
-  "bg-emerald-500/10 text-emerald-600 dark:text-emerald-400",
-  "bg-sky-500/10 text-sky-600 dark:text-sky-400",
-  "bg-violet-500/10 text-violet-600 dark:text-violet-400",
-  "bg-amber-500/10 text-amber-600 dark:text-amber-400",
-  "bg-rose-500/10 text-rose-600 dark:text-rose-400",
-  "bg-teal-500/10 text-teal-600 dark:text-teal-400",
+  "bg-tint-2/10 text-tint-2-ink",
+  "bg-tint-1/10 text-tint-1-ink",
+  "bg-tint-4/10 text-tint-4-ink",
+  "bg-tint-3/10 text-tint-3-ink",
+  "bg-tint-5/10 text-tint-5-ink",
+  "bg-tint-6/10 text-tint-6-ink",
 ];
 
 /** Stable per-id tint. Any cheap hash will do; it only has to be deterministic across reloads. */
@@ -386,7 +386,7 @@ export default function AgentPluginsPage() {
             {offline ? <p className="mb-4 text-[11px] text-ink-subtle">{t("plugins.offline")}</p> : null}
 
             {error ? (
-              <p className="mb-4 flex items-start gap-2 rounded-xl border border-red-500/30 bg-red-500/5 px-4 py-3 text-xs text-red-600 dark:text-red-400">
+              <p className="mb-4 flex items-start gap-2 rounded-xl border border-danger/30 bg-danger/5 px-4 py-3 text-xs text-danger-ink">
                 <AlertTriangle className="mt-px size-3.5 shrink-0" />
                 <span className="break-words">{error}</span>
               </p>
@@ -476,7 +476,7 @@ export default function AgentPluginsPage() {
 /** Reason-first banner. A withdrawn plugin explains itself before anything else on the card. */
 function RevokedNotice({ t, reason }: { t: T; reason: string }) {
   return (
-    <p className="mt-2 flex items-start gap-2 rounded-lg border border-red-500/30 bg-red-500/5 px-3 py-2 text-[11px] text-red-600 dark:text-red-400">
+    <p className="mt-2 flex items-start gap-2 rounded-lg border border-danger/30 bg-danger/5 px-3 py-2 text-[11px] text-danger-ink">
       <Ban className="mt-px size-3 shrink-0" />
       <span className="break-words">
         <span className="font-semibold">{t("plugins.revoked")}</span> {reason}
@@ -509,7 +509,7 @@ function AccountNotice({
 
   if (disconnected.length === 0) {
     return (
-      <p className="mt-2 flex items-center gap-1.5 text-[11px] text-emerald-600 dark:text-emerald-400">
+      <p className="mt-2 flex items-center gap-1.5 text-[11px] text-success-ink">
         <ShieldCheck className="size-3 shrink-0" />
         {t("plugins.auth.connected", { provider: status.map((p) => p.provider ?? p.providerId).join(", ") })}
       </p>
@@ -517,8 +517,8 @@ function AccountNotice({
   }
 
   return (
-    <div className="mt-2 rounded-lg border border-amber-500/30 bg-amber-500/5 px-3 py-2">
-      <p className="flex items-start gap-2 text-[11px] text-amber-700 dark:text-amber-400">
+    <div className="mt-2 rounded-lg border border-warning/30 bg-warning/5 px-3 py-2">
+      <p className="flex items-start gap-2 text-[11px] text-warning-ink">
         <KeyRound className="mt-px size-3 shrink-0" />
         <span className="break-words">
           <span className="font-semibold">{t("plugins.auth.disconnected")}</span>{" "}
@@ -532,7 +532,7 @@ function AccountNotice({
         type="button"
         onClick={onConnect}
         disabled={busy}
-        className={cn(GHOST_BTN, "mt-2 border-amber-500/40 text-amber-700 dark:text-amber-400")}
+        className={cn(GHOST_BTN, "mt-2 border-warning/40 text-warning-ink")}
       >
         {busy ? <Loader2 className="size-3 animate-spin" /> : <LinkIcon className="size-3" />}
         {t("plugins.auth.connect")}
@@ -578,7 +578,7 @@ function PluginCard({
     <li
       className={cn(
         "group rounded-xl border border-line bg-surface p-4 transition hover:border-line-strong hover:bg-surface-hover/40",
-        revoked && "border-red-500/30",
+        revoked && "border-danger/30",
       )}
     >
       <div className="flex items-start gap-3.5">
@@ -620,7 +620,7 @@ function PluginCard({
                 <Chip key={c.type}>{t(`plugins.adds.${c.type}`, { count: c.count })}</Chip>
               ))}
               {grants.map((g) => (
-                <Chip key={g} className="border-amber-500/25 bg-amber-500/5 text-amber-600 dark:text-amber-400">
+                <Chip key={g} className="border-warning/25 bg-warning/5 text-warning-ink">
                   <ShieldCheck className="size-2.5 shrink-0" />
                   {g}
                 </Chip>
@@ -812,7 +812,7 @@ function PluginDetails({
                     {file.loading ? (
                       <Loader2 className="size-3.5 animate-spin text-ink-subtle" />
                     ) : file.error ? (
-                      <p className="text-[11px] text-red-600 dark:text-red-400">{file.error}</p>
+                      <p className="text-[11px] text-danger-ink">{file.error}</p>
                     ) : (
                       <pre className="max-h-72 overflow-auto whitespace-pre-wrap break-words font-mono text-[10px] leading-relaxed text-ink-muted">
                         {file.content}
@@ -879,7 +879,7 @@ function OrphanCard({
     <li
       className={cn(
         "group rounded-xl border border-line bg-surface p-4 transition hover:border-line-strong hover:bg-surface-hover/40",
-        record.revoked && "border-red-500/30",
+        record.revoked && "border-danger/30",
       )}
     >
       <div className="flex items-start gap-3.5">

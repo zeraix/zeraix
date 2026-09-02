@@ -181,7 +181,7 @@ export default function WorkdirSelector({
             shaking ? "animate-nudge" : ""
           } ${
             blocking && nudged
-              ? "border-amber-500/60 bg-amber-500/10 text-amber-600 dark:text-amber-400"
+              ? "border-warning/60 bg-warning/10 text-warning-ink"
               : "border-line bg-surface text-foreground"
           }`}
         >
@@ -269,11 +269,11 @@ export default function WorkdirSelector({
         </div>
       </div>
       {blocking && nudged && (
-        <p className="mt-1 px-0.5 text-[11px] text-amber-600 dark:text-amber-400">
+        <p className="mt-1 px-0.5 text-[11px] text-warning-ink">
           {t("workdir.pickFirst")}
         </p>
       )}
-      {msg && <p className="mt-1 px-0.5 text-[11px] text-amber-600 dark:text-amber-400">{msg}</p>}
+      {msg && <p className="mt-1 px-0.5 text-[11px] text-warning-ink">{msg}</p>}
     </div>
   );
 }

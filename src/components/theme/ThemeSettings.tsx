@@ -65,7 +65,7 @@ export default function ThemeSettings() {
 
       {/* Theme mode */}
       <div className="mb-4">
-        <p className="text-xs text-gray-500 mb-2">Theme mode</p>
+        <p className="text-xs text-ink-muted mb-2">Theme mode</p>
         <div className="grid grid-cols-3 gap-2">
           {MODES.map(({ key, label, icon: Icon }) => (
             <button
@@ -75,7 +75,7 @@ export default function ThemeSettings() {
               className={`flex flex-col items-center gap-1 rounded-md border py-2 text-xs transition-colors ${
                 theme === key
                   ? "border-primary text-primary bg-primary/5"
-                  : "border-border text-gray-500 hover:text-foreground"
+                  : "border-border text-ink-muted hover:text-foreground"
               }`}
             >
               <Icon className="h-4 w-4" />
@@ -87,7 +87,7 @@ export default function ThemeSettings() {
 
       {/* Accent color */}
       <div>
-        <p className="text-xs text-gray-500 mb-2">Accent color</p>
+        <p className="text-xs text-ink-muted mb-2">Accent color</p>
         <div className="flex items-center gap-3">
           {ACCENTS.map((a) => (
             <button
@@ -102,7 +102,9 @@ export default function ThemeSettings() {
                   ? "scale-110 border-foreground"
                   : "border-transparent hover:scale-105"
               }`}
-              style={{ background: a.swatch }}
+              style={{
+                background: resolvedTheme === "dark" ? a.swatchDark : a.swatch,
+              }}
             />
           ))}
         </div>

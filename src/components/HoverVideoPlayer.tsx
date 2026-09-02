@@ -559,7 +559,7 @@ export default function HoverVideoPlayer({
                         onClick={() => changeRate(r)}
                         className={`py-0.5 rounded text-[11px] tabular-nums transition-colors ${
                           r === rate
-                            ? "bg-primary text-white"
+                            ? "bg-primary text-primary-foreground"
                             : "bg-white/10 hover:bg-white/20"
                         }`}
                       >

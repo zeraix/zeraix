@@ -151,7 +151,7 @@ const PROSE = [
   // Inline code (excluding code inside code blocks)
   "[&_:not(pre)>code]:rounded [&_:not(pre)>code]:bg-muted [&_:not(pre)>code]:px-1 [&_:not(pre)>code]:py-0.5 [&_:not(pre)>code]:font-mono [&_:not(pre)>code]:text-[0.85em]",
   // Code blocks
-  "[&_pre]:my-1 [&_pre]:overflow-auto [&_pre]:rounded-lg [&_pre]:bg-neutral-900 [&_pre]:px-3 [&_pre]:py-2 [&_pre]:text-[12px] [&_pre]:leading-relaxed [&_pre]:text-neutral-100",
+  "[&_pre]:my-1 [&_pre]:overflow-auto [&_pre]:rounded-lg [&_pre]:bg-code-surface [&_pre]:px-3 [&_pre]:py-2 [&_pre]:text-[12px] [&_pre]:leading-relaxed [&_pre]:text-code-ink",
   "[&_pre_code]:bg-transparent [&_pre_code]:p-0 [&_pre_code]:font-mono",
   // Lists
   "[&_ul]:my-1 [&_ul]:ml-5 [&_ul]:list-disc [&_ul]:space-y-0.5",

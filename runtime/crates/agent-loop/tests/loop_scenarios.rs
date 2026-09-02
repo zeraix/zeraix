@@ -297,10 +297,18 @@ async fn re_running_a_command_over_changing_output_is_never_a_doom_loop() {
     assert_eq!(out.state.tool_calls(), 6);
 }
 
+/// A delegation that keeps making progress is allowed to keep going.
+///
+/// This used to assert the opposite -- that a sub-agent's 40-turn cap ended the run. The cap is gone because
+/// it could not tell this case from a stuck one: every round here does distinct, useful work, and stopping at
+/// 40 returned a truncated answer that read like a finished one. What still stops a delegation that is going
+/// nowhere is the doom-loop detector, and the test below it pins that.
 #[tokio::test]
-async fn a_sub_agents_turn_cap_stops_a_run_that_will_not_end() {
+async fn a_sub_agent_making_progress_runs_past_the_old_turn_cap() {
     let busy = || NormalizedTurn::calls(vec![call("c", "read_file", json!({"path": "a.ts"}))]);
-    let model = ScriptedModel::new((0..60).map(|_| busy()).collect());
+    let mut script: Vec<NormalizedTurn> = (0..60).map(|_| busy()).collect();
+    script.push(NormalizedTurn::text("done"));
+    let model = ScriptedModel::new(script);
     // Distinct output each time, so the doom detector never fires and the cap is what stops it.
     struct Fresh {
         n: Mutex<u32>,
@@ -324,8 +332,9 @@ async fn a_sub_agents_turn_cap_stops_a_run_that_will_not_end() {
         .await
         .expect("run");
 
-    assert_eq!(out.stop.reason, Some(StopReason::MaxTurns));
-    assert_eq!(out.turns.len(), 40);
+    assert_eq!(out.stop.reason, Some(StopReason::Completed), "progress must not be mistaken for a runaway");
+    assert_eq!(out.turns.len(), 61, "every scripted round should have run, plus the final answer");
+    assert_eq!(out.state.tool_calls(), 60);
 }
 
 /// Six consecutive failures across DIFFERENT tools is a run that is not recovering on its own.

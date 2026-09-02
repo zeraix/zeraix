@@ -283,7 +283,7 @@ export function ModelsSection({ t }: { t: TFunc }) {
                   {visionBlocked(m) && (
                     <span
                       title={t("models.visionBlockedHint")}
-                      className="flex shrink-0 items-center gap-1 rounded-full bg-amber-500/15 px-1.5 py-0.5 text-[10px] font-medium text-amber-600 dark:text-amber-400"
+                      className="flex shrink-0 items-center gap-1 rounded-full bg-warning/15 px-1.5 py-0.5 text-[10px] font-medium text-warning-ink"
                     >
                       <ImageOff className="size-3" />
                       {t("models.visionBlocked")}
@@ -329,7 +329,7 @@ export function ModelsSection({ t }: { t: TFunc }) {
         {omState === "loading" ? (
           <p className="text-xs">{t("models.loading")}</p>
         ) : omState === "error" ? (
-          <p className="text-xs text-amber-600 dark:text-amber-400">
+          <p className="text-xs text-warning-ink">
             {t("models.officialError")}
             {omError ? ` (${omError})` : ""}
           </p>

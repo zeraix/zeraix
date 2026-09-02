@@ -121,7 +121,7 @@ export default function SidebarLeaf({
     pendingConsent || pendingQuestion ? (
       <span
         title={pendingConsent ? t("sidebar.approvalNeeded") : t("sidebar.answerNeeded")}
-        className="size-2 shrink-0 animate-pulse rounded-full bg-amber-500"
+        className="size-2 shrink-0 animate-pulse rounded-full bg-warning"
       />
     ) : generating ? (
       <Spinner className="size-3.5 shrink-0 text-muted-foreground" />

@@ -236,7 +236,7 @@ export function MemorySection({ t }: { t: TFunc }) {
                       <button
                         type="button"
                         onClick={() => void onDelete(m)}
-                        className="shrink-0 rounded-md p-1 text-ink-subtle transition hover:bg-red-500/10 hover:text-red-500"
+                        className="shrink-0 rounded-md p-1 text-ink-subtle transition hover:bg-danger/10 hover:text-danger-ink"
                         aria-label={t("memory.delete")}
                       >
                         <Trash2 className="size-3.5" />

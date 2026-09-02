@@ -49,10 +49,10 @@ type NType = NonNullable<NotificationInput["type"]>;
 type NPriority = NonNullable<NotificationInput["priority"]>;
 
 const TYPE_META: Record<NType, { label: string; className: string }> = {
-  info: { label: "Info", className: "bg-sky-500/15 text-sky-500 border-sky-500/30" },
-  success: { label: "Success", className: "bg-emerald-500/15 text-emerald-500 border-emerald-500/30" },
-  warning: { label: "Warning", className: "bg-amber-500/15 text-amber-500 border-amber-500/30" },
-  error: { label: "Error", className: "bg-red-500/15 text-red-500 border-red-500/30" },
+  info: { label: "Info", className: "bg-info/15 text-info-ink border-info/30" },
+  success: { label: "Success", className: "bg-success/15 text-success-ink border-success/30" },
+  warning: { label: "Warning", className: "bg-warning/15 text-warning-ink border-warning/30" },
+  error: { label: "Error", className: "bg-danger/15 text-danger-ink border-danger/30" },
 };
 
 /** Short-lived log entry (navigation / action / send result), for in-page visual feedback. */
@@ -199,7 +199,7 @@ export default function NotifyDemoPage() {
         </div>
 
         {!available && (
-          <div className="mb-6 flex items-start gap-2 rounded-xl border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-sm text-amber-600">
+          <div className="mb-6 flex items-start gap-2 rounded-xl border border-warning/30 bg-warning/10 px-4 py-3 text-sm text-warning-ink">
             <Info className="mt-0.5 size-4 shrink-0" />
             <span>
               Not currently in an Electron environment (pure Web); system notifications are unavailable and the actions below are all no-ops. Please open this page in the desktop app (
@@ -437,10 +437,10 @@ function AvailabilityBadge({ available, supported }: { available: boolean; suppo
   return (
     <span
       className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-xs font-medium ${
-        ok ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-500" : "border-line bg-surface-muted text-ink-subtle"
+        ok ? "border-success/30 bg-success/10 text-success-ink" : "border-line bg-surface-muted text-ink-subtle"
       }`}
     >
-      <span className={`size-1.5 rounded-full ${ok ? "bg-emerald-500" : "bg-ink-subtle"}`} />
+      <span className={`size-1.5 rounded-full ${ok ? "bg-success" : "bg-ink-subtle"}`} />
       {text}
     </span>
   );

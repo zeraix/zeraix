@@ -3,11 +3,12 @@ import { ROUTED_TOOLS, routedFailureHint, unknownToolResult } from "@/lib/ai/too
 import { countTokens } from "@/lib/ai/tokenizer";
 import { isUsageLogEnabledSync, logToolCall } from "@/lib/ai/usageLog";
 import type { ConsentDecision, ConsentRequest } from "@/lib/agent/runtimeBoundary";
+import { publishExecutionEvent } from "@/lib/agent/executionRegistry";
 import type { ConsentRequester } from "./ConsentPanel";
 import { makeUnifiedDiff } from "./diffUtil";
 import { pathProvenance, type CompactionState } from "./contextCompress";
 import { toolNeedsConsent, toolStatusText } from "./constants";
-import type { ApiMsg, RunCtx } from "./types";
+import type { ApiMsg, DisplayMsg, RunCtx } from "./types";
 
 /**
  * Explain a FAILED call to a tool the model never saw a schema for.
@@ -84,7 +85,23 @@ export interface ToolExecDeps {
   /** Read to judge whether a mutation targets a file the model only knows from compressed history. */
   wireBuffer: () => ApiMsg[];
   compaction: () => CompactionState | null;
+  /**
+   * Swap one display message for another, used to complete the in-flight bubble a call is pushed with.
+   *
+   * Optional: a host that cannot replace a message simply gets the old behaviour — one bubble, pushed once the
+   * call has returned. That is the honest fallback, because a bubble pushed early and never replaced would sit
+   * on screen claiming to be running forever.
+   */
+  replaceDisplay?: (target: DisplayMsg, next: DisplayMsg) => void;
 }
+
+/**
+ * Distinguishes two calls to the same tool started in the same millisecond.
+ *
+ * Concurrent calls are the normal case here — a batch of read-only lookups runs in parallel — so the pairing
+ * key cannot be derived from the tool and the clock alone.
+ */
+let execToolSeq = 0;
 
 /**
  * The single path every tool call takes: consent, execution, the display bubble, and the usage log.
@@ -93,7 +110,7 @@ export interface ToolExecDeps {
  * delegation's actions are recorded and the one place the consent policy is applied.
  */
 export function createToolExec(deps: ToolExecDeps) {
-  const { t, requestConsent, allowedTools, wireBuffer, compaction } = deps;
+  const { t, requestConsent, allowedTools, wireBuffer, compaction, replaceDisplay } = deps;
 
   // Execute a single tool call (including sensitive-operation confirmation), push a display bubble, and return the result text fed back to the model.
   // displayName is only for display (subagent calls carry an "agentId→" prefix).
@@ -150,6 +167,40 @@ export function createToolExec(deps: ToolExecDeps) {
         convId: ctx.convId,
         turnId: ctx.turnId,
       });
+
+    // Sub-agent observability (TODO §9). Emitted from the ONE dispatcher every agent's calls pass through,
+    // rather than from each tool: a tool that had to know about monitoring is a tool that can forget to.
+    // Silent for the main agent, whose context carries no execution id — it is not a delegation.
+    //
+    // Announced BEFORE consent, so a call parked on the confirmation panel shows as in flight rather than as
+    // a gap, and a refusal is reported as a failed result rather than as a call that never happened.
+    const executionId = ctx.executionId;
+    const toolCallId = executionId ? `${ctx.turnId}:${name}:${startedAt}:${execToolSeq++}` : "";
+    if (executionId) {
+      publishExecutionEvent({
+        type: "tool_call",
+        executionId,
+        timestamp: startedAt,
+        toolCallId,
+        toolName: name,
+        input: args,
+      });
+    }
+    /** Report the call's fate exactly once. Payloads are redacted by the reducer, never here. */
+    const observe = (ok: boolean, output: string) => {
+      if (!executionId) return;
+      publishExecutionEvent({
+        type: "tool_result",
+        executionId,
+        timestamp: Date.now(),
+        toolCallId,
+        toolName: name,
+        ok,
+        output,
+        durationMs: Date.now() - startedAt,
+      });
+    };
+
     // Consent policy lives in toolNeedsConsent (constants.ts) so the rules can grow in one place. Currently every sensitive
     // tool is confirmed. The "always" allowance still short-circuits repeat prompts.
     // A sub-agent's call always asks, even for a tool the user allowed with "don't ask again": that answer
@@ -173,10 +224,15 @@ export function createToolExec(deps: ToolExecDeps) {
       if (decision === "always") allowedTools().add(name);
       if (decision === "no") {
         const denied = "The user rejected this operation.";
-        ctx.push({ kind: "tool", name: displayName, args, ok: false, result: denied });
+        // Same rule as the bubbles below: a sub-agent's refusal is reported to the sub-agent, recorded in the
+        // log and shown in the Inspector, but it is not a row in the conversation.
+        if (!ctx.executionId) {
+          ctx.push({ kind: "tool", name: displayName, args, ok: false, result: denied });
+        }
         // A refused call is logged too: "what did the agent try to do" is exactly the question the log
         // exists to answer, and a silent gap there reads as if it never asked.
         log(false, denied, true);
+        observe(false, denied);
         onResult?.(false);
         return denied;
       }
@@ -184,9 +240,42 @@ export function createToolExec(deps: ToolExecDeps) {
     // This run's signal goes with the call, so Stop reaches the work itself. Without it the loop only
     // noticed the abort at its next checkpoint — which for run_command is after the command exits or hits
     // its timeout, so stopping a one-minute build appeared to do nothing at all for a minute.
-    const result = await callTool(name, args, ctx.signal);
-    ctx.push({ kind: "tool", name: displayName, args, ok: result.ok, result: result.content });
+    // The bubble goes up BEFORE the call, not after.
+    //
+    // A file edit used to be invisible until it finished: the transcript sat on "thinking" while the agent
+    // wrote a file, and the user's first sight of the change was the completed diff. Pushing the bubble now
+    // means the arguments — which for write_file and edit_file are the content itself — are on screen while
+    // the work happens, and the same bubble is then replaced in place by the result.
+    //
+    // Only when the host supplied a way to replace it. Without that the bubble could never be completed, and a
+    // permanently "running" row is worse than a late one.
+    //
+    // And only for the MAIN agent. A sub-agent's calls belong to its delegation, not to the conversation, and
+    // the Sub-agent Inspector is where they are shown. `ctx.push` is already a sink on a delegation's context,
+    // but `replaceDisplay` arrives as a dependency rather than through `ctx` and reached the transcript
+    // directly — so the two disagreed, and the completion fell through to `pushDisplay`, putting every
+    // sub-agent tool call into the chat as a top-level bubble. `ctx.executionId` is the one fact that tells
+    // the two callers apart, and it is right here.
+    const display = ctx.executionId ? undefined : replaceDisplay;
+    const live: DisplayMsg | null = display
+      ? { kind: "tool", name: displayName, args, ok: true, result: "", running: true }
+      : null;
+    if (live) ctx.push(live);
+
+    // Wrapped only to report the throw: a tool that rejects (cancellation, above all) must not leave its row
+    // in the Inspector spinning forever, and the throw is re-raised untouched so nothing else changes.
+    let result: Awaited<ReturnType<typeof callTool>>;
+    try {
+      result = await callTool(name, args, ctx.signal);
+    } catch (e) {
+      observe(false, e instanceof Error ? e.message : String(e));
+      throw e;
+    }
+    const done: DisplayMsg = { kind: "tool", name: displayName, args, ok: result.ok, result: result.content };
+    if (live && display) display(live, done);
+    else if (!ctx.executionId) ctx.push(done);
     log(result.ok, result.content);
+    observe(result.ok, result.content);
     onResult?.(result.ok);
     // The schema hint is model-facing only: the bubble above and the log entry keep the tool's own error, because a parameter
     // dump is what the model needs to retry and noise to everyone reading the timeline.

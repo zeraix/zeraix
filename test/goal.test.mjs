@@ -435,10 +435,22 @@ test("a cleared goal stops the loop immediately", () => {
   assert.equal(decideNextRound(g, { met: false, reason: "still failing" }).action, "stop");
 });
 
-test("the round limit stops the loop and never claims success", () => {
+test("by default the loop is not stopped by its round count", () => {
+  // The default ceiling is gone: a goal loop now runs until the evaluator settles it or the user stops it.
+  // This asserted the opposite (exhausted at 25) until the caps came off.
+  assert.equal(MAX_GOAL_AUTO_ROUNDS, null, "the default ceiling is off");
+  let g = started("something long");
+  for (let i = 0; i < 200; i++) g = recordEvaluation(g, { reason: "no", tokens: 1 });
+  assert.equal(decideNextRound(g, { met: false, reason: "no" }).action, "continue");
+});
+
+test("a configured round limit stops the loop and never claims success", () => {
+  // The ceiling still exists for anyone who sets one, and reaching it must still read as unfinished rather
+  // than as done. Driven by an explicit `maxRounds`, since the default no longer supplies one -- without
+  // that this would pass by never reaching a limit at all, which is not the property being pinned.
   let g = started("something impossible");
-  for (let i = 0; i < MAX_GOAL_AUTO_ROUNDS; i++) g = recordEvaluation(g, { reason: "no", tokens: 1 });
-  const d = decideNextRound(g, { met: false, reason: "no" });
+  for (let i = 0; i < 25; i++) g = recordEvaluation(g, { reason: "no", tokens: 1 });
+  const d = decideNextRound(g, { met: false, reason: "no", maxRounds: 25 });
   assert.equal(d.action, "exhausted");
   assert.notEqual(g.status, "achieved");
   // The final round is an honest report, explicitly not a claim of completion.

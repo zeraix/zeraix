@@ -78,7 +78,7 @@ function SkillSelectPanelInner({ open, onClose, installed, onChange }: Props) {
                       {s.name}
                       <span className="ml-1 font-mono text-[11px] text-ink-subtle">v{s.version}</span>
                       {s.enabled && (
-                        <span className="ml-2 rounded-full bg-emerald-500/15 px-1.5 py-0.5 text-[10px] font-medium text-emerald-600">
+                        <span className="ml-2 rounded-full bg-success/15 px-1.5 py-0.5 text-[10px] font-medium text-success-ink">
                           Enabled
                         </span>
                       )}

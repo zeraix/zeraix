@@ -294,7 +294,7 @@ export default function WorkflowEditor({ id }: { id: string }) {
       {/* Errors */}
       {errors.length > 0 && (
         <div className="border-t border-line px-4 py-3">
-          <ul className="max-h-32 space-y-1 overflow-y-auto rounded-lg bg-red-500/5 p-3 text-xs text-red-600 dark:text-red-400">
+          <ul className="max-h-32 space-y-1 overflow-y-auto rounded-lg bg-danger/5 p-3 text-xs text-danger-ink">
             {errors.map((err, i) => (
               <li key={i} className="flex items-start gap-1.5">
                 <AlertCircle className="mt-px size-3.5 shrink-0" />

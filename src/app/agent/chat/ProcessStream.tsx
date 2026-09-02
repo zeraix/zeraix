@@ -39,6 +39,7 @@ import {
   toolNameOf,
   type TraceCall,
 } from "./processTrace";
+import { formatDuration } from "./format";
 import { Markdown } from "./Markdown";
 import type { DisplayMsg, ToolMsg } from "./types";
 
@@ -242,21 +243,60 @@ function RowDetail({ children }: { children: React.ReactNode }) {
 }
 
 /**
+ * The text a still-running call is about to write, if it is that kind of call.
+ *
+ * `write_file` carries the whole new file in `content` and `edit_file` the replacement in `new_string`, so the
+ * preview is already in the arguments — nothing has to be streamed to show it. Returns null for a call with
+ * nothing to preview (a search, a command), where the arguments alone are the honest thing to show.
+ */
+function pendingContent(args: unknown): string | null {
+  if (!args || typeof args !== "object") return null;
+  const a = args as Record<string, unknown>;
+  for (const key of ["content", "new_string"]) {
+    const v = a[key];
+    if (typeof v === "string" && v.length > 0) return v;
+  }
+  return null;
+}
+
+/** A tool call's arguments as JSON, or `{}` when they cannot be serialised (a cycle, a BigInt). */
+function argsJson(args: unknown): string {
+  try {
+    return JSON.stringify(args, null, 2) ?? "{}";
+  } catch {
+    return "{}";
+  }
+}
+
+/**
  * What one tool call actually did: its diff if it changed a file, otherwise its arguments and what it returned.
  *
  * The same material the old per-tool card carried, minus the card — the row above already says which tool and which
  * file, so this only has to supply what the row could not fit.
+ *
+ * While a call is still running there is no result to show, so it shows the CONTENT instead — which for a file
+ * edit is the thing the user actually wants to watch. Without it a write of any size was an unexplained pause.
  */
 function ToolDetail({ call }: { call: TraceCall }) {
   const t = useT();
+  const preview = call.running ? pendingContent(call.args) : null;
   const { before, diff, after } = extractDiff(call.result);
-  const argStr = (() => {
-    try {
-      return JSON.stringify(call.args, null, 2);
-    } catch {
-      return "{}";
-    }
-  })();
+  const argStr = argsJson(call.args);
+
+  if (preview !== null) {
+    return (
+      <RowDetail>
+        <div>
+          <div className="mb-0.5 font-semibold text-ink-subtle">{t("chat.writing")}</div>
+          {/* Bounded and scrollable for the same reason the diff panel is: the content of a file is as long as
+              the file, and an unbounded preview pushes the conversation off the screen while it is written. */}
+          <pre className="max-h-96 overflow-auto overscroll-contain whitespace-pre-wrap break-all font-mono text-ink-muted">
+            {preview}
+          </pre>
+        </div>
+      </RowDetail>
+    );
+  }
 
   return (
     <RowDetail>
@@ -384,6 +424,12 @@ function TraceSegment({
 /** One action, on one line: what was done, to what, and how big the change was. Click it for the rest. */
 function ActionRow({ call }: { call: TraceCall }) {
   const t = useT();
+  // Collapsed by default, like every other row here — including while the call is still running.
+  //
+  // A running row used to open itself, on the reasoning that a live preview nobody can see is not a preview.
+  // That was wrong about the cost: a turn is dozens of calls, each one unfolding a block of file content as it
+  // starts, and the trace turns into a wall that scrolls the conversation away from under the reader. The
+  // preview is still one click away, and the click is the reader saying they want it.
   const [open, setOpen] = useState(false);
   const tool = resolveName(call.name);
   const action = actionFor(call.name);
@@ -404,12 +450,18 @@ function ActionRow({ call }: { call: TraceCall }) {
         aria-expanded={open}
         className="group flex w-full min-w-0 items-center gap-1.5 rounded py-1 text-left text-[12px] transition-colors hover:bg-surface-muted/60"
       >
-        <Icon
-          className={cn(
-            "size-3.5 shrink-0",
-            call.ok ? "text-ink-subtle" : "text-destructive",
-          )}
-        />
+        {call.running ? (
+          // The spinner replaces the tool's own icon rather than sitting beside it: two glyphs on a one-line
+          // row reads as two things happening.
+          <Loader2 className="size-3.5 shrink-0 animate-spin text-ink-subtle" />
+        ) : (
+          <Icon
+            className={cn(
+              "size-3.5 shrink-0",
+              call.ok ? "text-ink-subtle" : "text-destructive",
+            )}
+          />
+        )}
         <span
           className={cn(
             "shrink-0",
@@ -419,6 +471,11 @@ function ActionRow({ call }: { call: TraceCall }) {
           {t(action.labelKey)}
         </span>
         {showTool && <span className="shrink-0 font-mono text-ink">{tool}</span>}
+        {/* The bare "1.8s" rather than the narration row's "took 6s": a tool call is routinely sub-second, and
+            formatTook rounds that to "took 1s" for everything under a second and a half. */}
+        {call.ms !== undefined && (
+          <span className="shrink-0 tabular-nums text-ink-subtle">{formatDuration(call.ms)}</span>
+        )}
         {isFile && <FileBadge name={name} />}
         {name && (
           <span
@@ -434,7 +491,7 @@ function ActionRow({ call }: { call: TraceCall }) {
         {counts && (
           <span className="ml-1 flex shrink-0 items-center gap-1.5 tabular-nums">
             {counts.add > 0 && (
-              <span className="text-emerald-500">
+              <span className="text-success-ink">
                 +{counts.add}
                 {counts.partial && "…"}
               </span>
@@ -523,8 +580,9 @@ function ExploreRow({ calls }: { calls: TraceCall[] }) {
 
 /**
  * A run of tool calls, drawn as the stream draws them: lookups merged, everything else on its own line.
- * Shared by the top-level trace and by a delegation's nested steps, so a sub-agent's work reads exactly like the main
- * agent's — same verbs, same file chips, same +/- counts.
+ *
+ * Shared by the top-level trace and by a single tool bubble that renders on its own (MessageItem), so a call reads
+ * the same wherever it appears — same verbs, same file chips, same +/- counts.
  */
 export function CallRows({ calls }: { calls: TraceCall[] }) {
   return (
@@ -542,18 +600,20 @@ export function CallRows({ calls }: { calls: TraceCall[] }) {
 }
 
 /**
- * A delegation, on one line: `Delegated  explore · 12 steps · 4 failed`, opening onto the task it was given, every
- * step it took, and the answer it came back with.
+ * A delegation, on one line: `Delegated  explore`, opening onto the task it was given and the answer it came back with.
  *
- * It reads as a row like any other rather than as the card it used to be — but it is the one row whose detail is a
- * whole nested run, which is why the steps inside get the same treatment as the outer stream instead of a summary.
+ * What the sub-agent DID on the way there is deliberately not here. It used to be — the row unfolded into the whole
+ * nested run — and that was the best available answer while there was nowhere else to put it. The Sub-agent Inspector
+ * is now that place, and it shows the run as a page of its own: the task, every tool call with its arguments and
+ * result, the timing, the conclusion. Rendering it in both would say the same thing twice, and the transcript is the
+ * one that cannot afford the room — its job is the conversation, not the machinery underneath it.
+ *
  * Collapsed by default, like everything else here.
  */
 function DelegateRow({ m }: { m: ToolMsg }) {
   const t = useT();
   const [open, setOpen] = useState(false);
-  const steps = m.steps ?? [];
-  const failed = steps.filter((s) => !s.ok).length;
+  const failed = !m.ok;
   const args =
     m.args && typeof m.args === "object"
       ? (m.args as Record<string, unknown>)
@@ -586,19 +646,11 @@ function DelegateRow({ m }: { m: ToolMsg }) {
           {t("chat.act.delegated")}
         </span>
         <span className="min-w-0 truncate font-medium text-ink">{agent}</span>
-        <span aria-hidden className="text-ink-subtle">
-          ·
-        </span>
-        <span className="truncate text-ink-subtle">
-          {failed > 0
-            ? t("chat.stepsFailed", { n: steps.length, failed })
-            : t("chat.stepsAllDone", { n: steps.length })}
-        </span>
         <Chevron open={open} />
       </button>
       {open && (
         <RowDetail>
-          {task && (
+          {task ? (
             <div>
               <div className="mb-0.5 font-semibold text-ink-subtle">
                 {t("chat.subagentTask")}
@@ -607,8 +659,18 @@ function DelegateRow({ m }: { m: ToolMsg }) {
                 {task}
               </p>
             </div>
+          ) : (
+            // `spawn_subagents` carries a LIST of tasks, and `join_subagents` a list of handles — neither has
+            // a single `task` to name. What the main agent asked for is its own action and belongs in the
+            // transcript (only what the sub-agents then DID moved to the Inspector), so the arguments are
+            // shown the way every other tool row shows them rather than being dropped for want of a field.
+            <div>
+              <div className="mb-0.5 font-semibold text-ink-subtle">{t("chat.args")}</div>
+              <pre className="max-h-32 overflow-auto whitespace-pre-wrap break-all font-mono text-ink-muted">
+                {argsJson(m.args)}
+              </pre>
+            </div>
           )}
-          {steps.length > 0 && <CallRows calls={steps} />}
           {m.result && (
             <div>
               <div className="mb-0.5 font-semibold text-ink-subtle">
@@ -638,8 +700,10 @@ function toSegments(items: ProcessItem[]): Segment[] {
       out.push({ type: "trace", kind: m.kind, content: m.content, ms: m.ms });
       continue;
     }
-    // A delegation carries a whole nested run of its own, so it gets its own row and keeps its steps inside it.
-    if (m.steps?.length) {
+    // A delegation is named by the tool that made it, not by whether a trace happened to be recorded against
+    // it — which is what this used to test, and what stopped being true when the sub-agent's steps moved to
+    // the Inspector. The action table already knows which tools delegate; asking it keeps one answer.
+    if (actionFor(m.name).kind === "delegate") {
       out.push({ type: "delegate", tool: m });
       continue;
     }

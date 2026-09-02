@@ -84,9 +84,9 @@ export function GoalBar({
           <div
             className={`mx-auto mt-2 w-full max-w-3xl rounded-xl border px-3 py-2 transition-colors duration-300 ${
               achieved
-                ? "border-emerald-500/30 bg-emerald-500/5"
+                ? "border-success/30 bg-success/5"
                 : run.lastEvalFailed
-                  ? "border-amber-500/30 bg-amber-500/5"
+                  ? "border-warning/30 bg-warning/5"
                   : "border-line bg-surface-muted/40"
             }`}
           >
@@ -101,7 +101,7 @@ export function GoalBar({
               >
                 <span
                   className={`shrink-0 text-xs font-semibold transition-colors duration-300 ${
-                    achieved ? "text-emerald-600" : "text-primary"
+                    achieved ? "text-success-ink" : "text-primary"
                   }`}
                 >
                   {achieved ? "◉" : "◎"} {achieved ? t("goal.achievedLabel") : t("goal.activeLabel")}
@@ -163,12 +163,12 @@ export function GoalBar({
                       </ul>
                     )}
                     {goal.blockers.length > 0 && (
-                      <div className="text-amber-600">
+                      <div className="text-warning-ink">
                         {t("goal.blockers", { list: goal.blockers.join("; ") })}
                       </div>
                     )}
                     {run.lastReason && (
-                      <div className={run.lastEvalFailed ? "text-amber-600" : "text-ink-subtle"}>
+                      <div className={run.lastEvalFailed ? "text-warning-ink" : "text-ink-subtle"}>
                         {run.lastEvalFailed
                           ? t("goal.evalFailed", { reason: run.lastReason })
                           : t(achieved ? "goal.lastVerdictMet" : "goal.lastVerdict", {

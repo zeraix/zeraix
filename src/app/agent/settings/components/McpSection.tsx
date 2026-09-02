@@ -73,9 +73,9 @@ interface Draft {
 const EMPTY_DRAFT: Draft = { id: "", isNew: true, kind: "stdio", commandLine: "", cwd: "", url: "", envText: "", headersText: "" };
 
 const DOT: Record<McpStatus["status"], string> = {
-  ready: "bg-emerald-500",
-  connecting: "bg-amber-500 animate-pulse",
-  error: "bg-red-500",
+  ready: "bg-success",
+  connecting: "bg-warning animate-pulse",
+  error: "bg-danger",
   idle: "bg-line-strong",
   disabled: "bg-line-strong",
 };
@@ -303,8 +303,8 @@ export function McpSection({ t }: { t: TFunc }) {
 
                     {/* Trust gate: an unapproved server never connects, and never runs on its own. */}
                     {!s.approved && (
-                      <div className="mt-2 rounded-lg border border-amber-500/40 bg-amber-500/5 px-3 py-2">
-                        <p className="flex items-center gap-1.5 text-[11px] font-semibold text-amber-600 dark:text-amber-400">
+                      <div className="mt-2 rounded-lg border border-warning/40 bg-warning/5 px-3 py-2">
+                        <p className="flex items-center gap-1.5 text-[11px] font-semibold text-warning-ink">
                           <AlertTriangle className="size-3.5" />
                           {t("mcp.approveTitle")}
                         </p>
@@ -322,7 +322,7 @@ export function McpSection({ t }: { t: TFunc }) {
                     )}
 
                     {st?.error && (
-                      <p className="mt-2 whitespace-pre-wrap break-words rounded-lg border border-red-500/30 bg-red-500/5 px-3 py-2 text-[11px] text-red-600 dark:text-red-400">
+                      <p className="mt-2 whitespace-pre-wrap break-words rounded-lg border border-danger/30 bg-danger/5 px-3 py-2 text-[11px] text-danger-ink">
                         {st.error}
                       </p>
                     )}
@@ -367,7 +367,7 @@ export function McpSection({ t }: { t: TFunc }) {
                       <button
                         type="button"
                         onClick={() => void removeMcpServer(s.id).then((r) => applied(r))}
-                        className="ml-auto flex items-center gap-1 rounded-lg border border-line-strong bg-surface px-2.5 py-1 text-[11px] text-red-600 transition hover:bg-red-500/10 dark:text-red-400"
+                        className="ml-auto flex items-center gap-1 rounded-lg border border-line-strong bg-surface px-2.5 py-1 text-[11px] text-danger-ink transition hover:bg-danger/10 dark:text-danger-ink"
                       >
                         <Trash2 className="size-3.5" />
                         {t("mcp.delete")}

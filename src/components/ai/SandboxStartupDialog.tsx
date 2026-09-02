@@ -46,7 +46,7 @@ function StepRow({
       <div
         className={`mt-0.5 flex size-6 shrink-0 items-center justify-center rounded-full ${
           state === "done"
-            ? "bg-emerald-500/15 text-emerald-600"
+            ? "bg-success/15 text-success-ink"
             : state === "active"
               ? "bg-primary/15 text-primary"
               : state === "error"
@@ -222,7 +222,7 @@ export default function SandboxStartupDialog({
                     <button
                       type="button"
                       onClick={doUpdate}
-                      className="inline-flex items-center gap-1 rounded-md bg-primary px-2 py-0.5 font-medium text-white transition hover:brightness-105"
+                      className="inline-flex items-center gap-1 rounded-md bg-primary px-2 py-0.5 font-medium text-primary-foreground transition hover:brightness-105"
                     >
                       <RefreshCw className="size-3" /> {t("sbx.updateBtn")}
                     </button>
@@ -254,7 +254,7 @@ export default function SandboxStartupDialog({
                   type="button"
                   onClick={doRestart}
                   disabled={restarting}
-                  className="mt-2 inline-flex items-center gap-1.5 rounded-lg bg-primary px-3 py-1.5 text-xs font-medium text-white shadow-sm transition hover:brightness-105 disabled:opacity-60"
+                  className="mt-2 inline-flex items-center gap-1.5 rounded-lg bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground shadow-sm transition hover:brightness-105 disabled:opacity-60"
                 >
                   {restarting ? <Loader2 className="size-3.5 animate-spin" /> : <Play className="size-3.5" />}
                   {restarting ? t("sbx.booting") : t("sbx.startBtn")}

@@ -22,7 +22,23 @@ export type ExploreTally = { read: number; list: number; search: number };
  * The parts of a tool call a row needs. Deliberately narrower than the display message: a sub-agent's steps are stored
  * as this shape and nothing more, and a row renders them the same way it renders the main agent's calls.
  */
-export type TraceCall = { name: string; args: unknown; ok: boolean; result: string };
+export type TraceCall = {
+  name: string;
+  args: unknown;
+  ok: boolean;
+  result: string;
+  /** Still executing: there is no result yet, and the row shows what it is doing instead of what it did. */
+  running?: boolean;
+  /**
+   * Wall clock the call took, when the caller knows it.
+   *
+   * Optional because most callers do not: a sub-agent's persisted steps carry no timing, so a reloaded
+   * transcript would show a number it invented. The Sub-agent Inspector does know, because the runtime
+   * timestamps both halves of every call — so the same row shows a duration there and none in the
+   * transcript, which is the honest difference rather than an inconsistency.
+   */
+  ms?: number;
+};
 
 /**
  * Fold a run of calls into what the stream draws: consecutive read-only lookups become one group, everything else

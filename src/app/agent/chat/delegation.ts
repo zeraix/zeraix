@@ -12,7 +12,7 @@
 import { detectServices } from "@/store/servicesStore";
 import { useAgentChatStore } from "@/store/agentChatStore";
 import { isLocalEndpoint } from "@/lib/ai/localModel";
-import { parseToolArguments } from "@/lib/ai/toolArgs";
+import { parseToolArguments, sanitizeToolCallArguments } from "@/lib/ai/toolArgs";
 import { isSandboxEngine, sandboxEnvHint, type SandboxStatus } from "@/lib/ai/sandbox";
 import {
   delegationSubject,
@@ -23,10 +23,11 @@ import {
 import { listTools } from "@/lib/ai/toolkit";
 import { logSubagentRun } from "@/lib/ai/usageLog";
 import type { TFunc } from "@/lib/i18n";
+import type { ExecutionHandle } from "@/lib/agent/executionRegistry";
 import { capToolOutput } from "./compress";
 import { PARALLEL_SAFE_TOOLS, UNCAPPED_TOOLS, WORKDIR_SCOPE_RULE, workdirPrompt } from "./constants";
 import { groupParallelCalls } from "./sendPrep";
-import type { ApiMsg, ChatResponse, RequestLog, RunCtx, SubAgentStep } from "./types";
+import type { ApiMsg, ChatResponse, RequestLog, RunCtx } from "./types";
 import { applyReasoningPolicy } from "./wireHelpers";
 import { runAgentLoop } from "@/lib/agent/agentLoop";
 import type { RuntimeBoundary } from "@/lib/agent/runtimeBoundary";
@@ -41,8 +42,15 @@ export type DelegationOpts = {
   def: SubAgentDef;
   /** Distinguishes concurrent delegations in the trace and the usage log ("s2 explore"). */
   label: string;
-  onStep: (s: SubAgentStep) => void;
   status: (s: string) => void;
+  /**
+   * The execution record this delegation reports its life against (TODO §5).
+   *
+   * Created by the caller, because that is where the delegation is DECIDED: a spawned one has to exist as
+   * "queued" while it waits for a slot, which is before this function is ever called. Optional so the loop
+   * stays usable — in tests, and by any future caller — without an observer attached.
+   */
+  execution?: ExecutionHandle;
 };
 
 export function createRunDelegation(deps: {
@@ -105,8 +113,11 @@ export function createRunDelegation(deps: {
     ctx: RunCtx,
     opts: DelegationOpts,
   ): Promise<{ conclusion: string; error?: string }> => {
-    const { agentId, task, def, label } = opts;
+    const { agentId, task, def, label, execution } = opts;
     opts.status(t("chat.subagentProcessing", { agent: agentId }));
+    // queued → running. The body is running by definition once this function has been entered: on the fan-out
+    // path the scheduler only calls it after handing out a concurrency slot.
+    execution?.start();
 
     // Usage-log bookkeeping for this delegation. The sub-agent's own rounds are counted here rather
     // than read back off turnUsageRef: that ref accumulates every conversation generating at the same
@@ -148,17 +159,24 @@ export function createRunDelegation(deps: {
     let rounds = 0;
     let stepCount = 0;
 
-    // The sub-agent's internal tool calls are reported through onStep rather than pushed as sibling
-    // bubbles. Siblings were the obvious approach and are wrong: a delegation persists as a single tool
-    // message, so N sibling bubbles seen live would collapse to one on reload. Nesting keeps live and
-    // reloaded identical (StoredMessage.steps) — and the user still sees every operation.
+    // A sub-agent's internal work does not appear in the conversation.
+    //
+    // It used to, nested inside the delegation's own bubble. That was the best available answer while there
+    // was nowhere else to put it, and it is no longer: the Sub-agent Inspector shows the whole run — every
+    // tool call, its arguments, its result, its timing — as a page of its own. Keeping both would say the
+    // same thing twice, in the place least able to afford the room, and the transcript's job is the
+    // conversation the user is having rather than the machinery underneath it.
+    //
+    // The sink stays as the guard. `execToolCall` skips the display for a call carrying an `executionId`, so
+    // nothing should arrive here — but `push` is on the context, any future caller can reach it, and a
+    // delegation whose context did not swallow its pushes would put them straight into the conversation.
     const collectCtx: RunCtx = {
       ...ctx,
-      push: (m) => {
-        if (m.kind !== "tool") return; // the subagent has no path to choice cards / usage rows
-        stepCount++;
-        opts.onStep({ name: m.name, args: m.args, ok: m.ok, result: m.result });
-      },
+      // Every tool this sub-agent runs is dispatched through execToolCall with this context, which is the
+      // whole of the tool-attribution mechanism (TODO §9) — no tool is modified, and a nested delegation
+      // would inherit it as its parent.
+      executionId: execution?.id,
+      push: () => {},
     };
 
     // Subagent tool set: reuse the same tool set, filtered by def.tools (a sub-agent gets neither
@@ -230,16 +248,19 @@ export function createRunDelegation(deps: {
     // What it gains by converging: execution state, phase-based reasoning (a recovery round inside a
     // delegation keeps full effort, a routine one is economised), doom-loop detection, and the same
     // structured stop reasons. What it keeps: everything about how a delegation runs — its own conversation,
-    // its own tool set, its trace reported through onStep, its usage accounting.
+    // its own tool set, its trace reported to the Inspector, its usage accounting.
     let lastContent = "";
 
-    // A sub-agent's boundary. It has no path to choice cards (collectCtx drops every non-tool push) and its
+    // A sub-agent's boundary. It has no path to choice cards (collectCtx drops every push) and its
     // conversation is never persisted, so those two members are unreachable rather than merely unused —
     // stated here as behaviour instead of left as silent no-ops.
     const boundary: RuntimeBoundary = {
       signal: ctx.signal,
       onEvent: (event) => {
         if (event.type === "status") opts.status(event.text);
+        // A round opening is the one moment the delegation is demonstrably thinking rather than running a
+        // tool; the tool phases come from the dispatcher itself.
+        if (event.type === "turn-start") execution?.action("thinking");
       },
       // Consent is asked for INSIDE execToolCall, on the same queue the main agent uses and with the
       // sub-agent named as requester. The loop never reaches for it.
@@ -302,7 +323,9 @@ export function createRunDelegation(deps: {
           {
             role: "assistant",
             content: msg.content,
-            ...(msg.tool_calls?.length ? { tool_calls: msg.tool_calls } : {}),
+            // Same repair as the main loop (see turnRound): a delegation replays its own assistant turns, so
+            // a tool call with unreadable arguments would 400 every remaining round of the sub-agent.
+            ...(msg.tool_calls?.length ? { tool_calls: [...sanitizeToolCallArguments(msg.tool_calls)] } : {}),
             ...(subReasoning ? { reasoning_content: subReasoning } : {}),
           },
         ];
@@ -318,9 +341,12 @@ export function createRunDelegation(deps: {
           // to a sub-agent that had sent it, and cost a round of its (capped) budget to a message it could not act on.
           const parsed = parseToolArguments(tc.function.arguments);
           if (!parsed.ok) {
-            // Through collectCtx.push, so the failed call still appears in the delegation's trace: every other
-            // call the sub-agent makes is visible there, and a silent gap reads as a step that never happened.
-            collectCtx.push({ kind: "tool", name: tc.function.name, args: {}, ok: false, result: parsed.error });
+            // Reported to the Inspector as the failed call it is. It never reaches execToolCall — the
+            // arguments could not be read — so this is the one call the dispatcher cannot report, and every
+            // other call the sub-agent makes is visible there. A silent gap reads as a step that never
+            // happened, which is exactly the wrong impression when the step is why the round was wasted.
+            const callId = execution?.toolCall(tc.function.name, {});
+            if (callId) execution?.toolResult(callId, tc.function.name, false, parsed.error, 0);
             return { tc, args: {} as Record<string, unknown>, content: parsed.error, ok: false };
           }
           const a = parsed.args;
@@ -342,6 +368,11 @@ export function createRunDelegation(deps: {
         // Same batching rule as the main loop: consecutive read-only calls run concurrently, everything else
         // serial. No dispatcher unwrapping — a subagent's calls are executed by raw name.
         const groups = groupParallelCalls(calls, (tc) => tc.function.name, PARALLEL_SAFE_TOOLS);
+        // Counted here, where the calls are issued. It used to be counted in `collectCtx.push`, which worked
+        // only for as long as execToolCall pushed a bubble per call — it no longer does for a sub-agent, and
+        // a step count that silently went to zero is exactly the kind of usage-log number nobody notices is
+        // wrong. `steps` is what logSubagentRun records this delegation as having cost.
+        stepCount += calls.length;
         const toolResults: ToolResult[] = [];
         for (const group of groups) {
           if (ctx.signal.aborted) break;
@@ -371,26 +402,43 @@ export function createRunDelegation(deps: {
           toolCallCount: calls.length,
         };
       },
+    }).catch((e: unknown) => {
+      // The loop can also end by THROWING — a provider rejection, a tool that raised. The scheduler turns
+      // that into the job's `failed` outcome, so without this the execution record would be the one place
+      // the delegation appeared to be still running. Re-raised untouched: this observes, it does not handle.
+      execution?.fail(e instanceof Error ? e.message : String(e), "error");
+      throw e;
     });
 
     // Map the structured stop reason onto the delegation's own two-field outcome. Only `completed` is an
     // answer; everything else is a delegation that did not finish, and saying so is what stops a truncated
     // run from being recorded as a reusable conclusion (see finish()).
     switch (result.stop.reason) {
-      case "completed":
-        return finish(lastContent || "(no output from subagent)");
+      case "completed": {
+        const conclusion = lastContent || "(no output from subagent)";
+        execution?.complete(conclusion);
+        return finish(conclusion);
+      }
       case "cancelled":
+        // Cancellation is its own outcome, not a failure: the delegation did not go wrong, it was stopped.
+        // The Inspector distinguishes them, and an interrupted turn showing three red rows would read as
+        // three broken sub-agents (TODO §22, §25).
+        execution?.cancel();
         return finish("(canceled)", "cancelled");
-      case "doom-loop":
+      case "doom-loop": {
+        const conclusion = lastContent || `(the ${agentId} sub-agent stopped making progress and was halted)`;
+        execution?.fail(result.stop.detail || "the sub-agent stopped making progress", "doom-loop");
+        return finish(conclusion, `doom-loop: ${result.stop.detail ?? ""}`.trim());
+      }
+      default: {
+        const conclusion = lastContent || `(the ${agentId} sub-agent stopped: ${result.stop.reason})`;
+        const reason = result.stop.reason ?? "error";
+        execution?.fail(result.stop.detail || reason, reason);
         return finish(
-          lastContent || `(the ${agentId} sub-agent stopped making progress and was halted)`,
-          `doom-loop: ${result.stop.detail ?? ""}`.trim(),
-        );
-      default:
-        return finish(
-          lastContent || `(the ${agentId} sub-agent stopped: ${result.stop.reason})`,
+          conclusion,
           result.stop.detail ? `${result.stop.reason}: ${result.stop.detail}` : result.stop.reason,
         );
+      }
     }
   };
 }

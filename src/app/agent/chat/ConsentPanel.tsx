@@ -107,7 +107,7 @@ export function ConsentPanel({
         <div className="px-4 pt-3.5 pb-3">
           {/* Header: the one spot of colour, and the queue depth pushed to the far side. */}
           <div className="flex items-center gap-2">
-            <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-amber-500" aria-hidden />
+            <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-warning" aria-hidden />
             <span className="text-[13px] font-semibold text-ink">{t("chat.consent.title")}</span>
             {pending.queued > 0 ? (
               <span className="ml-auto rounded-md bg-surface-muted px-1.5 py-0.5 text-[11px] font-medium text-ink-subtle">
@@ -141,7 +141,7 @@ export function ConsentPanel({
 
           {/* Provenance warning (§A1): this operation relies on file state known only from compressed history. */}
           {pending.warning ? (
-            <p className="mt-2.5 rounded-lg border border-amber-500/30 bg-amber-500/[0.07] px-2.5 py-1.5 text-[11px] font-medium text-amber-700 dark:text-amber-300">
+            <p className="mt-2.5 rounded-lg border border-warning/30 bg-warning/[0.07] px-2.5 py-1.5 text-[11px] font-medium text-warning-ink">
               {pending.warning}
             </p>
           ) : null}
@@ -185,7 +185,7 @@ export function ConsentPanel({
                   onMouseEnter={() => onHover(idx)}
                   className={`rounded-lg px-3 py-1.5 text-xs font-medium transition ${
                     primary
-                      ? "bg-brand text-white shadow-sm hover:brightness-110"
+                      ? "bg-brand text-accent-on shadow-sm hover:brightness-110"
                       : "text-ink-muted hover:bg-surface-hover hover:text-ink"
                   } ${active ? "ring-2 ring-brand/50 ring-offset-1 ring-offset-surface" : ""}`}
                 >

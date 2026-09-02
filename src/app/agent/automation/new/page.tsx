@@ -78,7 +78,7 @@ export default function NewWorkflowPage() {
               <p className="mx-auto mt-2 max-w-md text-center text-sm text-muted-foreground">{t("auto.new.subtitle")}</p>
 
               {error && (
-                <p className="mt-4 flex items-center justify-center gap-1.5 text-xs text-red-600 dark:text-red-400">
+                <p className="mt-4 flex items-center justify-center gap-1.5 text-xs text-danger-ink">
                   <AlertCircle className="size-3.5" />
                   {error}
                 </p>

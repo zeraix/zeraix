@@ -1,6 +1,7 @@
 import { countMessagesTokens, countTokens } from "@/lib/ai/tokenizer";
 import { logContextDiag, logToolCall, isUsageLogEnabledSync } from "@/lib/ai/usageLog";
 import { resolveContextWindow, type ResolvedModel } from "@/lib/ai/models";
+import { sanitizeToolCallArguments } from "@/lib/ai/toolArgs";
 import { detectServices } from "@/store/servicesStore";
 import { useAgentChatStore } from "@/store/agentChatStore";
 import { prepareWire, type WireSteps } from "@/lib/agent/contextManager";
@@ -24,7 +25,7 @@ import { groupParallelCalls, resolveToolCalls, type ResolvedCall } from "./sendP
 import { isGoalActive, recordEvidence, type GoalState } from "./goalState";
 import type { RendererTool } from "./chatTools";
 import type { TurnBuffer } from "./turnBuffer";
-import type { ApiMsg, DisplayMsg, RunCtx, SubAgentStep, ToolCall } from "./types";
+import type { ApiMsg, DisplayMsg, RunCtx, ToolCall } from "./types";
 import {
   DELEGATION_TOOLS,
   FINALIZE_NUDGE,
@@ -98,7 +99,6 @@ export interface RoundRunnerDeps {
   setCtxTokens: (n: number) => void;
   diagRef: React.RefObject<{ messages: ApiMsg[]; tools: unknown[]; contextWindow: number }>;
   lastArtifactRef: React.RefObject<{ src: string; kind: "image" | "video"; servedBy?: string } | null>;
-  subagentSinksRef: React.RefObject<WeakMap<object, { convId: string; steps: SubAgentStep[]; storedIndex: number | null }>>;
   schedulerRef: React.RefObject<{ turnId: string; sched: { outstanding: () => unknown[] } } | null>;
   awaitingJobsRef: React.RefObject<Map<string, number>>;
   tagLastAssistantStoredIndex: (idx: number) => void;
@@ -125,7 +125,7 @@ export function createRoundRunner(deps: RoundRunnerDeps) {
     buf, compaction, log,
     activeModel, modelName, isLocalModel, sendReasoningContext, wireSteps, tools, requestChat, boundary, ctx,
     rendererTools, execToolCall, toolRules, drainDelegations, drainJobEvents,
-    displayRef, setDisplay, setCtxTokens, diagRef, lastArtifactRef, subagentSinksRef, schedulerRef,
+    displayRef, setDisplay, setCtxTokens, diagRef, lastArtifactRef, schedulerRef,
     awaitingJobsRef, tagLastAssistantStoredIndex, goalFor, setGoalFor, setRenderDelta,
   } = deps;
   const ctrl = { signal };
@@ -278,9 +278,15 @@ export function createRoundRunner(deps: RoundRunnerDeps) {
     // reasoning_content rides the buffer so it is available to replay, but applyReasoningPolicy decides whether it reaches
     // the wire: by default local models only, and only for turns after the last user query, which is exactly what their
     // chat template renders back; with "send thinking as context" on, every model gets every turn's thinking.
+    // Repaired before it reaches the wire or storage, never before execution: `resolveToolCalls` below still
+    // sees exactly what the model emitted, so the error it reports and the partial it recovers are unchanged.
+    // What changes is only the copy that gets REPLAYED — a tool call whose `arguments` are not valid JSON is
+    // rejected by the provider on every later request, which kills the conversation rather than the round.
+    // Same array back when nothing needed fixing, so a healthy turn keeps its byte-identical prefix.
+    const wireToolCalls = msg.tool_calls?.length ? sanitizeToolCallArguments(msg.tool_calls) : undefined;
     buf.push(
-      msg.tool_calls?.length
-        ? { role: "assistant", content: msg.content ?? null, tool_calls: msg.tool_calls, ...(reasoningText ? { reasoning_content: reasoningText } : {}) }
+      wireToolCalls?.length
+        ? { role: "assistant", content: msg.content ?? null, tool_calls: [...wireToolCalls], ...(reasoningText ? { reasoning_content: reasoningText } : {}) }
         : { role: "assistant", content: msg.content ?? null, ...(reasoningText ? { reasoning_content: reasoningText } : {}) },
     );
 
@@ -290,7 +296,9 @@ export function createRoundRunner(deps: RoundRunnerDeps) {
       store.appendMessage(genConvId, {
         role: "assistant",
         content: msg.content ?? "",
-        ...(msg.tool_calls?.length ? { tool_calls: msg.tool_calls } : {}),
+        // The repaired copy, for the same reason: a conversation reopened from disk rebuilds its wire history
+        // from these, so persisting the malformed original would resurrect the 400 on every future session.
+        ...(wireToolCalls?.length ? { tool_calls: [...wireToolCalls] } : {}),
         ...(reasoningText ? { reasoning: reasoningText } : {}),
         // Persisted so a reopened conversation still reports how long each round took, rather than showing the
         // duration only until the view is rebuilt from disk.
@@ -437,12 +445,6 @@ export function createRoundRunner(deps: RoundRunnerDeps) {
               ? lastArtifactRef.current
               : null;
           lastArtifactRef.current = null;
-          // Likewise for a sub-agent's inner steps: display-only, stored beside the conclusion so reopening
-          // the conversation shows the same operations the user watched happen. Addressed by the tool
-          // call's own args object, because a spawned delegation settles after this point and has to be
-          // able to find its message again (see the storedIndex hand-off below).
-          const sink = subagentSinksRef.current.get(args as object) ?? null;
-          const subSteps = sink ? sink.steps : null;
           // Persist the tool result to this conversation (store the compressed version, to avoid bloating storage / the integrity hash).
           store.appendMessage(genConvId, {
             role: "tool",
@@ -459,17 +461,8 @@ export function createRoundRunner(deps: RoundRunnerDeps) {
                   servedBy: artifact.servedBy,
                 }
               : {}),
-            // Copied, not the live array: a spawned delegation keeps appending to it after this write.
-            ...(subSteps?.length ? { steps: [...subSteps] } : {}),
           });
           buf.markToolStored((store.getConversation(genConvId)?.messages.length ?? 0) - 1);
-          // Tell the sink where its message landed. Until this point a still-running delegation has
-          // nowhere to write its trace; from here every step it takes is patched straight onto that
-          // message, so the reopened conversation matches what the user watched.
-          if (sink) {
-            sink.storedIndex = buf.lastToolStoredIdx;
-            if (sink.steps.length > 0) store.setMessageSteps(genConvId, buf.lastToolStoredIdx, [...sink.steps]);
-          }
 
           // Detect local service addresses in the tool output (e.g. an http://localhost:5173 printed by a dev server),
           // using the full output (the elided middle section may also contain a URL). Once registered, the bottom-left floating indicator displays it and polls its health.

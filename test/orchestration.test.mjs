@@ -37,7 +37,7 @@ const { CapabilityBroker, ConcurrencyLimitError, DenyAllApprover, TerminalApprov
 const { CEILING_TOOLS, createConfiguredBroker } = await import(
   "../src/lib/ai/orchestration/config.ts"
 );
-const { SUBAGENTS, CODER_TOOLS, READONLY_TOOLS } = await import("../src/lib/ai/subagents.ts");
+const { SUBAGENTS, CODER_TOOLS, READONLY_TOOLS, WEB_TOOLS } = await import("../src/lib/ai/subagents.ts");
 const { runAnonymousSubAgent, ToolUseViolationError, MaxTurnsExceededError } = await import(
   "../src/lib/ai/orchestration/sub-agent-runner.ts"
 );
@@ -858,9 +858,12 @@ test("the ceiling is exactly the union of the fixed roles' tool lists", () => {
 test("the derived ceiling is a real bound, not a restatement of the whole tool surface", () => {
   // If this ever became "everything", the ceiling would have stopped doing anything.
   assert.ok(CEILING_TOOLS.length < ALL_TOOL_NAMES.length);
-  for (const excluded of ["delete_file", "open_path", "stop_service", "mcp_connect", "web_search", "fetch_url"]) {
+  for (const excluded of ["delete_file", "open_path", "stop_service", "mcp_connect", "page_console"]) {
     assert.equal(CEILING_TOOLS.includes(excluded), false, `${excluded} must stay off the ceiling`);
   }
+  // On it deliberately: every fixed role carries WEB_TOOLS, so a dynamic sub-agent may be granted them too.
+  // Stated here so that removing them from the roles fails visibly rather than quietly narrowing the ceiling.
+  for (const t of WEB_TOOLS) assert.ok(CEILING_TOOLS.includes(t), `${t} should be on the ceiling`);
   // And every tool it does permit has a classification, or the broker would deny it as unknown.
   for (const t of CEILING_TOOLS) assert.ok(TOOL_RISK.has(t), `${t} is on the ceiling but unclassified`);
 });

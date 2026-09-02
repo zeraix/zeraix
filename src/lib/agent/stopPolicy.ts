@@ -32,6 +32,18 @@
  * and collapsing them would be the duplication the rule warns about. `MAX_TURNS_PER_SUBAGENT` likewise stays
  * with the brokered sub-agent runner; when §15 converges the sub-agent loops onto this one, it becomes this
  * policy's `maxTurns` for a sub-agent session rather than a separate mechanism.
+ *
+ * ── Both of those are now OFF by default ────────────────────────────────────────────────────────────────────
+ *
+ * The two named above still live where this says they live, and still govern what it says they govern — but
+ * their defaults are `null`. Every ceiling that ended a run for its SIZE rather than for something going
+ * wrong has been switched off, here and in the two loops above: a count cannot tell a run that is working
+ * from one that is stuck, so it lands on the runs doing the most work and returns a truncated answer that
+ * reads like a finished one.
+ *
+ * What still stops a run is unchanged and is all in `decideStop` below: cancellation, a provider error, a
+ * doom loop, ten consecutive tool failures, and the model's own final answer. Each of those fires on
+ * BEHAVIOUR, and each can say which one it was. A caller that wants a ceiling passes one explicitly.
  */
 import type { StopReason } from "./runtimeBoundary";
 import type { AgentExecutionState } from "./executionState";

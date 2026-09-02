@@ -50,6 +50,7 @@ import { mcpAdminHandlers } from "./mcpAdmin.mjs";
 import {
   invalidateFileList as invalidateRustFileList,
   isReady as isRuntimeReady,
+  missingRuntimeTools,
   tryRunTool,
 } from "./rustRuntime.mjs";
 // page_console's window lifecycle. Its own module because this one is already far past the file-size
@@ -1416,18 +1417,31 @@ export async function runTool(name, args = {}, { signal } = {}) {
 
     const handler = handlers[name];
     if (!handler) {
-      // No handler, and the runtime did not serve it. Which of the two problems this is depends on whether the
-      // runtime is up, and the difference matters: one is a typo the model can fix, the other is an
-      // installation the user has to fix, and telling them apart is the whole reason this branch is not one
-      // sentence.
-      return {
-        ok: false,
-        content: isRuntimeReady()
-          ? `Unknown tool: ${name}`
-          : `${name} is served by the Zeraix agent runtime, which is not running. No fallback exists for it — ` +
+      // No handler, and the runtime did not serve it. There are THREE ways to get here and they need
+      // different answers — an earlier version collapsed two of them into "Unknown tool", which told a model
+      // that `write_file` does not exist while it was staring at the declaration for it, and told the user
+      // nothing at all about the actual cause.
+      if (!isRuntimeReady()) {
+        return {
+          ok: false,
+          content:
+            `${name} is served by the Zeraix agent runtime, which is not running. No fallback exists for it — ` +
             `the JS implementations were removed at 2.0. Check the runtime binary is installed and see the ` +
             `logs for why it did not start.`,
-      };
+        };
+      }
+      // The runtime is up but does not implement this tool, while the app has no handler either. In practice
+      // that means the binary predates the tool: it was built when this name still lived in JavaScript.
+      if (missingRuntimeTools().includes(name)) {
+        return {
+          ok: false,
+          content:
+            `${name} exists but the running agent runtime does not serve it — the runtime binary is older ` +
+            `than the app. This is a build problem, not a mistake in the call: rebuilding the runtime ` +
+            `(\`npm run build:runtime\`) fixes it. Do not retry this call or work around it; tell the user.`,
+        };
+      }
+      return { ok: false, content: `Unknown tool: ${name}` };
     }
     const content = await handler(args ?? {}, { signal });
     if (FILE_LIST_MUTATORS.has(name)) {

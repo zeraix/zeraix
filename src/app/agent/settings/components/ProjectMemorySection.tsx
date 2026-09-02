@@ -145,7 +145,7 @@ export function ProjectMemorySection({ t }: { t: TFunc }) {
                   </span>
                 )}
                 {stats.pending > 0 && (
-                  <span className="rounded-full bg-amber-500/15 px-2 py-0.5 text-[10px] font-medium text-amber-600">
+                  <span className="rounded-full bg-warning/15 px-2 py-0.5 text-[10px] font-medium text-warning-ink">
                     {t("projmem.statPending", { count: stats.pending })}
                   </span>
                 )}
@@ -169,7 +169,7 @@ export function ProjectMemorySection({ t }: { t: TFunc }) {
                   disabled={busy || !dirty}
                   className="inline-flex items-center gap-1 rounded-lg border border-line-strong bg-surface px-2.5 py-1 text-[11px] font-medium text-ink transition hover:bg-surface-muted disabled:opacity-50"
                 >
-                  {saved && !dirty ? <CheckCircle2 className="size-3 text-emerald-500" /> : null}
+                  {saved && !dirty ? <CheckCircle2 className="size-3 text-success-ink" /> : null}
                   {saved && !dirty ? t("projmem.saved") : t("projmem.save")}
                 </button>
                 <button

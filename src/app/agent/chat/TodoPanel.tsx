@@ -24,14 +24,14 @@ export function TodoPanel({
             <span className="shrink-0 text-xs font-semibold text-ink">📋 To-do</span>
             <span
               className={`shrink-0 rounded-full px-1.5 py-px text-[10px] font-medium tabular-nums ${
-                allDone ? "bg-emerald-500/15 text-emerald-600" : "bg-surface-hover text-ink-muted"
+                allDone ? "bg-success/15 text-success-ink" : "bg-surface-hover text-ink-muted"
               }`}
             >
               {done}/{todos.length}
             </span>
             <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-surface-hover">
               <div
-                className={`h-full rounded-full transition-all ${allDone ? "bg-emerald-500" : "bg-primary"}`}
+                className={`h-full rounded-full transition-all ${allDone ? "bg-success" : "bg-primary"}`}
                 style={{ width: `${pct}%` }}
               />
             </div>
@@ -51,7 +51,7 @@ export function TodoPanel({
             {todos.map((t, i) => {
               const icon =
                 t.status === "completed" ? (
-                  <span className="flex h-4 w-4 items-center justify-center rounded-full bg-emerald-500 text-[9px] font-bold text-white">
+                  <span className="flex h-4 w-4 items-center justify-center rounded-full bg-success text-[9px] font-bold text-success-on">
                     ✓
                   </span>
                 ) : t.status === "in_progress" ? (

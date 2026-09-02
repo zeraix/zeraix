@@ -118,7 +118,7 @@ const styles = {
     position: 'absolute' as const,
     width: '600px',
     height: '300px',
-    background: 'radial-gradient(circle, rgba(218, 55, 55, 0.04) 0%, rgba(0,0,0,0) 70%)',
+    background: 'radial-gradient(circle, color-mix(in srgb, var(--danger) 6%, transparent) 0%, transparent 70%)',
     top: '15%',
     left: '50%',
     transform: 'translateX(-50%)',
@@ -148,7 +148,7 @@ const styles = {
   iconCore: {
     width: '8px',
     height: '8px',
-    backgroundColor: '#da3737', 
+    backgroundColor: 'var(--danger)',
   },
   headline: {
     fontSize: '14px',
@@ -187,7 +187,7 @@ const styles = {
     width: '6px',
     height: '6px',
     borderRadius: '50%',
-    backgroundColor: '#da3737',
+    backgroundColor: 'var(--danger)',
   },
   consoleTitle: {
     fontSize: '10px',

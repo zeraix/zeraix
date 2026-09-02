@@ -85,7 +85,7 @@ export default function WorkflowAssistant({
                 m.role === "user"
                   ? "bg-primary text-primary-foreground"
                   : m.error
-                    ? "border border-red-500/30 bg-red-500/5 text-red-600 dark:text-red-400"
+                    ? "border border-danger/30 bg-danger/5 text-danger-ink"
                     : "bg-surface-muted text-foreground"
               }`}
             >

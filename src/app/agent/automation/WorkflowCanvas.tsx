@@ -381,7 +381,7 @@ export default function WorkflowCanvas({
         </div>
 
         {branchWarning && (
-          <p className="pointer-events-none absolute bottom-2 left-2 right-2 flex items-start gap-1.5 rounded-md bg-amber-500/10 px-2 py-1.5 text-[11px] text-amber-700 dark:text-amber-400">
+          <p className="pointer-events-none absolute bottom-2 left-2 right-2 flex items-start gap-1.5 rounded-md bg-warning/10 px-2 py-1.5 text-[11px] text-warning-ink">
             <AlertTriangle className="mt-px size-3 shrink-0" />
             {t("auto.canvas.chainWarning")}
           </p>
@@ -503,7 +503,7 @@ export default function WorkflowCanvas({
                             updateNode(selected.id, { inputs: (selected.inputs ?? []).filter((_, j) => j !== i) });
                             if (newVarIdx === i) setNewVarIdx(null);
                           }}
-                          className="shrink-0 rounded-md px-1 text-muted-foreground transition hover:text-red-500"
+                          className="shrink-0 rounded-md px-1 text-muted-foreground transition hover:text-danger-ink"
                         >
                           <Trash2 className="size-3" />
                         </button>
@@ -576,7 +576,7 @@ export default function WorkflowCanvas({
                           <button
                             onClick={() => createVarAndBind(i, newVarKey)}
                             disabled={!newVarKey}
-                            className="shrink-0 rounded-md border border-line-strong px-1.5 text-emerald-600 transition hover:bg-emerald-500/10 disabled:opacity-40 dark:text-emerald-400"
+                            className="shrink-0 rounded-md border border-line-strong px-1.5 text-success-ink transition hover:bg-success/10 disabled:opacity-40 dark:text-success-ink"
                           >
                             <Check className="size-3" />
                           </button>
@@ -634,7 +634,7 @@ export default function WorkflowCanvas({
 
             <button
               onClick={() => removeNode(selected.id)}
-              className="flex w-full items-center justify-center gap-1 rounded-md border border-line-strong px-2 py-1 text-[11px] text-red-600 transition hover:bg-red-500/5 dark:text-red-400"
+              className="flex w-full items-center justify-center gap-1 rounded-md border border-line-strong px-2 py-1 text-[11px] text-danger-ink transition hover:bg-danger/5 dark:text-danger-ink"
             >
               <Trash2 className="size-3" />
               {t("auto.canvas.deleteNode")}

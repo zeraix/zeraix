@@ -107,7 +107,7 @@ export default function RunInputsDialog({
             <label key={v.key} className="block">
               <span className="mb-1 flex items-center gap-1 text-xs font-medium text-foreground">
                 {v.label || v.key}
-                {v.required && <span className="text-red-500">*</span>}
+                {v.required && <span className="text-danger-ink">*</span>}
               </span>
 
               {v.type === "file" ? (
@@ -156,7 +156,7 @@ export default function RunInputsDialog({
           ))}
         </div>
 
-        {error && <p className="text-xs text-red-600 dark:text-red-400">{error}</p>}
+        {error && <p className="text-xs text-danger-ink">{error}</p>}
 
         <DialogFooter>
           <button

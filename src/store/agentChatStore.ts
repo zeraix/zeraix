@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import { localLlm } from "@/lib/ai/localModel";
+import { useSubAgentExecutionStore } from "./subagentExecutionStore";
 import { AGENT_MODE } from "@/constants/Agent";
 import type { Attachment } from "@/lib/ai/attachments";
 import {
@@ -91,7 +92,6 @@ type AgentChatState = {
     reminder?: StoredMessage["reminder"],
   ) => void;
   /** Attach a sub-agent's tool trace to a tool message already on disk. Never touches `content`. */
-  setMessageSteps: (convId: string, index: number, steps: NonNullable<StoredMessage["steps"]>) => void;
   setActiveProject: (id: string) => void;
   setActiveConversation: (id: string | null) => void;
   /** Flags or clears a conversation as "generating" (drives the sidebar loading spinner). Keyed by conversation ID, independent of the active conversation. */
@@ -345,40 +345,38 @@ export const useAgentChatStore = create<AgentChatState>((set, get) => {
       if (pid) markProjectDirty(pid);
     },
 
-    /**
-     * Attach a sub-agent's tool trace to a tool message already on disk.
-     *
-     * Concurrent delegations settle *after* the tool result that started them was persisted, so their
-     * steps cannot be written by appendMessage the way a blocking run_subagent's are. Without this the
-     * trace would exist only in memory: visible while the user watched it happen, gone on reload — the
-     * exact live/reloaded divergence the nesting design exists to prevent.
-     */
-    setMessageSteps: (convId, index, steps) => {
-      const conv = get().getConversation(convId);
-      if (!conv || index < 0 || index >= conv.messages.length) return;
-      const pid = conv.projectId;
-      set((s) => ({
-        conversations: s.conversations.map((c) => {
-          if (c.id !== convId) return c;
-          const messages = c.messages.map((m, i) => (i === index ? { ...m, steps } : m));
-          return { ...c, messages, updatedAt: Date.now() };
-        }),
-      }));
-      if (pid) markProjectDirty(pid);
-    },
-
     setActiveProject: (id) => {
       set({ activeProjectId: id });
       void get().ensureProjectLoaded(id);
     },
-    setActiveConversation: (id) =>
+    setActiveConversation: (id) => {
+      // The active project FOLLOWS the active conversation.
+      //
+      // Without this the two drift apart the moment a user crosses a folder boundary: pick project A in the
+      // sidebar, then click a conversation that lives under B, and the app is showing B's conversation while
+      // every project-scoped thing — the highlighted folder, the secure-environment default, the file tree —
+      // still answers for A. Nothing errors; it just quietly acts on the wrong project.
+      //
+      // Resolved here rather than at the call sites for the same reason the unread dot is: opening a
+      // conversation is what changes which project is current, and a rule enforced in one place cannot be
+      // half-applied by a caller that forgot it.
+      const projectId = id ? get().getConversation(id)?.projectId : undefined;
+
       set((s) => {
         // Opening a conversation is what "reads" it, so the new-reply dot is dropped here rather than at every call site.
-        if (!id || !s.unread[id]) return { activeConversationId: id };
+        const next: Partial<AgentChatState> = { activeConversationId: id };
+        // Only when it is actually known and actually different: a conversation whose project has not been
+        // loaded yet must not clear the current one, and a no-op write would re-render every subscriber.
+        if (projectId && projectId !== s.activeProjectId) next.activeProjectId = projectId;
+        if (!id || !s.unread[id]) return next;
         const unread = { ...s.unread };
         delete unread[id];
-        return { activeConversationId: id, unread };
-      }),
+        return { ...next, unread };
+      });
+
+      // Outside the setter: loading is async and `set` must stay pure.
+      if (projectId) void get().ensureProjectLoaded(projectId);
+    },
 
     markConversationUnread: (id) =>
       set((s) => (s.unread[id] ? s : { unread: { ...s.unread, [id]: true } })),
@@ -537,6 +535,9 @@ export const useAgentChatStore = create<AgentChatState>((set, get) => {
       // are named as well: each ran under its own conversation id, and this record is the only thing that knows which.
       // Fire-and-forget: no local model running is the common case, and the ids are queued on disk until one is.
       void localLlm()?.eraseConversationsKv([id, ...(conv.subConvIds ?? [])]);
+      // And its sub-agent execution history, for the same reason: it is in-memory only and capped, but a
+      // record describing work done in a conversation the user deleted has nothing left to describe.
+      useSubAgentExecutionStore.getState().clearConversationExecutions(id);
       const pid = conv.projectId;
       const remaining = get().conversations.filter((c) => c.projectId === pid && c.id !== id);
       set((s) => {

@@ -378,9 +378,9 @@ export default function AgentSidebar({ onToggle }: { onToggle?: () => void }) {
     if (await requireLogin()) router.push("/agent/wallet");
   };
   return (
-    <aside className="m-2 flex h-[calc(100%_-_16px)] w-[260px] shrink-0 flex-col rounded-2xl border border-line bg-surface shadow-[0px_4px_12.3px_0px_#0000000A]">
+    <aside className="flex h-full w-[260px] shrink-0 flex-col border-r border-line bg-sidebar">
       {/* Top: window control dots + brand + collapse button (the whole block is the drag region of the frameless window; interactive elements are no-drag) */}
-      <div className="px-4 pt-4" style={{ WebkitAppRegion: "drag" } as React.CSSProperties}>
+      <div className="px-4 pt-6" style={{ WebkitAppRegion: "drag" } as React.CSSProperties}>
         <TrafficLights />
         {/* The gap under the lights belongs to the lights: on Windows and Linux nothing is drawn up here, and
             reserving macOS's inset anyway left a band of dead space above the brand. */}

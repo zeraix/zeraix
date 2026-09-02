@@ -29,7 +29,8 @@ export default function NotFound() {
         alignItems: "center",
         justifyContent: "center",
         height: "100vh",
-        backgroundColor: "#f5f5f5",
+        backgroundColor: "var(--background)",
+        color: "var(--ink)",
         textAlign: "center",
       }}
     >
@@ -44,8 +45,8 @@ export default function NotFound() {
           fontSize: "1rem",
           borderRadius: "5px",
           border: "none",
-          backgroundColor: "#0070f3",
-          color: "#fff",
+          backgroundColor: "var(--primary)",
+          color: "var(--primary-foreground)",
           cursor: "pointer",
         }}
       >

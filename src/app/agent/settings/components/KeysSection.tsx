@@ -135,7 +135,7 @@ export function KeysSection({ t }: { t: TFunc }) {
             {t("models.loading")}
           </p>
         ) : okState === "error" ? (
-          <p className="rounded-xl border border-line bg-surface-muted/50 px-4 py-3.5 text-xs text-amber-600 dark:text-amber-400">
+          <p className="rounded-xl border border-line bg-surface-muted/50 px-4 py-3.5 text-xs text-warning-ink">
             {t("keys.officialError")}
             {okError ? ` (${okError})` : ""}
           </p>

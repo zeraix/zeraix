@@ -70,13 +70,14 @@ export interface StoredMessage {
    *  and the failure would look like the artifact was lost rather than mis-typed. */
   video?: string;
   servedBy?: string;
-  /** The tool calls a sub-agent made inside its own loop (on a run_subagent or spawn_subagents tool result;
-   *  a spawned batch collects every delegation's calls onto the one message, each prefixed with its job id).
-   *  The sub-agent conversation itself is never persisted — only its conclusion goes into content — so
-   *  without this the steps the user watched in real time would disappear the moment the conversation is
-   *  reopened. A spawned delegation settles after its message is written, so these arrive by patch
-   *  (setMessageSteps) rather than with the append.
-   *  Display-only, never fed to the model, not part of the integrity hash (same as name / image). */
+  /**
+   * LEGACY: a sub-agent's inner tool calls, as written by builds before the Sub-agent Inspector existed.
+   *
+   * No longer written and no longer rendered — a delegation's run is now a page in the Inspector, and
+   * duplicating it inside the transcript said the same thing twice in the place least able to afford the
+   * room. Kept in the type so that conversations already on disk stay describable, and so the name is not
+   * quietly reused for something else.
+   */
   steps?: { name: string; args: unknown; ok: boolean; result: string }[];
   /** The reasoning model's "deep thinking" body (only when role==="assistant"): rebuilds the UI thinking block, and — for LOCAL
    *  models only — is replayed to the model as `reasoning_content` on the turns their chat template renders it back on (see

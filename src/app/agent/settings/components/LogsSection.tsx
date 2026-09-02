@@ -109,11 +109,11 @@ function actorLabel(actor: string, t: TFunc): string {
 
 /** Actor colour, so a delegation is visually separable from the main agent at a glance. */
 function actorClass(actor: string): string {
-  if (actor.startsWith("sub:")) return "bg-violet-500/15 text-violet-600 dark:text-violet-400 border-violet-500/30";
-  if (actor === "compact") return "bg-amber-500/15 text-amber-600 dark:text-amber-400 border-amber-500/30";
-  if (actor.startsWith("node:")) return "bg-teal-500/15 text-teal-600 dark:text-teal-400 border-teal-500/30";
-  if (actor === "builder") return "bg-slate-500/15 text-slate-600 dark:text-slate-400 border-slate-500/30";
-  return "bg-sky-500/15 text-sky-600 dark:text-sky-400 border-sky-500/30";
+  if (actor.startsWith("sub:")) return "bg-tint-4/15 text-tint-4-ink border-tint-4/30";
+  if (actor === "compact") return "bg-warning/15 text-warning-ink border-warning/30";
+  if (actor.startsWith("node:")) return "bg-tint-6/15 text-tint-6-ink border-tint-6/30";
+  if (actor === "builder") return "bg-surface-hover text-ink-muted border-line-strong";
+  return "bg-tint-1/15 text-tint-1-ink border-tint-1/30";
 }
 
 function kindIcon(kind: string) {
@@ -304,7 +304,7 @@ export function LogsSection({ t }: { t: TFunc }) {
               onClick={() => setView(v)}
               className={cn(
                 "flex items-center gap-1 px-2.5 py-1.5 text-xs font-medium transition",
-                view === v ? "bg-primary text-white" : "bg-surface text-ink-muted hover:bg-surface-muted",
+                view === v ? "bg-primary text-primary-foreground" : "bg-surface text-ink-muted hover:bg-surface-muted",
               )}
             >
               {v === "list" ? <ScrollText className="size-3.5" /> : <ListTree className="size-3.5" />}
@@ -334,7 +334,7 @@ export function LogsSection({ t }: { t: TFunc }) {
           onClick={() => void clear("day")}
           disabled={!day}
           title={t("logs.clearDay")}
-          className="inline-flex size-7 shrink-0 items-center justify-center rounded-md border border-line-strong bg-surface text-ink-muted transition hover:bg-red-500/10 hover:text-red-500 disabled:opacity-40"
+          className="inline-flex size-7 shrink-0 items-center justify-center rounded-md border border-line-strong bg-surface text-ink-muted transition hover:bg-danger/10 hover:text-danger-ink disabled:opacity-40"
         >
           <Trash2 className="size-3.5" />
         </button>
@@ -342,13 +342,13 @@ export function LogsSection({ t }: { t: TFunc }) {
           type="button"
           onClick={() => void clear("all")}
           disabled={days.length === 0}
-          className="shrink-0 rounded-md border border-line-strong bg-surface px-2 py-1 text-[11px] font-medium text-ink-muted transition hover:bg-red-500/10 hover:text-red-500 disabled:opacity-40"
+          className="shrink-0 rounded-md border border-line-strong bg-surface px-2 py-1 text-[11px] font-medium text-ink-muted transition hover:bg-danger/10 hover:text-danger-ink disabled:opacity-40"
         >
           {t("logs.clearAll")}
         </button>
       </div>
 
-      {msg && <p className="mb-3 text-[11px] text-amber-600 dark:text-amber-400">{msg}</p>}
+      {msg && <p className="mb-3 text-[11px] text-warning-ink">{msg}</p>}
 
       {/* Day summary. */}
       {stats && (
@@ -507,7 +507,7 @@ function EntryList({
         const open = expanded === id;
         const detail = e.kind === "tool" ? e.args : e.kind === "subagent" ? e.task : undefined;
         return (
-          <div key={id} className={cn("bg-surface", !e.ok && "bg-red-500/[0.04]")}>
+          <div key={id} className={cn("bg-surface", !e.ok && "bg-danger/[0.04]")}>
             <button
               type="button"
               onClick={() => setExpanded(open ? null : id)}
@@ -515,7 +515,7 @@ function EntryList({
             >
               {open ? <ChevronDown className="size-3.5 shrink-0 text-ink-subtle" /> : <ChevronRight className="size-3.5 shrink-0 text-ink-subtle" />}
               <span className="w-[68px] shrink-0 font-mono text-[11px] tabular-nums text-ink-subtle">{fmtTime(e.ts)}</span>
-              <Icon className={cn("size-3.5 shrink-0", e.ok ? "text-ink-muted" : "text-red-500")} />
+              <Icon className={cn("size-3.5 shrink-0", e.ok ? "text-ink-muted" : "text-danger-ink")} />
               <span className={cn("shrink-0 rounded border px-1.5 py-px text-[10px] font-medium", actorClass(e.actor))}>
                 {actorLabel(e.actor, t)}
               </span>
@@ -665,7 +665,7 @@ function Timeline({ t, entries }: { t: TFunc; entries: UsageLogEntry[] }) {
               {t("logs.turnSummary", { calls: g.entries.filter((e) => e.kind === "model").length, tools: g.toolCalls })}
             </span>
             {g.errors > 0 && (
-              <span className="rounded border border-red-500/30 bg-red-500/10 px-1.5 py-px text-[10px] text-red-500">
+              <span className="rounded border border-danger/30 bg-danger/10 px-1.5 py-px text-[10px] text-danger-ink">
                 {t("logs.errorCount", { n: g.errors })}
               </span>
             )}
@@ -679,7 +679,7 @@ function Timeline({ t, entries }: { t: TFunc; entries: UsageLogEntry[] }) {
               const Icon = kindIcon(e.kind);
               return (
                 <div key={e.id ?? `${e.ts}-${i}`} className="flex items-center gap-2">
-                  <Icon className={cn("size-3 shrink-0", e.ok ? "text-ink-subtle" : "text-red-500")} />
+                  <Icon className={cn("size-3 shrink-0", e.ok ? "text-ink-subtle" : "text-danger-ink")} />
                   <span
                     className={cn("w-24 shrink-0 truncate rounded border px-1.5 py-px text-[10px] font-medium", actorClass(e.actor))}
                     title={actorLabel(e.actor, t)}
@@ -693,7 +693,7 @@ function Timeline({ t, entries }: { t: TFunc; entries: UsageLogEntry[] }) {
                     <div
                       className={cn(
                         "absolute top-0 h-full rounded",
-                        !e.ok ? "bg-red-500/70" : e.kind === "model" ? "bg-primary/80" : e.kind === "tool" ? "bg-emerald-500/70" : "bg-violet-500/70",
+                        !e.ok ? "bg-danger/70" : e.kind === "model" ? "bg-primary/80" : e.kind === "tool" ? "bg-success/70" : "bg-tint-4/70",
                       )}
                       style={{ left: `${Math.min(98.5, left)}%`, width: `${Math.min(width, 100 - Math.min(98.5, left))}%` }}
                       title={`${fmtTime(e.ts)} · ${fmtMs(e.ms)}`}

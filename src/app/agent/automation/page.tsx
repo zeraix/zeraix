@@ -58,14 +58,14 @@ import {
 const STATE_STYLE: Record<RunState, string> = {
   QUEUED: "bg-muted text-muted-foreground",
   RUNNING: "bg-primary/10 text-primary",
-  AWAITING_APPROVAL: "bg-amber-500/10 text-amber-600 dark:text-amber-400",
-  AWAITING_EVENT: "bg-sky-500/10 text-sky-600 dark:text-sky-400",
-  AWAITING_RETRY: "bg-amber-500/10 text-amber-600 dark:text-amber-400",
-  INTERRUPTED: "bg-amber-500/10 text-amber-600 dark:text-amber-400",
-  SUCCEEDED: "bg-emerald-500/10 text-emerald-600 dark:text-emerald-400",
-  FAILED: "bg-red-500/10 text-red-600 dark:text-red-400",
+  AWAITING_APPROVAL: "bg-warning/10 text-warning-ink",
+  AWAITING_EVENT: "bg-info/10 text-info-ink",
+  AWAITING_RETRY: "bg-warning/10 text-warning-ink",
+  INTERRUPTED: "bg-warning/10 text-warning-ink",
+  SUCCEEDED: "bg-success/10 text-success-ink",
+  FAILED: "bg-danger/10 text-danger-ink",
   CANCELLED: "bg-muted text-muted-foreground",
-  TIMED_OUT: "bg-red-500/10 text-red-600 dark:text-red-400",
+  TIMED_OUT: "bg-danger/10 text-danger-ink",
 };
 
 /**
@@ -89,7 +89,7 @@ const BTN_FOCUS = "outline-none focus-visible:ring-2 focus-visible:ring-ring/50 
 const BTN_BASE = `inline-flex items-center justify-center gap-1.5 rounded-lg font-medium transition active:scale-[0.98] ${BTN_FOCUS}`;
 const BTN_SECONDARY = `${BTN_BASE} border border-line-strong bg-surface text-foreground hover:border-line-strong hover:bg-surface-hover disabled:pointer-events-none disabled:opacity-40`;
 const BTN_PRIMARY = `${BTN_BASE} bg-primary text-primary-foreground shadow-sm hover:opacity-90 disabled:pointer-events-none disabled:opacity-40`;
-const BTN_DANGER = `${BTN_BASE} border border-line-strong bg-surface text-red-600 hover:border-red-500/40 hover:bg-red-500/5 dark:text-red-400`;
+const BTN_DANGER = `${BTN_BASE} border border-line-strong bg-surface text-danger-ink hover:border-danger/40 hover:bg-danger/5 dark:text-danger-ink`;
 
 /**
  * Selectable rows (workflow list, run list).
@@ -497,7 +497,7 @@ export default function AgentAutomationPage() {
               <div className="flex flex-wrap items-center gap-2">
                 <p className="text-sm font-medium text-foreground">{a.title ?? a.node_id}</p>
                 {a.deadline_at && (
-                  <span className="rounded-md bg-amber-500/15 px-1.5 py-0.5 text-[10px] text-amber-700 dark:text-amber-300">
+                  <span className="rounded-md bg-warning/15 px-1.5 py-0.5 text-[10px] text-warning-ink">
                     {/* Says what happens if they do nothing — the difference between "waiting" and
                         "this opportunity will be dropped" matters for an unattended pipeline. */}
                     {a.on_timeout === "approve"
@@ -511,7 +511,7 @@ export default function AgentAutomationPage() {
               <div className="mt-2.5 flex gap-2">
                 <button
                   onClick={() => void onDecide(a.id, true)}
-                  className={`${BTN_BASE} bg-emerald-600 px-3 py-1.5 text-xs text-white shadow-sm hover:opacity-90`}
+                  className={`${BTN_BASE} bg-success px-3 py-1.5 text-xs text-success-on shadow-sm hover:opacity-90`}
                 >
                   {t("auto.approval.approve")}
                 </button>
@@ -540,7 +540,7 @@ export default function AgentAutomationPage() {
               <div className="flex flex-wrap items-center gap-2">
                 <span className="font-mono text-xs text-foreground">{w.match_key}</span>
                 {w.deadline_at && (
-                  <span className="rounded-md bg-sky-500/15 px-1.5 py-0.5 text-[10px] text-sky-700 dark:text-sky-300">
+                  <span className="rounded-md bg-info/15 px-1.5 py-0.5 text-[10px] text-info-ink">
                     {/* Says what happens on silence — "waiting" and "this will be dropped" are very
                         different things to leave ambiguous. */}
                     {w.on_timeout === "continue" ? t("auto.waits.dropsAt") : t("auto.waits.failsAt")}{" "}
@@ -644,11 +644,11 @@ export default function AgentAutomationPage() {
               {/* Inline rather than a modal: the thing being deleted stays on screen behind the
                   question, so "delete this one?" is answerable without remembering which one. */}
               {confirmingDelete && (
-                <div className="flex flex-wrap items-center gap-3 rounded-xl border border-red-500/30 bg-red-500/5 px-4 py-3">
+                <div className="flex flex-wrap items-center gap-3 rounded-xl border border-danger/30 bg-danger/5 px-4 py-3">
                   <p className="min-w-0 flex-1 text-xs text-foreground">{t("auto.confirmDelete")}</p>
                   <button
                     onClick={() => void onDelete()}
-                    className={`${BTN_BASE} bg-red-600 px-3 py-1.5 text-xs text-white shadow-sm hover:opacity-90`}
+                    className={`${BTN_BASE} bg-danger px-3 py-1.5 text-xs text-danger-on shadow-sm hover:opacity-90`}
                   >
                     {t("auto.delete")}
                   </button>
@@ -858,7 +858,7 @@ function Count({ n }: { n: number }) {
 function Notice({ children, className = "" }: { children: React.ReactNode; className?: string }) {
   return (
     <p
-      className={`flex items-start gap-1.5 rounded-lg border border-red-500/20 bg-red-500/5 px-3 py-2 text-xs text-red-600 dark:text-red-400 ${className}`}
+      className={`flex items-start gap-1.5 rounded-lg border border-danger/20 bg-danger/5 px-3 py-2 text-xs text-danger-ink ${className}`}
     >
       <AlertCircle className="mt-px size-3.5 shrink-0" />
       {children}
@@ -900,16 +900,16 @@ function Callout({
   // `border-${tone}-500/25` would survive review and then ship with no border at all.
   const TONE = {
     amber: {
-      frame: "border-amber-500/25 bg-amber-500/[0.04]",
-      head: "text-amber-600 dark:text-amber-400",
-      divide: "divide-amber-500/15",
-      rule: "border-amber-500/25",
+      frame: "border-warning/25 bg-warning/[0.04]",
+      head: "text-warning-ink",
+      divide: "divide-warning/15",
+      rule: "border-warning/25",
     },
     sky: {
-      frame: "border-sky-500/25 bg-sky-500/[0.04]",
-      head: "text-sky-600 dark:text-sky-400",
-      divide: "divide-sky-500/15",
-      rule: "border-sky-500/25",
+      frame: "border-info/25 bg-info/[0.04]",
+      head: "text-info-ink",
+      divide: "divide-info/15",
+      rule: "border-info/25",
     },
   }[tone];
 

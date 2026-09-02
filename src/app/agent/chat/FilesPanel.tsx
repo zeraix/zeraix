@@ -5,7 +5,12 @@ import dynamic from "next/dynamic";
 import { useTheme } from "next-themes";
 import { X, Save, ExternalLink, FileWarning, Loader2, Maximize2, Minimize2, SquareTerminal, Plus } from "lucide-react";
 import { onOpenFile, onCloseFile, monacoLanguage } from "@/lib/fileViewer";
-import { monacoOptions, configureMonacoIntelliSense } from "@/lib/monacoConfig";
+import {
+  monacoOptions,
+  configureMonacoIntelliSense,
+  defineMonacoThemes,
+  MONACO_THEME,
+} from "@/lib/monacoConfig";
 import { wsReadFile, wsWriteFile, callTool } from "@/lib/ai/toolkit";
 import { isTerminalAvailable, terminalBridge } from "@/lib/terminal";
 import { WORKDIR_SET_EVENT, WORKDIR_CLEAR_EVENT, AGENT_FILES_MAXIMIZED_KEY } from "@/constants/Agent";
@@ -353,7 +358,7 @@ export default function FilesPanel() {
           )}
           {activeFile?.state === "error" && (
             <div className="flex h-full flex-col items-center justify-center gap-3 px-6 text-center">
-              <FileWarning className="size-8 text-amber-500" />
+              <FileWarning className="size-8 text-warning-ink" />
               <p className="text-sm text-muted-foreground">{activeFile.reason}</p>
               <button
                 type="button"
@@ -369,10 +374,14 @@ export default function FilesPanel() {
               height="100%"
               path={activeFile.path}
               language={monacoLanguage(activeFile.path)}
-              theme={resolvedTheme === "dark" ? "vs-dark" : "light"}
+              theme={resolvedTheme === "dark" ? MONACO_THEME.dark : MONACO_THEME.light}
               value={activeFile.content}
-              // Language service configuration (TS/JS/JSON completion / IntelliSense): set once before the editor is created.
-              beforeMount={configureMonacoIntelliSense}
+              // Language services (TS/JS/JSON completion, IntelliSense) and the app's editor
+              // themes: both have to be registered before the editor is created.
+              beforeMount={(monaco) => {
+                defineMonacoThemes(monaco);
+                configureMonacoIntelliSense(monaco);
+              }}
               onChange={(v) => {
                 if (activePath) patchFile(activePath, { content: v ?? "", dirty: true });
               }}

@@ -83,10 +83,6 @@ export type ChatResponse = {
   usage?: Usage; // OpenAI-compatible usage statistics
 };
 
-/** One tool call a sub-agent made inside its own loop, recorded so the user can see what it actually did
- *  rather than only the conclusion it reported back. Same four fields as a top-level tool bubble. */
-export type SubAgentStep = { name: string; args: unknown; ok: boolean; result: string };
-
 /** Display message (includes tool-call bubbles / choice cards). */
 /** One question on a choice card. A card carries at least one; several are shown as tabs. */
 export type ChoiceQuestion = {
@@ -151,21 +147,33 @@ export type DisplayMsg =
   // display layer, and deliberately never enters the model's context (a base64 payload would be
   // re-sent every turn). `servedBy` names the engine because the vendor may differ from the chat
   // vendor — see docs/generation-capabilities-design.md §3.
-  // `steps` is set by run_subagent only: the tool calls the sub-agent made inside its own loop. They are
-  // nested in this one bubble rather than pushed as siblings, because the whole delegation is persisted
-  // as a single tool message — sibling bubbles would exist live and then vanish on reload.
   | {
       kind: "tool";
       name: string;
       args: unknown;
       ok: boolean;
       result: string;
+      /**
+       * The call has not returned yet.
+       *
+       * Set when the bubble is pushed BEFORE execution so a file edit is visible while it happens rather than
+       * only once it is done — the difference between watching the agent work and watching a spinner. Cleared
+       * by the replacement that carries the real result, so a persisted message never has it: nothing that
+       * reaches disk was still running.
+       */
+      running?: boolean;
       image?: string;
       /** A generated VIDEO's src. Separate from `image` because they render differently and a <video> in an
        *  <img> shows nothing at all — the two must never be conflated by a caller reaching for "the artifact". */
       video?: string;
       servedBy?: string;
-      steps?: SubAgentStep[];
+      /**
+       * Wall clock the call took, when the caller knows it.
+       *
+       * Only the Sub-agent Inspector's transcript sets it: the conversation's own tool messages are not
+       * timed, and a reloaded chat would otherwise show a number it invented. Display-only, never persisted.
+       */
+      ms?: number;
     }
   | { kind: "todos"; todos: Todo[] } // the task list archived into the chat after the conversation ends
   // this round's token usage (cached = input tokens served from prefix cache) + the wall-clock time it took
@@ -221,6 +229,15 @@ export type RunCtx = {
   signal: AbortSignal;
   push: (m: DisplayMsg) => void;
   status: (s: string) => void;
+  /**
+   * The sub-agent execution this work belongs to, when it belongs to one (TODO §9).
+   *
+   * Set only on the context a delegation runs under, so `execToolCall` — the single dispatcher every agent's
+   * tool calls pass through — can attribute a call to the right sub-agent without any individual tool
+   * knowing that observability exists. Absent on the main agent's context: the main agent is not a
+   * sub-agent execution, and giving it a synthetic one would put it in the Inspector's list.
+   */
+  executionId?: string;
 };
 
 /** A single tool-call message (the tool branch extracted from the DisplayMsg union). */

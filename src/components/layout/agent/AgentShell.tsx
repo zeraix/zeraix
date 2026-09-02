@@ -4,7 +4,7 @@ import { useCallback, useMemo, useState } from "react";
 import { usePathname } from "next/navigation";
 import { motion, AnimatePresence } from "framer-motion";
 import { PanelLeft } from "lucide-react";
-import { shouldHideAgentSidebar } from "@/constants/Agent";
+import { shouldHideAgentSidebar, pageDrawsOwnTitleBar } from "@/constants/Agent";
 import AgentSidebar from "./AgentSidebar";
 import FilesSidebar from "./FilesSidebar";
 import FilesPanel from "@/app/agent/chat/FilesPanel";
@@ -21,8 +21,10 @@ import LocalModelSync from "@/components/ai/LocalModelSync";
 import TrayLabelSync from "@/components/ai/TrayLabelSync";
 import { requestCloseFile } from "@/lib/fileViewer";
 
-/** Sidebar outer frame width: card 260 + m-2 on each side (8 each). */
-const SIDEBAR_WIDTH = 276;
+/** Sidebar frame width. The rails are flush, so this is the rail itself with nothing
+ *  around it -- it must equal the `w-[260px]` on both asides, or the difference shows
+ *  as a strip of ground stranded on the content side of the rail's hairline. */
+const SIDEBAR_WIDTH = 260;
 const EASE = [0.4, 0, 0.2, 1] as const;
 
 /**
@@ -47,6 +49,8 @@ export default function AgentShell({ children }: { children: React.ReactNode }) 
   // Full-screen pages (e.g. settings) hide the left main sidebar; the page provides its own back entry. See AGENT_FULLSCREEN_PATHS.
   const pathname = usePathname();
   const hideSidebar = shouldHideAgentSidebar(pathname ?? "");
+  // Pages with their own left rail draw the top band themselves -- see AGENT_SELF_TITLED_PATHS.
+  const selfTitled = pageDrawsOwnTitleBar(pathname ?? "");
   // The conversation page stays mounted: shown only on /agent/chat, hidden (display:none) on other /agent routes
   // but not unmounted -- so its generation loop, message queue and "stop" control keep working across page switches.
   // See ChatAgentView / page.tsx.
@@ -71,7 +75,7 @@ export default function AgentShell({ children }: { children: React.ReactNode }) 
   return (
     <TitleBarSlotContext.Provider value={titleSlot}>
     <FilesSidebarContext.Provider value={filesSidebar}>
-    <div className="relative flex h-full w-full overflow-hidden bg-surface">
+    <div className="relative flex h-full w-full overflow-hidden bg-background">
       {/* Global: local model ready/stopped -> sync the chat model list (persists across pages, so leaving the model-library page doesn't lose the ready event). */}
       <LocalModelSync />
       <TrayLabelSync />
@@ -102,27 +106,29 @@ export default function AgentShell({ children }: { children: React.ReactNode }) 
         )}
       </AnimatePresence>
 
-      <main className="flex min-w-0 flex-1 flex-col overflow-hidden">
+      <main className="flex min-w-0 flex-1 flex-col overflow-hidden bg-surface">
         {/* Top title bar: draggable, with the top-right window controls floating over the gap reserved at its end.
             On the chat route the conversation header fills the slot on the left, so the conversation title, the
             environment switch and the skills / clear buttons sit on this row instead of in a second strip below it.
             Everywhere else the bar is empty, and only keeps page content off the window's top edge. */}
-        <div
-          style={{ WebkitAppRegion: "drag" } as React.CSSProperties}
-          className={`flex ${TITLE_BAR_HEIGHT} shrink-0 items-stretch bg-surface ${
-            isChatRoute ? "border-b border-line" : ""
-          }`}
-        >
-          {/* Clears the floating top-left cluster, which overlaps this row's left end while the sidebar is away.
-              Measured from the same constant the cluster is built from, so the two cannot drift apart. */}
-          {collapsed && !hideSidebar && !filesOpen && (
-            <div className="shrink-0" style={{ width: COLLAPSED_CLUSTER_WIDTH }} aria-hidden />
-          )}
-          {isChatRoute && <div ref={setTitleSlot} className="flex min-w-0 flex-1 items-center" />}
-          {hasWindowControls && (
-            <div className="shrink-0" style={{ width: WINDOW_CONTROLS_WIDTH }} aria-hidden />
-          )}
-        </div>
+        {!selfTitled && (
+          <div
+            style={{ WebkitAppRegion: "drag" } as React.CSSProperties}
+            className={`flex ${TITLE_BAR_HEIGHT} shrink-0 items-stretch ${
+              isChatRoute ? "border-b border-line" : ""
+            }`}
+          >
+            {/* Clears the floating top-left cluster, which overlaps this row's left end while the sidebar is away.
+                Measured from the same constant the cluster is built from, so the two cannot drift apart. */}
+            {collapsed && !hideSidebar && !filesOpen && (
+              <div className="shrink-0" style={{ width: COLLAPSED_CLUSTER_WIDTH }} aria-hidden />
+            )}
+            {isChatRoute && <div ref={setTitleSlot} className="flex min-w-0 flex-1 items-center" />}
+            {hasWindowControls && (
+              <div className="shrink-0" style={{ width: WINDOW_CONTROLS_WIDTH }} aria-hidden />
+            )}
+          </div>
+        )}
         {/* Content row below the top bar: page content + right-side file panel side by side. The file panel sits
             here (below the top bar) rather than outside main, so its header doesn't overlap the top-right window
             controls (which float over the top bar). */}

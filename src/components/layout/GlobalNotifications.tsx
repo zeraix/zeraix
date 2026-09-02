@@ -206,8 +206,8 @@ function ServiceLauncher({
               Plain spans, not motion children — a `layout` child inside a `layoutId` morph gets
               measured mid-transition and jitters against the parent it is being carried by. */}
           <span className="relative flex size-2.5 shrink-0">
-            <span className="absolute inline-flex size-full animate-ping rounded-full bg-emerald-500/60" />
-            <span className="relative inline-flex size-2.5 rounded-full bg-emerald-500" />
+            <span className="absolute inline-flex size-full animate-ping rounded-full bg-success/60" />
+            <span className="relative inline-flex size-2.5 rounded-full bg-success" />
           </span>
           <span className="ml-1 font-mono text-xs font-semibold tabular-nums text-ink">
             {services.length}
@@ -269,8 +269,8 @@ function ServiceCard({
     <div className="pointer-events-auto overflow-hidden rounded-xl border border-line bg-surface shadow-lg">
       <div className="flex items-center gap-2.5 px-3.5 py-2.5">
         <span className="relative flex size-2 shrink-0">
-          <span className="absolute inline-flex size-full animate-ping rounded-full bg-emerald-500/60" />
-          <span className="relative inline-flex size-2 rounded-full bg-emerald-500" />
+          <span className="absolute inline-flex size-full animate-ping rounded-full bg-success/60" />
+          <span className="relative inline-flex size-2 rounded-full bg-success" />
         </span>
         <button
           type="button"
@@ -288,7 +288,7 @@ function ServiceCard({
           className={cn(
             "inline-flex shrink-0 items-center gap-1 rounded-full border px-2 py-1 text-[11px] font-medium transition",
             svc.pid != null
-              ? "border-red-500/40 text-red-500 hover:bg-red-500/10"
+              ? "border-danger/40 text-danger-ink hover:bg-danger/10"
               : "border-line-strong text-ink-subtle hover:bg-surface-muted",
           )}
         >
@@ -310,9 +310,9 @@ function NotificationCard({ n, onClose }: { n: AppNotification; onClose: () => v
           {n.kind === "progress" ? (
             <Loader2 className="size-4 animate-spin text-primary" />
           ) : n.kind === "success" ? (
-            <CheckCircle2 className="size-4 text-emerald-500" />
+            <CheckCircle2 className="size-4 text-success-ink" />
           ) : n.kind === "error" ? (
-            <AlertCircle className="size-4 text-red-500" />
+            <AlertCircle className="size-4 text-danger-ink" />
           ) : (
             <Info className="size-4 text-ink-muted" />
           )}

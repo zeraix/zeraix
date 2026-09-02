@@ -87,19 +87,19 @@ function TodoRecord({ todos }: { todos: Todo[] }) {
           <span className="text-xs font-semibold text-ink">📋 {t("chat.todos")}</span>
           <span
             className={`rounded-full px-1.5 py-px text-[10px] font-medium tabular-nums ${
-              allDone ? "bg-emerald-500/15 text-emerald-600" : "bg-surface-hover text-ink-muted"
+              allDone ? "bg-success/15 text-success-ink" : "bg-surface-hover text-ink-muted"
             }`}
           >
             {done}/{todos.length}
           </span>
           {allDone && (
-            <span className="rounded-full bg-emerald-500/15 px-2 py-0.5 text-[10px] font-medium text-emerald-600">
+            <span className="rounded-full bg-success/15 px-2 py-0.5 text-[10px] font-medium text-success-ink">
               {t("chat.allDone")}
             </span>
           )}
           <div className="ml-auto h-1.5 w-16 shrink-0 overflow-hidden rounded-full bg-surface-hover">
             <div
-              className={`h-full rounded-full ${allDone ? "bg-emerald-500" : "bg-primary"}`}
+              className={`h-full rounded-full ${allDone ? "bg-success" : "bg-primary"}`}
               style={{ width: `${todos.length ? Math.round((done / todos.length) * 100) : 0}%` }}
             />
           </div>
@@ -109,7 +109,7 @@ function TodoRecord({ todos }: { todos: Todo[] }) {
             <li key={i} className="flex items-start gap-2 text-sm">
               <span className="mt-0.5 shrink-0">
                 {td.status === "completed" ? (
-                  <span className="flex h-4 w-4 items-center justify-center rounded-full bg-emerald-500 text-[9px] font-bold text-white">
+                  <span className="flex h-4 w-4 items-center justify-center rounded-full bg-success text-[9px] font-bold text-success-on">
                     ✓
                   </span>
                 ) : td.status === "in_progress" ? (
@@ -274,7 +274,7 @@ function ChoiceCard({
                   >
                     <span
                       className={`flex h-4 w-4 items-center justify-center rounded-full text-[10px] font-semibold ${
-                        done ? "bg-primary text-white" : active ? "bg-surface-muted text-ink-muted" : "bg-surface-muted text-ink-subtle"
+                        done ? "bg-primary text-primary-foreground" : active ? "bg-surface-muted text-ink-muted" : "bg-surface-muted text-ink-subtle"
                       }`}
                     >
                       {done ? "✓" : i + 1}
@@ -302,7 +302,7 @@ function ChoiceCard({
                   onClick={() => (isMulti ? toggle(opt) : pick(opt, false))}
                   className={`group flex items-center gap-2.5 rounded-xl border px-3.5 py-2.5 text-left text-sm transition-all disabled:cursor-default ${
                     isChosen
-                      ? "border-primary bg-primary font-medium text-white shadow-sm shadow-primary/25"
+                      ? "border-primary bg-primary font-medium text-primary-foreground shadow-sm shadow-primary/25"
                       : msg.submitted
                         ? "border-line bg-surface-muted text-ink-subtle"
                         : "border-line bg-surface text-ink hover:-translate-y-px hover:border-primary hover:bg-primary/[0.06] hover:shadow-sm"
@@ -352,10 +352,10 @@ function ChoiceCard({
               onClick={() => pick(discussLabel, true)}
               className={`flex items-center gap-2 rounded-xl border border-dashed px-3.5 py-2.5 text-left text-sm transition-all disabled:cursor-default ${
                 chosen?.discuss
-                  ? "border-neutral-500 bg-neutral-700 font-medium text-white"
+                  ? "border-primary bg-primary font-medium text-primary-foreground"
                   : msg.submitted
                     ? "border-line bg-surface-muted text-ink-subtle"
-                    : "border-line-strong bg-surface/60 text-ink-muted hover:border-neutral-400 hover:bg-surface-muted hover:text-ink"
+                    : "border-line-strong bg-surface/60 text-ink-muted hover:border-line-strong hover:bg-surface-muted hover:text-ink"
               }`}
             >
               <span className="shrink-0 text-[13px]">💬</span>
@@ -375,7 +375,7 @@ function ChoiceCard({
                   onClick={() => onSubmit(msg.id, draft as ChoiceAnswer[])}
                   className={`flex items-center gap-2.5 rounded-xl border px-3.5 py-2.5 text-left text-sm font-medium transition-all ${
                     complete
-                      ? "border-primary bg-primary text-white shadow-sm shadow-primary/25 hover:-translate-y-px hover:brightness-110"
+                      ? "border-primary bg-primary text-primary-foreground shadow-sm shadow-primary/25 hover:-translate-y-px hover:brightness-110"
                       : "cursor-not-allowed border-line bg-surface-muted text-ink-subtle"
                   }`}
                 >
@@ -405,7 +405,7 @@ function ChoiceCard({
                 <button
                   disabled={!complete}
                   onClick={() => onSubmit(msg.id, draft as ChoiceAnswer[])}
-                  className="rounded-lg bg-primary px-3 py-1.5 text-xs font-medium text-white shadow-sm transition hover:brightness-110 disabled:cursor-not-allowed disabled:bg-surface-muted disabled:text-ink-subtle disabled:shadow-none"
+                  className="rounded-lg bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground shadow-sm transition hover:brightness-110 disabled:cursor-not-allowed disabled:bg-surface-muted disabled:text-ink-subtle disabled:shadow-none"
                 >
                   {t("chat.choice.submit")}
                 </button>
@@ -618,7 +618,7 @@ const UsageTag = ({
   <span
     className={`inline-flex items-center gap-1 rounded-md px-1.5 py-0.5 text-[10px] tabular-nums ${
       tone === "cache"
-        ? "bg-emerald-500/15 text-emerald-600 dark:text-emerald-400"
+        ? "bg-success/15 text-success-ink"
         : "bg-surface-muted text-ink-subtle"
     }`}
   >
@@ -633,6 +633,77 @@ const UsageTag = ({
   </span>
 );
 
+/**
+ * How tall a user message may be before it is folded, in pixels.
+ *
+ * A pasted log, a stack trace or a spec runs to thousands of pixels and pushes the conversation it belongs to
+ * off the screen — the reply the user is waiting for ends up below the message that asked for it. 350px is
+ * roughly twenty lines: enough to recognise what was sent without having to scroll past it every time.
+ */
+const USER_TEXT_MAX_HEIGHT = 350;
+
+/**
+ * A user message, folded when it is long.
+ *
+ * Measured rather than guessed from the character count: what matters is rendered height, and that depends on
+ * wrapping, on the bubble's width and on the font — a 2000-character paragraph and a 2000-character column of
+ * short lines are wildly different heights. So the toggle appears only when the text ACTUALLY overflows, and a
+ * long-but-not-that-long message keeps its plain appearance with no control attached to it.
+ */
+function UserText({ text }: { text: string }) {
+  const t = useT();
+  const ref = useRef<HTMLDivElement>(null);
+  const [overflows, setOverflows] = useState(false);
+  const [expanded, setExpanded] = useState(false);
+
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    // The measurement lives entirely in the observer callback, never in the effect body. ResizeObserver fires
+    // once on observe, so this still measures immediately — and setting state from a callback is what the
+    // `set-state-in-effect` rule asks for, rather than a synchronous set that cascades a second render.
+    //
+    // `scrollHeight` is the full content height even while `max-height` clamps the box, which is the whole
+    // reason it can answer "is there more than we are showing".
+    const ro = new ResizeObserver(() => {
+      setOverflows(el.scrollHeight > USER_TEXT_MAX_HEIGHT + 1);
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [text]);
+
+  const folded = overflows && !expanded;
+  return (
+    <div className="min-w-0">
+      <div className="relative">
+        <div
+          ref={ref}
+          className="whitespace-pre-wrap break-words"
+          style={folded ? { maxHeight: USER_TEXT_MAX_HEIGHT, overflow: "hidden" } : undefined}
+        >
+          {text}
+        </div>
+        {/* A fade rather than a hard cut, so it reads as "continues below" instead of as a message that ends
+            mid-sentence. Tinted to the bubble's own background; pointer-events-none keeps the text under it
+            selectable right to the edge. */}
+        {folded && (
+          <div className="pointer-events-none absolute inset-x-0 bottom-0 h-10 bg-gradient-to-t from-surface-muted to-transparent" />
+        )}
+      </div>
+      {overflows && (
+        <button
+          type="button"
+          onClick={() => setExpanded((v) => !v)}
+          aria-expanded={expanded}
+          className="mt-1 text-[11px] font-medium text-ink-subtle underline-offset-2 transition-colors hover:text-ink hover:underline"
+        >
+          {expanded ? t("chat.collapse") : t("chat.expandMessage")}
+        </button>
+      )}
+    </div>
+  );
+}
+
 export const MessageItem = memo(function MessageItem({
   m,
   index,
@@ -645,7 +716,13 @@ export const MessageItem = memo(function MessageItem({
 }: {
   m: DisplayMsg;
   index?: number;
-  onSubmitChoice: (id: number, answers: ChoiceAnswer[]) => void;
+  /**
+   * Optional for the same reason `index` is: a read-only transcript (the Sub-agent Inspector's run view)
+   * has nothing to submit an answer to. A sub-agent has no path to a choice card in the first place, so the
+   * branch below is unreachable there — but a required callback would have to be faked to satisfy the type,
+   * and a fake one is how a card that silently swallows its answer gets shipped.
+   */
+  onSubmitChoice?: (id: number, answers: ChoiceAnswer[]) => void;
   onEditUser?: (index: number, newText: string) => void;
   onRegenerate?: (index: number, rating: "up" | "down" | null) => void;
   onRateMessage?: (displayIndex: number, storedIndex: number | undefined, rating: "up" | "down" | null) => void;
@@ -668,7 +745,8 @@ export const MessageItem = memo(function MessageItem({
     return <CallRows calls={[m]} />;
   }
   if (m.kind === "choice") {
-    return <ChoiceCard msg={m} onSubmit={onSubmitChoice} />;
+    // Rendered read-only when there is nobody to answer to, rather than with a submit that does nothing.
+    return onSubmitChoice ? <ChoiceCard msg={m} onSubmit={onSubmitChoice} /> : null;
   }
   if (m.kind === "todos") {
     return <TodoRecord todos={m.todos} />;
@@ -768,7 +846,7 @@ export const MessageItem = memo(function MessageItem({
               type="button"
               onClick={saveEdit}
               disabled={!draft.trim()}
-              className="rounded-full bg-primary px-3 py-1 text-xs font-semibold text-white shadow-sm transition hover:brightness-105 disabled:opacity-50"
+              className="rounded-full bg-primary px-3 py-1 text-xs font-semibold text-primary-foreground shadow-sm transition hover:brightness-105 disabled:opacity-50"
             >
               {t("chat.send")}
             </button>
@@ -820,7 +898,7 @@ export const MessageItem = memo(function MessageItem({
                   ))}
                 </div>
               )}
-              {m.content && <span className="whitespace-pre-wrap break-words">{m.content}</span>}
+              {m.content && <UserText text={m.content} />}
             </div>
           ) : (
             <Markdown content={m.content} />

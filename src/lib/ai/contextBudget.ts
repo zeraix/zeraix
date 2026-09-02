@@ -44,6 +44,21 @@ export function getContextBudgetK(): number {
   return clampBudgetK(n);
 }
 
+/**
+ * What to apply when the cap is switched back ON, given the last positive budget seen.
+ *
+ * Exists because "restore the previous value" has no answer the first time: the default is 0, so a UI that
+ * restores the default turns the cap on by setting it to off. The toggle then appears to do nothing at all —
+ * it flips, the store reads back 0, and it flips straight back — which is exactly what it did.
+ *
+ * So the fallback is the SUGGESTED value rather than the default. Turning something on has to result in it
+ * being on; a switch whose "on" position means off is not a preference, it is a broken control.
+ */
+export function restoreBudgetK(lastPositiveK: number): number {
+  const restored = clampBudgetK(lastPositiveK);
+  return restored > 0 ? restored : SUGGESTED_CONTEXT_BUDGET_K;
+}
+
 /** Persist the budget in K tokens (0 disables; positive values are clamped to the sane band). */
 export function setContextBudgetK(k: number): void {
   setStorage(STORAGE_KEY.contextBudget, k <= 0 ? 0 : clampBudgetK(k));

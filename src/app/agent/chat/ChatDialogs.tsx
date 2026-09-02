@@ -73,7 +73,7 @@ export function ChatDialogs(props: {
                 props.onLocalStartOpenChange(false);
                 router.push("/agent/models");
               }}
-              className="rounded-lg bg-primary px-3 py-1.5 text-sm font-medium text-white shadow-sm transition hover:brightness-105"
+              className="rounded-lg bg-primary px-3 py-1.5 text-sm font-medium text-primary-foreground shadow-sm transition hover:brightness-105"
             >
               {t("lm.goStart")}
             </button>
@@ -115,7 +115,7 @@ export function ChatDialogs(props: {
             <button
               onClick={commitRename}
               disabled={!renameDraft?.trim()}
-              className="rounded-lg bg-primary px-4 py-1.5 text-sm font-medium text-white transition hover:brightness-105 disabled:opacity-50"
+              className="rounded-lg bg-primary px-4 py-1.5 text-sm font-medium text-primary-foreground transition hover:brightness-105 disabled:opacity-50"
             >
               {t("ctx.save")}
             </button>

@@ -128,7 +128,7 @@ export function ProjectSkillsPrompt({
                         type="button"
                         onClick={() => void decide(s, true)}
                         disabled={rowBusy}
-                        className="flex items-center gap-1 rounded-md bg-primary px-2 py-1 text-xs font-semibold text-white shadow-sm transition hover:brightness-105 disabled:opacity-60"
+                        className="flex items-center gap-1 rounded-md bg-primary px-2 py-1 text-xs font-semibold text-primary-foreground shadow-sm transition hover:brightness-105 disabled:opacity-60"
                       >
                         {rowBusy ? (
                           <Loader2 className="size-3.5 animate-spin" />

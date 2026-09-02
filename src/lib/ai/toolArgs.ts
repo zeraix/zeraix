@@ -201,3 +201,69 @@ export function parseToolArguments(raw: unknown): ParsedToolArgs {
   const partial = asObject(recovered);
   return { ok: false, error: unreadable(text, recovered), ...(partial ? { partial } : {}) };
 }
+
+/**
+ * Make a round's `tool_calls` safe to send back to a provider.
+ *
+ * ## The failure this prevents
+ *
+ * A model can emit a tool call whose `arguments` are not valid JSON — most often a large payload cut off by
+ * the output token limit, which is why it shows up on `write_file` and `spawn_subagents` first. Reading it is
+ * already handled: `parseToolArguments` carries the failure and the round reports it.
+ *
+ * What was NOT handled is what happens to that call afterwards. The assistant turn is echoed back verbatim on
+ * every subsequent request, because a provider rejects tool results whose `tool_calls` are missing — so the
+ * malformed string went onto the wire and into storage unchanged. Providers validate it:
+ *
+ *     HTTP 400 — Assistant tool call ***.arguments must be valid JSON.
+ *
+ * and that is not a failed round, it is a **dead conversation**. The bad call is in the history now, so every
+ * later request replays it and gets the same 400. The user cannot send anything, cannot retry, and cannot see
+ * why; reopening does not help, because it was persisted too.
+ *
+ * ## Why rewriting is the right trade
+ *
+ * The wire copy was deliberately kept byte-identical to keep the provider's prefix cache stable. That is worth
+ * real money on a long conversation — but only for a conversation that still works. Here the choice is a cache
+ * miss on one turn against every future turn failing, so the call is rewritten to the partial object the
+ * parser recovered, or `{}` when it recovered nothing.
+ *
+ * The model is not misled by the rewrite: the tool RESULT for this call already says the arguments were
+ * unreadable and that the call has to be sent again. What it sees is a call it made with less in it than it
+ * wrote, and an error saying exactly that — which is the truth, and is recoverable.
+ *
+ * Returns the SAME array when nothing needed repair, so the common path allocates nothing and callers can
+ * still compare by reference.
+ */
+export function sanitizeToolCallArguments<T extends { function: { name: string; arguments: unknown } }>(
+  calls: readonly T[],
+): readonly T[] {
+  let repaired: T[] | null = null;
+  for (let i = 0; i < calls.length; i++) {
+    const tc = calls[i];
+    const parsed = parseToolArguments(tc.function.arguments);
+    // `ok` covers the shapes a provider may legitimately send (an object, null, an empty string). Those are
+    // re-serialised too when they are not already a JSON string, so the wire carries one canonical form.
+    const canonical = parsed.ok ? parsed.args : (parsed.partial ?? {});
+    const encoded = JSON.stringify(canonical);
+    if (typeof tc.function.arguments === "string" && tc.function.arguments === encoded) continue;
+    // Already valid JSON in some other spelling (whitespace, key order): leave it alone. Rewriting those
+    // would break the prefix cache on every healthy turn to fix a problem they do not have.
+    if (parsed.ok && typeof tc.function.arguments === "string" && isValidJsonText(tc.function.arguments)) {
+      continue;
+    }
+    repaired ??= [...calls];
+    repaired[i] = { ...tc, function: { ...tc.function, arguments: encoded } };
+  }
+  return repaired ?? calls;
+}
+
+/** Is this text something `JSON.parse` accepts? The one question that decides whether a provider will 400. */
+function isValidJsonText(text: string): boolean {
+  try {
+    JSON.parse(text);
+    return true;
+  } catch {
+    return false;
+  }
+}

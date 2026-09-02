@@ -155,12 +155,12 @@ export function Composer({
                       />
                       {/* Uploading overlay + progress */}
                       {a.uploading && (
-                        <div className="absolute inset-0 flex items-center justify-center bg-black/50 text-[10px] font-semibold text-white">
+                        <div className="absolute inset-0 flex items-center justify-center bg-black/50 text-[10px] font-semibold text-danger-on">
                           {a.progress ?? 0}%
                         </div>
                       )}
                       {a.uploadError && (
-                        <div className="absolute inset-0 flex items-center justify-center bg-destructive/70 text-[10px] font-semibold text-white">
+                        <div className="absolute inset-0 flex items-center justify-center bg-destructive/75 text-[10px] font-semibold text-danger-on">
                           {t("chat.uploadFailedShort")}
                         </div>
                       )}
@@ -183,7 +183,7 @@ export function Composer({
                   <button
                     onClick={() => onRemoveAttachment(a.id)}
                     title={t("chat.remove")}
-                    className="absolute -right-1.5 -top-1.5 flex h-5 w-5 items-center justify-center rounded-full bg-neutral-800 text-[11px] font-bold text-white shadow transition hover:bg-neutral-900"
+                    className="absolute -right-1.5 -top-1.5 flex h-5 w-5 items-center justify-center rounded-full bg-primary text-[11px] font-bold text-primary-foreground shadow transition hover:brightness-110"
                   >
                     ✕
                   </button>
@@ -518,7 +518,7 @@ export function Composer({
             {loading && (
               <button
                 onClick={onCancel}
-                className="flex h-9 shrink-0 items-center gap-1.5 rounded-full bg-neutral-700 px-4 text-sm font-semibold text-white shadow-sm transition hover:bg-neutral-800 active:scale-95"
+                className="flex h-9 shrink-0 items-center gap-1.5 rounded-full bg-primary px-4 text-sm font-semibold text-primary-foreground shadow-sm transition hover:brightness-110 active:scale-95"
               >
                 <span className="inline-block size-2.5 rounded-[2px] bg-surface" />
                 {t("chat.stop")}
@@ -530,7 +530,7 @@ export function Composer({
                 (!input.trim() && attachments.length === 0) ||
                 attachments.some((a) => a.kind === "image" && a.uploading)
               }
-              className="flex h-9 shrink-0 items-center gap-1.5 rounded-full bg-gradient-to-br from-primary to-primary/85 pl-4 pr-4 text-sm font-semibold text-white shadow-sm transition hover:shadow-md hover:brightness-105 active:scale-95 disabled:opacity-50 disabled:shadow-none"
+              className="flex h-9 shrink-0 items-center gap-1.5 rounded-full bg-gradient-to-br from-primary to-primary/85 pl-4 pr-4 text-sm font-semibold text-danger-on shadow-sm transition hover:shadow-md hover:brightness-105 active:scale-95 disabled:opacity-50 disabled:shadow-none"
               title={loading ? t("chat.queueTitle") : undefined}
             >
               <Send className="size-4 -translate-y-px" />

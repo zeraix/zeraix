@@ -20,12 +20,13 @@
     display: flex; flex-direction: column;
     align-items: center; justify-content: center;
     -webkit-app-region: drag;
-    /* Dark brand base: radial warm-gold glow layered over a near-black background */
+    /* Warm graphite base with a cool ink halo -- same pairing as the app palette
+       (--surface / --accent-ink in src/app/globals.css). */
     background:
-      radial-gradient(120% 120% at 50% 38%, #26221a 0%, #17151100 60%),
-      linear-gradient(160deg, #121110 0%, #0b0a09 100%);
+      radial-gradient(120% 120% at 50% 38%, #1f1f26 0%, #15151800 60%),
+      linear-gradient(160deg, #131316 0%, #08080a 100%);
     border-radius: 16px;
-    border: 1px solid rgba(212,175,55,0.14);
+    border: 1px solid rgba(127,160,217,0.16);
     box-shadow: 0 24px 80px rgba(0,0,0,0.55);
     overflow: hidden;
   }
@@ -34,7 +35,7 @@
     position: absolute;
     width: 340px; height: 340px;
     border-radius: 50%;
-    background: radial-gradient(circle, rgba(212,175,55,0.28) 0%, rgba(212,175,55,0) 68%);
+    background: radial-gradient(circle, rgba(127,160,217,0.26) 0%, rgba(127,160,217,0) 68%);
     filter: blur(18px);
     animation: pulse 3.2s ease-in-out infinite;
     top: 50%; left: 50%;
@@ -49,7 +50,7 @@
     width: 100%; height: 100%;
     object-fit: contain;
     display: block;
-    filter: drop-shadow(0 4px 18px rgba(212,175,55,0.35));
+    filter: drop-shadow(0 4px 18px rgba(127,160,217,0.32));
   }
   /* Sweep light: constrained within the logo shape */
   .shine {
@@ -71,7 +72,7 @@
     margin-top: 30px;
     font-size: 26px; font-weight: 700; letter-spacing: 0.42em;
     padding-left: 0.42em; /* offset the rightward shift caused by letter-spacing */
-    background: linear-gradient(180deg, #f3e6b6 0%, #d4af37 55%, #b8860b 100%);
+    background: linear-gradient(180deg, #f0eeeb 0%, #a3bcea 55%, #7fa0d9 100%);
     -webkit-background-clip: text; background-clip: text;
     color: transparent;
   }
@@ -84,13 +85,13 @@
   .bar {
     position: absolute; left: 0; bottom: 0;
     width: 100%; height: 3px;
-    background: rgba(212,175,55,0.10);
+    background: rgba(255,255,255,0.08);
     overflow: hidden;
   }
   .bar::before {
     content: ""; position: absolute; top: 0; left: 0; height: 100%;
     width: 40%;
-    background: linear-gradient(90deg, transparent, #d4af37, transparent);
+    background: linear-gradient(90deg, transparent, #7fa0d9, transparent);
     animation: slide 1.6s ease-in-out infinite;
   }
   @keyframes breath {

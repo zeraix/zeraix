@@ -52,8 +52,8 @@ export function ContextUsageRing(props: {
   const locale = useLocaleStore((s) => s.locale);
   const { tokens, contextWindow } = props;
   const pct = contextWindow > 0 ? Math.min(100, Math.round((tokens / contextWindow) * 100)) : 0;
-  const ringColor = pct >= 90 ? "text-red-500" : pct >= 70 ? "text-amber-500" : "text-emerald-500";
-  const barColor = pct >= 90 ? "bg-red-500" : pct >= 70 ? "bg-amber-500" : "bg-emerald-500";
+  const ringColor = pct >= 90 ? "text-danger-ink" : pct >= 70 ? "text-warning-ink" : "text-success-ink";
+  const barColor = pct >= 90 ? "bg-danger" : pct >= 70 ? "bg-warning" : "bg-success";
   // Manual compaction is allowed once there's enough to compress: ≥20% of the window, OR — when an absolute
   // budget is set — once context has passed that budget (so a 1M-window model isn't stuck "below 20%" while
   // already carrying 200K). Keep this in sync with compactNow's guard.

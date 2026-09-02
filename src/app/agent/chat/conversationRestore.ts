@@ -1,3 +1,4 @@
+import { sanitizeToolCallArguments } from "@/lib/ai/toolArgs";
 import { resolveToolCall } from "@/lib/ai/toolRouter";
 import { thinkingProcessText } from "./wireHelpers";
 import type { StoredMessage } from "@/lib/ai/conversation";
@@ -31,7 +32,11 @@ export function restoreWireBuffer(conv: StoredConversation): ApiMsg[] {
       return {
         role: "assistant",
         content: m.content,
-        ...(m.tool_calls?.length ? { tool_calls: m.tool_calls } : {}),
+        // Repaired on the way back in, not just on the way out. A conversation saved before the sanitiser
+        // existed still holds the malformed call, and replaying it means the provider rejects the request
+        // the moment the conversation is reopened -- so the fix has to reach the archive too, or every
+        // conversation already broken by this stays broken for good.
+        ...(m.tool_calls?.length ? { tool_calls: [...sanitizeToolCallArguments(m.tool_calls)] } : {}),
         // The rating (thumbs up / down) is restored from the archive into the in-memory wire buffer; stripWireMetadata removes the field before sending.
         ...(m.rating ? { rating: m.rating } : {}),
         // Thinking text is restored too, or reopening mid tool-loop would replay a prompt missing the <think> blocks the model
@@ -113,7 +118,6 @@ export function restoreDisplay(conv: StoredConversation): DisplayMsg[] {
         // Restore a generated image so it survives a conversation switch (persisted display-only, see StoredMessage.image).
         ...(m.image ? { image: m.image, servedBy: m.servedBy } : {}),
         // Same for a sub-agent's inner steps, so the reopened view matches what was shown live.
-        ...(m.steps?.length ? { steps: m.steps } : {}),
       });
     } else if (m.role === "assistant") {
       // The deep-thinking block is restored before this round's content / tool trace (consistent with the real-time order).

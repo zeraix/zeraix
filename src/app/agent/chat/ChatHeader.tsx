@@ -116,19 +116,19 @@ export function ChatHeader(props: {
    * is scaled in. At rest with the switch off the layer is scale-x-0, so carrying a colour costs nothing visually.
    */
   const envFill = pending
-    ? "bg-sky-500/15"
+    ? "bg-info/15"
     : phase === "error" && secureEnv
-      ? "bg-amber-500/15"
-      : "bg-emerald-500/15";
+      ? "bg-warning/15"
+      : "bg-success/15";
   // Follows the switch, not the engine: `pending` is derived from `secureEnv` (local state), so this flips on the click
   // rather than waiting for the main process to confirm the engine change — the wipe starts under the user's finger.
   const envFilled = inSandbox || pending || (phase === "error" && secureEnv);
   const envText = inSandbox
-    ? "text-emerald-600"
+    ? "text-success-ink"
     : phase === "error" && secureEnv
-      ? "text-amber-600 dark:text-amber-400"
+      ? "text-warning-ink"
       : pending
-        ? "text-sky-600"
+        ? "text-info-ink"
         : "text-ink-muted";
   // The title bar is a drag region for the frameless window, so every control on this row has to opt out of it —
   // otherwise the mouse is taken by the window drag before it reaches the button.
@@ -213,7 +213,7 @@ export function ChatHeader(props: {
             {/* The runtime has a newer image: appended here rather than beside the switch, because updating is
                 something you do to the runtime, and this half is what opens the runtime dialog. */}
             {props.vmUpdatable && (
-              <span className="text-amber-600 dark:text-amber-400">{t("sbx.badge.updatable")}</span>
+              <span className="text-warning-ink">{t("sbx.badge.updatable")}</span>
             )}
           </button>
           {/* The switch proper. Disabled when this machine cannot run the VM at all — offering a control that silently
@@ -239,7 +239,7 @@ export function ChatHeader(props: {
                 matched to it too — it used to run at the default duration and arrived ahead of the colour. */}
             <span
               aria-hidden
-              className={`absolute inset-0 origin-left bg-emerald-500 transition-transform duration-300 ease-in ${
+              className={`absolute inset-0 origin-left bg-success transition-transform duration-300 ease-in ${
                 secureEnv ? "scale-x-100" : "scale-x-0"
               }`}
             />

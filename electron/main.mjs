@@ -2,6 +2,7 @@ import { app, BrowserWindow, dialog, ipcMain, protocol, shell, utilityProcess } 
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { reapOrphans } from "./tools/sandbox/orphans.mjs";
 import { listTools, runTool, getWorkingDir, setWorkingDir, setAssetDir, saveAttachment, setLLMConfig, getLLMConfig, setServiceEventHandler, stopProcess, listProcesses, initEngine, disposeEngines, getSandboxStatus, setSandboxMode, onSandboxStatus, restartSandbox, sandboxVmInfo, wsReadDir, wsReadFile, wsWriteFile } from "./tools/aiToolkit.mjs";
 import { setAssetHostDir } from "./tools/sandbox/qemu.mjs";
 import { setMediaDir, readIndex, writeIndex, saveMedia, openMediaDir, getMediaDir } from "./mediaStore.mjs";
@@ -984,6 +985,20 @@ app.whenReady().then(() => {
   // Windows: Toast notifications require setting the AppUserModelID (matching the electron-builder appId),
   // otherwise notifications show no app name/icon or do not pop at all. No side effects on macOS/Linux.
   app.setAppUserModelId("com.operease.app");
+  // Kill command trees left running by a previous session that never got to clean up after itself --
+  // End Task, a crash, an OS shutdown. Nothing else will: on Windows a child simply outlives its parent,
+  // so a build the agent started can hold a core indefinitely with no app left to show it. Deliberately
+  // not awaited (it shells out to check start times, and the window should not wait on that), and the
+  // result is logged because an app that silently kills processes at boot is worse to debug than the
+  // orphans were. See electron/tools/sandbox/orphans.mjs.
+  void reapOrphans()
+    .then((killed) => {
+      if (killed.length) {
+        console.log(`[orphans] killed ${killed.length} command tree(s) left by a previous run:`);
+        for (const k of killed) console.log(`[orphans]   pid ${k.pid}: ${k.command}`);
+      }
+    })
+    .catch(() => {});
   // The splash screen has been removed: the app loads the entry (`/`) directly, and the entry page routes to /agent or /login based on login state.
   // The main window shows as soon as the first content frame is ready (ready-to-show); with no splash, dismissSplash is equivalent to directly showing the main window.
   protocol.handle(APP_SCHEME, handleAppRequest);
@@ -993,7 +1008,8 @@ app.whenReady().then(() => {
   registerAiTools();
   // Start the Rust sidecar now rather than on the first tool call, so its state is reported once at
   // boot instead of being inferred from behaviour. Fire-and-forget and never fatal: with the flag off it
-  // prints one line and starts nothing, and every failure path leaves the JS handlers serving.
+  // prints one line and starts nothing. Not fatal here either: a failure is reported by the tools that
+  // need it (they have no JS fallback since 2.0), not by refusing to open the window.
   void warmUpRustRuntime()
     .then(() => {
       // Said plainly, because the sub-agent path is opt-in and its absence is otherwise invisible:

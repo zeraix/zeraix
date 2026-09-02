@@ -19,15 +19,40 @@ export const READONLY_TOOLS = [
   "search_in_files",
 ];
 
-/** Review tool set: read-only + compile/test verification (check_project), but still can't modify any file or run arbitrary commands. */
-export const REVIEW_TOOLS = [...READONLY_TOOLS, "check_project"];
+/**
+ * The web: search, and read one page.
+ *
+ * Kept as its own constant rather than folded into READONLY_TOOLS, even though neither one writes anything.
+ * They are read-only about the WORKSPACE and outbound about the network, which is a different property and
+ * the one `capabilities.ts` classifies them `medium` for — a local grep and an HTTP request are not the same
+ * risk, and a constant named READONLY_TOOLS that quietly contained one would make the two indistinguishable
+ * at every call site that reads it.
+ *
+ * Given to every role. A sub-agent is the part of the system most likely to hit a question the workspace
+ * cannot answer — a library's actual API, an error string, what a spec says — and until now it had to come
+ * back and ask the main agent to look it up, which costs a round trip and loses the context that raised the
+ * question. This is also what puts them on the brokered ceiling: see `deriveCeiling` in orchestration/config.ts,
+ * which is the union of these lists and is the only route by which an anonymous sub-agent can be granted a tool.
+ */
+export const WEB_TOOLS = ["web_search", "fetch_url"];
+
+/**
+ * What every sub-agent gets, whatever its role: local lookups plus the web.
+ *
+ * The floor the three specialised sets are built on, so adding a capability to all four roles is one edit
+ * rather than four — which is how `web_search` reaching only three of them would otherwise happen.
+ */
+export const BASE_TOOLS = [...READONLY_TOOLS, ...WEB_TOOLS];
+
+/** Review tool set: the base + compile/test verification (check_project), but still can't modify any file or run arbitrary commands. */
+export const REVIEW_TOOLS = [...BASE_TOOLS, "check_project"];
 
 /**
  * Coding execution tool set: read + write + run commands + compile/test. Listed explicitly (rather than omitted = everything) —
  * deliberately excludes delete_file (irreversible deletion is only done by the main agent while the user is present); sub-agents naturally don't include run_subagent (no nesting).
  */
 export const CODER_TOOLS = [
-  ...READONLY_TOOLS,
+  ...BASE_TOOLS,
   "write_file",
   "edit_file",
   "append_file",
@@ -53,7 +78,14 @@ export const SUBAGENT_TOOL_DISCIPLINE =
   "concurrently, so batching them is much faster than one per round. If you know you need three files, " +
   "request all three at once rather than waiting for each result. Serialize only when one call genuinely " +
   "depends on another's result. Prefer the narrowest tool, and read the specific line range you need " +
-  "(offset/limit) rather than whole files.";
+  "(offset/limit) rather than whole files.\n" +
+  // Every role now carries WEB_TOOLS, and a tool the prompt never mentions is a tool the model reaches for
+  // late or not at all. The ordering rule is the important half: a sub-agent is given a question about THIS
+  // project, and searching the web for it wastes a round and returns something about a different codebase.
+  "The web is available: web_search finds pages, fetch_url reads one. Check the workspace first — a question " +
+  "about this project is nearly always answered inside it — and go online for what the workspace cannot tell " +
+  "you: a library's actual API, an unfamiliar error string, a specification, anything that may have changed " +
+  "since training. When a conclusion rests on something you read online, give the URL with it.";
 
 export interface SubAgentDef {
   /** The value for the tool's agent argument. */
@@ -73,9 +105,9 @@ export const SUBAGENTS: SubAgentDef[] = [
     id: "explore",
     label: "Explore",
     description:
-      "Read-only investigation: Search across files within the workspace to locate files, code, or content, then summarize the findings." +
+      "Read-only investigation: Search across files within the workspace to locate files, code, or content — and look things up on the web when the answer is not in the workspace — then summarize the findings." +
       "For any question that requires searching or reading more than one or two files to answer, prefer using this tool instead of repeatedly performing search / read operations yourself. It will not modify any files.",
-    tools: READONLY_TOOLS,
+    tools: BASE_TOOLS,
     systemPrompt:
       "You are a read-only exploration sub-agent. Your goal is to locate the answer in as few steps as possible, not to scan the whole directory.\n" +
       "Strategy:\n" +
@@ -83,13 +115,13 @@ export const SUBAGENTS: SubAgentDef[] = [
       "2) Be precise: search_in_files supports regex / ignore_case / pattern (scope by filename, e.g. *.ts) and returns context lines around each hit — read that context first; you usually won't need to open the file. One precise search beats many broad substring searches.\n" +
       "3) Narrow first: use search_files (by filename) / list_directory to find candidates, then search content within that small set; only read_file the specific parts you need — don't dump whole files.\n" +
       "4) Converge: conclude once you have enough evidence. If you've searched six or seven times and are still diverging, you're probably searching too broadly — switch to a more precise regex / filename scope, or just answer; don't keep scanning the whole directory.\n" +
-      "You cannot write files or run commands. Finish with a concise conclusion and list the most relevant path:line references as evidence.",
+      "You cannot write files or run commands. Finish with a concise conclusion and list the most relevant path:line references (and any URL you relied on) as evidence.",
   },
   {
     id: "plan",
     label: "Plan",
     description: "Architecture / Implementation Planning: Investigate first, then provide a step-by-step implementation plan with trade-offs. Only plan, do not modify code.",
-    tools: READONLY_TOOLS,
+    tools: BASE_TOOLS,
     systemPrompt:
       "You are a planning sub-agent. First investigate the relevant code with read-only tools, then output an implementation plan — do not write or change any code. " +
       "Your output must include: the goal, the key files (path + why), ordered steps, trade-offs and risks (with a recommendation), and how to verify.",

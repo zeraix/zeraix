@@ -30,9 +30,77 @@ const HEAD_CHARS = 5000;
 /** Number of tail characters kept when compressing (preserves the ending, such as a command's final result / error). */
 const TAIL_CHARS = 2000;
 
+/**
+ * A fenced unified diff, as write_file / edit_file return it.
+ *
+ * Matched so the cap below can avoid cutting through one. A diff sliced at a character offset is not a shorter
+ * diff — it is a broken one: the renderer parses the fragments as rows, the hunk headers stop matching the
+ * lines under them, and both the user and the model are shown something that looks complete and is not. This
+ * is the same objection `UNCAPPED_TOOLS` records for read_file, where a hole in the middle of the code is
+ * indistinguishable from code that was never there.
+ */
+const DIFF_BLOCK = /```diff\n([\s\S]*?)\n```/;
+
+/**
+ * Elision marker for a shortened diff.
+ *
+ * Prefixed with `\` on purpose: the renderer maps that to the "no newline at end of file" row type, which
+ * carries no line numbers — so the marker cannot shift the numbering of the rows after it. A plain context
+ * line would have advanced both counters and quietly mislabelled every following line.
+ */
+const diffElision = (lines: number) => `\\ […… ${lines} diff lines elided ……]`;
+
+/**
+ * Shorten a diff by whole lines, keeping it a valid diff.
+ *
+ * Head and tail rather than head alone: the start of a change says what it is and the end is where a
+ * half-finished edit shows up.
+ */
+function capDiffBody(body: string, budget: number): string {
+  if (body.length <= budget) return body;
+  const lines = body.split("\n");
+  const kept: string[] = [];
+  const tail: string[] = [];
+  let used = 0;
+  let head = 0;
+  let back = lines.length - 1;
+  // Alternate ends so a change with all its weight at one end is not represented only by the other.
+  while (head <= back) {
+    const next = head <= back ? lines[head] : "";
+    if (used + next.length + 1 > budget) break;
+    kept.push(next);
+    used += next.length + 1;
+    head++;
+    if (head > back) break;
+    const prev = lines[back];
+    if (used + prev.length + 1 > budget) break;
+    tail.unshift(prev);
+    used += prev.length + 1;
+    back--;
+  }
+  const elided = lines.length - kept.length - tail.length;
+  if (elided <= 0) return body;
+  return [...kept, diffElision(elided), ...tail].join("\n");
+}
+
 /** If the tool output is too long, compress it into head + tail and note the elided amount; otherwise return as-is. */
 export function capToolOutput(content: string): string {
   if (typeof content !== "string" || content.length <= MAX_TOOL_OUTPUT_CHARS) return content;
+
+  // A diff is shortened by whole lines rather than sliced, so what survives is still a diff. The prose around
+  // it (a "Wrote N bytes to …" line) is short and is kept whole.
+  const block = DIFF_BLOCK.exec(content);
+  if (block) {
+    const before = content.slice(0, block.index);
+    const after = content.slice(block.index + block[0].length);
+    // What is left for the diff once the surrounding text and the fences have had their share.
+    const budget = MAX_TOOL_OUTPUT_CHARS - before.length - after.length - 16;
+    if (budget > 0) {
+      return `${before}\`\`\`diff\n${capDiffBody(block[1], budget)}\n\`\`\`${after}`;
+    }
+    // The prose alone is over budget, which means this is not really a diff result. Fall through.
+  }
+
   const head = content.slice(0, HEAD_CHARS);
   const tail = content.slice(content.length - TAIL_CHARS);
   const elided = content.length - HEAD_CHARS - TAIL_CHARS;

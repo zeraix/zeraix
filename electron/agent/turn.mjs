@@ -32,8 +32,17 @@ export const INTERACTIVE_TOOLS = Object.freeze([
   "mcp_connect",
 ]);
 
-/** Safety net so a looping model cannot spend a budget forever; also see limits.maxTokens (§4.1). */
-const DEFAULT_MAX_ROUNDS = 12;
+/**
+ * Rounds allowed when a node does not say. `null` = unbounded.
+ *
+ * This was 12, as a safety net against a looping model. The net caught the wrong thing: a round cap fires on
+ * the tally, so it ended the runs doing the most work and left a node reporting failure after paying for
+ * every round it had. What stops a genuinely stuck agent is the tool policy and the model's own final answer,
+ * neither of which counts rounds.
+ *
+ * A node that wants a ceiling still sets `maxRounds` explicitly, and the automation templates do.
+ */
+const DEFAULT_MAX_ROUNDS = null;
 
 /**
  * Local models run on the user's own machine: no per-token cost, so the round and token ceilings that
@@ -43,7 +52,7 @@ const DEFAULT_MAX_ROUNDS = 12;
  * local tokens are reported as 0 so they never accrue against limits.maxTokens. Locality is decided by
  * the endpoint, matching the renderer's isLocalEndpoint.
  */
-const LOCAL_MAX_ROUNDS = 50;
+const LOCAL_MAX_ROUNDS = null;
 function isLocalModel(model) {
   return /^https?:\/\/(127\.0\.0\.1|localhost)(:|\/)/i.test(String(model?.endpoint ?? ""));
 }
@@ -59,7 +68,7 @@ function isLocalModel(model) {
  * @param {(format:string)=>Promise<object[]>} opts.listTools
  * @param {(name:string, args:object)=>Promise<object>} opts.runTool
  * @param {{allow?:string[], deny?:string[]}} [opts.toolPolicy]
- * @param {number} [opts.maxRounds]
+ * @param {number|null} [opts.maxRounds]  Round ceiling for this node; null (the default) is unbounded.
  * @param {object} [opts.meta]                 Attribution passed through to the transport (see the
  *                                             usage log in electron/llm/proxy.mjs). Opaque here.
  * @param {AbortSignal} [opts.signal]
@@ -111,8 +120,10 @@ export async function runAgentTurn({
 async function runWithModel({ model, messages, tools, llmChat, runTool, toolPolicy, maxRounds, meta, signal, onEvent, usage }) {
   // Local models are uncapped (see LOCAL_MAX_ROUNDS): the round ceiling exists to bound spending.
   const local = isLocalModel(model);
+  // `null` anywhere here means unbounded: a local model has no per-token cost, and the default is now
+  // uncapped for everyone. An explicit per-node `maxRounds` is still honoured.
   const roundCap = local ? LOCAL_MAX_ROUNDS : maxRounds;
-  for (let round = 1; round <= roundCap; round++) {
+  for (let round = 1; roundCap === null || round <= roundCap; round++) {
     if (signal?.aborted) return { ok: false, error: "cancelled", fatal: true };
 
     // The last round is spent asking for an answer, not for more research. A model that used its
@@ -120,7 +131,7 @@ async function runWithModel({ model, messages, tools, llmChat, runTool, toolPoli
     // old behaviour threw all of that away and failed the node, which for a fanned-out research step
     // means paying for ten searches and getting nothing. Withdrawing the tools removes the option it
     // keeps taking, so this is a forced answer, not a silent partial one.
-    const finalRound = round === roundCap && tools.length > 0;
+    const finalRound = roundCap !== null && round === roundCap && tools.length > 0;
     if (finalRound) {
       messages.push({
         role: "user",
@@ -193,6 +204,9 @@ async function runWithModel({ model, messages, tools, llmChat, runTool, toolPoli
 
   // Reached only when the model kept calling tools even in the round where none were offered. That
   // is a stuck agent, not a busy one, and reporting success on its last partial output would hide it.
+  //
+  // Unreachable when `roundCap` is null, which is now the default: the loop above only exits through a final
+  // answer, a cancellation or an error. Kept for the nodes that still set `maxRounds` themselves.
   return { ok: false, error: `agent did not finish within ${roundCap} rounds`, fatal: true };
 }
 

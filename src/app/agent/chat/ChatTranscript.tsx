@@ -40,11 +40,20 @@ export interface ChatTranscriptProps {
   error: string | null;
   toolsReady: boolean;
   t: (key: string, vars?: Record<string, string>) => string;
-  onSubmitChoice: (id: number, answers: ChoiceAnswer[]) => void;
-  onEditUser: (displayIndex: number, newText: string) => void;
-  onRegenerate: (assistantIndex: number, rating?: "up" | "down" | null) => void;
+  onSubmitChoice?: (id: number, answers: ChoiceAnswer[]) => void;
+  onEditUser?: (displayIndex: number, newText: string) => void;
+  onRegenerate?: (assistantIndex: number, rating?: "up" | "down" | null) => void;
   /** The stored index is how a rating survives a reload; MessageItem supplies it from the message. */
-  onRateMessage: (displayIndex: number, storedIndex: number | undefined, rating: "up" | "down" | null) => void;
+  onRateMessage?: (displayIndex: number, storedIndex: number | undefined, rating: "up" | "down" | null) => void;
+  /**
+   * A transcript nobody can act on: the Sub-agent Inspector's view of one delegation.
+   *
+   * It withholds `index` from `MessageItem`, which is what every affordance is gated on — editing a turn,
+   * rating a reply, regenerating one all resolve against a position in the page's own `display` array, and a
+   * sub-agent's run has no such array to resolve against. Read-only is therefore not a style: passing an
+   * index a callback could not honour is what would produce an edit button that silently does nothing.
+   */
+  readOnly?: boolean;
 }
 
 export function ChatTranscript({
@@ -63,6 +72,7 @@ export function ChatTranscript({
   onEditUser,
   onRegenerate,
   onRateMessage,
+  readOnly = false,
 }: ChatTranscriptProps) {
   const lastAssistant = lastAssistantIndex(display);
   // Memoised for IDENTITY, not for the fold's own cost. Every keystroke in the composer re-renders this
@@ -118,14 +128,16 @@ export function ChatTranscript({
           ) : (
             <MessageItem
               key={row.index}
-              index={row.index}
+              // Withheld when read-only — see `readOnly` above. The key still uses the row's position; only
+              // what MessageItem does with an index is being taken away.
+              index={readOnly ? undefined : row.index}
               m={display[row.index]}
-              onSubmitChoice={onSubmitChoice}
-              onEditUser={onEditUser}
-              onRegenerate={onRegenerate}
-              onRateMessage={onRateMessage}
+              onSubmitChoice={readOnly ? undefined : onSubmitChoice}
+              onEditUser={readOnly ? undefined : onEditUser}
+              onRegenerate={readOnly ? undefined : onRegenerate}
+              onRateMessage={readOnly ? undefined : onRateMessage}
               // Regenerating discards everything after the reply, so only the last one offers it.
-              canRegenerate={!loading && row.index === lastAssistant}
+              canRegenerate={!readOnly && !loading && row.index === lastAssistant}
               busy={loading}
             />
           ),

@@ -124,7 +124,7 @@ export default function UpdateNotifier() {
         <div className="flex items-start gap-2">
           <div className="mt-0.5 shrink-0">
             {failed ? (
-              <CircleAlert className="size-4 text-amber-500" />
+              <CircleAlert className="size-4 text-warning-ink" />
             ) : downloading ? (
               <Loader2 className="size-4 animate-spin text-muted-foreground" />
             ) : status === "downloaded" ? (

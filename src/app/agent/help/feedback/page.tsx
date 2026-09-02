@@ -395,7 +395,7 @@ export default function AgentFeedbackPage() {
                     </span>
                   )}
                   {s.failed && (
-                    <span className="absolute inset-0 flex items-center justify-center bg-destructive/70 px-1 text-center text-[10px] font-semibold text-white">
+                    <span className="absolute inset-0 flex items-center justify-center bg-destructive/75 px-1 text-center text-[10px] font-semibold text-danger-on">
                       {t("help.imageFailedBadge")}
                     </span>
                   )}
@@ -404,7 +404,7 @@ export default function AgentFeedbackPage() {
                     onClick={() => removeShot(s.id)}
                     aria-label={t("help.imageRemove")}
                     title={t("help.imageRemove")}
-                    className="absolute right-0.5 top-0.5 flex size-4 items-center justify-center rounded-full bg-neutral-900/80 text-white opacity-0 transition group-hover:opacity-100"
+                    className="absolute right-0.5 top-0.5 flex size-4 items-center justify-center rounded-full bg-primary/85 text-primary-foreground opacity-0 transition group-hover:opacity-100"
                   >
                     <X className="size-2.5" />
                   </button>
@@ -428,7 +428,7 @@ export default function AgentFeedbackPage() {
           <div className="mt-4 flex flex-wrap items-center gap-2">
             <button
               onClick={() => void send()}
-              className="flex shrink-0 items-center gap-1.5 rounded-lg bg-gradient-to-br from-primary to-primary/85 px-3 py-1.5 text-xs font-semibold text-white shadow-sm transition hover:brightness-105"
+              className="flex shrink-0 items-center gap-1.5 rounded-lg bg-gradient-to-br from-primary to-primary/85 px-3 py-1.5 text-xs font-semibold text-danger-on shadow-sm transition hover:brightness-105"
             >
               {channel === "github" ? <Github className="size-3.5" /> : <Globe className="size-3.5" />}
               {channel === "github" ? t("help.openIssue") : t("help.openWebsite")}

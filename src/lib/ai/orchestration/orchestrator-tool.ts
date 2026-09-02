@@ -139,7 +139,7 @@ export interface OrchestratorContext {
   requesterId: string;
   /** The orchestrator's grant, when it has one; children chain to it in the call tree. */
   parentGrant?: Grant | null;
-  maxTurns?: number;
+  maxTurns?: number | null;
   maxTokens?: number;
 }
 

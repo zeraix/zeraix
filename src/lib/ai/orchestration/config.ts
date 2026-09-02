@@ -46,10 +46,15 @@ import { SUBAGENTS } from "../subagents";
  * there is one place that decides it. Nothing here changes `subagents.ts`; the dependency points this way
  * only.
  *
- * Concretely, today, that union is 14 tools and excludes `delete_file`, `open_path`, `stop_service`,
- * `mcp_connect`, `web_search` and `fetch_url` — so it is a real bound rather than a formality. `run_command`
- * *is* included, via `CODER_TOOLS`, and is classified high-risk, which means a dynamic sub-agent asking for
- * it reaches the human approval path rather than being refused outright.
+ * Concretely, today, that union is 16 tools and excludes `delete_file`, `open_path`, `stop_service`,
+ * `mcp_connect` and `page_console` — so it is a real bound rather than a formality. `run_command` *is*
+ * included, via `CODER_TOOLS`, and is classified high-risk, which means a dynamic sub-agent asking for it
+ * reaches the human approval path rather than being refused outright.
+ *
+ * `web_search` and `fetch_url` joined the union when `WEB_TOOLS` was added to every fixed role, and that is
+ * exactly how widening is supposed to happen: a reviewed edit to a role's tool list, not a change here. Both
+ * are `medium`, so a dynamic sub-agent that asks for them is granted them by set intersection without a human
+ * being asked — which is the same answer the four fixed roles already got.
  *
  * **Deliberately not readable from the environment.** Every other value below accepts an env override; this
  * one does not. Environment is process state — a launcher, a shell profile, a container spec, a CI variable
@@ -106,8 +111,20 @@ export const MAX_CONCURRENT_SUBAGENTS: number = tighten(
 /** Grant lifetime. Tasks normally end with an explicit revoke well before this; the TTL is the backstop. */
 export const GRANT_TTL_MS: number = tighten("GRANT_TTL_MS", DEFAULT_GRANT_TTL_MS);
 
-/** Model turns one sub-agent may take before the runner gives up on it. */
-export const MAX_TURNS_PER_SUBAGENT: number = tighten("MAX_TURNS_PER_SUBAGENT", DEFAULT_MAX_TURNS);
+/**
+ * Model turns one sub-agent may take before the runner gives up on it. `null` = unbounded, the default.
+ *
+ * `tighten` cannot express this: it clamps a value DOWN to a hard limit, and there is no longer a hard limit
+ * to clamp to. With no default ceiling, an env value is not a tightening but the only ceiling there is — so
+ * it is taken at face value, and anything absent or nonsensical leaves the runner unbounded.
+ */
+export const MAX_TURNS_PER_SUBAGENT: number | null = (() => {
+  const raw = process.env.MAX_TURNS_PER_SUBAGENT;
+  if (raw === undefined) return DEFAULT_MAX_TURNS;
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed) || parsed <= 0) return DEFAULT_MAX_TURNS;
+  return Math.floor(parsed);
+})();
 
 /**
  * Where a file-backed audit log should be written, for hosts that use one.
@@ -128,7 +145,7 @@ export interface OrchestrationConfig {
   readonly MAX_SPAWN_DEPTH: number;
   readonly MAX_CONCURRENT_SUBAGENTS: number;
   readonly GRANT_TTL_MS: number;
-  readonly MAX_TURNS_PER_SUBAGENT: number;
+  readonly MAX_TURNS_PER_SUBAGENT: number | null;
   readonly AUDIT_LOG_PATH: string;
 }
 

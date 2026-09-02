@@ -575,6 +575,33 @@ onRequest(
   { keepsHostAlive: false },
 );
 
+/**
+ * Tools the app has NO implementation for other than the runtime.
+ *
+ * Kept here, in the host, rather than read from the handshake: the failure being guarded against is the
+ * runtime declaring FEWER tools than the app needs, and a check that trusts its list would agree with it no
+ * matter how short it was.
+ *
+ * A stale binary is the way this happens in practice — one built before a tool moved into the runtime serves
+ * the older, shorter list. The symptom is otherwise a per-call "Unknown tool: write_file", which reads as the
+ * agent inventing a tool rather than as a build being out of date.
+ */
+const RUNTIME_ONLY_TOOLS = [
+  "read_file",
+  "write_file",
+  "edit_file",
+  "list_directory",
+  "file_info",
+  "search_files",
+  "search_in_files",
+];
+
+/** Names the app needs and this runtime did not declare. Empty on a healthy handshake. */
+export function missingRuntimeTools() {
+  if (!state?.ready) return [];
+  return RUNTIME_ONLY_TOOLS.filter((name) => !state.tools.has(name));
+}
+
 /** What the previous run left unfinished, or null if no handshake has completed. */
 export function recoveredWork() {
   return recovered;
@@ -662,6 +689,15 @@ async function ensureStarted() {
     for (const name of init?.features ?? []) s.features.add(name);
     s.ready = true;
     spawnFailures = 0;
+    // Said once, at the handshake, rather than discovered one failed call at a time.
+    const missing = RUNTIME_ONLY_TOOLS.filter((name) => !s.tools.has(name));
+    if (missing.length) {
+      console.error(
+        `[rust-runtime] this runtime does not serve ${missing.join(", ")} — and nothing else implements ` +
+          `them, so those calls will fail. The binary is almost certainly older than the app; rebuild it ` +
+          `with \`npm run build:runtime\`.`,
+      );
+    }
     console.info(
       `[rust-runtime] ready -- protocol ${init?.protocol_version}, ${s.tools.size} tool(s)` +
         (s.features.size ? `, features: ${[...s.features].join(", ")}` : ""),

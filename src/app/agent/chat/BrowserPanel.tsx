@@ -587,7 +587,7 @@ export default function BrowserPanel({
                       l.kind === "error"
                         ? "text-destructive"
                         : l.kind === "warn"
-                          ? "text-amber-600"
+                          ? "text-warning-ink"
                           : l.kind === "trigger"
                             ? "text-primary"
                             : "text-muted-foreground"
@@ -604,11 +604,11 @@ export default function BrowserPanel({
           <div className="flex items-center gap-2 border-t border-line px-3 py-1.5 text-xs">
             <span
               className={`flex items-center gap-1.5 rounded-md px-2 py-1 ${
-                agentControl && busy ? "bg-emerald-500/15 text-emerald-600" : "bg-surface-muted text-muted-foreground"
+                agentControl && busy ? "bg-success/15 text-success-ink" : "bg-surface-muted text-muted-foreground"
               }`}
             >
               <span
-                className={`size-1.5 rounded-full ${agentControl && busy ? "bg-emerald-500 animate-pulse" : "bg-muted-foreground"}`}
+                className={`size-1.5 rounded-full ${agentControl && busy ? "bg-success animate-pulse" : "bg-muted-foreground"}`}
               />
               {!agentControl ? "You are in control" : busy ? "Agent is operating" : "Agent idle"}
             </span>

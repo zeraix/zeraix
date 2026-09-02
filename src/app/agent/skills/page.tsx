@@ -40,7 +40,10 @@ import {
 } from "@/lib/ai/skills/store";
 
 /** Brand pink (matches AgentComposer). */
-const ACCENT = "#f5327d";
+/* Follows the theme accent rather than pinning a hue: `--accent-ink` is already contrast-safe
+   against either background, and ACCENT_TINT is its wash for chip fills. */
+const ACCENT = "var(--accent-ink)";
+const ACCENT_TINT = "color-mix(in srgb, var(--accent-ink) 12%, transparent)";
 /** Skill upload: Markdown only. */
 const MD_ACCEPT = ".md,.markdown,text/markdown";
 
@@ -140,7 +143,7 @@ function SkillCard({
             {customLabel && (
               <span
                 className="rounded-full px-1.5 py-0.5 text-[10px] font-medium"
-                style={{ backgroundColor: `${ACCENT}1a`, color: ACCENT }}
+                style={{ backgroundColor: ACCENT_TINT, color: ACCENT }}
               >
                 {customLabel}
               </span>
@@ -336,7 +339,7 @@ export default function AgentSkillsPage() {
         }
         className={`flex size-7 shrink-0 items-center justify-center rounded-lg border transition ${
           has
-            ? "border-transparent text-emerald-600"
+            ? "border-transparent text-success-ink"
             : "border-line text-muted-foreground hover:border-line-strong hover:text-foreground"
         }`}
       >
@@ -572,7 +575,7 @@ export default function AgentSkillsPage() {
                 {"source" in detail && detail.source === "user" && (
                   <span
                     className="rounded-full px-1.5 py-0.5 text-[10px] font-medium"
-                    style={{ backgroundColor: `${ACCENT}1a`, color: ACCENT }}
+                    style={{ backgroundColor: ACCENT_TINT, color: ACCENT }}
                   >
                     {t("skills.badge.custom")}
                   </span>

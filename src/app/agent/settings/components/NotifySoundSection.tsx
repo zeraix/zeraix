@@ -32,10 +32,10 @@ export const NOTIFY_TYPE_META: {
   labelKey: string;
   className: string;
 }[] = [
-  { type: "info", labelKey: "notify.typeInfo", className: "bg-sky-500/15 text-sky-500 border-sky-500/30" },
-  { type: "success", labelKey: "notify.typeSuccess", className: "bg-emerald-500/15 text-emerald-500 border-emerald-500/30" },
-  { type: "warning", labelKey: "notify.typeWarning", className: "bg-amber-500/15 text-amber-500 border-amber-500/30" },
-  { type: "error", labelKey: "notify.typeError", className: "bg-red-500/15 text-red-500 border-red-500/30" },
+  { type: "info", labelKey: "notify.typeInfo", className: "bg-info/15 text-info-ink border-info/30" },
+  { type: "success", labelKey: "notify.typeSuccess", className: "bg-success/15 text-success-ink border-success/30" },
+  { type: "warning", labelKey: "notify.typeWarning", className: "bg-warning/15 text-warning-ink border-warning/30" },
+  { type: "error", labelKey: "notify.typeError", className: "bg-danger/15 text-danger-ink border-danger/30" },
 ];
 
 
@@ -76,7 +76,7 @@ export function NotifySoundSection({ t }: { t: TFunc }) {
       <p className="mb-5 text-sm text-ink-subtle">{t("notify.desc")}</p>
 
       {!available && (
-        <p className="mb-4 rounded-xl border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-xs text-amber-600 dark:text-amber-400">
+        <p className="mb-4 rounded-xl border border-warning/30 bg-warning/10 px-4 py-3 text-xs text-warning-ink">
           {t("notify.unsupported")}
         </p>
       )}

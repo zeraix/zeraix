@@ -135,7 +135,6 @@ import type {
   ReminderState,
   RunCtx,
   DisplayMsg,
-  SubAgentStep,
 } from "./types";
 import { capabilityAvailable } from "@/lib/ai/generation";
 import { mediaDir } from "@/lib/ai/mediaLibrary";
@@ -170,6 +169,8 @@ import {
 import { createChatRequest } from "./chatRequest";
 import { createSummarizeHistory } from "./summarize";
 import { ChatHeader } from "./ChatHeader";
+import { SubAgentInspector, SubAgentInspectorButton } from "./SubAgentInspector";
+import { useSubAgentExecutionStore } from "@/store/subagentExecutionStore";
 import { ChatDialogs } from "./ChatDialogs";
 import { ContextUsageRing } from "./ContextUsageRing";
 import { useTranscriptWindow } from "./useTranscriptWindow";
@@ -310,12 +311,6 @@ function ChatAgent() {
    * to be addressed rather than assumed. `storedIndex` is filled in by the persist step once the message
    * exists on disk; until then steps accumulate and are flushed on the first patch.
    */
-  const subagentSinksRef = useRef(
-    new WeakMap<
-      object,
-      { convId: string; steps: SubAgentStep[]; storedIndex: number | null }
-    >(),
-  );
   /** Delegations completed in the current turn, for the repeat guard in runSubAgent (keyed by turn, never cleared — see there). */
   const delegationsRef = useRef<{ turnId: string; done: PriorDelegation[] }>({ turnId: "", done: [] });
   /**
@@ -396,6 +391,8 @@ function ChatAgent() {
     setInstalledSkills(list);
   };
   const [skillsOpen, setSkillsOpen] = useState(false);
+  /** The Sub-agent Execution Inspector. Its entry point hides itself when nothing has been delegated. */
+  const [inspectorOpen, setInspectorOpen] = useState(false);
   // The settings area (working directory / run parameters) is collapsed by default; it expands on demand in dev mode when a working directory is missing.
   const [settingsOpen, setSettingsOpen] = useState(false);
   // The header's root element. Nothing reads it yet — it exists so measurements against the top bar (its height,
@@ -840,6 +837,9 @@ function ChatAgent() {
     // started before the clear inject its result into an empty conversation.
     pendingJobsRef.current.delete(id);
     awaitingJobsRef.current.delete(id);
+    // Execution history belongs to the transcript being deleted: keeping it would leave the Inspector
+    // describing work whose conversation no longer exists.
+    useSubAgentExecutionStore.getState().clearConversationExecutions(id);
     useAgentChatStore.getState().truncateMessages(id, 0); // empty the messages, keep the conversation entry
     displayRef.current = [];
     setDisplay([]);
@@ -1018,6 +1018,24 @@ function ChatAgent() {
       displayRef.current = n;
       return n;
     });
+  };
+  /**
+   * Finish an in-flight bubble: replace it if it is still there, append it if it is not.
+   *
+   * `replaceDisplay` matches by object identity and is a silent no-op when the target has gone — correct for a
+   * delegation growing its steps, where a lost update costs one stale row. It is the wrong shape for completing
+   * a tool call: the display list is rebuilt from a baseline on every streamed delta, so a bubble pushed before
+   * a call can legitimately be absent by the time the call returns, and a no-op there would strand the row as
+   * permanently "running" AND drop the result with it.
+   *
+   * Appending is the right fallback because the result is the thing that matters; its position is not.
+   */
+  const completeDisplay = (target: DisplayMsg, next: DisplayMsg) => {
+    if (displayRef.current.includes(target)) {
+      replaceDisplay(target, next);
+      return;
+    }
+    pushDisplay(next);
   };
   // Fallback: after any other setDisplay path (choice-card updates, etc.) renders, sync the mirror, to avoid the mirror lagging behind the state.
   useEffect(() => {
@@ -1680,6 +1698,9 @@ function ChatAgent() {
       allowedTools: () => allowedToolsRef.current,
       wireBuffer: () => convoRef.current,
       compaction: () => compactionRef.current,
+      // Lets a tool's bubble go up before the call and be completed in place. `completeDisplay` rather than
+      // `replaceDisplay`: a bubble can be gone by the time its call returns, and the result must survive that.
+      replaceDisplay: completeDisplay,
     });
 
     const boundary: RuntimeBoundary = {
@@ -1765,6 +1786,9 @@ function ChatAgent() {
       shutdownScheduler,
     } = createDelegationTools({
       t,
+      // What the user actually typed this turn — the Inspector groups delegations under it, because "which
+      // turn started this agent" is a question about a message, not about a correlation id.
+      turnLabel: text,
       toolsReady,
       workdir,
       endpoint,
@@ -1776,7 +1800,6 @@ function ChatAgent() {
       replaceDisplay,
       thinking,
       capabilities: modelCaps,
-      subagentSinksRef,
       schedulerRef,
       delegationsRef,
       brokerRef,
@@ -1995,8 +2018,7 @@ function ChatAgent() {
           setCtxTokens,
           diagRef,
           lastArtifactRef,
-          subagentSinksRef,
-          schedulerRef,
+              schedulerRef,
           awaitingJobsRef,
           tagLastAssistantStoredIndex,
           goalFor,
@@ -2321,7 +2343,7 @@ function ChatAgent() {
 
   return (
     <div className="relative flex h-full">
-    <div className="relative flex h-full minonSecureEnvChange-w-0 flex-1 flex-col overflow-hidden bg-surface-muted text-ink">
+    <div className="relative flex h-full minonSecureEnvChange-w-0 flex-1 flex-col overflow-hidden bg-surface text-ink">
       <ChatHeader
         ref={headerRef}
         title={activeConvTitle}
@@ -2399,9 +2421,21 @@ function ChatAgent() {
         <ChevronDown className="size-4" />
         {t("chat.backToBottom")}
       </button>
+
+      {/* Sub-agent Inspector entry: bottom-left of the transcript, beside the delegations it counts. Renders
+          nothing until this conversation has actually delegated something. */}
+      <SubAgentInspectorButton conversationId={viewConvId} onOpen={() => setInspectorOpen(true)} />
       </div>
 
       {/* Skills panel: download marketplace skills, enable / uninstall. Enabled skills enter the chat configuration (effective from the next message). */}
+      {/* Sub-agent Execution Inspector: every delegation of this conversation, live, from runtime events.
+          Scoped to the conversation on screen, so a background conversation's fan-out is not shown here. */}
+      <SubAgentInspector
+        open={inspectorOpen}
+        onClose={() => setInspectorOpen(false)}
+        conversationId={viewConvId}
+      />
+
       <SkillSelectPanel
         open={skillsOpen}
         onClose={() => setSkillsOpen(false)}

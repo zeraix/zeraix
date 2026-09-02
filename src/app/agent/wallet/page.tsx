@@ -381,7 +381,7 @@ export default function WalletPage() {
           {walletText}
         </p>
         {lowBalance && (
-          <p className="relative mt-2 flex items-center gap-1.5 text-[11px] font-medium text-amber-600 dark:text-amber-500">
+          <p className="relative mt-2 flex items-center gap-1.5 text-[11px] font-medium text-warning-ink">
             <TriangleAlert className="size-3" /> {t("wallet.lowBalance")}
           </p>
         )}
@@ -410,7 +410,7 @@ export default function WalletPage() {
                   }`}
                 >
                   {p === POPULAR_AMOUNT && (
-                    <span className="absolute -top-2 left-1/2 inline-flex -translate-x-1/2 items-center gap-0.5 rounded-full bg-primary px-2 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-white shadow-sm">
+                    <span className="absolute -top-2 left-1/2 inline-flex -translate-x-1/2 items-center gap-0.5 rounded-full bg-primary px-2 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-primary-foreground shadow-sm">
                       <Sparkles className="size-2.5" /> {t("wallet.popular")}
                     </span>
                   )}
@@ -419,7 +419,7 @@ export default function WalletPage() {
                   </span>
                   {isCnEdition && <span className="text-[11px] tabular-nums text-ink-muted">{fmtPrice(p)}</span>}
                   {selected && (
-                    <span className="absolute right-1.5 top-1.5 grid size-4 place-items-center rounded-full bg-primary text-white">
+                    <span className="absolute right-1.5 top-1.5 grid size-4 place-items-center rounded-full bg-primary text-primary-foreground">
                       <Check className="size-2.5" strokeWidth={3} />
                     </span>
                   )}
@@ -474,7 +474,7 @@ export default function WalletPage() {
             <button
               onClick={() => void pay()}
               disabled={loading || !valid}
-              className="mt-4 flex w-full items-center justify-center gap-2 rounded-xl bg-primary px-4 py-3 text-sm font-semibold text-white shadow-[0_2px_8px_rgba(133,104,0,0.25)] transition hover:brightness-110 active:scale-[0.99] disabled:cursor-not-allowed disabled:opacity-40 disabled:shadow-none"
+              className="mt-4 flex w-full items-center justify-center gap-2 rounded-xl bg-primary px-4 py-3 text-sm font-semibold text-primary-foreground shadow-md shadow-primary/25 transition hover:brightness-110 active:scale-[0.99] disabled:cursor-not-allowed disabled:opacity-40 disabled:shadow-none"
             >
               {loading ? <Loader2 className="size-4 animate-spin" /> : <CreditCard className="size-4" />}
               {loading ? t("wallet.processing") : t("wallet.payWithCard")}
@@ -498,7 +498,7 @@ export default function WalletPage() {
           )}
           {phase === "success" && (
             <>
-              <span className="mx-auto grid size-11 place-items-center rounded-full bg-emerald-500/12 text-emerald-600 dark:text-emerald-400">
+              <span className="mx-auto grid size-11 place-items-center rounded-full bg-success/12 text-success-ink">
                 <CircleCheck className="size-5" />
               </span>
               <p className="mt-3.5 text-base font-semibold text-ink">{t("wallet.successTitle")}</p>
@@ -522,7 +522,7 @@ export default function WalletPage() {
           )}
           {phase === "stalled" && (
             <>
-              <span className="mx-auto grid size-11 place-items-center rounded-full bg-amber-500/12 text-amber-600 dark:text-amber-500">
+              <span className="mx-auto grid size-11 place-items-center rounded-full bg-warning/12 text-warning-ink">
                 <Clock className="size-5" />
               </span>
               <p className="mt-3.5 text-base font-semibold text-ink">{t("wallet.stalledTitle")}</p>
@@ -543,7 +543,7 @@ export default function WalletPage() {
               <button
                 onClick={() => void retry()}
                 disabled={loading}
-                className="flex w-full items-center justify-center gap-2 rounded-xl bg-primary px-4 py-3 text-sm font-semibold text-white transition hover:brightness-110 active:scale-[0.99] disabled:opacity-40"
+                className="flex w-full items-center justify-center gap-2 rounded-xl bg-primary px-4 py-3 text-sm font-semibold text-primary-foreground transition hover:brightness-110 active:scale-[0.99] disabled:opacity-40"
               >
                 {loading ? <Loader2 className="size-4 animate-spin" /> : <ExternalLink className="size-4" />}
                 {phase === "awaiting" ? t("wallet.reopen") : t("wallet.retry")}

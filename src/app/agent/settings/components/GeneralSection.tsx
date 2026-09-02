@@ -9,6 +9,7 @@ import {
   MAX_CONTEXT_BUDGET_K,
   MIN_CONTEXT_BUDGET_K,
   getContextBudgetK,
+  restoreBudgetK,
   setContextBudgetK,
 } from "@/lib/ai/contextBudget";
 import {
@@ -38,12 +39,21 @@ export function GeneralSection({ t }: { t: TFunc }) {
   // Absolute context working-set budget (K tokens); "" input is treated as 0 = off.
   const [budgetK, setBudgetK] = useState(DEFAULT_CONTEXT_BUDGET_K);
   const [budgetInput, setBudgetInput] = useState(String(DEFAULT_CONTEXT_BUDGET_K));
+  /**
+   * The budget to restore when the cap is switched back on.
+   *
+   * State rather than a ref: this is read during render (by the toggle) and the lint rule that forbids
+   * mutating a ref is right to — a value the UI depends on should not change without a render. Kept so that
+   * toggling off and on again does not silently reset a tuned budget to the default.
+   */
+  const [lastPositiveK, setLastPositiveK] = useState(DEFAULT_CONTEXT_BUDGET_K);
 
   useEffect(() => {
     setConfigurable(isFileStoreAvailable());
     setAppConfigOk(isAppConfigAvailable());
     void getBackgroundState().then(setBg);
     const b = getContextBudgetK();
+    if (b > 0) setLastPositiveK(b);
     setBudgetK(b);
     setBudgetInput(String(b));
     void getStorePath().then((p) => {
@@ -54,10 +64,12 @@ export function GeneralSection({ t }: { t: TFunc }) {
     });
   }, []);
 
+
   const applyBudget = () => {
     const n = Math.round(Number(budgetInput));
     setContextBudgetK(!Number.isFinite(n) || n <= 0 ? 0 : n);
     const eff = getContextBudgetK(); // clamped/normalized by the store
+    if (eff > 0) setLastPositiveK(eff);
     setBudgetK(eff);
     setBudgetInput(String(eff));
   };
@@ -140,7 +152,7 @@ export function GeneralSection({ t }: { t: TFunc }) {
             <span className="break-all font-mono text-ink-muted">{path || t("general.default")}</span>
             {t("general.migrateNote")}
           </p>
-          {msg && <p className="mt-1 text-[11px] text-amber-600 dark:text-amber-400">{msg}</p>}
+          {msg && <p className="mt-1 text-[11px] text-warning-ink">{msg}</p>}
         </div>
       ) : (
         <p className="rounded-xl border border-line bg-surface-muted/50 px-4 py-3.5 text-xs text-ink-subtle">
@@ -157,11 +169,33 @@ export function GeneralSection({ t }: { t: TFunc }) {
         </p>
         <div className="rounded-xl border border-line bg-surface-muted/50 px-4 py-3.5">
           <p className="mb-2 text-xs text-ink-subtle">{t("general.contextBudgetDesc")}</p>
+          {/* An explicit switch, because "type 0 to disable" is a rule you have to already know. The number
+              stays the way to TUNE the cap; this is the way to turn it off, and toggling back on restores the
+              value rather than the default. */}
+          <label className="mb-2.5 flex w-fit cursor-pointer items-center gap-2 text-xs text-ink-muted">
+            <input
+              type="checkbox"
+              checked={budgetK > 0}
+              onChange={(e) => {
+                // `restoreBudgetK`, not `lastPositiveK` directly: on a fresh install nothing positive has been
+                // seen yet, and switching the cap ON with the default (0) switched it off instead — the box
+                // un-ticked itself and the number field stayed disabled, so the control could never be used.
+                const next = e.target.checked ? restoreBudgetK(lastPositiveK) : 0;
+                setContextBudgetK(next);
+                const eff = getContextBudgetK();
+                setBudgetK(eff);
+                setBudgetInput(String(eff));
+              }}
+              className="size-3.5 accent-primary"
+            />
+            {t("general.contextBudgetEnabled")}
+          </label>
           <div className="flex flex-wrap items-center gap-2">
             <input
               type="number"
               inputMode="numeric"
               min={0}
+              disabled={budgetK <= 0}
               max={MAX_CONTEXT_BUDGET_K}
               value={budgetInput}
               onChange={(e) => setBudgetInput(e.target.value)}
@@ -173,12 +207,13 @@ export function GeneralSection({ t }: { t: TFunc }) {
               }}
               onBlur={applyBudget}
               placeholder="0"
-              className="w-24 rounded-lg border border-line-strong bg-surface px-2.5 py-1.5 text-xs tabular-nums outline-none transition focus:border-ring focus:ring-2 focus:ring-primary/10"
+              className="w-24 rounded-lg border border-line-strong bg-surface px-2.5 py-1.5 text-xs tabular-nums outline-none transition focus:border-ring focus:ring-2 focus:ring-primary/10 disabled:cursor-not-allowed disabled:opacity-50"
             />
             <span className="text-xs text-ink-subtle">{t("general.contextBudgetUnit")}</span>
             <button
               onClick={applyBudget}
-              className="shrink-0 rounded-lg bg-gradient-to-br from-primary to-primary/85 px-3 py-1.5 text-xs font-semibold text-white shadow-sm transition hover:brightness-105"
+              disabled={budgetK <= 0}
+              className="shrink-0 rounded-lg bg-gradient-to-br from-primary to-primary/85 px-3 py-1.5 text-xs font-semibold text-white shadow-sm transition hover:brightness-105 disabled:cursor-not-allowed disabled:opacity-50"
             >
               {t("general.apply")}
             </button>
@@ -209,7 +244,7 @@ export function GeneralSection({ t }: { t: TFunc }) {
               {t("general.appConfigOpen")}
             </button>
             {appConfigMsg && (
-              <p className="mt-2 text-[11px] text-amber-600 dark:text-amber-400">{appConfigMsg}</p>
+              <p className="mt-2 text-[11px] text-warning-ink">{appConfigMsg}</p>
             )}
           </div>
         </div>
@@ -268,7 +303,7 @@ export function GeneralSection({ t }: { t: TFunc }) {
                 </div>
               </>
             ) : (
-              <p className="text-xs text-amber-600 dark:text-amber-400">
+              <p className="text-xs text-warning-ink">
                 {t("general.backgroundUnsupported")}
               </p>
             )}

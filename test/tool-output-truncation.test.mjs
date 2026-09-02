@@ -79,3 +79,62 @@ test("a non-string result is passed through rather than coerced", () => {
   assert.equal(capToolOutput(undefined), undefined);
   assert.equal(capToolOutput(null), null);
 });
+
+// ── A diff is shortened, never sliced ─────────────────────────────────────────────────────────────
+
+/** A write_file result: a prose line, then a fenced diff of `lines` rows. */
+function writeResult(lines) {
+  const body = Array.from({ length: lines }, (_, i) => `+line ${i} ${"x".repeat(60)}`).join("\n");
+  return `Wrote 999 bytes to src/big.ts (/abs/src/big.ts).\n\n\`\`\`diff\n@@ -1,0 +1,${lines} @@\n${body}\n\`\`\``;
+}
+
+test("a long diff is shortened by whole lines and remains a valid diff", () => {
+  const out = capToolOutput(writeResult(400));
+  assert.ok(out.length < writeResult(400).length, "nothing was elided");
+
+  // The fences survive, so the renderer still recognises it as a diff at all.
+  assert.ok(out.startsWith("Wrote 999 bytes"), "the prose line was lost");
+  assert.ok(out.includes("```diff\n"), "the opening fence was lost");
+  assert.ok(out.trimEnd().endsWith("```"), "the closing fence was lost");
+
+  // Every surviving row is still a diff row — the failure this prevents is a slice landing mid-line and
+  // leaving a fragment the renderer reads as content.
+  const body = /```diff\n([\s\S]*?)\n```/.exec(out)[1];
+  for (const line of body.split("\n")) {
+    assert.ok(/^[+\-@ \\]/.test(line), `not a diff row: ${JSON.stringify(line.slice(0, 60))}`);
+  }
+});
+
+test("the elision marker cannot shift the line numbers after it", () => {
+  // `\` is the renderer's "no newline at end of file" row: it carries no line numbers. A context line would
+  // have advanced both counters and mislabelled every row below it.
+  const out = capToolOutput(writeResult(400));
+  const marker = out.split("\n").find((l) => l.includes("diff lines elided"));
+  assert.ok(marker, "no elision marker was written");
+  assert.ok(marker.startsWith("\\"), `marker must be a no-line-number row, got: ${marker}`);
+});
+
+test("the elision says how much is missing", () => {
+  const out = capToolOutput(writeResult(400));
+  assert.match(out, /\d+ diff lines elided/);
+});
+
+test("both ends of a diff survive", () => {
+  // The start says what the change is; the end is where a half-finished edit shows up. Keeping only the head
+  // would hide exactly the part worth checking.
+  const out = capToolOutput(writeResult(400));
+  assert.ok(out.includes("line 0 "), "the start of the diff was dropped");
+  assert.ok(out.includes("line 399 "), "the end of the diff was dropped");
+});
+
+test("a diff that already fits is returned untouched", () => {
+  const small = writeResult(3);
+  assert.equal(capToolOutput(small), small);
+});
+
+test("output with no diff still uses the head+tail cap", () => {
+  // The diff path must not change what happens to a command's output.
+  const out = capToolOutput("H".repeat(MAX_TOOL_OUTPUT_CHARS * 2) + "TAIL");
+  assert.ok(out.includes("TRUNCATED"));
+  assert.ok(out.endsWith("TAIL"));
+});

@@ -12,8 +12,12 @@
 //! this runtime already has three mechanisms that stop a run for a *reason*: cancellation, the doom-loop
 //! detector, and consecutive failures. A turn cap is the blunt one, so it is available and off.
 //!
-//! The one exception is [`StopPolicyConfig::for_sub_agent`], where a bound is right: a delegation the user is
-//! not watching cannot be asked whether it wants to keep going.
+//! That now holds for [`StopPolicyConfig::for_sub_agent`] too. It used to be the exception, on the reasoning
+//! that a delegation the user is not watching cannot be asked whether it wants to keep going — but the count
+//! was doing the wrong job. A sub-agent that is working reaches 120 calls on any real exploration of a large
+//! repository, and gets cut off mid-task; a sub-agent that is *stuck* is caught by the doom-loop detector
+//! long before 120, and caught by what it is doing rather than by how much of it it has done. What is left
+//! bounding an unwatched delegation is `task_timeout`, which measures the thing actually worth bounding.
 
 use std::time::Duration;
 
@@ -92,14 +96,17 @@ impl Default for StopPolicyConfig {
 impl StopPolicyConfig {
     /// A delegation's policy.
     ///
-    /// Bounded, because nobody is watching it: a sub-agent that wanders cannot be interrupted by the user the
-    /// way the main agent can, and its cost lands on a turn the user did not choose to extend.
+    /// Bounded in wall clock only. The count caps this used to carry (40 turns, 120 tool calls) are gone: they
+    /// could not tell a delegation that was working from one that was stuck, and on a large repository an
+    /// exploration reaches 120 lookups while doing exactly what it was asked to. Stopping there produced a
+    /// truncated answer that read like a finished one, which is the worst of both.
+    ///
+    /// A stuck delegation is still caught, by the mechanisms that stop a run for a *reason* — the doom-loop
+    /// detector and consecutive failures — and those fire on the behaviour rather than on the tally. The
+    /// timeout stays because nobody is watching a delegation, so nobody notices it running for an hour until
+    /// the bill does; that is a bound on the thing worth bounding.
     pub fn for_sub_agent() -> Self {
         Self {
-            max_turns: Some(40),
-            max_tool_calls: Some(120),
-            // Bounded in wall clock too: nobody is watching a delegation, so nobody will notice it running
-            // for an hour until the bill does.
             task_timeout: Some(Duration::from_secs(900)),
             ..Self::default()
         }
@@ -348,13 +355,18 @@ mod tests {
         assert!(!decide_stop(&input(&s), &cfg).stop);
     }
 
+    /// A delegation is not stopped for having done a lot of work.
+    ///
+    /// This asserted the opposite until the caps came off: 40 turns and 120 tool calls used to end a sub-agent
+    /// mid-task. The tally never distinguished a delegation that was working from one that was stuck, and on a
+    /// large repository an exploration passes 120 lookups while doing exactly what it was asked to.
     #[test]
-    fn a_sub_agent_is_bounded_because_nobody_is_watching_it() {
+    fn a_sub_agent_is_not_stopped_by_a_tally() {
         let cfg = StopPolicyConfig::for_sub_agent();
-        let s = state_after(40, 0);
-        let d = decide_stop(&input(&s), &cfg);
-        assert_eq!(d.reason, Some(StopReason::MaxTurns));
-        assert_eq!(d.detail.as_deref(), Some("40 of 40"));
+        assert_eq!(cfg.max_turns, None);
+        assert_eq!(cfg.max_tool_calls, None);
+        let s = state_after(500, 500);
+        assert!(!decide_stop(&input(&s), &cfg).stop, "a busy delegation must not be cut off by its count");
     }
 
     #[test]
@@ -380,10 +392,16 @@ mod tests {
     }
 
     /// A run that was going to finish anyway must never be reported as having hit a limit.
+    ///
+    /// Written against an explicitly capped config rather than `for_sub_agent`, which no longer carries a
+    /// count: against an uncapped policy this would pass without exercising anything, and a test that cannot
+    /// fail is worse than no test. The first assertion pins that the cap really is live at this state, so the
+    /// second one is about precedence rather than about there being nothing to take precedence over.
     #[test]
     fn a_final_answer_on_the_last_allowed_round_completes_rather_than_hitting_the_cap() {
-        let cfg = StopPolicyConfig::for_sub_agent();
+        let cfg = StopPolicyConfig { max_turns: Some(40), ..StopPolicyConfig::default() };
         let s = state_after(40, 0);
+        assert_eq!(decide_stop(&input(&s), &cfg).reason, Some(StopReason::MaxTurns));
         let d = decide_stop(&StopInput { final_response: true, ..input(&s) }, &cfg);
         assert_eq!(d.reason, Some(StopReason::Completed));
     }

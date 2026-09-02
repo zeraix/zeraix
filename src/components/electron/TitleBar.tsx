@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { usePathname } from "next/navigation";
 import { Minus, Square, X } from "lucide-react";
 import { minimizeWindow, toggleMaximizeWindow, closeWindow } from "@/lib/electron/windowControls";
+import { useThemedLogo } from "@/hooks/useThemedLogo";
 
 /* CSS drag region (Electron frameless window). WebkitAppRegion is a non-standard property, so it needs a cast.
  * The whole bar is draggable; clickable elements inside the bar need noDrag to respond to clicks. */
@@ -21,6 +22,8 @@ const noDrag = { WebkitAppRegion: "no-drag" } as React.CSSProperties;
  */
 export default function TitleBar() {
   const pathname = usePathname();
+  // Above the early returns below: useThemedLogo holds state, so it has to run on every render.
+  const logoSrc = useThemedLogo();
   const [env, setEnv] = useState<{ electron: boolean; mac: boolean }>({
     electron: false,
     mac: false,
@@ -40,12 +43,12 @@ export default function TitleBar() {
   return (
     <div
       style={{ ...drag, height: "env(titlebar-area-height, 36px)" }}
-      className={`flex shrink-0 select-none items-center gap-2 bg-[#1f6feb] text-xs font-medium text-white ${
+      className={`flex shrink-0 select-none items-center gap-2 border-b border-line bg-sidebar text-xs font-medium text-ink ${
         env.mac ? "pl-20" : "pl-3"
       }`}
     >
       {/* eslint-disable-next-line @next/next/no-img-element */}
-      <img src="/image/logo-white.png" alt="" className="h-4 w-4" draggable={false} />
+      <img src={logoSrc} alt="" className="h-4 w-4" draggable={false} />
       <span>Zeraix</span>
 
       {/* Windows / Linux: custom-drawn window control buttons (macOS uses native traffic lights, no custom drawing needed) */}
@@ -55,7 +58,7 @@ export default function TitleBar() {
             type="button"
             aria-label="Minimize"
             onClick={() => minimizeWindow()}
-            className="flex w-11 items-center justify-center transition-colors hover:bg-white/15"
+            className="flex w-11 items-center justify-center transition-colors hover:bg-surface-hover"
           >
             <Minus className="size-4" />
           </button>
@@ -63,7 +66,7 @@ export default function TitleBar() {
             type="button"
             aria-label="Maximize"
             onClick={() => void toggleMaximizeWindow()}
-            className="flex w-11 items-center justify-center transition-colors hover:bg-white/15"
+            className="flex w-11 items-center justify-center transition-colors hover:bg-surface-hover"
           >
             <Square className="size-3.5" />
           </button>
@@ -71,7 +74,8 @@ export default function TitleBar() {
             type="button"
             aria-label="Close"
             onClick={() => closeWindow()}
-            className="flex w-11 items-center justify-center transition-colors hover:bg-[#e81123]"
+            // The one deliberately fixed color left: closing a window is red on Windows, theme or not.
+            className="flex w-11 items-center justify-center transition-colors hover:bg-[#e81123] hover:text-white"
           >
             <X className="size-4" />
           </button>

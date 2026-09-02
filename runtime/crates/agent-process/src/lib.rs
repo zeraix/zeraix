@@ -31,6 +31,8 @@
 
 pub mod background;
 pub mod console;
+/// Kernel-enforced ownership of spawned trees; see the module header for what `kill_tree` cannot do.
+mod job;
 pub mod limits;
 
 pub use background::{BackgroundRegistry, Exited};
@@ -274,7 +276,16 @@ pub(crate) fn spawn_command(req: &ProcessRequest) -> std::io::Result<Child> {
         }
     }
 
-    cmd.spawn()
+    let child = cmd.spawn()?;
+    // Adopted immediately after spawn, before anything is awaited. On Windows this is what stops the
+    // tree outliving an abrupt death of the runtime; elsewhere it is a no-op. See `job`.
+    //
+    // There is a race in principle -- the shell could fork between `CreateProcess` and the assignment,
+    // and that grandchild would not be a job member. In practice the shell has not finished parsing its
+    // command line by then, and closing the window properly would need `CREATE_SUSPENDED`, which neither
+    // std nor tokio exposes a thread handle for. Documented rather than papered over.
+    job::adopt(&child);
+    Ok(child)
 }
 
 /// Kill a process group, falling back to the single pid.

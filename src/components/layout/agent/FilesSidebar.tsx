@@ -4,8 +4,8 @@ import FilesTree from "./FilesTree";
 import { TITLE_BAR_HEIGHT_PX } from "./titleBar";
 import { TrafficLights, useTrafficLights } from "./WindowControls";
 
-/** The card is inset by 8px (m-2), so this much of it makes up the rest of the title-bar band. */
-const TOP_STRIP = TITLE_BAR_HEIGHT_PX - 8;
+/** The rail runs to the window edge, so its top band is the full title-bar height. */
+const TOP_STRIP = TITLE_BAR_HEIGHT_PX;
 
 /** Without traffic lights to clear, the strip is only a grip for dragging the window — a hair of padding, not a band. */
 const DRAG_STRIP = 8;
@@ -20,7 +20,7 @@ const DRAG_STRIP = 8;
 export default function FilesSidebar() {
   const lights = useTrafficLights();
   return (
-    <aside className="m-2 flex h-[calc(100%_-_16px)] w-[260px] shrink-0 flex-col overflow-hidden rounded-2xl border border-line bg-surface shadow-[0px_4px_12.3px_0px_#0000000A]">
+    <aside className="flex h-full w-[260px] shrink-0 flex-col overflow-hidden border-r border-line bg-sidebar">
       {/* Top band. On macOS this is where the traffic lights sit and where the frameless window expects to be dragged
           from, so it has to be as tall as the title bar. Windows and Linux draw their buttons in the top right
           instead, so reserving the same band there only pushed the tree down behind a strip of nothing.

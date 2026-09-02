@@ -38,15 +38,16 @@ import {
   type DelegationMeta, type PriorDelegation,
 } from "@/lib/ai/subagents";
 import { SubAgentScheduler, type SchedulerLike } from "@/lib/ai/subagentScheduler";
+import { beginExecution, cancelExecutions, type ExecutionHandle } from "@/lib/agent/executionRegistry";
+import { useSubAgentExecutionStore } from "@/store/subagentExecutionStore";
 import { createRuntimeScheduler } from "./runtimeScheduler";
 import { logSubagentRun } from "@/lib/ai/usageLog";
 import { formatJobDelivery } from "@/lib/ai/services";
 import type { SandboxStatus } from "@/lib/ai/sandbox";
 import type { TFunc } from "@/lib/i18n";
-import { useAgentChatStore } from "@/store/agentChatStore";
 import { createRunDelegation } from "./delegation";
 import { applyReasoningPolicy } from "./wireHelpers";
-import type { ApiMsg, ChatResponse, DisplayMsg, RequestLog, RunCtx, SubAgentStep } from "./types";
+import type { ApiMsg, ChatResponse, DisplayMsg, RequestLog, RunCtx } from "./types";
 import type { ThinkingConfig } from "@/lib/ai/thinking";
 import type { ModelCapabilities } from "@/lib/agent/modelAdapter";
 
@@ -94,6 +95,14 @@ export interface HeldScheduler {
 
 export interface DelegationDeps {
   t: TFunc;
+  /**
+   * The text of the user turn this factory was built for.
+   *
+   * The Inspector groups delegations by the message that caused them; a turn id means nothing to a person.
+   * A constant rather than an accessor because this whole factory is turn-scoped — it is rebuilt by `send()`
+   * for every turn, which is the only scope in which one answer to "which message" is correct.
+   */
+  turnLabel: string;
   toolsReady: boolean;
   workdir: string;
   endpoint: string;
@@ -107,14 +116,6 @@ export interface DelegationDeps {
   requestChat: RequestChat;
   execToolCall: ExecToolCall;
   replaceDisplay: (target: DisplayMsg, next: DisplayMsg) => void;
-  /** Where a delegation tool call parks its sub-agent trace, keyed by the args object identity. */
-  /**
-   * A WeakMap, not a Map, and keyed on the tool call's own args object: the sink dies with the call that
-   * created it, so a long conversation does not accumulate one entry per delegation forever.
-   */
-  subagentSinksRef: {
-    current: WeakMap<object, { convId: string; steps: SubAgentStep[]; storedIndex: number | null }>;
-  };
   schedulerRef: { current: HeldScheduler | null };
   delegationsRef: { current: { turnId: string; done: PriorDelegation[] } };
   brokerRef: { current: { broker: CapabilityBroker; audit: InMemoryAuditLog } | null };
@@ -125,6 +126,7 @@ export interface DelegationDeps {
 export function createDelegationTools(deps: DelegationDeps): DelegationTools {
   const {
     t,
+    turnLabel,
     toolsReady,
     workdir,
     endpoint,
@@ -136,7 +138,6 @@ export function createDelegationTools(deps: DelegationDeps): DelegationTools {
     requestChat,
     execToolCall,
     replaceDisplay,
-    subagentSinksRef,
     schedulerRef,
     delegationsRef,
     brokerRef,
@@ -151,36 +152,36 @@ export function createDelegationTools(deps: DelegationDeps): DelegationTools {
   // each path owns its own display bubble, because what the user should see differs: a lone delegation
   // settles its own bubble on its conclusion, whereas a fan-out keeps one bubble for the whole batch.
 
-  /** Get (or create) the place a delegation tool call parks its sub-agent trace for persistence. */
-  const delegationSink = (argsKey: object, convId: string) => {
-    const existing = subagentSinksRef.current.get(argsKey);
-    if (existing) return existing;
-    const fresh = { convId, steps: [] as SubAgentStep[], storedIndex: null as number | null };
-    subagentSinksRef.current.set(argsKey, fresh);
-    return fresh;
-  };
-
   /**
-   * Record one sub-agent tool call against a sink, patching the stored message when it already exists.
+   * The execution ids behind a set of scheduler job handles.
    *
-   * A blocking delegation finishes before its tool result is written, so its steps ride along with
-   * appendMessage. A spawned one does not: it settles after that message is on disk, so its trace has to
-   * be patched in — otherwise the operations the user watched happen would vanish on reload.
+   * The model speaks in `s1`/`s2` — per-turn handles that restart every turn and so cannot be execution
+   * ids — while the Inspector speaks in execution ids. This is the one place the two are mapped, and it is
+   * scoped to the turn because that is the only scope in which `s1` means anything. An empty `ids` means
+   * "everything outstanding", which is exactly what an empty result already represents.
    */
-  const recordStep = (
-    sink: { convId: string; steps: SubAgentStep[]; storedIndex: number | null },
-    step: SubAgentStep,
-  ) => {
-    sink.steps.push(step);
-    if (sink.storedIndex != null) {
-      useAgentChatStore.getState().setMessageSteps(sink.convId, sink.storedIndex, [...sink.steps]);
-    }
+  const executionIdsForJobs = (turnId: string, jobIds: string[] | null): string[] => {
+    if (!jobIds || jobIds.length === 0) return [];
+    const wanted = new Set(jobIds);
+    const { byId, order } = useSubAgentExecutionStore.getState().executions;
+    return order.filter((id) => {
+      const ex = byId[id];
+      return !!ex && ex.turnId === turnId && !!ex.jobId && wanted.has(ex.jobId);
+    });
   };
 
   /** Settle every outstanding job AND stop the loops still producing them. Both, always — see `stop` above. */
   const shutdownScheduler = (held: NonNullable<typeof schedulerRef.current>) => {
     held.sched.cancelAll();
     held.stop.abort();
+    // A job cancelled while it was still QUEUED never ran its body, so nothing else will ever report it: the
+    // scheduler settles it directly. Without this the Inspector would keep those rows at "queued" for the
+    // rest of the session (TODO §22, §25).
+    const store = useSubAgentExecutionStore.getState();
+    // No reason text: the Inspector renders "Cancelled" from the status, in the user's language. A stored
+    // English sentence would be the one string in that panel that never translates.
+    cancelExecutions(store.outstandingForTurn(held.turnId));
+    store.endJoinWait(held.turnId);
   };
 
   /** The scheduler for the current turn, rebuilt (and the previous one shut down) when the turn changes. */
@@ -300,9 +301,8 @@ export function createDelegationTools(deps: DelegationDeps): DelegationTools {
       return answer;
     }
 
-    // A "delegate" bubble, so the user can see what task the main model handed to which sub-agent. Its
-    // `steps` grow in place as the sub-agent works, so the delegation is not an opaque wait.
-    const sink = delegationSink(rawArgs, ctx.convId);
+    // A "delegate" bubble, so the user can see what task the main model handed to which sub-agent, and what
+    // it concluded. What the sub-agent DID on the way there is a page in the Inspector, not rows here.
     // Typed as the tool variant, not the DisplayMsg union: `...bubble` below must keep the tool shape.
     let bubble: Extract<DisplayMsg, { kind: "tool" }> = {
       kind: "tool",
@@ -310,26 +310,36 @@ export function createDelegationTools(deps: DelegationDeps): DelegationTools {
       args: { agent: agentId, task },
       ok: true,
       result: task,
-      steps: sink.steps,
     };
     ctx.push(bubble);
-    // New object identity so memoized message components re-render; the array is copied for the same reason.
-    const refresh = (result?: string) => {
-      const next = { ...bubble, steps: [...sink.steps], ...(result != null ? { result } : {}) };
+    // New object identity so memoized message components re-render.
+    const refresh = (result: string) => {
+      const next = { ...bubble, result };
       replaceDisplay(bubble, next);
       bubble = next;
     };
+
+    // The execution record for this delegation (TODO §5.1). Created here rather than inside runDelegation
+    // because THIS is where the delegation is decided — the loop is shared with the fan-out path, where the
+    // record has to exist while the job is still queued.
+    const execution = beginExecution({
+      agent: agentId,
+      task,
+      origin: "run_subagent",
+      conversationId: ctx.convId,
+      turnId: ctx.turnId,
+      turnLabel,
+      // Undefined for the main agent, set when a sub-agent delegates — which is what makes the tree (§20).
+      parentExecutionId: ctx.executionId,
+    });
 
     const { conclusion } = await runDelegation(ctx, {
       agentId,
       task,
       def,
       label: agentId,
-      onStep: (s) => {
-        recordStep(sink, s);
-        refresh();
-      },
       status: ctx.status,
+      execution,
     });
     // Settle the bubble on the conclusion. Live and reloaded views must agree, and the reload path rebuilds
     // `result` from the persisted tool content — which is the conclusion, not the task. Without this the
@@ -353,27 +363,25 @@ export function createDelegationTools(deps: DelegationDeps): DelegationTools {
 
     const bucket = ensureTurnBucket(ctx);
     const sched = schedulerFor(ctx);
-    const sink = delegationSink(rawArgs, ctx.convId);
     // The delegations run on the scheduler's stop signal rather than the turn's. It fires on BOTH exits —
     // the user interrupting (ctx.signal is wired to shut the scheduler down) and the turn simply ending
     // with work in flight — whereas ctx.signal covers only the first, which is the exit a spawned
     // delegation is least likely to take.
     const jobCtx: RunCtx = { ...ctx, signal: schedulerRef.current!.stop.signal };
 
-    // ONE bubble for the whole batch, whose trace collects every delegation's tool calls (each already
-    // prefixed with its job id by runDelegation's label). Per-delegation bubbles would look right live and
-    // then collapse on reload, because the batch persists as this single tool message.
+    // ONE bubble for the whole batch — the fan-out persists as this single tool message, and what it says is
+    // which delegations were started and what they concluded. Each delegation's own run is a page in the
+    // Sub-agent Inspector, not a nested trace here.
     let bubble: Extract<DisplayMsg, { kind: "tool" }> = {
       kind: "tool",
       name: "spawn_subagents",
       args: rawArgs,
       ok: true,
       result: "",
-      steps: sink.steps,
     };
     ctx.push(bubble);
-    const refresh = (result?: string) => {
-      const next = { ...bubble, steps: [...sink.steps], ...(result != null ? { result } : {}) };
+    const refresh = (result: string) => {
+      const next = { ...bubble, result };
       replaceDisplay(bubble, next);
       bubble = next;
     };
@@ -402,22 +410,53 @@ export function createDelegationTools(deps: DelegationDeps): DelegationTools {
         continue;
       }
       const meta: DelegationMeta = { agent: agentId, task, subject: delegationSubject(task) };
-      const res = await sched.spawn(meta, async (job) => {
-        const { conclusion } = await runDelegation(jobCtx, {
-          agentId,
-          task,
-          def,
-          label: `${job.id} ${agentId}`,
-          onStep: (s) => {
-            recordStep(sink, s);
-            refresh();
-          },
-          // Per-delegation progress text is dropped on this path: concurrent delegations would fight over
-          // the single status line. The scheduler's onChange publishes the aggregate instead.
-          status: () => {},
-        });
-        return conclusion;
+      // The body can start before `spawn` has returned — the scheduler hands out a free slot on the next
+      // microtask, and awaiting `spawn` costs one. So the body waits for the record rather than reading a
+      // variable that may not be assigned yet. This is the same registration race the runtime bridge hit
+      // five times (D12 in docs/agent-runtime-migration.md); it is not worth losing a sixth round to.
+      let attachExecution!: (h: ExecutionHandle | undefined) => void;
+      const executionReady = new Promise<ExecutionHandle | undefined>((r) => {
+        attachExecution = r;
       });
+      let res;
+      try {
+        res = await sched.spawn(meta, async (job) => {
+          const { conclusion } = await runDelegation(jobCtx, {
+            agentId,
+            task,
+            def,
+            label: `${job.id} ${agentId}`,
+            // Per-delegation progress text is dropped on this path: concurrent delegations would fight over
+            // the single status line. The scheduler's onChange publishes the aggregate instead.
+            status: () => {},
+            execution: await executionReady,
+          });
+          return conclusion;
+        });
+      } catch (e) {
+        // `spawn` crossing two process boundaries can reject. Whoever is waiting on the record has to be
+        // answered on that path too: a body left awaiting a promise nobody will ever settle is a delegation
+        // that hangs silently rather than failing.
+        attachExecution(undefined);
+        throw e;
+      }
+      // A coalesced or refused spawn started no work, so it gets no execution record: a row that was never
+      // going to run is noise in a panel whose whole job is showing what is running. The batch's tool result
+      // already tells the model which of its entries folded into which.
+      attachExecution(
+        res.coalesced || res.refused
+          ? undefined
+          : beginExecution({
+              agent: agentId,
+              task,
+              origin: "spawn_subagents",
+              conversationId: ctx.convId,
+              turnId: ctx.turnId,
+              turnLabel,
+              parentExecutionId: ctx.executionId,
+              jobId: res.id,
+            }),
+      );
       spawned.push({ id: res.id, agent: agentId, coalesced: res.coalesced, refused: res.refused });
     }
 
@@ -455,7 +494,25 @@ export function createDelegationTools(deps: DelegationDeps): DelegationTools {
     };
     ctx.push(bubble);
 
-    const r = await sched.join(ids, { mode, timeoutMs, block });
+    // The MAIN agent is now blocked — a different fact from a sub-agent being blocked, and the Inspector
+    // must not confuse them (TODO §23). Recorded only for a blocking join: `block: false` returns at once
+    // and waits for nothing.
+    const store = useSubAgentExecutionStore.getState();
+    if (block) {
+      store.beginJoinWait({
+        conversationId: ctx.convId,
+        turnId: ctx.turnId,
+        // The scheduler's job handles, mapped to execution ids: the model names `s1`, the panel knows `ex_…`.
+        executionIds: executionIdsForJobs(ctx.turnId, ids),
+        since: Date.now(),
+      });
+    }
+    let r: Awaited<ReturnType<typeof sched.join>>;
+    try {
+      r = await sched.join(ids, { mode, timeoutMs, block });
+    } finally {
+      store.endJoinWait(ctx.turnId);
+    }
     const text = formatJoinResult(
       r.ready.map((x) => ({
         meta: x.job.meta,
@@ -531,7 +588,27 @@ export function createDelegationTools(deps: DelegationDeps): DelegationTools {
     const task = String(rawArgs.task ?? "");
     const decls = await getOrchestrationDecls();
     const { broker } = getBroker();
-    const sink = delegationSink(rawArgs, ctx.convId);
+    // TODO §8. The agent id comes from the broker's grant and so is not known yet; the record is created
+    // now anyway, because the tool calls that need attributing start before the handler returns. `info`
+    // fills in the real id and what was ACTUALLY granted once the broker has decided — requested and granted
+    // are different lists, and showing the request as though it were the grant would overstate the agent's
+    // reach.
+    const requestedTools = Array.isArray(rawArgs.requestedTools)
+      ? rawArgs.requestedTools.map((v) => String(v))
+      : [];
+    const execution = beginExecution({
+      agent: "spawn_sub_agent",
+      task,
+      origin: "spawn_sub_agent",
+      conversationId: ctx.convId,
+      turnId: ctx.turnId,
+      turnLabel,
+      parentExecutionId: ctx.executionId,
+      requestedTools,
+    });
+    execution.start();
+    // The brokered agent's own tool calls, attributed through the one dispatcher (TODO §9).
+    const brokeredCtx: RunCtx = { ...ctx, executionId: execution.id };
 
     const client: ModelClient = {
       async send(req) {
@@ -560,7 +637,7 @@ export function createDelegationTools(deps: DelegationDeps): DelegationTools {
         execute: async (name, input, context) => {
           let ok = true;
           const content = await execToolCall(
-            ctx,
+            brokeredCtx,
             name,
             input,
             `${context.agentId}→${name}`,
@@ -570,11 +647,18 @@ export function createDelegationTools(deps: DelegationDeps): DelegationTools {
               ok = v;
             },
           );
-          recordStep(sink, { name, args: input, ok, result: content });
           return { content, isError: !ok };
         },
       },
     })(rawArgs);
+
+    execution.info({
+      agent: result.agentId ?? "spawn_sub_agent",
+      requestedTools: result.requestedTools,
+      grantedTools: result.grantedTools,
+    });
+    if (result.status === "completed") execution.complete(result.output ?? "");
+    else execution.fail(result.error ?? result.status, result.status);
 
     ctx.push({
       kind: "tool",

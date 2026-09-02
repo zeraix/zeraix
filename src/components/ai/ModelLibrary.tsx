@@ -229,7 +229,7 @@ export default function ModelLibrary() {
 
   if (!bridge) return <p className="text-sm text-ink-subtle">{t("ml.desktopOnly")}</p>;
   if (hw && hw.supported === false) {
-    return <p className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-700 dark:text-amber-400">{t("ml.insufficient", { gb: hw.minMemGB ?? 8 })}</p>;
+    return <p className="rounded-lg border border-warning/30 bg-warning/10 px-3 py-2 text-xs text-warning-ink">{t("ml.insufficient", { gb: hw.minMemGB ?? 8 })}</p>;
   }
 
   const options = rec?.options ?? [];
@@ -267,7 +267,7 @@ export default function ModelLibrary() {
     const cls = size === "lg" ? "px-3 py-1.5 text-sm" : "px-2.5 py-1 text-xs";
     if (s.isRunning) return <button onClick={(e) => { e.stopPropagation(); stop(); }} className={`inline-flex items-center gap-1 rounded-lg border border-line-strong ${cls} text-ink transition hover:bg-surface-muted`}><Square className="size-3" /> {t("ml.stop")}</button>;
     if (s.isLoading) return <button onClick={(e) => { e.stopPropagation(); bridge.stop(); }} className={`inline-flex items-center gap-1 rounded-lg ${cls} text-primary transition hover:bg-primary/10`} title={t("ml.cancel")}><Loader2 className="size-3 animate-spin" /> {s.isFetching ? t("ml.downloadPct", { pct: status?.pct ?? 0 }) : t("ml.loading")} <X className="size-3" /></button>;
-    return <button onClick={(e) => { e.stopPropagation(); start(o, s.mo); }} className={`inline-flex items-center gap-1 rounded-lg bg-primary ${cls} font-medium text-white shadow-sm transition hover:brightness-105`}><Play className="size-3" /> {s.dl ? t("ml.start") : t("ml.downloadStart")}</button>;
+    return <button onClick={(e) => { e.stopPropagation(); start(o, s.mo); }} className={`inline-flex items-center gap-1 rounded-lg bg-primary ${cls} font-medium text-primary-foreground shadow-sm transition hover:brightness-105`}><Play className="size-3" /> {s.dl ? t("ml.start") : t("ml.downloadStart")}</button>;
   };
 
   return (
@@ -281,15 +281,15 @@ export default function ModelLibrary() {
           <span className="text-sm font-medium text-ink">{t("ml.runtime")}</span>
           {llama?.installed ? (
             llama.upToDate ? (
-              <span className="inline-flex items-center gap-1 rounded-full bg-emerald-500/15 px-2 py-0.5 text-[11px] text-emerald-600"><Check className="size-3" /> {t("ml.installed")}{llama.variant ? ` · ${llama.variant}` : ""} · {llama.version}</span>
+              <span className="inline-flex items-center gap-1 rounded-full bg-success/15 px-2 py-0.5 text-[11px] text-success-ink"><Check className="size-3" /> {t("ml.installed")}{llama.variant ? ` · ${llama.variant}` : ""} · {llama.version}</span>
             ) : (
-              <span className="inline-flex items-center gap-1 rounded-full bg-amber-500/15 px-2 py-0.5 text-[11px] text-amber-600 dark:text-amber-400"><RefreshCw className="size-3" /> {t("ml.newVersion", { version: llama.version, old: llama.installedVersions[0] ?? "" })}</span>
+              <span className="inline-flex items-center gap-1 rounded-full bg-warning/15 px-2 py-0.5 text-[11px] text-warning-ink"><RefreshCw className="size-3" /> {t("ml.newVersion", { version: llama.version, old: llama.installedVersions[0] ?? "" })}</span>
             )
           ) : (
             <span className="text-xs text-ink-subtle">{t("ml.notInstalled")}</span>
           )}
           <button onClick={async () => { setBusy(true); try { if (!llama?.installed || llama?.updatable) await bridge.install({ useCuda }); else await bridge.probe({ useCuda }); await refresh(); } finally { setBusy(false); } }} disabled={busy || installing}
-            className="ml-auto inline-flex items-center gap-1 rounded-lg bg-primary px-3 py-1.5 text-xs font-medium text-white shadow-sm transition hover:brightness-105 disabled:opacity-50">
+            className="ml-auto inline-flex items-center gap-1 rounded-lg bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground shadow-sm transition hover:brightness-105 disabled:opacity-50">
             {installing ? <Loader2 className="size-3.5 animate-spin" /> : !llama?.installed || llama?.updatable ? <Download className="size-3.5" /> : <RefreshCw className="size-3.5" />}
             {installing ? t("ml.installingPct", { pct: status?.pct ?? 0 }) : !llama?.installed ? t("ml.install") : llama?.updatable ? t("ml.update") : t("ml.recheck")}
           </button>
@@ -341,12 +341,12 @@ export default function ModelLibrary() {
             <label className="flex shrink-0 items-center gap-1.5 text-xs text-ink-subtle">
               <input type="checkbox" checked={trusted} onChange={(e) => { setTrusted(e.target.checked); void runSearch(query, e.target.checked); }} /> {t("ml.trustedOnly")}
             </label>
-            <button type="submit" disabled={searching} className="inline-flex shrink-0 items-center gap-1 rounded-lg bg-primary px-3 py-1.5 text-xs font-medium text-white shadow-sm transition hover:brightness-105 disabled:opacity-50">
+            <button type="submit" disabled={searching} className="inline-flex shrink-0 items-center gap-1 rounded-lg bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground shadow-sm transition hover:brightness-105 disabled:opacity-50">
               {searching ? <Loader2 className="size-3.5 animate-spin" /> : <Search className="size-3.5" />} {t("ml.search")}
             </button>
           </form>
           <p className="text-[11px] text-ink-muted">{t("ml.browseHint")}</p>
-          {searchErr && <p className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-700 dark:text-amber-400">{t("ml.browseError", { err: searchErr })}</p>}
+          {searchErr && <p className="rounded-lg border border-warning/30 bg-warning/10 px-3 py-2 text-xs text-warning-ink">{t("ml.browseError", { err: searchErr })}</p>}
           {searching && results === null ? (
             <p className="py-6 text-center text-sm text-ink-subtle"><Loader2 className="mr-1 inline size-3.5 animate-spin" /> {t("ml.searching")}</p>
           ) : (results ?? []).length === 0 && !searchErr ? (
@@ -363,7 +363,7 @@ export default function ModelLibrary() {
                       <span className="block truncate text-sm font-medium text-ink">{r.repo}</span>
                       <span className="mt-0.5 block text-[11px] text-ink-muted">{t("ml.downloadsN", { n: r.downloads.toLocaleString() })}{r.gated ? ` · ${t("ml.gated")}` : ""}</span>
                     </span>
-                    {installedHere && <span className="shrink-0 rounded-full bg-emerald-500/15 px-2 py-0.5 text-[10px] font-medium text-emerald-600">{t("ml.installed")}</span>}
+                    {installedHere && <span className="shrink-0 rounded-full bg-success/15 px-2 py-0.5 text-[10px] font-medium text-success-ink">{t("ml.installed")}</span>}
                     <ChevronDown className="size-3.5 shrink-0 -rotate-90 text-ink-muted" />
                   </button>
                 );
@@ -384,16 +384,16 @@ export default function ModelLibrary() {
             return (
               <div key={o.model.id} role="button" tabIndex={0} onClick={() => setDialogId(o.model.id)}
                 onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); setDialogId(o.model.id); } }}
-                className={`flex cursor-pointer flex-col rounded-xl border bg-surface p-4 text-left transition hover:border-line-strong hover:shadow-sm ${s.isRunning ? "border-emerald-500/40" : "border-line"}`}>
+                className={`flex cursor-pointer flex-col rounded-xl border bg-surface p-4 text-left transition hover:border-line-strong hover:shadow-sm ${s.isRunning ? "border-success/40" : "border-line"}`}>
                 <div className="flex items-center gap-2">
                   <ModelIcon hints={[o.model.id, o.model.name]} />
                   <span className="truncate text-sm font-semibold text-ink">{o.model.name}</span>
-                  {isPrimary && <span className="inline-flex shrink-0 items-center gap-1 rounded-full bg-emerald-500/15 px-2 py-0.5 text-[10px] font-medium text-emerald-600"><Sparkles className="size-2.5" /> {t("ml.recommended")}</span>}
+                  {isPrimary && <span className="inline-flex shrink-0 items-center gap-1 rounded-full bg-success/15 px-2 py-0.5 text-[10px] font-medium text-success-ink"><Sparkles className="size-2.5" /> {t("ml.recommended")}</span>}
                 </div>
                 <p className="mt-1 line-clamp-2 min-h-[2rem] text-xs leading-relaxed text-ink-subtle">{modelNote(o.model.id, o.model.notes)}</p>
                 <div className="mt-2 flex items-center gap-2">
                   <span className="text-[11px] text-ink-muted">{s.sizeGB != null ? `${s.sizeGB}GB` : ""} · {fmtK(s.mo.ctx)}</span>
-                  {s.isRunning && <span className="rounded-full bg-emerald-500/15 px-2 py-0.5 text-[10px] font-medium text-emerald-600">{t("ml.running")}</span>}
+                  {s.isRunning && <span className="rounded-full bg-success/15 px-2 py-0.5 text-[10px] font-medium text-success-ink">{t("ml.running")}</span>}
                   <span className="ml-auto" onClick={(e) => e.stopPropagation()}><ActionButton o={o} /></span>
                 </div>
                 {s.isRunning && status?.endpoint && (
@@ -412,7 +412,7 @@ export default function ModelLibrary() {
             const isFetching = !!isThis && status?.phase === "fetching";
             const isLoading = !!isThis && !status?.ready && (status?.phase === "fetching" || status?.phase === "loading");
             return (
-              <div key={d.dir} className={`flex flex-col rounded-xl border bg-surface p-4 text-left transition ${isRunning ? "border-emerald-500/40" : "border-line"}`}>
+              <div key={d.dir} className={`flex flex-col rounded-xl border bg-surface p-4 text-left transition ${isRunning ? "border-success/40" : "border-line"}`}>
                 <div className="flex items-center gap-2">
                   <ModelIcon hints={[d.repo, d.name]} />
                   <span className="truncate text-sm font-semibold text-ink">{d.name}</span>
@@ -421,8 +421,8 @@ export default function ModelLibrary() {
                 <p className="mt-1 truncate font-mono text-[11px] text-ink-subtle">{d.repo} · {d.quant}</p>
                 <div className="mt-2 flex items-center gap-2">
                   <span className="text-[11px] text-ink-muted">{fmtGB(d.sizeBytes)}</span>
-                  {isRunning && <span className="rounded-full bg-emerald-500/15 px-2 py-0.5 text-[10px] font-medium text-emerald-600">{t("ml.running")}</span>}
-                  {d.belowMinCtx && <span className="rounded-full bg-amber-500/15 px-2 py-0.5 text-[10px] font-medium text-amber-600 dark:text-amber-400">{t("ml.ctxTooSmall", { min: fmtK(MIN_CTX) })}</span>}
+                  {isRunning && <span className="rounded-full bg-success/15 px-2 py-0.5 text-[10px] font-medium text-success-ink">{t("ml.running")}</span>}
+                  {d.belowMinCtx && <span className="rounded-full bg-warning/15 px-2 py-0.5 text-[10px] font-medium text-warning-ink">{t("ml.ctxTooSmall", { min: fmtK(MIN_CTX) })}</span>}
                   <span className="ml-auto flex items-center gap-1.5">
                     {isRunning ? (
                       <button onClick={stop} className="inline-flex items-center gap-1 rounded-lg border border-line-strong px-2.5 py-1 text-xs text-ink transition hover:bg-surface-muted"><Square className="size-3" /> {t("ml.stop")}</button>
@@ -433,7 +433,7 @@ export default function ModelLibrary() {
                     ) : (
                       // Installed before the 32K floor existed: keep it listed (so it can be inspected and deleted) but refuse to start it.
                       <button onClick={() => startCustom(d)} disabled={!!d.belowMinCtx} title={d.belowMinCtx ? t("ml.ctxTooSmall", { min: fmtK(MIN_CTX) }) : undefined}
-                        className="inline-flex items-center gap-1 rounded-lg bg-primary px-2.5 py-1 text-xs font-medium text-white shadow-sm transition hover:brightness-105 disabled:opacity-40 disabled:hover:brightness-100"><Play className="size-3" /> {t("ml.start")}</button>
+                        className="inline-flex items-center gap-1 rounded-lg bg-primary px-2.5 py-1 text-xs font-medium text-primary-foreground shadow-sm transition hover:brightness-105 disabled:opacity-40 disabled:hover:brightness-100"><Play className="size-3" /> {t("ml.start")}</button>
                     )}
                     <button onClick={() => openFolder(d.dir)} className="rounded-lg border border-line p-1 text-ink-subtle transition hover:bg-surface-muted" title={t("ml.openWeightsDir")}><FolderOpen className="size-3.5" /></button>
                     <button onClick={async () => { if (d.running || isRunning) return; setBusy(true); await bridge.deleteModel({ dir: d.dir }); await bridge.listModels().then(setDownloaded); setBusy(false); }} disabled={d.running || isRunning || busy}
@@ -465,7 +465,7 @@ export default function ModelLibrary() {
             return (
               <>
                 <DialogHeader>
-                  <DialogTitle className="flex items-center gap-2"><ModelIcon hints={[o.model.id, o.model.name]} size="lg" />{o.model.name}{s.isRunning &&<span className="rounded-full bg-emerald-500/15 px-2 py-0.5 text-[10px] font-medium text-emerald-600">{t("ml.running")}</span>}</DialogTitle>
+                  <DialogTitle className="flex items-center gap-2"><ModelIcon hints={[o.model.id, o.model.name]} size="lg" />{o.model.name}{s.isRunning &&<span className="rounded-full bg-success/15 px-2 py-0.5 text-[10px] font-medium text-success-ink">{t("ml.running")}</span>}</DialogTitle>
                 </DialogHeader>
                 <div className="space-y-3 py-1">
                   <div className="flex items-start justify-between gap-2">
@@ -529,11 +529,11 @@ export default function ModelLibrary() {
                   </div>
                   <p className="text-[11px] text-ink-muted">{t("ml.estimate", { gb: s.sizeGB != null ? s.sizeGB : "…", ctx: fmtK(mo.ctx), kv: kvTag(mo.kvBits) })}</p>
                   {s.isRunning && status?.endpoint && (
-                    <div className="flex items-center gap-2 rounded-lg border border-emerald-500/30 bg-emerald-500/5 px-2.5 py-1.5">
+                    <div className="flex items-center gap-2 rounded-lg border border-success/30 bg-success/5 px-2.5 py-1.5">
                       <span className="shrink-0 text-[11px] text-ink-subtle">{t("ml.serverUrl")}</span>
                       <span className="truncate font-mono text-[11px] text-ink">{apiBase(status.endpoint)}</span>
                       <button onClick={() => void navigator.clipboard?.writeText(apiBase(status.endpoint))} title={t("ml.copyUrl")}
-                        className="ml-auto inline-flex shrink-0 items-center gap-1 text-[11px] text-emerald-600 transition hover:text-emerald-500"><Copy className="size-3" /> {t("ml.copy")}</button>
+                        className="ml-auto inline-flex shrink-0 items-center gap-1 text-[11px] text-success-ink transition hover:brightness-110"><Copy className="size-3" /> {t("ml.copy")}</button>
                     </div>
                   )}
                   <div className="flex flex-wrap items-center gap-2 pt-1">
@@ -564,7 +564,7 @@ export default function ModelLibrary() {
               {repoInfo === null ? (
                 <p className="py-6 text-center text-sm text-ink-subtle"><Loader2 className="mr-1 inline size-3.5 animate-spin" /> {t("ml.searching")}</p>
               ) : !repoInfo.ok ? (
-                <p className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-700 dark:text-amber-400">{t("ml.browseError", { err: repoInfo.error || "" })}</p>
+                <p className="rounded-lg border border-warning/30 bg-warning/10 px-3 py-2 text-xs text-warning-ink">{t("ml.browseError", { err: repoInfo.error || "" })}</p>
               ) : (() => {
                 const info = repoInfo;
                 const isThis = status?.model?.id === repoDlg;
@@ -577,19 +577,19 @@ export default function ModelLibrary() {
                     {/* Metadata line: arch compat + params + native context + capabilities */}
                     <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-ink-subtle">
                       {info.compat === "supported" ? (
-                        <span className="inline-flex items-center gap-1 rounded-full bg-emerald-500/15 px-2 py-0.5 text-emerald-600"><Check className="size-3" /> {t("ml.compatOk")}{info.arch ? ` · ${info.arch}` : ""}</span>
+                        <span className="inline-flex items-center gap-1 rounded-full bg-success/15 px-2 py-0.5 text-success-ink"><Check className="size-3" /> {t("ml.compatOk")}{info.arch ? ` · ${info.arch}` : ""}</span>
                       ) : info.compat === "unsupported" ? (
-                        <span className="inline-flex items-center gap-1 rounded-full bg-amber-500/15 px-2 py-0.5 text-amber-600 dark:text-amber-400"><AlertTriangle className="size-3" /> {t("ml.compatNo")}{info.arch ? ` · ${info.arch}` : ""}</span>
+                        <span className="inline-flex items-center gap-1 rounded-full bg-warning/15 px-2 py-0.5 text-warning-ink"><AlertTriangle className="size-3" /> {t("ml.compatNo")}{info.arch ? ` · ${info.arch}` : ""}</span>
                       ) : (
                         <span className="inline-flex items-center gap-1 rounded-full bg-surface-muted px-2 py-0.5"><AlertTriangle className="size-3" /> {t("ml.compatUnknown")}</span>
                       )}
                       {info.gguf?.total ? <span>{t("ml.paramsB", { b: (info.gguf.total / 1e9).toFixed(1) })}</span> : null}
                       {info.gguf?.context_length ? <span>{fmtK(info.gguf.context_length)} ctx</span> : null}
                       {info.mmproj && <span>{t("ml.vision")}</span>}
-                      {info.gated ? <span className="text-amber-600 dark:text-amber-400">{t("ml.gated")}</span> : null}
+                      {info.gated ? <span className="text-warning-ink">{t("ml.gated")}</span> : null}
                     </div>
                     {info.belowMinCtx && (
-                      <p className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-700 dark:text-amber-400">
+                      <p className="rounded-lg border border-warning/30 bg-warning/10 px-3 py-2 text-xs text-warning-ink">
                         {t("ml.ctxTooSmall", { min: fmtK(info.minCtx ?? MIN_CTX) })}
                       </p>
                     )}
@@ -639,11 +639,11 @@ export default function ModelLibrary() {
                     {repoEst != null && <p className="text-[11px] text-ink-muted">{t("ml.estimate", { gb: repoEst, ctx: fmtK(repoCtx), kv: kvTag(repoKv) })}</p>}
                     {isFetching && <div className="h-1.5 w-full overflow-hidden rounded-full bg-surface-muted"><div className="h-full rounded-full bg-primary transition-[width] duration-200" style={{ width: `${Math.max(3, status?.pct ?? 0)}%` }} /></div>}
                     {isRunning && status?.endpoint && (
-                      <div className="flex items-center gap-2 rounded-lg border border-emerald-500/30 bg-emerald-500/5 px-2.5 py-1.5">
+                      <div className="flex items-center gap-2 rounded-lg border border-success/30 bg-success/5 px-2.5 py-1.5">
                         <span className="shrink-0 text-[11px] text-ink-subtle">{t("ml.serverUrl")}</span>
                         <span className="truncate font-mono text-[11px] text-ink">{apiBase(status.endpoint)}</span>
                         <button onClick={() => void navigator.clipboard?.writeText(apiBase(status.endpoint))} title={t("ml.copyUrl")}
-                          className="ml-auto inline-flex shrink-0 items-center gap-1 text-[11px] text-emerald-600 transition hover:text-emerald-500"><Copy className="size-3" /> {t("ml.copy")}</button>
+                          className="ml-auto inline-flex shrink-0 items-center gap-1 text-[11px] text-success-ink transition hover:brightness-110"><Copy className="size-3" /> {t("ml.copy")}</button>
                       </div>
                     )}
                     <div className="flex flex-wrap items-center gap-2 pt-1">
@@ -655,7 +655,7 @@ export default function ModelLibrary() {
                         </button>
                       ) : (
                         <button onClick={() => startRepo(repoDlg, info, repoQuant)} disabled={!repoQuant || busy || !!info.belowMinCtx}
-                          className="inline-flex items-center gap-1 rounded-lg bg-primary px-3 py-1.5 text-sm font-medium text-white shadow-sm transition hover:brightness-105 disabled:opacity-50">
+                          className="inline-flex items-center gap-1 rounded-lg bg-primary px-3 py-1.5 text-sm font-medium text-primary-foreground shadow-sm transition hover:brightness-105 disabled:opacity-50">
                           <Play className="size-3" /> {downloaded.some((d) => d.repo === repoDlg && d.quant === repoQuant) ? t("ml.start") : t("ml.downloadStart")}
                         </button>
                       )}

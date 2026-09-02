@@ -15,6 +15,7 @@
 import { spawn } from "node:child_process";
 
 import { emitService } from "./events.mjs";
+import { clearRecord, forgetChild, recordChild } from "./orphans.mjs";
 import {
   EVENT_RUNTIME_DISCONNECTED,
   onEvent,
@@ -162,6 +163,9 @@ function runOnNode(cmd, { cwd, timeoutMs, maxBuffer, signal } = {}) {
       stdio: ["ignore", "pipe", "pipe"],
     });
     fgChildren.add(child);
+    // Recorded on disk as well as in memory: `fgChildren` is only reachable from a graceful exit, and
+    // this tree has to be killable by the NEXT launch if this one is killed outright. See orphans.mjs.
+    recordChild(child.pid, cmd);
 
     // Collected as raw bytes and decoded per code page at the end, to avoid garbled Chinese console output
     // (cp936/GBK) — the same reason exec was given encoding:"buffer".
@@ -179,6 +183,7 @@ function runOnNode(cmd, { cwd, timeoutMs, maxBuffer, signal } = {}) {
       if (done) return;
       done = true;
       fgChildren.delete(child);
+      forgetChild(child.pid);
       if (timer) clearTimeout(timer);
       if (hardTimer) clearTimeout(hardTimer);
       if (exitTimer) clearTimeout(exitTimer);
@@ -422,6 +427,9 @@ function startBackgroundOnNode(cmd, { cwd, notify } = {}) {
     }
     const pid = child.pid;
     if (pid) bgProcs.set(pid, { command: cmd, url: "", notify: !!notify });
+    // A background service is exactly what an orphan sweep is for: it is meant to outlive the command
+    // that started it, so nothing else will ever notice it is still there.
+    recordChild(pid, cmd);
     let buf = Buffer.alloc(0);
     const onData = (d) => {
       buf = Buffer.concat([buf, d]);
@@ -431,9 +439,11 @@ function startBackgroundOnNode(cmd, { cwd, notify } = {}) {
     child.stderr?.on("data", onData);
     child.on("error", (e) => {
       if (pid) bgProcs.delete(pid);
+      forgetChild(pid);
       resolve(`Background startup failed: ${e?.message || e}`);
     });
     child.on("exit", (code, signal) => {
+      forgetChild(pid);
       if (pid && bgProcs.has(pid)) {
         const entry = bgProcs.get(pid);
         bgProcs.delete(pid);
@@ -515,4 +525,6 @@ export function stopAll() {
     }
   }
   bgProcs.clear();
+  // Everything above has been killed, so the on-disk record has nothing left to describe.
+  clearRecord();
 }

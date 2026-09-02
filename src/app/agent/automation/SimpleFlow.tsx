@@ -256,7 +256,7 @@ export default function SimpleFlow({
                     </span>
                     <span className="font-mono text-[10px] text-muted-foreground">{node.id}</span>
                     {advancedShape(node.id, node.runtime) && (
-                      <span className="inline-flex items-center gap-1 rounded bg-amber-500/10 px-1.5 py-px text-[10px] font-semibold text-amber-600 dark:text-amber-400">
+                      <span className="inline-flex items-center gap-1 rounded bg-warning/10 px-1.5 py-px text-[10px] font-semibold text-warning-ink">
                         <Settings2 className="size-3" />
                         {t("auto.simple.advBadge")}
                       </span>
@@ -526,7 +526,7 @@ function IconBtn({
       disabled={disabled}
       onClick={onClick}
       className={`flex size-7 items-center justify-center rounded-md text-muted-foreground transition hover:bg-surface-muted disabled:opacity-30 ${
-        danger ? "hover:text-red-500" : "hover:text-foreground"
+        danger ? "hover:text-danger-ink" : "hover:text-foreground"
       }`}
     >
       {children}
@@ -556,10 +556,10 @@ function PickOption({
     >
       <span
         className={`grid size-4 shrink-0 place-items-center rounded-full border-2 ${
-          checked ? (ask ? "border-sky-500" : "border-primary") : "border-line-strong"
+          checked ? (ask ? "border-info" : "border-primary") : "border-line-strong"
         }`}
       >
-        {checked && <span className={`size-2 rounded-full ${ask ? "bg-sky-500" : "bg-primary"}`} />}
+        {checked && <span className={`size-2 rounded-full ${ask ? "bg-info" : "bg-primary"}`} />}
       </span>
       <span className="text-base leading-none">{emoji}</span>
       <span className="min-w-0">
