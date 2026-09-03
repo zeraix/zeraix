@@ -1388,5 +1388,9 @@
   "inspector.details": "詳情",
   "inspector.turnNoPrompt": "（無訊息）",
   "inspector.turnAgents": "{n} 個代理",
-  "inspector.fromTurn": "所屬輪次"
+  "inspector.fromTurn": "所屬輪次",
+  "inspector.stop": "停止",
+  "inspector.stopping": "停止中…",
+  "inspector.stopHint": "僅停止此子代理。主代理會繼續執行，並得知它已被停止。",
+  "inspector.timeline.stopRequested": "已要求停止"
 }

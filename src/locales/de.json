@@ -1388,5 +1388,9 @@
   "inspector.details": "Details",
   "inspector.turnNoPrompt": "(keine Nachricht)",
   "inspector.turnAgents": "{n} Agenten",
-  "inspector.fromTurn": "Aus Runde"
+  "inspector.fromTurn": "Aus Runde",
+  "inspector.stop": "Stopp",
+  "inspector.stopping": "Wird gestoppt…",
+  "inspector.stopHint": "Nur diesen Sub-Agenten stoppen. Der Haupt-Agent arbeitet weiter und erfährt, dass er gestoppt wurde.",
+  "inspector.timeline.stopRequested": "Stopp angefordert"
 }

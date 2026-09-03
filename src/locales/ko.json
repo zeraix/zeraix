@@ -1388,5 +1388,9 @@
   "inspector.details": "세부 정보",
   "inspector.turnNoPrompt": "(메시지 없음)",
   "inspector.turnAgents": "{n}개",
-  "inspector.fromTurn": "해당 턴"
+  "inspector.fromTurn": "해당 턴",
+  "inspector.stop": "중지",
+  "inspector.stopping": "중지하는 중…",
+  "inspector.stopHint": "이 서브 에이전트만 중지합니다. 메인 에이전트는 계속 진행하며 중지된 사실을 전달받습니다.",
+  "inspector.timeline.stopRequested": "중지 요청됨"
 }

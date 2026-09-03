@@ -9,7 +9,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { SubAgentScheduler, CANCELLED_RESULT } from "../src/lib/ai/subagentScheduler.ts";
+import { SubAgentScheduler, CANCELLED_RESULT, STOPPED_BY_USER_RESULT } from "../src/lib/ai/subagentScheduler.ts";
 
 /** A delegation whose completion the test decides. */
 function deferred() {
@@ -329,4 +329,65 @@ test("unknown ids are reported rather than silently ignored", async () => {
   const r = await s.join([id, "s99"]);
   assert.deepEqual(r.unknown, ["s99"]);
   assert.equal(r.ready.length, 1);
+});
+
+// ── Cancelling one job (the Inspector's per-sub-agent Stop) ──────────────────────────────────
+
+test("cancelling one running job settles it, wakes a join on it, and leaves its siblings running", async () => {
+  const s = new SubAgentScheduler({ limit: 2 });
+  const d = [deferred(), deferred()];
+  s.spawn({ i: 0 }, () => d[0].promise);
+  s.spawn({ i: 1 }, () => d[1].promise);
+  await tick();
+
+  const join = s.join(["s1"], { block: true });
+  assert.equal(s.cancel("s1"), "running", "reports the state the job was in");
+  const r = await join;
+  assert.equal(r.ready.length, 1);
+  assert.equal(r.ready[0].outcome.state, "cancelled");
+  assert.equal(r.ready[0].outcome.result, STOPPED_BY_USER_RESULT);
+  assert.deepEqual(s.outstanding(), ["s2"], "the sibling is untouched");
+
+  // The cancelled body returning later changes nothing, and its slot goes back.
+  d[0].resolve("too late");
+  await tick();
+  assert.equal(s.counts().running, 1);
+  assert.equal(s.cancel("s1"), null, "already settled");
+
+  // The scheduler itself is still open: a further spawn is accepted.
+  const c = s.spawn({ i: 2 }, () => new Promise(() => {}));
+  assert.equal(c.refused, undefined);
+  assert.equal(c.id, "s3");
+  d[1].resolve("done");
+});
+
+test("cancelling a queued job means it never runs, and its slot is not lost", async () => {
+  const s = new SubAgentScheduler({ limit: 1 });
+  const first = deferred();
+  const started = [];
+  s.spawn({ i: 0 }, () => {
+    started.push(0);
+    return first.promise;
+  });
+  s.spawn({ i: 1 }, () => {
+    started.push(1);
+    return Promise.resolve("never");
+  });
+  s.spawn({ i: 2 }, () => {
+    started.push(2);
+    return Promise.resolve("third");
+  });
+  await tick();
+  assert.deepEqual(started, [0]);
+
+  assert.equal(s.cancel("s2"), "queued");
+  first.resolve("first");
+  await tick();
+  assert.deepEqual(started, [0, 2], "the cancelled job is skipped and the next queued one gets the slot");
+  const r = await s.join(null, { block: true });
+  assert.deepEqual(
+    r.ready.map((x) => [x.outcome.id, x.outcome.state]),
+    [["s1", "done"], ["s2", "cancelled"], ["s3", "done"]],
+  );
+  assert.equal(s.cancel("s9"), null, "unknown ids are refused quietly");
 });

@@ -1388,5 +1388,9 @@
   "inspector.details": "Détails",
   "inspector.turnNoPrompt": "(aucun message)",
   "inspector.turnAgents": "{n} agents",
-  "inspector.fromTurn": "Du tour"
+  "inspector.fromTurn": "Du tour",
+  "inspector.stop": "Arrêter",
+  "inspector.stopping": "Arrêt en cours…",
+  "inspector.stopHint": "Arrête uniquement ce sous-agent. L’agent principal continue et est informé de l’arrêt.",
+  "inspector.timeline.stopRequested": "Arrêt demandé"
 }

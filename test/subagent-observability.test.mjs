@@ -27,8 +27,14 @@ const {
   rootExecutions,
   summarise,
 } = await import("../src/lib/agent/subagentExecution.ts");
-const { beginExecution, cancelExecutions, resetExecutionListenersForTest, subscribeExecutionEvents } =
-  await import("../src/lib/agent/executionRegistry.ts");
+const {
+  beginExecution,
+  cancelExecution,
+  cancelExecutions,
+  resetExecutionListenersForTest,
+  subscribeExecutionEvents,
+} = await import("../src/lib/agent/executionRegistry.ts");
+const { linkSignals } = await import("../src/lib/agent/abortSignals.ts");
 const { redactArgs, redactOutput, REDACTED } = await import("../src/lib/agent/executionRedaction.ts");
 const { executionTranscript, executionIsRunning } = await import(
   "../src/app/agent/chat/executionTranscript.ts"
@@ -117,6 +123,99 @@ test("a delegation cancelled while still queued never shows as running", () => {
   cancelExecutions([ex.id]);
   assert.equal(h.one(ex.id).status, "cancelled");
   assert.equal(h.one(ex.id).startedAt, undefined);
+});
+
+// ── Stopping one sub-agent (the Inspector's Stop button) ────────────────────────────────────────
+
+test("the user's Stop pulls the execution's own signal and is recorded before the work has stopped", () => {
+  const h = harness();
+  const ex = beginExecution(init());
+  ex.start();
+  assert.equal(ex.signal.aborted, false);
+
+  assert.equal(cancelExecution(ex.id), true);
+  assert.equal(ex.signal.aborted, true, "the work runs on this signal; Stop must reach it");
+  const rec = h.one(ex.id);
+  assert.equal(rec.status, "running", "still running until the work itself reports otherwise");
+  assert.equal(typeof rec.cancelRequestedAt, "number", "…but the request is visible, so the panel can say so");
+  assert.deepEqual(h.types(), ["spawned", "started", "cancel_requested"]);
+
+  // The body notices its signal and settles — the same path a turn-cancel takes.
+  ex.cancel();
+  assert.equal(h.one(ex.id).status, "cancelled");
+  assert.equal(cancelExecution(ex.id), false, "a settled execution has nothing left to stop");
+});
+
+test("Stop is one request however often it is pressed, and nothing to a settled execution", () => {
+  const h = harness();
+  const ex = beginExecution(init());
+  ex.start();
+  assert.equal(cancelExecution(ex.id), true);
+  assert.equal(cancelExecution(ex.id), false, "already asked");
+  const at = h.one(ex.id).cancelRequestedAt;
+  // A duplicate request event straight into the reducer changes nothing either.
+  const before = h.state;
+  const after = applyExecutionEvent(before, {
+    type: "cancel_requested",
+    executionId: ex.id,
+    timestamp: at + 1000,
+  });
+  assert.equal(after, before);
+
+  const done = beginExecution(init({ agent: "coder" }));
+  done.start();
+  done.complete("finished");
+  assert.equal(cancelExecution(done.id), false);
+  assert.equal(h.one(done.id).cancelRequestedAt, undefined);
+  assert.equal(cancelExecution("ex_never_minted"), false);
+});
+
+test("Stop on one execution leaves its siblings untouched", () => {
+  const h = harness();
+  const a = beginExecution(init());
+  const b = beginExecution(init({ agent: "plan" }));
+  a.start();
+  b.start();
+  cancelExecution(a.id);
+  assert.equal(a.signal.aborted, true);
+  assert.equal(b.signal.aborted, false);
+  assert.equal(h.one(b.id).cancelRequestedAt, undefined);
+});
+
+test("a turn-level cancel does not leave stop handles behind", () => {
+  harness();
+  const ex = beginExecution(init());
+  cancelExecutions([ex.id]);
+  assert.equal(cancelExecution(ex.id), false, "settled by the turn: nothing to stop");
+});
+
+test("linkSignals fires on either source and releases cleanly", () => {
+  const turn = new AbortController();
+  const own = new AbortController();
+  const linked = linkSignals(turn.signal, own.signal);
+  assert.equal(linked.signal.aborted, false);
+  own.abort();
+  assert.equal(linked.signal.aborted, true, "the execution's own stop reaches the joined signal");
+
+  const turn2 = new AbortController();
+  const own2 = new AbortController();
+  const linked2 = linkSignals(turn2.signal, own2.signal);
+  turn2.abort();
+  assert.equal(linked2.signal.aborted, true, "so does the turn's");
+
+  // Already-aborted source: joined signal starts aborted.
+  const dead = new AbortController();
+  dead.abort();
+  assert.equal(linkSignals(new AbortController().signal, dead.signal).signal.aborted, true);
+
+  // Released: a later abort of a source no longer reaches the joined signal.
+  const turn3 = new AbortController();
+  const own3 = new AbortController();
+  const linked3 = linkSignals(turn3.signal, own3.signal);
+  linked3.release();
+  turn3.abort();
+  own3.abort();
+  assert.equal(linked3.signal.aborted, false);
 });
 
 test("a second terminal event is ignored — the first one wins", () => {

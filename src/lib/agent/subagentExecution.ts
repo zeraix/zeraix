@@ -138,7 +138,15 @@ export type SubAgentEvent =
     }
   | { type: "completed"; executionId: string; timestamp: number; result?: string }
   | { type: "failed"; executionId: string; timestamp: number; error: { message: string; code?: string } }
-  | { type: "cancelled"; executionId: string; timestamp: number; reason?: string };
+  | { type: "cancelled"; executionId: string; timestamp: number; reason?: string }
+  /**
+   * The user asked this one execution to stop (the Inspector's Stop button).
+   *
+   * Not a status. The work is still running until it notices its signal — a model request in flight, a
+   * tool mid-call — and `cancelled` follows once it has actually stopped. Recording the request separately
+   * is what lets the panel say "Stopping…" instead of offering a second Stop for something already asked to.
+   */
+  | { type: "cancel_requested"; executionId: string; timestamp: number; reason?: string };
 
 /** The canonical execution record (TODO §2). */
 export interface SubAgentExecution {
@@ -171,6 +179,8 @@ export interface SubAgentExecution {
   grantedTools?: string[];
   result?: string;
   error?: { message: string; code?: string };
+  /** When the user asked this execution to stop, if they did. Set before, and independently of, `cancelled`. */
+  cancelRequestedAt?: number;
 }
 
 export interface ExecutionsState {
@@ -360,6 +370,12 @@ export function applyExecutionEvent(state: ExecutionsState, event: SubAgentEvent
     case "cancelled": {
       if (!settle(ex, "cancelled", event.timestamp)) return state;
       if (event.reason) ex.result = event.reason;
+      break;
+    }
+    case "cancel_requested": {
+      // A stop asked of settled work changes nothing, and asking twice is one request.
+      if (isTerminal(ex.status) || ex.cancelRequestedAt !== undefined) return state;
+      ex.cancelRequestedAt = event.timestamp;
       break;
     }
   }

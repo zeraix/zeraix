@@ -1,10 +1,19 @@
 /**
  * The execution event bus, and the handle the runtime writes through (TODO §4, §11).
  *
- * Two responsibilities and no more: mint an id that is stable for the life of an execution, and publish
- * frozen events to whoever is listening. It holds NO state — the reducer in subagentExecution.ts does, and
- * the store owns the copy. That separation is what keeps "runtime owns execution truth, frontend owns
- * presentation" true even though both currently run in the renderer (see docs/subagent-observability.md).
+ * Three responsibilities and no more: mint an id that is stable for the life of an execution, publish
+ * frozen events to whoever is listening, and hold the stop handle of every execution still running. It
+ * holds no execution STATE — the reducer in subagentExecution.ts does, and the store owns the copy. That
+ * separation is what keeps "runtime owns execution truth, frontend owns presentation" true even though both
+ * currently run in the renderer (see docs/subagent-observability.md).
+ *
+ * ## Why the stop handles live here
+ *
+ * The Inspector's Stop has to reach the work — the delegation's loop, its model request, the tool it is in
+ * the middle of — and the work runs on an `AbortSignal`. The store holds a presentation copy and must not
+ * own something that can stop a delegation; the registry is the runtime's write surface, so the controller
+ * is minted with the id, handed to the work as `handle.signal`, and pulled by `cancelExecution`. An entry
+ * lives exactly as long as the execution is unsettled.
  *
  * ## Why a handle rather than an `emit(event)` function
  *
@@ -29,6 +38,8 @@ import {
 export type ExecutionListener = (event: SubAgentEvent) => void;
 
 const listeners = new Set<ExecutionListener>();
+/** The stop handle of every execution that has not settled, by id. Dropped on the terminal event. */
+const stops = new Map<string, AbortController>();
 let seq = 0;
 
 /** Subscribe to every execution event. Returns the unsubscribe. */
@@ -81,6 +92,11 @@ export interface ExecutionInit {
 /** The runtime's write surface for one execution. Every method is safe to call more than once. */
 export interface ExecutionHandle {
   readonly id: string;
+  /**
+   * Fires when the user stops THIS execution (`cancelExecution`), and only then. The work runs on it, joined
+   * with the turn's own signal (see abortSignals.ts); nothing here aborts it on the execution's behalf.
+   */
+  readonly signal: AbortSignal;
   start(): void;
   action(phase: ExecutionPhase): void;
   /** Returns the id to pass back to `toolResult`. */
@@ -102,6 +118,8 @@ let toolSeq = 0;
  */
 export function beginExecution(init: ExecutionInit): ExecutionHandle {
   const id = mintId();
+  const stop = new AbortController();
+  stops.set(id, stop);
   publishExecutionEvent({
     type: "spawned",
     executionId: id,
@@ -119,6 +137,7 @@ export function beginExecution(init: ExecutionInit): ExecutionHandle {
 
   return {
     id,
+    signal: stop.signal,
     start() {
       publishExecutionEvent({ type: "started", executionId: id, timestamp: Date.now() });
     },
@@ -153,9 +172,11 @@ export function beginExecution(init: ExecutionInit): ExecutionHandle {
       publishExecutionEvent({ type: "info", executionId: id, timestamp: Date.now(), ...patch });
     },
     complete(result) {
+      stops.delete(id);
       publishExecutionEvent({ type: "completed", executionId: id, timestamp: Date.now(), result });
     },
     fail(message, code) {
+      stops.delete(id);
       publishExecutionEvent({
         type: "failed",
         executionId: id,
@@ -164,9 +185,31 @@ export function beginExecution(init: ExecutionInit): ExecutionHandle {
       });
     },
     cancel(reason) {
+      stops.delete(id);
       publishExecutionEvent({ type: "cancelled", executionId: id, timestamp: Date.now(), reason });
     },
   };
+}
+
+/**
+ * Stop one execution, because the user asked to (the Inspector's Stop button).
+ *
+ * Publishes `cancel_requested` and pulls the execution's own signal. The work notices on its own — its loop,
+ * its model request and its tool calls all run on that signal — and reports `cancelled` once it has actually
+ * stopped. That is deliberately NOT published here: a Stop reported before the work has stopped is the
+ * panel describing something other than what is running, which is the one thing it must never do.
+ *
+ * The one exception is a delegation that has not started, which has no body to report anything; the
+ * scheduler wiring in chatDelegation.ts settles that case, because it is the only place that knows.
+ *
+ * Returns false when there was nothing to stop: an unknown id, a settled execution, or one already asked.
+ */
+export function cancelExecution(id: string, reason?: string): boolean {
+  const stop = stops.get(id);
+  if (!stop || stop.signal.aborted) return false;
+  publishExecutionEvent({ type: "cancel_requested", executionId: id, timestamp: Date.now(), reason });
+  stop.abort();
+  return true;
 }
 
 /**
@@ -178,11 +221,13 @@ export function beginExecution(init: ExecutionInit): ExecutionHandle {
  */
 export function cancelExecutions(ids: string[], reason?: string): void {
   for (const id of ids) {
+    stops.delete(id);
     publishExecutionEvent({ type: "cancelled", executionId: id, timestamp: Date.now(), reason });
   }
 }
 
-/** Test seam: forget every subscriber. Never called by the app. */
+/** Test seam: forget every subscriber and every stop handle. Never called by the app. */
 export function resetExecutionListenersForTest(): void {
   listeners.clear();
+  stops.clear();
 }

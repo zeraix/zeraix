@@ -94,6 +94,17 @@ interface Job<M> {
 export const CANCELLED_RESULT = "(cancelled: the turn was interrupted before this delegation finished)";
 
 /**
+ * What the main agent reads when the user stops ONE delegation from the Sub-agent Inspector.
+ *
+ * Different from CANCELLED_RESULT on purpose: there the whole turn is unwinding and nobody reads the
+ * answer, here the main agent carries on and has to learn two things — that this work is incomplete, and
+ * that the user chose that. Without the second it would simply delegate the same task again.
+ */
+export const STOPPED_BY_USER_RESULT =
+  "(stopped by the user before this delegation finished — its work is incomplete. " +
+  "Do not start it again unless the user asks; carry on with what you have.)";
+
+/**
  * The scheduler surface the delegation tools call.
  *
  * Extracted so a second implementation can stand behind it — the Rust runtime, in Stage 4b — without
@@ -111,6 +122,14 @@ export interface SchedulerLike<M> {
   counts(): { queued: number; running: number; settled: number; total: number };
   outstanding(): string[];
   cancelAll(): void;
+  /**
+   * Settle ONE job as cancelled, leaving its siblings and the scheduler itself running.
+   *
+   * Returns the state the job was in, or null when there was nothing to cancel (unknown, or settled). A
+   * caller needs the distinction: a job that was still queued never ran its body, so nothing else will
+   * ever report it.
+   */
+  cancel(id: string, reason?: string): "queued" | "running" | null;
 }
 
 export class SubAgentScheduler<M> {
@@ -371,6 +390,24 @@ export class SubAgentScheduler<M> {
       }
     }
     return out;
+  }
+
+  // ── Cancelling one job ───────────────────────────────────────────────────────────────────────
+
+  /**
+   * Settle one job as cancelled — the Inspector's per-sub-agent Stop.
+   *
+   * Settling is what wakes a join blocked on this job NOW, rather than whenever the body notices its signal.
+   * The body is not touched here: its stop signal belongs to the caller (see executionRegistry.ts), and a
+   * running body that later returns is ignored by `settle`, exactly as a body racing `cancelAll` is. A job
+   * still queued never starts: `drive` sees the outcome after acquiring its slot and hands the slot back.
+   */
+  cancel(id: string, reason: string = STOPPED_BY_USER_RESULT): "queued" | "running" | null {
+    const j = this.jobs.get(id);
+    if (!j || j.outcome) return null;
+    const was = j.state as "queued" | "running";
+    this.settle(j, "cancelled", reason);
+    return was;
   }
 
   // ── Teardown ─────────────────────────────────────────────────────────────────────────────────

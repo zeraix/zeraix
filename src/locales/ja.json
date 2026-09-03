@@ -1388,5 +1388,9 @@
   "inspector.details": "詳細",
   "inspector.turnNoPrompt": "（メッセージなし）",
   "inspector.turnAgents": "{n} 件",
-  "inspector.fromTurn": "対象のターン"
+  "inspector.fromTurn": "対象のターン",
+  "inspector.stop": "停止",
+  "inspector.stopping": "停止中…",
+  "inspector.stopHint": "このサブエージェントだけを停止します。メインエージェントは続行し、停止されたことを通知されます。",
+  "inspector.timeline.stopRequested": "停止を要求"
 }

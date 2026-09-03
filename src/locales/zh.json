@@ -1392,5 +1392,9 @@
   "inspector.details": "详情",
   "inspector.turnNoPrompt": "（无消息）",
   "inspector.turnAgents": "{n} 个代理",
-  "inspector.fromTurn": "所属轮次"
+  "inspector.fromTurn": "所属轮次",
+  "inspector.stop": "停止",
+  "inspector.stopping": "停止中…",
+  "inspector.stopHint": "仅停止此子代理。主代理会继续运行，并得知它已被停止。",
+  "inspector.timeline.stopRequested": "已请求停止"
 }

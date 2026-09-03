@@ -17,6 +17,9 @@ import { register } from "node:module";
 
 register("./helpers/srcResolve.mjs", import.meta.url);
 const { createRunDelegation } = await import("../src/app/agent/chat/delegation.ts");
+const { beginExecution, cancelExecution, resetExecutionListenersForTest, subscribeExecutionEvents } =
+  await import("../src/lib/agent/executionRegistry.ts");
+const { STOPPED_BY_USER_RESULT } = await import("../src/lib/ai/subagentScheduler.ts");
 
 const CAPS = {
   supportsReasoning: true,
@@ -217,6 +220,85 @@ test("cancelling the turn ends the delegation as cancelled, not as an answer", a
   const result = await run(ctx(ctrl.signal), opts());
   assert.equal(result.error, "cancelled");
   assert.equal(requests.length, 0, "an already-cancelled delegation issues no request");
+});
+
+test("stopping ONE sub-agent ends its delegation as cancelled and tells the parent the user did it", async () => {
+  resetExecutionListenersForTest();
+  const events = [];
+  subscribeExecutionEvents((e) => events.push(e.type));
+  const execution = beginExecution({ agent: "explore", task: "find the handler", origin: "run_subagent" });
+
+  const turn = new AbortController();
+  let signals = [];
+  const { run, requests } = makeRunner({
+    turns: [
+      { toolCalls: [{ name: "search_files", args: { query: "handler" } }] },
+      { toolCalls: [{ name: "read_file", args: { path: "a.ts" } }] },
+      { content: "never reached" },
+    ],
+    repeatLast: true,
+  });
+  // Press Stop while the second round's request is in flight, from outside — exactly what the button does.
+  const stopping = run(
+    {
+      ...ctx(turn.signal),
+      // The runner's requestChat ignores its signal argument, so the stop is observed through the loop
+      // instead: it must end the delegation without another request being issued.
+    },
+    opts({
+      execution,
+      status: () => {
+        if (requests.length === 2 && signals.length === 0) signals.push(cancelExecution(execution.id));
+      },
+    }),
+  );
+  const result = await stopping;
+
+  assert.deepEqual(signals, [true], "the stop was accepted while the delegation was running");
+  assert.equal(result.error, "cancelled");
+  assert.equal(result.conclusion, STOPPED_BY_USER_RESULT, "the parent learns the USER stopped it");
+  assert.equal(turn.signal.aborted, false, "the turn itself was never cancelled");
+  assert.ok(requests.length < 4, "the loop stops issuing requests once its signal is pulled");
+  assert.equal(events.at(-1), "cancelled");
+  assert.ok(events.includes("cancel_requested"));
+});
+
+test("a request that REJECTS with the abort reason on Stop is a cancellation, not a failure", async () => {
+  // What actually happens in the app: Stop pulls the signal under an in-flight fetch, which rejects with
+  // "signal is aborted without reason". That must not become the sub-agent's conclusion or a red row.
+  resetExecutionListenersForTest();
+  const events = [];
+  subscribeExecutionEvents((e) => events.push(e));
+  const execution = beginExecution({ agent: "explore", task: "find the handler", origin: "run_subagent" });
+  const { run, requests } = makeRunner({
+    turns: [{ toolCalls: [{ name: "search_files", args: { query: "handler" } }] }, { content: "unreached" }],
+    // The first tool call is where Stop lands; the runner's tool rejects the way a real aborted call does.
+    toolResult: () => {
+      cancelExecution(execution.id);
+      throw new DOMException("signal is aborted without reason", "AbortError");
+    },
+  });
+  const result = await run(ctx(), opts({ execution }));
+  assert.equal(result.error, "cancelled");
+  assert.equal(result.conclusion, STOPPED_BY_USER_RESULT);
+  assert.equal(requests.length, 1);
+  const last = events.at(-1);
+  assert.equal(last.type, "cancelled", "reported as stopped, not failed");
+  assert.ok(!events.some((e) => e.type === "failed"));
+});
+
+test("a sub-agent stopped while still queued never starts and never issues a request", async () => {
+  resetExecutionListenersForTest();
+  const events = [];
+  subscribeExecutionEvents((e) => events.push(e.type));
+  const execution = beginExecution({ agent: "explore", task: "find the handler", origin: "spawn_subagents" });
+  cancelExecution(execution.id);
+  const { run, requests } = makeRunner({ turns: [{ content: "never reached" }] });
+  const result = await run(ctx(), opts({ execution }));
+  assert.equal(result.error, "cancelled");
+  assert.equal(result.conclusion, STOPPED_BY_USER_RESULT);
+  assert.equal(requests.length, 0);
+  assert.deepEqual(events, ["spawned", "cancel_requested", "cancelled"], "no `started` for work that never ran");
 });
 
 test("a provider failure ends the delegation with an error rather than an empty conclusion", async () => {

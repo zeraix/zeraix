@@ -37,7 +37,8 @@ import {
   MAX_PARALLEL_SUBAGENTS, MAX_SUBAGENTS_PER_TURN,
   type DelegationMeta, type PriorDelegation,
 } from "@/lib/ai/subagents";
-import { SubAgentScheduler, type SchedulerLike } from "@/lib/ai/subagentScheduler";
+import { STOPPED_BY_USER_RESULT, SubAgentScheduler, type SchedulerLike } from "@/lib/ai/subagentScheduler";
+import { linkSignals } from "@/lib/agent/abortSignals";
 import { beginExecution, cancelExecutions, type ExecutionHandle } from "@/lib/agent/executionRegistry";
 import { useSubAgentExecutionStore } from "@/store/subagentExecutionStore";
 import { createRuntimeScheduler } from "./runtimeScheduler";
@@ -443,7 +444,7 @@ export function createDelegationTools(deps: DelegationDeps): DelegationTools {
       // A coalesced or refused spawn started no work, so it gets no execution record: a row that was never
       // going to run is noise in a panel whose whole job is showing what is running. The batch's tool result
       // already tells the model which of its entries folded into which.
-      attachExecution(
+      const execution =
         res.coalesced || res.refused
           ? undefined
           : beginExecution({
@@ -455,8 +456,22 @@ export function createDelegationTools(deps: DelegationDeps): DelegationTools {
               turnLabel,
               parentExecutionId: ctx.executionId,
               jobId: res.id,
-            }),
-      );
+            });
+      attachExecution(execution);
+      if (execution) {
+        const jobId = res.id;
+        // The Inspector's Stop for this one delegation. The body stops on its own — it runs on the
+        // execution's signal — but the JOB is settled here, at once, so a join blocked on it wakes now rather
+        // than when the body notices. A job that had not started has no body to report it, and this is the
+        // one place that knows, so it is reported here.
+        execution.signal.addEventListener(
+          "abort",
+          () => {
+            if (sched.cancel(jobId) === "queued") execution.cancel();
+          },
+          { once: true },
+        );
+      }
       spawned.push({ id: res.id, agent: agentId, coalesced: res.coalesced, refused: res.refused });
     }
 
@@ -607,8 +622,10 @@ export function createDelegationTools(deps: DelegationDeps): DelegationTools {
       requestedTools,
     });
     execution.start();
+    // The turn's signal joined with the execution's own (the Inspector's Stop), as delegation.ts does.
+    const stop = linkSignals(ctx.signal, execution.signal);
     // The brokered agent's own tool calls, attributed through the one dispatcher (TODO §9).
-    const brokeredCtx: RunCtx = { ...ctx, executionId: execution.id };
+    const brokeredCtx: RunCtx = { ...ctx, executionId: execution.id, signal: stop.signal };
 
     const client: ModelClient = {
       async send(req) {
@@ -621,53 +638,67 @@ export function createDelegationTools(deps: DelegationDeps): DelegationTools {
             sendReasoningContext(),
           ),
           req.tools.length ? toChatTools(req.tools) : undefined,
-          ctx.signal,
+          stop.signal,
         );
+        // An aborted request returns what streamed in before the stop rather than throwing, and to the
+        // runner that would read as a finished turn. A stop has to END the run, and a throw is the runner's
+        // one exit that does; it comes back as `failed`, which is mapped to `cancelled` below.
+        if (stop.signal.aborted) throw new Error("stopped");
         return toModelTurn(data);
       },
     };
 
-    const result = await createSpawnSubAgentHandler({
-      broker,
-      client,
-      requesterId: `conv:${ctx.convId}`,
-      maxTurns: MAX_TURNS_PER_SUBAGENT,
-      tools: {
-        declarationFor: (name) => decls.get(name),
-        execute: async (name, input, context) => {
-          let ok = true;
-          const content = await execToolCall(
-            brokeredCtx,
-            name,
-            input,
-            `${context.agentId}→${name}`,
-            `sub:${context.agentId}`,
-            { agentId: context.agentId, task },
-            (v) => {
-              ok = v;
-            },
-          );
-          return { content, isError: !ok };
+    let result;
+    try {
+      result = await createSpawnSubAgentHandler({
+        broker,
+        client,
+        requesterId: `conv:${ctx.convId}`,
+        maxTurns: MAX_TURNS_PER_SUBAGENT,
+        tools: {
+          declarationFor: (name) => decls.get(name),
+          execute: async (name, input, context) => {
+            let ok = true;
+            const content = await execToolCall(
+              brokeredCtx,
+              name,
+              input,
+              `${context.agentId}→${name}`,
+              `sub:${context.agentId}`,
+              { agentId: context.agentId, task },
+              (v) => {
+                ok = v;
+              },
+            );
+            return { content, isError: !ok };
+          },
         },
-      },
-    })(rawArgs);
+      })(rawArgs);
+    } finally {
+      stop.release();
+    }
 
     execution.info({
       agent: result.agentId ?? "spawn_sub_agent",
       requestedTools: result.requestedTools,
       grantedTools: result.grantedTools,
     });
-    if (result.status === "completed") execution.complete(result.output ?? "");
+    // The user's Stop outranks how the runner happened to exit: a run stopped mid-request comes back as
+    // `failed`, and reporting that as a failure would be the Inspector saying the sub-agent broke.
+    const stoppedByUser = execution.signal.aborted;
+    if (stoppedByUser) execution.cancel();
+    else if (result.status === "completed") execution.complete(result.output ?? "");
     else execution.fail(result.error ?? result.status, result.status);
 
+    const text = stoppedByUser ? STOPPED_BY_USER_RESULT : formatBrokeredSpawn(result);
     ctx.push({
       kind: "tool",
       name: `spawn_sub_agent → ${result.agentId ?? "(not created)"}`,
       args: rawArgs,
       ok: result.status === "completed",
-      result: formatBrokeredSpawn(result),
+      result: text,
     });
-    return formatBrokeredSpawn(result);
+    return text;
   };
 
   /**

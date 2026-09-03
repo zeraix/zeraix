@@ -23,7 +23,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { spawn, spawnSync, execFileSync } from "node:child_process";
+import { spawn, execFile, execFileSync } from "node:child_process";
 import crypto from "node:crypto";
 import https from "node:https";
 import { app } from "electron";
@@ -31,6 +31,7 @@ import { app } from "electron";
 import { emitService } from "./events.mjs";
 import { qmp, guestAgent } from "./control.mjs";
 import { startNinepServer } from "./ninep-server.mjs";
+import { createProgressReporter } from "./progress.mjs";
 import { vmDir, vmVersion, guestArch, localDataDir } from "./vmpaths.mjs";
 import { resolveHfEndpoint } from "../../llm/hfEndpoint.mjs";
 
@@ -287,22 +288,37 @@ function qemuImgBin() {
 }
 
 /**
- * Structural check of a qcow2 file. Returns null when it is sound, else a description of what is wrong.
+ * Structural check of a qcow2 file. Resolves null when it is sound, else a description of what is wrong.
  *
  * qemu-img exit codes: 0 = clean, 1 = check unsupported/could not run, 2 = corruption found, 3 = leaked clusters.
  * Only 2 counts as broken. Leaks (3) waste space and boot fine, and 1 must not condemn an image just because the
  * bundled qemu-img could not be run — a check that fails open is the right direction for a cache we would otherwise
  * delete and re-download over a false positive.
+ *
+ * Asynchronous, and that is not a nicety. This runs on the first-run path right after the multi-GB image has landed,
+ * and it used to be `spawnSync`: for as long as qemu-img walked the file — up to the 120 s timeout — the main process
+ * event loop was stopped, every IPC call from the window stalled, and the app was frozen at the one moment a new user
+ * was first trying it. The check itself is unchanged; only the waiting moved off the event loop.
  */
 function qcow2Corruption(file) {
-  try {
-    const r = spawnSync(qemuImgBin(), ["check", "-f", "qcow2", file], { encoding: "utf8", timeout: 120000, windowsHide: true });
-    if (r.error || r.status === null) return null; // could not run / timed out: fail open
-    if (r.status !== 2) return null;
-    return (`${r.stdout ?? ""}${r.stderr ?? ""}`.trim().split("\n").slice(0, 4).join("; ") || "qemu-img reported corruption");
-  } catch {
-    return null;
-  }
+  return new Promise((resolve) => {
+    try {
+      execFile(
+        qemuImgBin(),
+        ["check", "-f", "qcow2", file],
+        { encoding: "utf8", timeout: 120000, windowsHide: true, maxBuffer: 4 * 1048576 },
+        (err, stdout, stderr) => {
+          // Could not run, or timed out (killed by the timeout): fail open, as above.
+          if (err && (err.killed || err.signal || typeof err.code !== "number")) return resolve(null);
+          const status = err ? err.code : 0;
+          if (status !== 2) return resolve(null);
+          resolve(`${stdout ?? ""}${stderr ?? ""}`.trim().split("\n").slice(0, 4).join("; ") || "qemu-img reported corruption");
+        },
+      );
+    } catch {
+      resolve(null);
+    }
+  });
 }
 
 function qemuBin() {
@@ -532,7 +548,9 @@ async function ensureRootfs(onProgress, forceConfigured = false) {
     total += n;
   }
   // Resumable download: an existing .part counts toward completed progress (the server's 206 only returns the remaining bytes, no longer reported via onChunk).
-  let done = 0;
+  // Progress is rationed, not counted approximately: every byte is added, and the reporter decides when a broadcast is
+  // worth making (see progress.mjs — one per chunk was what made a fresh install sluggish for the whole download).
+  const progress = createProgressReporter({ total, onProgress });
   for (const f of missing) {
     const p = path.join(vd, f + ".part");
     if (!fs.existsSync(p)) continue;
@@ -542,14 +560,14 @@ async function ensureRootfs(onProgress, forceConfigured = false) {
     const size = fs.statSync(p).size;
     const want = expected.get(f) || 0;
     if (want && size >= want) { fs.rmSync(p, { force: true }); continue; }
-    done += size;
+    progress.add(size);
   }
-  const report = () => onProgress?.(total ? Math.min(99, Math.floor((done / total) * 100)) : null, `Downloading runtime environment ${(done / 1048576).toFixed(0)}/${(total / 1048576).toFixed(0)} MB`);
-  report(); // initial progress (including any already-resumed part)
+  progress.milestone(); // initial progress (including any already-resumed part)
   for (const f of missing) {
     const tmp = path.join(vd, f + ".part");
     console.log(`[sandbox/qemu] downloading ${f} -> ${tmp}`);
-    await httpDownload(`${base}/vm/${arch}/${version}/${f}`, tmp, (n) => { done += n; report(); });
+    await httpDownload(`${base}/vm/${arch}/${version}/${f}`, tmp, (n) => progress.add(n));
+    progress.milestone(); // the exact final number for this file, whatever the throttle dropped
     // Verify BEFORE publishing. `ws.on("finish")` fires when the response ends, and a connection dropped mid-body ends
     // the response just the same — so a truncated file used to be renamed into place as if complete, and from then on
     // `versionComplete()` (an existsSync test) called it downloaded for ever. That is how an unbootable image becomes
@@ -566,7 +584,7 @@ async function ensureRootfs(onProgress, forceConfigured = false) {
     // the length test above cannot see a body that arrived damaged (or was resumed onto a damaged prefix). qemu-img
     // reads the qcow2 metadata and says so directly — which is the failure this whole path exists to stop shipping.
     if (f.endsWith(".qcow2")) {
-      const bad = qcow2Corruption(tmp);
+      const bad = await qcow2Corruption(tmp);
       if (bad) {
         fs.rmSync(tmp, { force: true });
         throw new Error(`downloaded ${f} is corrupt (${bad}) — discarded. Start the sandbox again to re-download it.`);

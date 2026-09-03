@@ -93,7 +93,13 @@ export function getSandboxStatus() {
 }
 
 function setStatus(phase, extra = {}) {
-  status = { ...status, phase, reason: "", pct: null, ...extra };
+  const next = { ...status, phase, reason: "", pct: null, ...extra };
+  // Nothing new to say is nothing to broadcast. Every listener call is an IPC message to every window and a state
+  // change in the chat page; the download path already rations its reports (progress.mjs), and this is the backstop
+  // for any other caller that repeats itself. Compared field by field: the object is four flat values.
+  const same = Object.keys(next).length === Object.keys(status).length && Object.entries(next).every(([k, v]) => status[k] === v);
+  status = next;
+  if (same) return;
   for (const fn of statusListeners) {
     try {
       fn(getSandboxStatus());

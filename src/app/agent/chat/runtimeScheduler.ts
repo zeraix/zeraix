@@ -25,7 +25,7 @@ import {
   type DelegationMeta,
 } from "@/lib/ai/subagents";
 import type { JobOutcome, JobState, JobView, JoinResult, SpawnResult } from "@/lib/ai/subagentScheduler";
-import { CANCELLED_RESULT } from "@/lib/ai/subagentScheduler";
+import { CANCELLED_RESULT, STOPPED_BY_USER_RESULT } from "@/lib/ai/subagentScheduler";
 
 type Body<M> = (job: JobView<M>) => Promise<string>;
 
@@ -102,6 +102,10 @@ class RuntimeSchedulerImpl<M> {
   /** Settled here, not yet reported to the model by either `drain` or `join`. */
   private readonly undelivered: Array<{ job: JobView<M>; outcome: JobOutcome }> = [];
   private readonly delivered = new Set<string>();
+  /** Settled in THIS window — by its body returning, or by `cancel`. What `record` dedupes on. */
+  private readonly settledIds = new Set<string>();
+  /** Bodies the runtime has asked this window to run. What tells a queued job from a running one. */
+  private readonly serving = new Set<string>();
   private readonly started = new Map<string, number>();
   private total = 0;
   private settled = 0;
@@ -139,6 +143,7 @@ class RuntimeSchedulerImpl<M> {
     }
     const job: JobView<M> = { id: jobId, meta: this.metas.get(jobId) ?? meta, state: "running", coalesced: 0 };
     const startedAt = this.started.get(jobId) ?? Date.now();
+    this.serving.add(jobId);
     try {
       const result = await body(job);
       this.record(job, "done", result, Date.now() - startedAt);
@@ -168,7 +173,10 @@ class RuntimeSchedulerImpl<M> {
   }
 
   private record(job: JobView<M>, state: JobOutcome["state"], result: string, ms: number) {
-    if (this.delivered.has(job.id)) return;
+    // Settled once. A body returning after `cancel` already settled its job is the same race `settle`
+    // handles in the in-process scheduler: the first outcome stands.
+    if (this.delivered.has(job.id) || this.settledIds.has(job.id)) return;
+    this.settledIds.add(job.id);
     this.settled++;
     this.undelivered.push({ job: { ...job, state: state as JobState }, outcome: { id: job.id, state, result, ms } });
     this.onChange();
@@ -226,6 +234,14 @@ class RuntimeSchedulerImpl<M> {
     for (const item of r.ready) {
       if (this.delivered.has(item.id)) continue;
       this.delivered.add(item.id);
+      // An outcome this window settled itself outranks the runtime's: a job the user stopped is one the
+      // runtime saw finish "done" with the stop notice as its text, because the body replied rather than
+      // erroring, and reporting it as finished would hide the one fact the model needs.
+      const local = this.undelivered.find((u) => u.job.id === item.id);
+      if (local) {
+        ready.push(local);
+        continue;
+      }
       const meta = (this.metas.get(item.id) ?? (item.meta as M)) as M;
       ready.push({
         job: { id: item.id, meta, state: item.state as JobState, coalesced: item.coalesced },
@@ -249,6 +265,27 @@ class RuntimeSchedulerImpl<M> {
     const out = this.undelivered.splice(0, this.undelivered.length);
     for (const item of out) this.delivered.add(item.job.id);
     return out;
+  }
+
+  /**
+   * Settle one job as cancelled in this window — the Inspector's per-sub-agent Stop.
+   *
+   * The runtime's protocol cancels a whole turn and nothing smaller, so it is not told. What it sees is the
+   * body replying with the stop notice as its result (the caller aborts the body's signal); `join` above
+   * prefers the outcome recorded here over that reply. A queued job stays queued in the runtime until it is
+   * served, at which point the body sees its aborted signal and returns at once.
+   */
+  cancel(id: string, reason: string = STOPPED_BY_USER_RESULT): "queued" | "running" | null {
+    const meta = this.metas.get(id);
+    if (meta === undefined || this.settledIds.has(id) || this.delivered.has(id)) return null;
+    const was = this.serving.has(id) ? "running" : "queued";
+    this.record(
+      { id, meta, state: "cancelled", coalesced: 0 },
+      "cancelled",
+      reason,
+      Date.now() - (this.started.get(id) ?? Date.now()),
+    );
+    return was;
   }
 
   cancelAll() {

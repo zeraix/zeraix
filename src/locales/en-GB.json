@@ -1389,5 +1389,9 @@
   "inspector.details": "Details",
   "inspector.turnNoPrompt": "(no message)",
   "inspector.turnAgents": "{n} agents",
-  "inspector.fromTurn": "From turn"
+  "inspector.fromTurn": "From turn",
+  "inspector.stop": "Stop",
+  "inspector.stopping": "Stopping…",
+  "inspector.stopHint": "Stop this sub-agent only. The main agent keeps going and is told it was stopped.",
+  "inspector.timeline.stopRequested": "Stop requested"
 }

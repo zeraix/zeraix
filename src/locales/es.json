@@ -1388,5 +1388,9 @@
   "inspector.details": "Detalles",
   "inspector.turnNoPrompt": "(sin mensaje)",
   "inspector.turnAgents": "{n} agentes",
-  "inspector.fromTurn": "Del turno"
+  "inspector.fromTurn": "Del turno",
+  "inspector.stop": "Detener",
+  "inspector.stopping": "Deteniendo…",
+  "inspector.stopHint": "Detiene solo este subagente. El agente principal continúa y se le informa de que fue detenido.",
+  "inspector.timeline.stopRequested": "Detención solicitada"
 }

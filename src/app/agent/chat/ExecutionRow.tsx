@@ -32,6 +32,7 @@ import {
   type SubAgentExecution,
 } from "@/lib/agent/subagentExecution";
 import { ChatTranscript } from "./ChatTranscript";
+import { ExecutionComposer } from "./ExecutionComposer";
 import { executionIsRunning, executionTranscript } from "./executionTranscript";
 import { formatDuration } from "./format";
 import { targetOf } from "./processTrace";
@@ -187,6 +188,8 @@ function timelineLabel(e: SubAgentEvent, t: TFunc): string | null {
       return t("inspector.timeline.failed");
     case "cancelled":
       return t("inspector.timeline.cancelled");
+    case "cancel_requested":
+      return t("inspector.timeline.stopRequested");
     // `action` and `status_changed` are folded into the rows above: a line per phase change would be most
     // of the timeline and none of its information.
     default:
@@ -207,9 +210,8 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
  * The delegation, read as the conversation it was.
  *
  * Laid out like the chat page — a header where the title bar is, a centred `max-w-3xl` transcript, and a
- * strip where the composer would be. That strip is what the composer cannot be here: there is nobody to send
- * a message to, so the space carries the run's metadata and its timeline instead of an input nobody could
- * use (TODO §16, §17).
+ * strip where the composer is. The strip holds the composer slot (ExecutionComposer.tsx: Stop today, an
+ * input for talking to the sub-agent next) above the run's metadata and its timeline (TODO §16, §17).
  */
 export function ExecutionRunView({
   execution: ex,
@@ -295,6 +297,7 @@ export function ExecutionRunView({
 
       <div className="shrink-0 border-t border-line px-4 py-2 text-[11px]">
         <div className="mx-auto w-full max-w-3xl">
+          <ExecutionComposer execution={ex} />
           <button
             type="button"
             onClick={() => setDetailsOpen((o) => !o)}

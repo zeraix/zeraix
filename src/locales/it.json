@@ -1388,5 +1388,9 @@
   "inspector.details": "Dettagli",
   "inspector.turnNoPrompt": "(nessun messaggio)",
   "inspector.turnAgents": "{n} agent",
-  "inspector.fromTurn": "Dal turno"
+  "inspector.fromTurn": "Dal turno",
+  "inspector.stop": "Interrompi",
+  "inspector.stopping": "Interruzione in corso…",
+  "inspector.stopHint": "Interrompe solo questo sub-agent. L’agente principale continua e viene informato dell’interruzione.",
+  "inspector.timeline.stopRequested": "Interruzione richiesta"
 }

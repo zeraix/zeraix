@@ -19,16 +19,19 @@ import {
   type PriorDelegation,
   type SubAgentDef,
 } from "@/lib/ai/subagents";
+import { STOPPED_BY_USER_RESULT } from "@/lib/ai/subagentScheduler";
 import { listTools } from "@/lib/ai/toolkit";
 import { logSubagentRun } from "@/lib/ai/usageLog";
 import type { TFunc } from "@/lib/i18n";
+import { linkSignals } from "@/lib/agent/abortSignals";
 import type { ExecutionHandle } from "@/lib/agent/executionRegistry";
 import { capToolOutput } from "./compress";
 import { PARALLEL_SAFE_TOOLS, UNCAPPED_TOOLS, WORKDIR_SCOPE_RULE, workdirPrompt } from "./constants";
 import { groupParallelCalls } from "./sendPrep";
 import type { ApiMsg, ChatResponse, RequestLog, RunCtx } from "./types";
 import { applyReasoningPolicy } from "./wireHelpers";
-import { runAgentLoop } from "@/lib/agent/agentLoop";
+import { runAgentLoop, type AgentLoopResult } from "@/lib/agent/agentLoop";
+import { initExecutionState } from "@/lib/agent/executionState";
 import type { RuntimeBoundary } from "@/lib/agent/runtimeBoundary";
 import type { ToolResult } from "@/lib/agent/turn";
 import type { ModelCapabilities } from "@/lib/agent/modelAdapter";
@@ -113,10 +116,24 @@ export function createRunDelegation(deps: {
     opts: DelegationOpts,
   ): Promise<{ conclusion: string; error?: string }> => {
     const { agentId, task, def, label, execution } = opts;
+    // Stopped before it ever got a slot — the Inspector's Stop on a queued delegation, on a scheduler that
+    // still serves the body afterwards. Nothing was spent and nothing runs: it never starts. Not `finish`,
+    // because a delegation that never ran has no usage line to write.
+    if (execution?.signal.aborted) {
+      execution.cancel();
+      return { conclusion: STOPPED_BY_USER_RESULT, error: "cancelled" };
+    }
     opts.status(t("chat.subagentProcessing", { agent: agentId }));
     // queued → running. The body is running by definition once this function has been entered: on the fan-out
     // path the scheduler only calls it after handing out a concurrency slot.
     execution?.start();
+
+    // What this delegation runs on: the turn's signal (the scheduler's, on the fan-out path) joined with the
+    // execution's own, which is the Inspector's per-sub-agent Stop. One signal, because the loop, the model
+    // request and every tool call each take one; released when the loop ends, because the turn's signal
+    // outlives this delegation and would otherwise keep a listener per delegation for the whole turn.
+    const stop = execution ? linkSignals(ctx.signal, execution.signal) : null;
+    const signal = stop?.signal ?? ctx.signal;
 
     // Usage-log bookkeeping for this delegation. The sub-agent's own rounds are counted here rather
     // than read back off turnUsageRef: that ref accumulates every conversation generating at the same
@@ -175,6 +192,8 @@ export function createRunDelegation(deps: {
       // whole of the tool-attribution mechanism (TODO §9) — no tool is modified, and a nested delegation
       // would inherit it as its parent.
       executionId: execution?.id,
+      // The joined signal, so Stop reaches a tool mid-call and not only the next round.
+      signal,
       push: () => {},
     };
 
@@ -254,7 +273,7 @@ export function createRunDelegation(deps: {
     // conversation is never persisted, so those two members are unreachable rather than merely unused —
     // stated here as behaviour instead of left as silent no-ops.
     const boundary: RuntimeBoundary = {
-      signal: ctx.signal,
+      signal,
       onEvent: (event) => {
         if (event.type === "status") opts.status(event.text);
         // A round opening is the one moment the delegation is demonstrably thinking rather than running a
@@ -293,7 +312,7 @@ export function createRunDelegation(deps: {
         const data = await requestChat(
           applyReasoningPolicy(convo, isLocalModel, sendReasoningContext()),
           subTools,
-          ctx.signal,
+          signal,
           undefined,
           subLog,
           // The phase-based effort the loop resolved for THIS round. Passing it is the entire point of the
@@ -374,7 +393,7 @@ export function createRunDelegation(deps: {
         stepCount += calls.length;
         const toolResults: ToolResult[] = [];
         for (const group of groups) {
-          if (ctx.signal.aborted) break;
+          if (signal.aborted) break;
           const settled =
             group.length > 1 ? await Promise.all(group.map(runOne)) : [await runOne(group[0])];
           for (const { tc, args, content, ok } of settled) {
@@ -400,13 +419,26 @@ export function createRunDelegation(deps: {
           toolCallCount: calls.length,
         };
       },
-    }).catch((e: unknown) => {
-      // The loop can also end by THROWING — a provider rejection, a tool that raised. The scheduler turns
-      // that into the job's `failed` outcome, so without this the execution record would be the one place
-      // the delegation appeared to be still running. Re-raised untouched: this observes, it does not handle.
-      execution?.fail(e instanceof Error ? e.message : String(e), "error");
-      throw e;
-    });
+    })
+      .catch((e: unknown): AgentLoopResult => {
+        // The loop can also end by THROWING — a provider rejection, a tool that raised.
+        //
+        // Under an aborted signal that throw IS the stop working: a stop pulled the signal under a request or
+        // a tool in flight, and `fetch` rejects with the abort reason ("signal is aborted without reason")
+        // rather than returning. Read as a failure, the Inspector showed that DOMException text as the
+        // sub-agent's conclusion and painted the row red — for a delegation that did exactly what was asked
+        // of it. So it is folded into the loop's own `cancelled` outcome, and the switch below handles it
+        // exactly as a stop the loop noticed itself.
+        if (signal.aborted) {
+          return { stop: { stop: true, reason: "cancelled" }, state: initExecutionState(), turns: [] };
+        }
+        // Anything else is a real failure. The scheduler turns the throw into the job's `failed` outcome, so
+        // without this the execution record would be the one place the delegation appeared to be still
+        // running. Re-raised untouched: this observes, it does not handle.
+        execution?.fail(e instanceof Error ? e.message : String(e), "error");
+        throw e;
+      })
+      .finally(() => stop?.release());
 
     // Map the structured stop reason onto the delegation's own two-field outcome. Only `completed` is an
     // answer; everything else is a delegation that did not finish, and saying so is what stops a truncated
@@ -422,7 +454,10 @@ export function createRunDelegation(deps: {
         // The Inspector distinguishes them, and an interrupted turn showing three red rows would read as
         // three broken sub-agents (TODO §22, §25).
         execution?.cancel();
-        return finish("(canceled)", "cancelled");
+        // WHICH stop it was decides what the parent is told. The turn's: nobody reads the answer, the whole
+        // turn is unwinding. This delegation's own (the Inspector's Stop): the main agent carries on, and
+        // has to learn the work is incomplete and that the user chose that — or it delegates the task again.
+        return finish(execution?.signal.aborted ? STOPPED_BY_USER_RESULT : "(canceled)", "cancelled");
       case "doom-loop": {
         const conclusion = lastContent || `(the ${agentId} sub-agent stopped making progress and was halted)`;
         execution?.fail(result.stop.detail || "the sub-agent stopped making progress", "doom-loop");

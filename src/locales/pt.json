@@ -1388,5 +1388,9 @@
   "inspector.details": "Detalhes",
   "inspector.turnNoPrompt": "(sem mensagem)",
   "inspector.turnAgents": "{n} agentes",
-  "inspector.fromTurn": "Do turno"
+  "inspector.fromTurn": "Do turno",
+  "inspector.stop": "Parar",
+  "inspector.stopping": "Parando…",
+  "inspector.stopHint": "Para apenas este subagente. O agente principal continua e é informado de que ele foi parado.",
+  "inspector.timeline.stopRequested": "Parada solicitada"
 }
