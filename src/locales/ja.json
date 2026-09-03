@@ -1399,5 +1399,6 @@
   "chat.skillsPanel.empty": "インストール済みのスキルはまだありません。",
   "chat.skillsPanel.browse": "スキルマーケットを見る →",
   "chat.skillsPanel.enabled": "有効",
-  "chat.skillsPanel.manage": "スキルを管理 / さらにダウンロード →"
+  "chat.skillsPanel.manage": "スキルを管理 / さらにダウンロード →",
+  "chat.resultClipped": "… 残り {n} 文字は表示されていません"
 }

@@ -33,3 +33,18 @@ export function formatDuration(ms: number): string {
   const sec = totalSec % 60;
   return `${min}m${String(sec).padStart(2, "0")}s`;
 }
+
+/**
+ * The most of one argument or result body the transcript lays out.
+ *
+ * A tool result is as long as the file it read — 2 MB on one line, on the day this was added — and laying that out
+ * as a single wrapped `<pre>` is seconds of main-thread work for text nobody scrolls through. The full text still
+ * reaches the model and the conversation on disk; only the DOM gets the head, with a line saying what was left out.
+ */
+export const DISPLAY_CLIP_CHARS = 32_768;
+
+export function clipForDisplay(text: string, max: number = DISPLAY_CLIP_CHARS): { text: string; hidden: number } {
+  if (text.length <= max) return { text, hidden: 0 };
+  return { text: text.slice(0, max), hidden: text.length - max };
+}
+

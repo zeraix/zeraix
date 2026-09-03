@@ -1403,5 +1403,6 @@
   "chat.skillsPanel.empty": "No skills installed yet.",
   "chat.skillsPanel.browse": "Browse the skill marketplace →",
   "chat.skillsPanel.enabled": "Enabled",
-  "chat.skillsPanel.manage": "Manage / download more skills →"
+  "chat.skillsPanel.manage": "Manage / download more skills →",
+  "chat.resultClipped": "… {n} more characters not shown"
 }

@@ -1399,5 +1399,6 @@
   "chat.skillsPanel.empty": "아직 설치된 스킬이 없습니다.",
   "chat.skillsPanel.browse": "스킬 마켓플레이스 둘러보기 →",
   "chat.skillsPanel.enabled": "활성화됨",
-  "chat.skillsPanel.manage": "스킬 관리 / 더 다운로드 →"
+  "chat.skillsPanel.manage": "스킬 관리 / 더 다운로드 →",
+  "chat.resultClipped": "… 나머지 {n}자는 표시되지 않음"
 }

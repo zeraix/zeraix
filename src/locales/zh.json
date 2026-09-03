@@ -1403,5 +1403,6 @@
   "chat.skillsPanel.empty": "尚未安装任何技能。",
   "chat.skillsPanel.browse": "浏览技能市场 →",
   "chat.skillsPanel.enabled": "已启用",
-  "chat.skillsPanel.manage": "管理 / 下载更多技能 →"
+  "chat.skillsPanel.manage": "管理 / 下载更多技能 →",
+  "chat.resultClipped": "… 其余 {n} 个字符未显示"
 }

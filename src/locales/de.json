@@ -1399,5 +1399,6 @@
   "chat.skillsPanel.empty": "Noch keine Fähigkeiten installiert.",
   "chat.skillsPanel.browse": "Marktplatz durchsuchen →",
   "chat.skillsPanel.enabled": "Aktiviert",
-  "chat.skillsPanel.manage": "Fähigkeiten verwalten / weitere laden →"
+  "chat.skillsPanel.manage": "Fähigkeiten verwalten / weitere laden →",
+  "chat.resultClipped": "… {n} weitere Zeichen nicht angezeigt"
 }

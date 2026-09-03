@@ -39,7 +39,7 @@ import {
   toolNameOf,
   type TraceCall,
 } from "./processTrace";
-import { formatDuration } from "./format";
+import { clipForDisplay, formatDuration } from "./format";
 import { Markdown } from "./Markdown";
 import type { DisplayMsg, ToolMsg } from "./types";
 
@@ -260,6 +260,25 @@ function pendingContent(args: unknown): string | null {
 }
 
 /** A tool call's arguments as JSON, or `{}` when they cannot be serialised (a cycle, a BigInt). */
+/**
+ * A body clipped for layout, with a line saying how much was left out.
+ *
+ * Every argument and result body in the stream goes through this. See clipForDisplay for why: a result the size of
+ * a file is the one thing here that can take the main thread down, and the text itself is unaffected.
+ */
+function Clipped({ text }: { text: string }) {
+  const t = useT();
+  const { text: head, hidden } = clipForDisplay(text);
+  return (
+    <>
+      {head}
+      {hidden > 0 && (
+        <span className="mt-1 block text-ink-subtle">{t("chat.resultClipped", { n: hidden })}</span>
+      )}
+    </>
+  );
+}
+
 function argsJson(args: unknown): string {
   try {
     return JSON.stringify(args, null, 2) ?? "{}";
@@ -322,7 +341,7 @@ function ToolDetail({ call }: { call: TraceCall }) {
               {t("chat.args")}
             </div>
             <pre className="max-h-32 overflow-auto whitespace-pre-wrap break-all font-mono text-ink-muted">
-              {argStr}
+              <Clipped text={argStr} />
             </pre>
           </div>
           <div>
@@ -335,7 +354,7 @@ function ToolDetail({ call }: { call: TraceCall }) {
                 call.ok ? "text-ink-muted" : "text-destructive",
               )}
             >
-              {call.result}
+              <Clipped text={call.result} />
             </pre>
           </div>
         </>
@@ -667,7 +686,7 @@ function DelegateRow({ m }: { m: ToolMsg }) {
             <div>
               <div className="mb-0.5 font-semibold text-ink-subtle">{t("chat.args")}</div>
               <pre className="max-h-32 overflow-auto whitespace-pre-wrap break-all font-mono text-ink-muted">
-                {argsJson(m.args)}
+                <Clipped text={argsJson(m.args)} />
               </pre>
             </div>
           )}
@@ -677,7 +696,7 @@ function DelegateRow({ m }: { m: ToolMsg }) {
                 {t("chat.result")}
               </div>
               <p className="whitespace-pre-wrap break-words text-ink-muted">
-                {m.result}
+                <Clipped text={m.result} />
               </p>
             </div>
           )}

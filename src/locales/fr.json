@@ -1399,5 +1399,6 @@
   "chat.skillsPanel.empty": "Aucune compétence installée pour l’instant.",
   "chat.skillsPanel.browse": "Parcourir le marché des compétences →",
   "chat.skillsPanel.enabled": "Activée",
-  "chat.skillsPanel.manage": "Gérer / télécharger d’autres compétences →"
+  "chat.skillsPanel.manage": "Gérer / télécharger d’autres compétences →",
+  "chat.resultClipped": "… {n} caractères supplémentaires non affichés"
 }

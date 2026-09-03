@@ -1399,5 +1399,6 @@
   "chat.skillsPanel.empty": "Aún no hay habilidades instaladas.",
   "chat.skillsPanel.browse": "Explorar el mercado de habilidades →",
   "chat.skillsPanel.enabled": "Activada",
-  "chat.skillsPanel.manage": "Gestionar / descargar más habilidades →"
+  "chat.skillsPanel.manage": "Gestionar / descargar más habilidades →",
+  "chat.resultClipped": "… {n} caracteres más no mostrados"
 }
