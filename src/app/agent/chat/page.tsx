@@ -20,6 +20,7 @@ import {
   isToolkitAvailable,
   listTools,
   setWorkingDir,
+  syncToolLLMConfig,
 } from "@/lib/ai/toolkit";
 import { isLlmProxyAvailable } from "@/lib/ai/llm";
 import {
@@ -758,6 +759,30 @@ function ChatAgent() {
   useEffect(() => {
     if (!onChatRoute) seededRef.current = false;
   }, [onChatRoute]);
+
+  // Installed skills are re-read from storage on every return to this route. The mount effect above reads them once,
+  // and this component never remounts (AgentShell hosts it permanently), so a skill installed on /agent/skills and
+  // then brought here used to be invisible until the app was reloaded. The skills page writes to storage and emits
+  // nothing — the `storage` event fires only in OTHER windows — so the reader has to re-read at the moments the list
+  // can have changed: coming back to the chat, and opening the panel (see onOpenSkills).
+  useEffect(() => {
+    if (!onChatRoute) return;
+    // Deferred a tick, as the mount effect above defers its own restore: a synchronous setState in an effect body is
+    // what this file's lint forbids, and a re-read of storage is nothing the route's first paint has to wait for.
+    void Promise.resolve().then(() => setInstalledSkillsBoth(loadInstalled()));
+  }, [onChatRoute]);
+
+  // The model config for main-process tools that make a model call of their own (refine_question). Re-sent whenever
+  // the active model changes; without this the main process has no endpoint at all and the tool fails every time.
+  // A local llama-server takes any key — "local" is what the chat request itself sends.
+  useEffect(() => {
+    if (!endpoint || !modelName) return;
+    syncToolLLMConfig({
+      endpoint,
+      model: modelName,
+      apiKey: apiKey.trim() || (isLocalEndpoint(endpoint) ? "local" : ""),
+    });
+  }, [endpoint, modelName, apiKey]);
 
 
   useEffect(() => {
@@ -2363,7 +2388,12 @@ function ChatAgent() {
         secureEnv={secureEnv}
         onSecureEnvChange={applySecureEnv}
         vmUpdatable={vmUpdatable}
-        onOpenSkills={() => setSkillsOpen(true)}
+        onOpenSkills={() => {
+          // Re-read on open as well: the user may have installed a skill on /agent/skills in a way that did not pass
+          // through a route change here (the chat stays mounted underneath every /agent route).
+          setInstalledSkillsBoth(loadInstalled());
+          setSkillsOpen(true);
+        }}
         enabledSkillCount={enabledSkills(installedSkills).length}
         settingsOpen={settingsOpen}
       />

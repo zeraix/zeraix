@@ -1392,5 +1392,12 @@
   "inspector.stop": "停止",
   "inspector.stopping": "停止中…",
   "inspector.stopHint": "僅停止此子代理。主代理會繼續執行，並得知它已被停止。",
-  "inspector.timeline.stopRequested": "已要求停止"
+  "inspector.timeline.stopRequested": "已要求停止",
+  "chat.skillsPanel.title": "選擇技能",
+  "chat.skillsPanel.hint": "勾選後加入目前對話",
+  "chat.skillsPanel.close": "關閉",
+  "chat.skillsPanel.empty": "尚未安裝任何技能。",
+  "chat.skillsPanel.browse": "瀏覽技能市場 →",
+  "chat.skillsPanel.enabled": "已啟用",
+  "chat.skillsPanel.manage": "管理 / 下載更多技能 →"
 }

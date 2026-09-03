@@ -1392,5 +1392,12 @@
   "inspector.stop": "Arrêter",
   "inspector.stopping": "Arrêt en cours…",
   "inspector.stopHint": "Arrête uniquement ce sous-agent. L’agent principal continue et est informé de l’arrêt.",
-  "inspector.timeline.stopRequested": "Arrêt demandé"
+  "inspector.timeline.stopRequested": "Arrêt demandé",
+  "chat.skillsPanel.title": "Sélectionner des compétences",
+  "chat.skillsPanel.hint": "Cochez pour les ajouter à la conversation en cours",
+  "chat.skillsPanel.close": "Fermer",
+  "chat.skillsPanel.empty": "Aucune compétence installée pour l’instant.",
+  "chat.skillsPanel.browse": "Parcourir le marché des compétences →",
+  "chat.skillsPanel.enabled": "Activée",
+  "chat.skillsPanel.manage": "Gérer / télécharger d’autres compétences →"
 }

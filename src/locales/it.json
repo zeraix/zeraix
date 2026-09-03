@@ -1392,5 +1392,12 @@
   "inspector.stop": "Interrompi",
   "inspector.stopping": "Interruzione in corso…",
   "inspector.stopHint": "Interrompe solo questo sub-agent. L’agente principale continua e viene informato dell’interruzione.",
-  "inspector.timeline.stopRequested": "Interruzione richiesta"
+  "inspector.timeline.stopRequested": "Interruzione richiesta",
+  "chat.skillsPanel.title": "Seleziona competenze",
+  "chat.skillsPanel.hint": "Spunta per aggiungerle alla conversazione corrente",
+  "chat.skillsPanel.close": "Chiudi",
+  "chat.skillsPanel.empty": "Nessuna competenza installata.",
+  "chat.skillsPanel.browse": "Sfoglia il mercato delle competenze →",
+  "chat.skillsPanel.enabled": "Attiva",
+  "chat.skillsPanel.manage": "Gestisci / scarica altre competenze →"
 }

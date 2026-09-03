@@ -1393,5 +1393,12 @@
   "inspector.stop": "Stop",
   "inspector.stopping": "Stopping…",
   "inspector.stopHint": "Stop this sub-agent only. The main agent keeps going and is told it was stopped.",
-  "inspector.timeline.stopRequested": "Stop requested"
+  "inspector.timeline.stopRequested": "Stop requested",
+  "chat.skillsPanel.title": "Select skills",
+  "chat.skillsPanel.hint": "Tick to add to the current conversation",
+  "chat.skillsPanel.close": "Close",
+  "chat.skillsPanel.empty": "No skills installed yet.",
+  "chat.skillsPanel.browse": "Browse the skill marketplace →",
+  "chat.skillsPanel.enabled": "Enabled",
+  "chat.skillsPanel.manage": "Manage / download more skills →"
 }

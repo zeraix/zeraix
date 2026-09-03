@@ -1392,5 +1392,12 @@
   "inspector.stop": "停止",
   "inspector.stopping": "停止中…",
   "inspector.stopHint": "このサブエージェントだけを停止します。メインエージェントは続行し、停止されたことを通知されます。",
-  "inspector.timeline.stopRequested": "停止を要求"
+  "inspector.timeline.stopRequested": "停止を要求",
+  "chat.skillsPanel.title": "スキルを選択",
+  "chat.skillsPanel.hint": "チェックすると現在の会話に追加されます",
+  "chat.skillsPanel.close": "閉じる",
+  "chat.skillsPanel.empty": "インストール済みのスキルはまだありません。",
+  "chat.skillsPanel.browse": "スキルマーケットを見る →",
+  "chat.skillsPanel.enabled": "有効",
+  "chat.skillsPanel.manage": "スキルを管理 / さらにダウンロード →"
 }

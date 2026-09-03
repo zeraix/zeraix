@@ -1392,5 +1392,12 @@
   "inspector.stop": "중지",
   "inspector.stopping": "중지하는 중…",
   "inspector.stopHint": "이 서브 에이전트만 중지합니다. 메인 에이전트는 계속 진행하며 중지된 사실을 전달받습니다.",
-  "inspector.timeline.stopRequested": "중지 요청됨"
+  "inspector.timeline.stopRequested": "중지 요청됨",
+  "chat.skillsPanel.title": "스킬 선택",
+  "chat.skillsPanel.hint": "체크하면 현재 대화에 추가됩니다",
+  "chat.skillsPanel.close": "닫기",
+  "chat.skillsPanel.empty": "아직 설치된 스킬이 없습니다.",
+  "chat.skillsPanel.browse": "스킬 마켓플레이스 둘러보기 →",
+  "chat.skillsPanel.enabled": "활성화됨",
+  "chat.skillsPanel.manage": "스킬 관리 / 더 다운로드 →"
 }

@@ -8,6 +8,7 @@
 import { memo } from "react";
 import Link from "next/link";
 import { Sparkles } from "lucide-react";
+import { useT } from "@/lib/i18n";
 import type { InstalledSkill } from "@/lib/ai/skills/types";
 import { setSkillEnabled } from "@/lib/ai/skills/store";
 
@@ -19,6 +20,7 @@ interface Props {
 }
 
 function SkillSelectPanelInner({ open, onClose, installed, onChange }: Props) {
+  const t = useT();
   if (!open) return null;
 
   const onToggle = (id: string, enabled: boolean) => onChange(setSkillEnabled(id, enabled));
@@ -32,30 +34,30 @@ function SkillSelectPanelInner({ open, onClose, installed, onChange }: Props) {
         className="flex max-h-[80vh] w-full max-w-lg flex-col overflow-hidden rounded-2xl border border-line bg-surface shadow-xl"
         onClick={(e) => e.stopPropagation()}
         role="dialog"
-        aria-label="Select skills"
+        aria-label={t("chat.skillsPanel.title")}
       >
         {/* Header */}
         <div className="flex items-center gap-2 border-b border-line px-4 py-3">
           <Sparkles className="size-4 text-ink-muted" />
-          <span className="text-base font-bold text-ink">Select skills</span>
-          <span className="text-[11px] text-ink-subtle">Check to add to the current conversation</span>
+          <span className="text-base font-bold text-ink">{t("chat.skillsPanel.title")}</span>
+          <span className="text-[11px] text-ink-subtle">{t("chat.skillsPanel.hint")}</span>
           <button
             onClick={onClose}
             className="ml-auto rounded-md border border-line-strong bg-surface px-3 py-1.5 text-xs font-medium text-ink transition hover:bg-surface-muted"
           >
-            Close
+            {t("chat.skillsPanel.close")}
           </button>
         </div>
 
         <div className="min-h-0 flex-1 overflow-auto px-4 py-3">
           {installed.length === 0 ? (
             <div className="rounded-lg bg-surface-muted px-3 py-4 text-center">
-              <p className="text-xs text-ink-muted">No skills installed yet.</p>
+              <p className="text-xs text-ink-muted">{t("chat.skillsPanel.empty")}</p>
               <Link
                 href="/agent/skills"
                 className="mt-2 inline-block rounded-md border border-line-strong bg-surface px-3 py-1.5 text-xs font-medium text-ink transition hover:bg-surface-muted"
               >
-                Browse the skill marketplace →
+                {t("chat.skillsPanel.browse")}
               </Link>
             </div>
           ) : (
@@ -79,7 +81,7 @@ function SkillSelectPanelInner({ open, onClose, installed, onChange }: Props) {
                       <span className="ml-1 font-mono text-[11px] text-ink-subtle">v{s.version}</span>
                       {s.enabled && (
                         <span className="ml-2 rounded-full bg-success/15 px-1.5 py-0.5 text-[10px] font-medium text-success-ink">
-                          Enabled
+                          {t("chat.skillsPanel.enabled")}
                         </span>
                       )}
                     </p>
@@ -97,7 +99,7 @@ function SkillSelectPanelInner({ open, onClose, installed, onChange }: Props) {
             href="/agent/skills"
             className="text-[11px] font-medium text-ink-muted transition hover:text-ink"
           >
-            Manage / download more skills →
+            {t("chat.skillsPanel.manage")}
           </Link>
         </div>
       </div>

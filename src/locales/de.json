@@ -1392,5 +1392,12 @@
   "inspector.stop": "Stopp",
   "inspector.stopping": "Wird gestoppt…",
   "inspector.stopHint": "Nur diesen Sub-Agenten stoppen. Der Haupt-Agent arbeitet weiter und erfährt, dass er gestoppt wurde.",
-  "inspector.timeline.stopRequested": "Stopp angefordert"
+  "inspector.timeline.stopRequested": "Stopp angefordert",
+  "chat.skillsPanel.title": "Fähigkeiten auswählen",
+  "chat.skillsPanel.hint": "Ankreuzen, um sie der aktuellen Unterhaltung hinzuzufügen",
+  "chat.skillsPanel.close": "Schließen",
+  "chat.skillsPanel.empty": "Noch keine Fähigkeiten installiert.",
+  "chat.skillsPanel.browse": "Marktplatz durchsuchen →",
+  "chat.skillsPanel.enabled": "Aktiviert",
+  "chat.skillsPanel.manage": "Fähigkeiten verwalten / weitere laden →"
 }

@@ -42,6 +42,17 @@ interface AiToolsBridge {
   wsReadDir?(relPath?: string): Promise<WsEntry[]>;
   wsReadFile?(relPath: string): Promise<WsReadFileResult>;
   wsWriteFile?(relPath: string, content: string): Promise<WsWriteResult>;
+  /** Inject the model config that main-process tools use for their own secondary model call. See syncToolLLMConfig. */
+  setLLMConfig?(cfg: ToolLLMConfig): Promise<unknown>;
+}
+
+/** The model a main-process tool talks to when it needs one of its own (refine_question's rewrite call). */
+export interface ToolLLMConfig {
+  /** OpenAI-compatible chat-completions endpoint. */
+  endpoint: string;
+  model: string;
+  apiKey: string;
+  headers?: Record<string, string>;
 }
 
 /** Workspace directory entry (for the file tree). */
@@ -71,6 +82,21 @@ declare global {
 /** Whether the current environment provides the tool set (Electron only). */
 export function isToolkitAvailable(): boolean {
   return typeof window !== "undefined" && !!window.aiTools;
+}
+
+/**
+ * Hand the active model's config to the main process, for the tools that make a model call of their own.
+ *
+ * `refine_question` runs in the main process and rewrites the question with a secondary request; the config for
+ * that request lives there (aiToolkit.mjs, LLM_CONFIG) and is filled only by this call. Nothing called it — the
+ * renderer-side call went missing with the legacy surface — so the config stayed empty on every install and the
+ * tool failed with "LLM endpoint is not configured" on every invocation. Called whenever the active model changes.
+ *
+ * Fire-and-forget: a tool that cannot refine a question is not worth failing a send over. No-op outside Electron.
+ */
+export function syncToolLLMConfig(cfg: ToolLLMConfig): void {
+  if (!isToolkitAvailable()) return;
+  void window.aiTools!.setLLMConfig?.(cfg)?.catch?.(() => {});
 }
 
 function bridge(): AiToolsBridge {
