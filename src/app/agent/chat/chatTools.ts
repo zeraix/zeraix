@@ -29,7 +29,6 @@ import { startGenerationJob } from "@/lib/ai/generation/jobs";
 import { saveMemoryFile, deleteMemoryFile, listMemoryFiles } from "@/lib/ai/memoryFiles";
 import { searchMemories } from "@/lib/ai/memoryRetrieval";
 import { browserAction, requestOpenBrowser, setBrowserBusy, type BrowserAction } from "@/lib/automation";
-import { detectServices } from "@/store/servicesStore";
 import type { ResolvedModel } from "@/lib/ai/models";
 import { applyTaskState, type TaskMemory } from "./taskMemory";
 import { applyTodoStatuses, isGoalActive, type GoalState } from "./goalState";
@@ -179,7 +178,6 @@ export function createRendererTools(deps: RendererToolDeps): Record<string, Rend
   // openBrowser: open the built-in browser panel on the right and (optionally) navigate; show a bubble and return the text fed back to the model.
   const openBrowserAction = (ctx: RunCtx, rawArgs: Record<string, unknown>): string => {
     const url = String(rawArgs.url ?? "").trim();
-    if (url) detectServices(url); // A local address opened by the AI is also registered with the running indicator
     requestOpenBrowser(url);
     const result = url ? `Opened the built-in browser and navigated to ${url}` : "Opened the built-in browser";
     ctx.push({ kind: "tool", name: "openBrowser", args: { url }, ok: true, result });

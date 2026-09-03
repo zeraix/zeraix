@@ -15,6 +15,7 @@
 
 import fs from "node:fs/promises";
 import { resolvePath } from "./paths.mjs";
+import { looksLongRunning as commandLooksLongRunning } from "./commandShape.mjs";
 import { constants as FS } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -1042,11 +1043,9 @@ const handlers = {
       );
     }
     // Long-lived processes such as dev servers / watchers: start non-blocking in the background so they
-    // aren't killed by the 60s timeout. When not explicitly specified, auto-detect by command shape
-    // (dev/serve/start/watch/preview, vite/webpack/nodemon/next dev).
-    const looksLongRunning =
-      /\b(dev|serve|start|watch|preview)\b/i.test(cmd) ||
-      /\bvite\b|\bwebpack(-dev-server)?\b|\bnodemon\b|next\s+dev/i.test(cmd);
+    // aren't killed by the 60s timeout. When not explicitly specified, judged by command shape — see
+    // commandShape.mjs for what counts, and for the curl-to-a-/dev/-path that used to.
+    const looksLongRunning = commandLooksLongRunning(cmd);
     // Through the current execution engine (native = run directly on the host; qemu = isolated
     // execution inside a VM). When the engine differs from last time (sandbox became ready mid-run
     // / degraded / switched mode), prepend the environment-switch note before the result.

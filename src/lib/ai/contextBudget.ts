@@ -59,7 +59,14 @@ export function restoreBudgetK(lastPositiveK: number): number {
   return restored > 0 ? restored : SUGGESTED_CONTEXT_BUDGET_K;
 }
 
-/** Persist the budget in K tokens (0 disables; positive values are clamped to the sane band). */
+/**
+ * Persist the budget in K tokens (0 disables; positive values are clamped to the sane band).
+ *
+ * Written as a STRING. The storage layer silently drops falsy values, so a numeric 0 was never written:
+ * switching the cap off left the previous budget in place, the switch read it straight back and re-ticked
+ * itself — the control "did nothing", and so did typing 0. "0" is truthy, and getContextBudgetK parses it
+ * back to the explicit "disabled" it means (distinct from unset, which is the default).
+ */
 export function setContextBudgetK(k: number): void {
-  setStorage(STORAGE_KEY.contextBudget, k <= 0 ? 0 : clampBudgetK(k));
+  setStorage(STORAGE_KEY.contextBudget, String(k <= 0 ? 0 : clampBudgetK(k)));
 }

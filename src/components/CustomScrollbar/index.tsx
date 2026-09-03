@@ -1,6 +1,7 @@
 'use client'
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { cn } from "@/lib/utils";
+import { dragScroll, fadeDecision, thumbMetrics } from "./logic";
 
 interface CustomScrollbarProps {
   children: React.ReactNode;
@@ -24,9 +25,6 @@ interface CustomScrollbarProps {
    */
   viewportRef?: React.RefObject<HTMLDivElement | null>;
 }
-
-/** Floor on the thumb's length, so a very long scroll area still leaves something grabbable. */
-const MIN_THUMB = 30;
 
 /**
  * Preset for the app's page-level scroll areas: pinned visible rather than appearing on scroll, and coloured from the
@@ -92,6 +90,10 @@ export default function CustomScrollbar({
 
   const frameRef = useRef(0);
   const hideTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  /** When the bar was last told to show. The fade-out timer reads this instead of being reset per scroll event. */
+  const lastRevealRef = useRef(0);
+  /** The thumb lengths last written, so a scroll frame that only moved the thumb writes only the transform. */
+  const lastLenRef = useRef({ v: -1, h: -1 });
   const startRef = useRef({ x: 0, y: 0, scrollL: 0, scrollT: 0 });
 
   /**
@@ -108,28 +110,32 @@ export default function CustomScrollbar({
     const h = scrollWidth > clientWidth;
     if (v !== axesRef.current.v || h !== axesRef.current.h) {
       axesRef.current = { v, h };
+      // A track that unmounts takes its written length with it; forget it, so the next mount is sized again.
+      if (!v) lastLenRef.current.v = -1;
+      if (!h) lastLenRef.current.h = -1;
       setAxes({ v, h }); // Mounts / unmounts a track; a layout effect below re-measures once the thumb exists
     }
 
+    // The arithmetic lives in logic.ts (clamped thumb, offset spread over the travel it actually has), where its
+    // edge cases are tested. Here it is only read and written.
     const vThumb = vThumbRef.current;
     if (v && vThumb) {
-      const len = Math.max((clientHeight / scrollHeight) * clientHeight, MIN_THUMB);
-      // Spread the scroll range over the track the thumb can actually travel (track minus thumb). The naive
-      // scrollTop/scrollHeight ratio assumes an unclamped thumb, so once MIN_THUMB kicks in on long content the bar
-      // stops short and never reaches the bottom.
-      const travel = clientHeight - len;
-      const max = scrollHeight - clientHeight;
-      vThumb.style.height = `${len}px`;
-      vThumb.style.transform = `translateY(${max > 0 ? (scrollTop / max) * travel : 0}px)`;
+      const { len, pos } = thumbMetrics(clientHeight, scrollHeight, scrollTop);
+      if (len !== lastLenRef.current.v) {
+        lastLenRef.current.v = len;
+        vThumb.style.height = `${len}px`;
+      }
+      vThumb.style.transform = `translateY(${pos}px)`;
     }
 
     const hThumb = hThumbRef.current;
     if (h && hThumb) {
-      const len = Math.max((clientWidth / scrollWidth) * clientWidth, MIN_THUMB);
-      const travel = clientWidth - len;
-      const max = scrollWidth - clientWidth;
-      hThumb.style.width = `${len}px`;
-      hThumb.style.transform = `translateX(${max > 0 ? (scrollLeft / max) * travel : 0}px)`;
+      const { len, pos } = thumbMetrics(clientWidth, scrollWidth, scrollLeft);
+      if (len !== lastLenRef.current.h) {
+        lastLenRef.current.h = len;
+        hThumb.style.width = `${len}px`;
+      }
+      hThumb.style.transform = `translateX(${pos}px)`;
     }
   }, []);
 
@@ -157,12 +163,16 @@ export default function CustomScrollbar({
     // zero timer churn, which matters where the content re-renders constantly anyway (the chat transcript).
     if (alwaysVisible) return;
     setVisibleBoth(true);
-    if (hideTimerRef.current) clearTimeout(hideTimerRef.current);
+    // One timer per fade, not one per scroll event. A wheel or a fling delivers scroll events far faster than the
+    // bar needs to know about them, and clearing + re-arming a timeout on each one was pure churn. The timer instead
+    // reads WHEN the bar was last revealed, and sleeps for whatever remains of the delay.
+    lastRevealRef.current = performance.now();
+    if (hideTimerRef.current) return;
     hideTimerRef.current = setTimeout(function tick() {
-      // Hold it open while the pointer is parked on the thumb or a drag is running — otherwise it would fade out
-      // from under the cursor exactly as the user reaches for it.
-      if (draggingRef.current || overThumbRef.current) {
-        hideTimerRef.current = setTimeout(tick, hideDelay);
+      const held = draggingRef.current !== null || overThumbRef.current;
+      const next = fadeDecision(hideDelay, lastRevealRef.current, performance.now(), held);
+      if (!next.hide) {
+        hideTimerRef.current = setTimeout(tick, next.ms);
         return;
       }
       hideTimerRef.current = null;
@@ -206,18 +216,13 @@ export default function CustomScrollbar({
       const el = contentRef.current;
       if (!el) return;
       const { scrollHeight, clientHeight, scrollWidth, clientWidth } = el;
+      // The same clamped-thumb model as applyMetrics, inverted (dragScroll), so the thumb stays under the cursor.
       if (dragging === "v") {
-        // Same clamped-thumb model as applyMetrics, inverted. The old scrollHeight/clientHeight ratio disagreed with
-        // the painted position, so on long content the thumb slid away from the cursor as you dragged.
-        const travel = clientHeight - Math.max((clientHeight / scrollHeight) * clientHeight, MIN_THUMB);
-        if (travel <= 0) return;
-        const delta = ((e.clientY - startRef.current.y) / travel) * (scrollHeight - clientHeight);
-        el.scrollTop = startRef.current.scrollT + delta;
+        const next = dragScroll(clientHeight, scrollHeight, startRef.current.scrollT, e.clientY - startRef.current.y);
+        if (next !== null) el.scrollTop = next;
       } else {
-        const travel = clientWidth - Math.max((clientWidth / scrollWidth) * clientWidth, MIN_THUMB);
-        if (travel <= 0) return;
-        const delta = ((e.clientX - startRef.current.x) / travel) * (scrollWidth - clientWidth);
-        el.scrollLeft = startRef.current.scrollL + delta;
+        const next = dragScroll(clientWidth, scrollWidth, startRef.current.scrollL, e.clientX - startRef.current.x);
+        if (next !== null) el.scrollLeft = next;
       }
     };
     const onMouseUp = () => {

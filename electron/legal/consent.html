@@ -1,0 +1,161 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'" />
+    <title>Zeraix</title>
+    <style>
+      :root {
+        color-scheme: light dark;
+        --bg: #f7f7f5;
+        --card: #ffffff;
+        --ink: #1a1a1a;
+        --muted: #5f6368;
+        --line: #e3e3e0;
+        --accent: #1a1a1a;
+        --accent-ink: #ffffff;
+        --link: #2563eb;
+      }
+      @media (prefers-color-scheme: dark) {
+        :root {
+          --bg: #171717;
+          --card: #202020;
+          --ink: #f2f2f2;
+          --muted: #a3a3a3;
+          --line: #333333;
+          --accent: #f2f2f2;
+          --accent-ink: #171717;
+          --link: #7aa2f7;
+        }
+      }
+      * { box-sizing: border-box; }
+      html, body { height: 100%; margin: 0; }
+      body {
+        display: flex; align-items: center; justify-content: center;
+        background: var(--bg); color: var(--ink);
+        font: 14px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, "PingFang SC", "Microsoft YaHei", "Hiragino Sans", "Noto Sans CJK SC", sans-serif;
+        opacity: 0; transition: opacity 120ms ease-out;
+        -webkit-user-select: none; user-select: none;
+      }
+      body.ready { opacity: 1; }
+      .card {
+        width: 460px; max-width: calc(100% - 32px);
+        background: var(--card); border: 1px solid var(--line); border-radius: 16px;
+        padding: 28px 28px 24px; box-shadow: 0 10px 30px rgba(0, 0, 0, 0.08);
+      }
+      .top { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+      h1 { margin: 0 0 8px; font-size: 20px; font-weight: 700; letter-spacing: -0.01em; }
+      .lang { display: flex; gap: 2px; flex: none; border: 1px solid var(--line); border-radius: 999px; padding: 2px; }
+      .lang button { border: 0; border-radius: 999px; padding: 3px 10px; font-size: 12px; font-weight: 500; color: var(--muted); }
+      .lang button[aria-pressed="true"] { background: var(--accent); color: var(--accent-ink); }
+      p { margin: 0 0 20px; color: var(--muted); }
+      .row { display: flex; align-items: flex-start; gap: 10px; margin: 0 0 12px; }
+      .row input { margin: 3px 0 0; width: 16px; height: 16px; flex: none; accent-color: var(--accent); cursor: pointer; }
+      .row label { cursor: pointer; }
+      a { color: var(--link); text-decoration: underline; text-underline-offset: 2px; }
+      .actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 22px; }
+      button {
+        font: inherit; font-weight: 600; border-radius: 10px; padding: 9px 16px; cursor: pointer;
+        border: 1px solid var(--line); background: transparent; color: var(--ink);
+      }
+      button.primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+      button:disabled { opacity: 0.45; cursor: not-allowed; }
+      button:focus-visible { outline: 2px solid var(--link); outline-offset: 2px; }
+    </style>
+  </head>
+  <body>
+    <main class="card" role="dialog" aria-labelledby="title" aria-describedby="intro">
+      <div class="top">
+        <h1 id="title"></h1>
+        <div class="lang" id="lang" role="group"></div>
+      </div>
+      <p id="intro"></p>
+      <div class="row">
+        <input type="checkbox" id="privacy" />
+        <label for="privacy" id="privacy-label"></label>
+      </div>
+      <div class="row">
+        <input type="checkbox" id="terms" />
+        <label for="terms" id="terms-label"></label>
+      </div>
+      <div class="actions">
+        <button type="button" id="quit"></button>
+        <button type="button" id="accept" class="primary" disabled></button>
+      </div>
+    </main>
+    <script>
+      const byId = (id) => document.getElementById(id);
+
+      // "{link}" marks where the document's name goes; it moves with the language's grammar.
+      function fill(id, template, linkText, href) {
+        const label = byId(id);
+        const at = template.indexOf("{link}");
+        if (at < 0) {
+          label.textContent = template;
+          return;
+        }
+        const a = document.createElement("a");
+        a.href = href;
+        a.target = "_blank";
+        a.rel = "noopener noreferrer";
+        a.textContent = linkText;
+        label.append(template.slice(0, at), a, template.slice(at + "{link}".length));
+      }
+
+      (async () => {
+        const data = await window.consent.strings();
+        const accept = byId("accept");
+        const quit = byId("quit");
+
+        // Everything with words on it, rendered from one language at a time. The switch re-renders in place;
+        // the boxes and the buttons' enabled state are untouched by it.
+        const render = (code) => {
+          const s = data.strings[code];
+          document.documentElement.lang = code;
+          document.title = s.title;
+          byId("title").textContent = s.title;
+          byId("intro").textContent = s.intro;
+          byId("privacy-label").replaceChildren();
+          byId("terms-label").replaceChildren();
+          fill("privacy-label", s.agreePrivacy, s.privacy, data.privacyUrl);
+          fill("terms-label", s.agreeTerms, s.terms, data.termsUrl);
+          accept.textContent = s.accept;
+          quit.textContent = s.quit;
+          const group = byId("lang");
+          group.setAttribute("aria-label", s.language);
+          for (const b of group.querySelectorAll("button")) b.setAttribute("aria-pressed", String(b.dataset.code === code));
+        };
+        const group = byId("lang");
+        for (const { code, label } of data.languages) {
+          const b = document.createElement("button");
+          b.type = "button";
+          b.dataset.code = code;
+          b.textContent = label;
+          b.lang = code;
+          b.addEventListener("click", () => render(code));
+          group.append(b);
+        }
+        render(data.defaultLanguage);
+
+        const boxes = [byId("privacy"), byId("terms")];
+        const sync = () => { accept.disabled = !boxes.every((b) => b.checked); };
+        boxes.forEach((b) => b.addEventListener("change", sync));
+        sync();
+
+        let answered = false;
+        accept.addEventListener("click", () => {
+          if (accept.disabled || answered) return;
+          answered = true;
+          window.consent.accept();
+        });
+        quit.addEventListener("click", () => {
+          if (answered) return;
+          answered = true;
+          window.consent.decline();
+        });
+        boxes[0].focus();
+        document.body.classList.add("ready");
+      })();
+    </script>
+  </body>
+</html>

@@ -9,7 +9,6 @@
  * A factory rather than a hook: it holds no state of its own, only the page values it is handed. The page
  * calls it on every render, so the returned function always sees current config.
  */
-import { detectServices } from "@/store/servicesStore";
 import { useAgentChatStore } from "@/store/agentChatStore";
 import { isLocalEndpoint } from "@/lib/ai/localModel";
 import { parseToolArguments, sanitizeToolCallArguments } from "@/lib/ai/toolArgs";
@@ -379,7 +378,6 @@ export function createRunDelegation(deps: {
           const settled =
             group.length > 1 ? await Promise.all(group.map(runOne)) : [await runOne(group[0])];
           for (const { tc, args, content, ok } of settled) {
-            if (typeof content === "string") detectServices(content);
             // Compress overly long tool output, to avoid bloating the subagent context (its conversation is
             // not persisted and lives only for this delegation). read_file is exempt for the same reason as
             // the main loop: eliding the middle of a source file makes the conclusion unreliable.

@@ -1700,7 +1700,12 @@ function ChatAgent() {
       compaction: () => compactionRef.current,
       // Lets a tool's bubble go up before the call and be completed in place. `completeDisplay` rather than
       // `replaceDisplay`: a bubble can be gone by the time its call returns, and the result must survive that.
-      replaceDisplay: completeDisplay,
+      // Gated like every other write of this turn: a bubble is also gone when the user has switched to another
+      // conversation, and the append fallback would then put this turn's finished call into THAT transcript.
+      // The result is not lost — it is persisted under this conversation and rebuilt when it is opened again.
+      replaceDisplay: (target, next) => {
+        if (active()) completeDisplay(target, next);
+      },
     });
 
     const boundary: RuntimeBoundary = {

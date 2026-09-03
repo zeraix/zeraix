@@ -19,7 +19,7 @@
  * were sent to look for it. In-flight jobs are listed first, with elapsed time.
  */
 import { useCallback, useEffect, useState } from "react";
-import { Image as ImageIcon, Film, FileText, Music, File as FileIcon, Loader2, FolderOpen } from "lucide-react";
+import { Image as ImageIcon, Film, FileText, Music, File as FileIcon, Loader2, FolderOpen, Play } from "lucide-react";
 import { toast } from "sonner";
 import { useT } from "@/lib/i18n";
 import { cn } from "@/lib/utils";
@@ -34,6 +34,7 @@ import {
   type MediaOrigin,
 } from "@/lib/ai/mediaLibrary";
 import { allJobs, onGenerationJobEvent, type GenerationJob } from "@/lib/ai/generation/jobs";
+import { openMediaViewer, type MediaViewerItem } from "@/store/mediaViewerStore";
 
 /** How often the elapsed time on an in-flight tile is refreshed. Seconds are enough for a minutes-long job. */
 const TICK_MS = 1000;
@@ -45,6 +46,20 @@ const KIND_ICON: Record<MediaKind, typeof ImageIcon> = {
   document: FileText,
   other: FileIcon,
 };
+
+/**
+ * A library row as the viewer wants it. The tile's title becomes the viewer's; the download name is the
+ * viewer's own business (it takes the path's), which is why the prompt can safely be the title here.
+ */
+const toViewerItem = (e: MediaEntry, untitled: string): MediaViewerItem => ({
+  id: e.id,
+  src: srcOf(e),
+  kind: e.kind,
+  mime: e.mime,
+  name: e.description || e.prompt || e.filename || e.path?.split(/[\\/]/).pop() || untitled,
+  bytes: e.bytes,
+  path: e.path,
+});
 
 type OriginFilter = "all" | MediaOrigin;
 type KindFilter = "all" | MediaKind;
@@ -237,22 +252,51 @@ export default function LibraryPage() {
               </div>
             ))}
 
-          {shown.map((e) => {
+          {shown.map((e, i) => {
             const Icon = KIND_ICON[e.kind] ?? FileIcon;
             return (
               <div key={e.id} className="flex flex-col overflow-hidden rounded-xl border border-line bg-surface">
-                <div className="flex aspect-square shrink-0 items-center justify-center bg-surface-muted/50">
+                {/* The whole thumbnail opens the viewer, on this tile, with the rest of the filtered grid as its
+                    neighbours — so the arrows walk the same list the user was looking at. */}
+                <button
+                  type="button"
+                  title={t("viewer.open")}
+                  onClick={() => openMediaViewer(shown.map((x) => toViewerItem(x, t("library.untitled"))), i)}
+                  className="relative flex aspect-square w-full shrink-0 cursor-zoom-in select-none items-center justify-center overflow-hidden bg-surface-muted/50 outline-none focus-visible:ring-2 focus-visible:ring-primary/50"
+                >
                   {e.kind === "image" ? (
                     // eslint-disable-next-line @next/next/no-img-element -- a vendor URL or a local path; next/image can optimise neither
-                    <img src={srcOf(e)} alt={e.description ?? e.prompt ?? ""} className="size-full object-cover" loading="lazy" />
+                    <img
+                      src={srcOf(e)}
+                      alt={e.description ?? e.prompt ?? ""}
+                      draggable={false}
+                      onDragStart={(ev) => ev.preventDefault()}
+                      className="size-full object-cover"
+                      loading="lazy"
+                    />
                   ) : e.kind === "video" ? (
-                    // No autoplay and no preload: a grid that fetched every clip would spend the user's
-                    // bandwidth on videos they are scrolling past.
-                    <video src={srcOf(e)} controls preload="none" className="size-full object-cover" />
+                    <>
+                      {/* A poster frame, not a player: `metadata` fetches the header and the first frame, never
+                          the clip, so a grid of clips still costs next to nothing. Playing is the viewer's job —
+                          twenty players in a grid is not a library. */}
+                      <video
+                        src={srcOf(e)}
+                        preload="metadata"
+                        muted
+                        playsInline
+                        draggable={false}
+                        className="pointer-events-none size-full object-cover"
+                      />
+                      <span className="absolute inset-0 flex items-center justify-center">
+                        <span className="rounded-full bg-black/55 p-2.5 text-white">
+                          <Play className="size-5" />
+                        </span>
+                      </span>
+                    </>
                   ) : (
                     <Icon className="size-7 text-ink-subtle" />
                   )}
-                </div>
+                </button>
                 <div className="space-y-1 border-t border-line/60 px-2.5 py-2">
                   {/* The full text on hover: a prompt is usually a sentence, and the tile has one line. */}
                   <p

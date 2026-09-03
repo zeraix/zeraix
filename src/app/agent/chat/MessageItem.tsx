@@ -17,6 +17,8 @@ import { useT } from "@/lib/i18n";
 import { useImeGuard } from "@/lib/ime";
 import type { ChoiceAnswer, ChoiceMsg, DisplayMsg, Todo } from "./types";
 import { CallRows } from "./ProcessStream";
+import { UserImageStrip } from "./UserImageStrip";
+import { openMediaViewer } from "@/store/mediaViewerStore";
 
 /** Tool-call bubble: collapsed by default, showing only a single status line (icon + tool name + success/failure);
  *  parameters and the full result appear only when expanded, keeping the "final result" (the assistant's reply) the main focus. */
@@ -33,8 +35,24 @@ function GeneratedImageCard({ src, servedBy }: { src: string; servedBy?: string 
     <div className="flex justify-center">
       <div className="w-full max-w-[92%]">
         <div className="overflow-hidden rounded-lg border border-border bg-background/60">
-          {/* eslint-disable-next-line @next/next/no-img-element -- src is a vendor CDN URL or a data: URL, neither of which next/image can optimise */}
-          <img src={src} alt={t("image.alt")} className="block h-auto w-full" loading="lazy" />
+          {/* A button: the card already spans the transcript, and what is left to want is a closer look —
+              the viewer zooms, and it has the download. */}
+          <button
+            type="button"
+            title={t("viewer.open")}
+            onClick={() => openMediaViewer([{ src, kind: "image", name: t("image.alt") }])}
+            className="block w-full cursor-zoom-in select-none"
+          >
+            {/* eslint-disable-next-line @next/next/no-img-element -- src is a vendor CDN URL or a data: URL, neither of which next/image can optimise */}
+            <img
+              src={src}
+              alt={t("image.alt")}
+              draggable={false}
+              onDragStart={(e) => e.preventDefault()}
+              className="block h-auto w-full"
+              loading="lazy"
+            />
+          </button>
           {servedBy ? (
             <div className="border-t border-border px-3 py-1.5 text-xs text-muted-foreground">
               {t("image.servedBy", { engine: servedBy })}
@@ -802,17 +820,7 @@ export const MessageItem = memo(function MessageItem({
           {/* The images already attached to this message stay attached when the edit is saved (the parent
               re-sends them, see resendRef), so show them here as read-only thumbnails to make that clear. */}
           {m.kind === "user" && m.images && m.images.length > 0 && (
-            <div className="mb-1.5 flex flex-wrap gap-1.5">
-              {m.images.map((src, ii) => (
-                // eslint-disable-next-line @next/next/no-img-element
-                <img
-                  key={ii}
-                  src={src}
-                  alt={t("chat.attachmentN", { n: ii + 1 })}
-                  className="h-16 w-16 rounded-lg border border-line object-cover"
-                />
-              ))}
-            </div>
+            <UserImageStrip images={m.images} size="sm" className="mb-1.5" />
           )}
           <textarea
             autoFocus
@@ -871,17 +879,7 @@ export const MessageItem = memo(function MessageItem({
           {isUser ? (
             <div className="space-y-2">
               {m.kind === "user" && m.images && m.images.length > 0 && (
-                <div className="flex flex-wrap gap-1.5">
-                  {m.images.map((src, ii) => (
-                    // eslint-disable-next-line @next/next/no-img-element
-                    <img
-                      key={ii}
-                      src={src}
-                      alt={t("chat.attachmentN", { n: ii + 1 })}
-                      className="h-20 w-20 rounded-lg border border-line object-cover"
-                    />
-                  ))}
-                </div>
+                <UserImageStrip images={m.images} />
               )}
               {m.kind === "user" && m.files && m.files.length > 0 && (
                 <div className="flex flex-wrap gap-1.5">

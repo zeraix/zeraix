@@ -3,7 +3,10 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { reapOrphans } from "./tools/sandbox/orphans.mjs";
-import { listTools, runTool, getWorkingDir, setWorkingDir, setAssetDir, saveAttachment, setLLMConfig, getLLMConfig, setServiceEventHandler, stopProcess, listProcesses, initEngine, disposeEngines, getSandboxStatus, setSandboxMode, onSandboxStatus, restartSandbox, sandboxVmInfo, wsReadDir, wsReadFile, wsWriteFile } from "./tools/aiToolkit.mjs";
+import { listTools, runTool, getWorkingDir, setWorkingDir, setAssetDir, saveAttachment, setLLMConfig, getLLMConfig, setServiceEventHandler, stopProcess, listProcesses, initEngine, disposeEngines, getSandboxStatus, setSandboxMode, onSandboxStatus, restartSandbox, sandboxVmInfo, wsReadDir, wsReadFile, wsWriteFile, getAssetDir } from "./tools/aiToolkit.mjs";
+import { MIME_TYPES, mimeOfPath, serveWorkspaceFile, WS_PREFIX } from "./fileServing.mjs";
+// First-launch agreement to the Privacy Policy and the Terms of Service; gates every window. See legal/consentWindow.mjs.
+import { ensureLegalConsent, isLegalAccepted } from "./legal/consentWindow.mjs";
 import { setAssetHostDir } from "./tools/sandbox/qemu.mjs";
 import { setMediaDir, readIndex, writeIndex, saveMedia, openMediaDir, getMediaDir } from "./mediaStore.mjs";
 // Reports at startup whether the Rust sidecar is enabled, active, or unavailable — see warmUp.
@@ -190,7 +193,9 @@ function onWindowShown() {
  */
 function handleDeepLink(url) {
   if (!url) return;
-  if (!app.isReady()) {
+  // Also stashed while the consent screen is up: the window it needs cannot exist yet, and the link is
+  // processed once startup resumes (see the tail of the ready handler).
+  if (!app.isReady() || !isLegalAccepted()) {
     pendingDeepLink = url;
     return;
   }
@@ -238,33 +243,6 @@ const WEB_ROOT = path.join(app.getAppPath(), "Zeraix");
 const APP_SCHEME = "app";
 const APP_URL = `${APP_SCHEME}://localhost/`;
 
-const MIME_TYPES = {
-  ".html": "text/html",
-  ".js": "text/javascript",
-  ".mjs": "text/javascript",
-  ".css": "text/css",
-  ".json": "application/json",
-  ".map": "application/json",
-  ".svg": "image/svg+xml",
-  ".png": "image/png",
-  ".jpg": "image/jpeg",
-  ".jpeg": "image/jpeg",
-  ".gif": "image/gif",
-  ".webp": "image/webp",
-  ".avif": "image/avif",
-  ".ico": "image/x-icon",
-  ".woff": "font/woff",
-  ".woff2": "font/woff2",
-  ".ttf": "font/ttf",
-  ".otf": "font/otf",
-  ".txt": "text/plain",
-  ".xml": "application/xml",
-  ".wasm": "application/wasm",
-  ".mp3": "audio/mpeg",
-  ".mp4": "video/mp4",
-  ".webm": "video/webm",
-};
-
 protocol.registerSchemesAsPrivileged([
   {
     scheme: APP_SCHEME,
@@ -290,6 +268,11 @@ async function handleAppRequest(request) {
    * Only the BASENAME is honoured, resolved against the media folder: a stored entry is data, and data that
    * can name `../../.ssh/id_rsa` would turn the library into a file-read primitive.
    */
+  // Workspace files, for the Files panel: same origin, same boundary as the file tools. See fileServing.mjs.
+  if (decoded.startsWith(WS_PREFIX)) {
+    return serveWorkspaceFile(decoded.slice(WS_PREFIX.length), request, { workdir: getWorkingDir(), assetDir: getAssetDir() });
+  }
+
   if (decoded.startsWith("/__media/")) {
     const dir = getMediaDir();
     const name = path.basename(decoded.slice("/__media/".length));
@@ -297,8 +280,7 @@ async function handleAppRequest(request) {
     try {
       const file = path.join(dir, name);
       const data = await fs.promises.readFile(file);
-      const type = MIME_TYPES[path.extname(file).toLowerCase()] ?? "application/octet-stream";
-      return new Response(data, { headers: { "content-type": type } });
+      return new Response(data, { headers: { "content-type": mimeOfPath(file) } });
     } catch {
       return new Response("not found", { status: 404 });
     }
@@ -363,6 +345,9 @@ function dismissSplash() {
 }
 
 async function createWindow() {
+  // Nothing opens ahead of the consent screen: a tray click or a deep link arriving while it is up gets a
+  // window only once it has been answered (see legal/consentWindow.mjs).
+  if (!isLegalAccepted()) return;
   // Reset the one-shot show latch: the window can legitimately be created more than once now
   // (tray "Open" after a --background cold start, or macOS dock activate), and a stale `true` here
   // would leave every subsequent window hidden forever.
@@ -979,12 +964,19 @@ function notificationIconPath() {
     : path.join(app.getAppPath(), "Zeraix", "logo.png");
 }
 
-app.whenReady().then(() => {
+app.whenReady().then(async () => {
   // The second instance (launched by a deep link) already called app.quit() earlier, so skip initializing windows and services and return directly.
   if (!gotSingleInstanceLock) return;
   // Windows: Toast notifications require setting the AppUserModelID (matching the electron-builder appId),
   // otherwise notifications show no app name/icon or do not pop at all. No side effects on macOS/Linux.
   app.setAppUserModelId("com.operease.app");
+  // First launch: the Privacy Policy and the Terms of Service are agreed to before anything else starts — no
+  // service, no window. Declining (or closing the screen) ends the launch. Asked again only when the
+  // documents' version changes (LEGAL_VERSION in legal/consentState.mjs).
+  if (!(await ensureLegalConsent({ iconPath: notificationIconPath() }))) {
+    app.quit();
+    return;
+  }
   // Kill command trees left running by a previous session that never got to clean up after itself --
   // End Task, a crash, an OS shutdown. Nothing else will: on Windows a child simply outlives its parent,
   // so a build the agent started can hold a core indefinitely with no app left to show it. Deliberately

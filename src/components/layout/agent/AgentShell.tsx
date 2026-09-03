@@ -9,6 +9,7 @@ import AgentSidebar from "./AgentSidebar";
 import FilesSidebar from "./FilesSidebar";
 import FilesPanel from "@/app/agent/chat/FilesPanel";
 import { ChatAgentView } from "@/app/agent/chat/page";
+import MediaViewerHost from "@/components/media/MediaViewerHost";
 import WindowControls, {
   TrafficLights,
   useTrafficLights,
@@ -176,6 +177,8 @@ export default function AgentShell({ children }: { children: React.ReactNode }) 
       </AnimatePresence>
       {/* Windows / Linux: top-right window controls (not rendered on macOS, which uses the sidebar traffic lights) */}
       <WindowControls />
+      {/* The media viewer, opened from a thumbnail on any /agent page (chat bubbles, the library, the inspector). */}
+      <MediaViewerHost />
     </div>
     </FilesSidebarContext.Provider>
     </TitleBarSlotContext.Provider>

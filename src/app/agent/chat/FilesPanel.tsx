@@ -3,15 +3,17 @@
 import { useEffect, useRef, useState, type MouseEvent as ReactMouseEvent } from "react";
 import dynamic from "next/dynamic";
 import { useTheme } from "next-themes";
-import { X, Save, ExternalLink, FileWarning, Loader2, Maximize2, Minimize2, SquareTerminal, Plus } from "lucide-react";
-import { onOpenFile, onCloseFile, monacoLanguage } from "@/lib/fileViewer";
+import { X, Save, ExternalLink, Expand, FileWarning, Loader2, Maximize2, Minimize2, SquareTerminal, Plus } from "lucide-react";
+import { onOpenFile, onCloseFile, monacoLanguage, previewKindOf, workspaceFileUrl, type PreviewKind } from "@/lib/fileViewer";
 import {
   monacoOptions,
   configureMonacoIntelliSense,
   defineMonacoThemes,
   MONACO_THEME,
 } from "@/lib/monacoConfig";
-import { wsReadFile, wsWriteFile, callTool } from "@/lib/ai/toolkit";
+import { wsReadFile, wsWriteFile, callTool, getWorkingDir } from "@/lib/ai/toolkit";
+import { MediaStage } from "@/components/media/MediaStage";
+import { openMediaViewer, type MediaViewerItem } from "@/store/mediaViewerStore";
 import { isTerminalAvailable, terminalBridge } from "@/lib/terminal";
 import { WORKDIR_SET_EVENT, WORKDIR_CLEAR_EVENT, AGENT_FILES_MAXIMIZED_KEY } from "@/constants/Agent";
 import { getStorage } from "@zzcpt/zztool";
@@ -24,7 +26,7 @@ const MonacoEditor = dynamic(() => import("@monaco-editor/react"), { ssr: false 
 // The terminal pulls in xterm (including CSS), so it is also loaded client-side only.
 const TerminalView = dynamic(() => import("@/components/layout/agent/TerminalView"), { ssr: false });
 
-type PanelState = "idle" | "loading" | "ok" | "error";
+type PanelState = "idle" | "loading" | "ok" | "error" | "media";
 
 /** An open file tab: path (relative to the project root) + its own load state / content / dirty flag. */
 interface FileTab {
@@ -33,6 +35,8 @@ interface FileTab {
   content: string;
   reason: string;
   dirty: boolean;
+  /** A `media` tab: what the stage shows. Nothing is read into the renderer — the file is served over the app scheme. */
+  media?: MediaViewerItem;
 }
 
 /** Get the file name from a path (handles both / and \\ separators). */
@@ -41,6 +45,22 @@ function basename(p: string): string {
   const i = Math.max(s.lastIndexOf("/"), s.lastIndexOf("\\"));
   return i >= 0 ? s.slice(i + 1) : s;
 }
+
+/**
+ * A workspace file as the media stage wants it. The URL goes through the app's own scheme (the renderer
+ * cannot show a disk path), and only a PDF needs a mime — pictures, clips and sound are told apart by kind.
+ */
+function mediaItemFor(relPath: string, kind: PreviewKind): MediaViewerItem {
+  return {
+    id: relPath,
+    src: workspaceFileUrl(relPath),
+    kind: kind === "pdf" ? "document" : kind,
+    mime: kind === "pdf" ? "application/pdf" : undefined,
+    name: basename(relPath),
+  };
+}
+
+const noop = () => {};
 
 /**
  * Right-side file panel: clicking a file in the sidebar file tree -> requestOpenFile -> loads and displays / edits it here.
@@ -89,11 +109,6 @@ export default function FilesPanel() {
     setMaximized(v);
     putStorage(AGENT_FILES_MAXIMIZED_KEY, v ? "1" : null);
   };
-  // Restore the last maximized choice on mount.
-  useEffect(() => {
-    if (getStorage(AGENT_FILES_MAXIMIZED_KEY) === "1") setMaximized(true);
-  }, []);
-
   // When the active tab changes -> auto horizontal scroll so it enters the tab bar's visible range (horizontal only, doesn't affect other scroll containers).
   useEffect(() => {
     const el = activeTabRef.current;
@@ -134,11 +149,20 @@ export default function FilesPanel() {
     () =>
       onOpenFile((p) => {
         if (!p) return;
+        // The maximized choice is restored as the panel opens rather than on mount: the panel is invisible
+        // until then, and storage is written on every toggle, so what is read here is always the latest.
+        setMaximized(getStorage(AGENT_FILES_MAXIMIZED_KEY) === "1");
         setOpen(true);
         setActivePath(p);
         if (!filesRef.current.some((f) => f.path === p)) {
-          setFiles((fs) => [...fs, { path: p, state: "loading", content: "", reason: "", dirty: false }]);
-          void load(p);
+          // A picture, clip, sound or PDF is shown, not read: the stage streams it from the app scheme, so
+          // there is nothing to load here and no size cap to hit.
+          const kind = previewKindOf(p);
+          const tab: FileTab = kind
+            ? { path: p, state: "media", content: "", reason: "", dirty: false, media: mediaItemFor(p, kind) }
+            : { path: p, state: "loading", content: "", reason: "", dirty: false };
+          setFiles((fs) => [...fs, tab]);
+          if (!kind) void load(p);
         }
       }),
     [],
@@ -164,7 +188,6 @@ export default function FilesPanel() {
       window.removeEventListener(WORKDIR_SET_EVENT, onWorkdirSet);
       window.removeEventListener(WORKDIR_CLEAR_EVENT, onWorkdirClear);
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // When collapsing the file tree sidebar (see AgentShell.closeFiles): close the file panel, clear the file tabs, and fully
@@ -209,6 +232,21 @@ export default function FilesPanel() {
   // When the file can't be opened as text: open the current file with the host system's default app (reuses the AI tool open_path, restricted to within the working directory).
   const openExternal = () => {
     if (activePath) void callTool("open_path", { path: activePath });
+  };
+
+  // The full-window viewer for the current media tab. The absolute path is looked up here rather than kept
+  // on the tab: it only serves the viewer's "open with system app", and the working directory is the main
+  // process's to know.
+  const openInViewer = async () => {
+    const f = activeFile;
+    if (!f?.media) return;
+    let dir = "";
+    try {
+      dir = await getWorkingDir();
+    } catch {
+      // Not in Electron: no working directory, and nothing that could open the file anyway.
+    }
+    openMediaViewer([dir ? { ...f.media, path: `${dir}/${f.path}` } : f.media]);
   };
 
   // Create a new terminal tab: auto-increment the id, set it as the active tab, and expand the panel.
@@ -298,6 +336,28 @@ export default function FilesPanel() {
             {saving ? <Loader2 className="size-4 animate-spin" /> : <Save className="size-4" />}
           </button>
         )}
+        {activeFile?.state === "media" && (
+          <>
+            <button
+              type="button"
+              aria-label={t("viewer.open")}
+              title={t("viewer.open")}
+              onClick={() => void openInViewer()}
+              className="flex size-7 shrink-0 items-center justify-center rounded-md text-muted-foreground transition hover:bg-accent hover:text-foreground"
+            >
+              <Expand className="size-4" />
+            </button>
+            <button
+              type="button"
+              aria-label={t("files.openExternal")}
+              title={t("files.openExternal")}
+              onClick={openExternal}
+              className="flex size-7 shrink-0 items-center justify-center rounded-md text-muted-foreground transition hover:bg-accent hover:text-foreground"
+            >
+              <ExternalLink className="size-4" />
+            </button>
+          </>
+        )}
         {/* The active file's relative path (relative to the project root); hover shows the full path. */}
         <span className="min-w-0 flex-1 truncate pl-1 text-xs text-muted-foreground" title={activePath ?? ""}>
           {activePath ?? t("files.title")}
@@ -367,6 +427,14 @@ export default function FilesPanel() {
               >
                 <ExternalLink className="size-3.5" /> {t("files.openExternal")}
               </button>
+            </div>
+          )}
+          {activeFile?.state === "media" && activeFile.media && (
+            // The viewer's own stage on the viewer's dark ground: zoom, pan and rotate for a picture, a player
+            // for a clip, Chromium's viewer for a PDF. There is nothing to dismiss here, so the empty-stage
+            // click does nothing — and the zoom hotkeys stay off, since this panel sits beside the composer.
+            <div className="h-full w-full bg-neutral-950 text-white">
+              <MediaStage key={activeFile.path} item={activeFile.media} onBackdropClick={noop} />
             </div>
           )}
           {activeFile?.state === "ok" && (

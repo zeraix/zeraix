@@ -238,6 +238,9 @@ const READY = /(?:localhost|127\.0\.0\.1|0\.0\.0\.0):\d+|listening|compiled|read
 const STARTUP_WINDOW_MS = 8000;
 /** How often to re-read the startup output while waiting. */
 const STARTUP_POLL_MS = 300;
+/** After the startup window, how much longer a service that has not printed its address is watched for one. */
+const URL_WATCH_MS = 60_000;
+const URL_WATCH_POLL_MS = 2000;
 
 /** Extract the first local service address from the output (dev servers usually print one, e.g. http://localhost:8081). */
 function pickUrl(s) {
@@ -277,6 +280,11 @@ async function awaitStartup(pid, cmd, read) {
       const entry = bgProcs.get(pid);
       if (entry) entry.url = url;
       emitService({ type: "started", pid, url, command: cmd });
+      // A server that compiles before it announces its port (Next, Angular) is often past the startup
+      // window by then. Keep reading ITS output for a while and fill the address in when it appears —
+      // this is the only place a service's address may come from. The renderer used to scan every tool
+      // result for localhost URLs to plug this gap, which is how a curl's output became a "service".
+      if (!url) void watchForUrl(pid, cmd, read);
     }
     // The first line gives a clear conclusion so the model can directly tell it "started successfully" instead of poring over the raw logs.
     const headline = alive
@@ -291,6 +299,23 @@ async function awaitStartup(pid, cmd, read) {
           "Do not run the same startup command again, and do not wait for it to finish."
         : "")
     );
+  }
+}
+
+/** Poll a running service's own output for its address, and report it once. Quiet if it never prints one. */
+async function watchForUrl(pid, cmd, read) {
+  const until = Date.now() + URL_WATCH_MS;
+  while (Date.now() < until) {
+    await new Promise((r) => setTimeout(r, URL_WATCH_POLL_MS));
+    const entry = bgProcs.get(pid);
+    if (!entry || entry.url) return; // exited, stopped, or already known
+    const { alive, out } = await read();
+    if (!alive) return;
+    const url = pickUrl(out);
+    if (!url) continue;
+    entry.url = url;
+    emitService({ type: "started", pid, url, command: cmd });
+    return;
   }
 }
 

@@ -50,3 +50,39 @@ export function monacoLanguage(path: string): string {
   };
   return map[ext] ?? "plaintext";
 }
+
+/** Where the app serves workspace files from. Matches WS_PREFIX + handleAppRequest in electron/main.mjs. */
+export const WORKSPACE_URL_PREFIX = "app://localhost/__ws/";
+
+/**
+ * A renderable URL for a path relative to the working directory.
+ *
+ * Each segment is encoded and the slashes are kept, so the main process decodes back to the same relative
+ * path the tree clicked — a name with a space or a `#` in it must not turn into a different file, or none.
+ */
+export function workspaceFileUrl(relPath: string): string {
+  const segments = relPath
+    .split(/[\\/]+/)
+    .filter((seg) => seg && seg !== ".")
+    .map(encodeURIComponent);
+  return WORKSPACE_URL_PREFIX + segments.join("/");
+}
+
+/** What the Files panel previews instead of editing: told apart by extension, since that is all a click on the tree knows. */
+export type PreviewKind = "image" | "video" | "audio" | "pdf";
+
+// SVG is deliberately text: in a panel that edits code it is source first, and Monaco already highlights it.
+const PREVIEW_EXTS: Record<string, PreviewKind> = {
+  png: "image", jpg: "image", jpeg: "image", gif: "image", webp: "image", avif: "image", bmp: "image", ico: "image",
+  mp4: "video", m4v: "video", webm: "video", mov: "video", ogv: "video",
+  mp3: "audio", wav: "audio", ogg: "audio", oga: "audio", m4a: "audio", aac: "audio", flac: "audio", opus: "audio", weba: "audio",
+  pdf: "pdf",
+};
+
+/** The media preview a path gets, or null for everything the editor (or the "cannot open" card) handles. */
+export function previewKindOf(path: string): PreviewKind | null {
+  const name = path.split(/[\\/]/).pop() ?? "";
+  const dot = name.lastIndexOf(".");
+  if (dot <= 0) return null;
+  return PREVIEW_EXTS[name.slice(dot + 1).toLowerCase()] ?? null;
+}

@@ -175,6 +175,14 @@ export function SubAgentInspector({
         <motion.div
           key="inspector"
           className="fixed inset-0 z-50 flex justify-end bg-black/30"
+          // The sheet covers the frameless window's title bar, which is a drag region (AgentShell). Electron builds
+          // that region from geometry alone — every `drag` rectangle minus every `no-drag` one, stacking order
+          // ignored — so whatever the sheet puts on the top band (the run view's back arrow, the close buttons) is
+          // taken by the window drag unless it opts out. It used to work only where the arrow happened to sit over
+          // a no-drag control of the conversation header, which is why it depended on the window width. The whole
+          // overlay opts out: the bar is dimmed and a click on the backdrop closes the sheet, it must not move the
+          // window instead.
+          style={{ WebkitAppRegion: "no-drag" } as React.CSSProperties}
           initial={{ opacity: 0 }}
           animate={{ opacity: 1 }}
           exit={{ opacity: 0 }}

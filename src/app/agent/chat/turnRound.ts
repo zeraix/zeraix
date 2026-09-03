@@ -2,7 +2,6 @@ import { countMessagesTokens, countTokens } from "@/lib/ai/tokenizer";
 import { logContextDiag, logToolCall, isUsageLogEnabledSync } from "@/lib/ai/usageLog";
 import { resolveContextWindow, type ResolvedModel } from "@/lib/ai/models";
 import { sanitizeToolCallArguments } from "@/lib/ai/toolArgs";
-import { detectServices } from "@/store/servicesStore";
 import { useAgentChatStore } from "@/store/agentChatStore";
 import { prepareWire, type WireSteps } from "@/lib/agent/contextManager";
 import {
@@ -463,10 +462,6 @@ export function createRoundRunner(deps: RoundRunnerDeps) {
               : {}),
           });
           buf.markToolStored((store.getConversation(genConvId)?.messages.length ?? 0) - 1);
-
-          // Detect local service addresses in the tool output (e.g. an http://localhost:5173 printed by a dev server),
-          // using the full output (the elided middle section may also contain a URL). Once registered, the bottom-left floating indicator displays it and polls its health.
-          if (typeof content === "string") detectServices(content);
 
           // ── Progress guard ──────────────────────────────────────────────────────────────────────────
           // Judged on `cappedContent` rather than `content`: what the guard has to answer is "does the

@@ -4,12 +4,13 @@
  * Global notification bar (docked at the bottom-right). Two kinds of content:
  *  1. Running local services (dev servers started by the AI, etc.): shows the project URL,
  *     clickable to open in the built-in browser, and can be "stopped".
- *     Driven by the main process's background-process start/stop events (with a pid -> can be stopped),
- *     with health probing that auto-removes on disconnect.
+ *     Driven ONLY by the main process's background-process start/stop events (each with a pid, so each
+ *     can be stopped); a card leaves when its process exits or the user stops it. Nothing is inferred
+ *     from tool output — see servicesStore.ts for what that used to put here.
  *  2. notificationStore notifications: model download/install progress, app operation hints, etc.
  * The container is pointer-events-none; only the cards are interactive, so it doesn't block page clicks.
  */
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useSyncExternalStore } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import { AlertCircle, CheckCircle2, ChevronDown, Globe, Info, Loader2, Square, X } from "lucide-react";
 import { cn } from "@/lib/utils";
@@ -21,26 +22,50 @@ import { useWorkflowRunNotifications } from "@/hooks/useWorkflowRunNotifications
 import { useT } from "@/lib/i18n";
 
 const AUTO_DISMISS_MS = 5000;
-const PING_MS = 6000;
-const MAX_FAILS = 2;
 
 /** Matches the spring used by the sidebar and mode tabs, so the app has one motion vocabulary. */
 const SPRING = { type: "spring", stiffness: 500, damping: 38 } as const;
+/**
+ * The fold: critically damped (damping² ≈ 4·stiffness·mass), so the stack and the capsule settle in about
+ * 300ms without overshooting. An overshoot is fine on a tab indicator; on a panel that is folding away
+ * it reads as a bounce, and the bounce was half of what made the old transition feel wrong.
+ */
+const FOLD = { type: "spring", stiffness: 360, damping: 34, mass: 0.8 } as const;
 /** Collapsed/expanded survives reloads: a launcher that springs back open every restart is noise. */
 const COLLAPSE_KEY = "zeraix.services.collapsed";
 
-/** no-cors liveness probe: resolves if reachable, rejects on refusal / timeout. */
-async function ping(url: string): Promise<boolean> {
-  const ctrl = new AbortController();
-  const t = setTimeout(() => ctrl.abort(), 3000);
+/**
+ * The collapsed flag as an external store, so the first client render can read localStorage without
+ * disagreeing with the server render: React takes the server snapshot (expanded) while hydrating and
+ * re-renders with the real one after. The in-memory value is authoritative for the session, so a browser
+ * that refuses the write still folds the panel — remembering it is the part that may fail.
+ */
+const collapseListeners = new Set<() => void>();
+let collapsedNow: boolean | null = null;
+const readCollapsed = (): boolean => {
+  if (collapsedNow !== null) return collapsedNow;
   try {
-    await fetch(url, { mode: "no-cors", cache: "no-store", signal: ctrl.signal });
-    return true;
+    return window.localStorage.getItem(COLLAPSE_KEY) === "1";
   } catch {
-    return false;
-  } finally {
-    clearTimeout(t);
+    return false; // Private mode / storage disabled — the launcher just starts expanded.
   }
+};
+const subscribeCollapsed = (cb: () => void) => {
+  collapseListeners.add(cb);
+  return () => void collapseListeners.delete(cb);
+};
+function useCollapsed(): [boolean, (v: boolean) => void] {
+  const collapsed = useSyncExternalStore(subscribeCollapsed, readCollapsed, () => false);
+  const setCollapsed = (v: boolean) => {
+    collapsedNow = v;
+    try {
+      window.localStorage.setItem(COLLAPSE_KEY, v ? "1" : "0");
+    } catch {
+      // Not being able to remember the choice must not stop it taking effect now.
+    }
+    collapseListeners.forEach((l) => l());
+  };
+  return [collapsed, setCollapsed];
 }
 
 export default function GlobalNotifications() {
@@ -56,27 +81,8 @@ export default function GlobalNotifications() {
   const services = useServicesStore((s) => s.services);
   const upsert = useServicesStore((s) => s.upsert);
   const removeByPid = useServicesStore((s) => s.removeByPid);
-  const removeByUrl = useServicesStore((s) => s.removeByUrl);
-  const failsRef = useRef<Record<string, number>>({});
 
-  // Read on mount rather than in the initializer: this renders on the server too, where there is no
-  // localStorage, and seeding from it directly would hydrate to a different tree than the server sent.
-  const [collapsed, setCollapsedState] = useState(false);
-  useEffect(() => {
-    try {
-      if (window.localStorage.getItem(COLLAPSE_KEY) === "1") setCollapsedState(true);
-    } catch {
-      // Private mode / storage disabled — the launcher just starts expanded.
-    }
-  }, []);
-  const setCollapsed = (v: boolean) => {
-    setCollapsedState(v);
-    try {
-      window.localStorage.setItem(COLLAPSE_KEY, v ? "1" : "0");
-    } catch {
-      // Not being able to remember the choice must not stop it taking effect now.
-    }
-  };
+  const [collapsed, setCollapsed] = useCollapsed();
 
   // Subscribe to background service start/stop events + initial sync.
   useEffect(() => {
@@ -88,33 +94,6 @@ export default function GlobalNotifications() {
       else if (evt.type === "stopped") removeByPid(evt.pid);
     });
   }, [upsert, removeByPid]);
-
-  // Health probing: only probe "detected external URLs (no pid, display-only)"; remove after several consecutive unreachable results.
-  // Background services started by the AI (with a pid) are excluded -- they should only disappear when the process actually exits
-  // (main process sends back a stopped event -> removeByPid) or when the user stops them manually. Otherwise, occasional port-probe
-  // failures, plus the packaged build's app:// -> http://localhost mixed-content blocking, would cause the "running service" card to be
-  // wrongly removed shortly after starting (user feedback: the service isn't stopped, yet the popup flashes and vanishes).
-  useEffect(() => {
-    const withUrl = services.filter((s) => s.url && s.pid == null);
-    if (withUrl.length === 0) return;
-    const id = window.setInterval(() => {
-      for (const s of withUrl) {
-        void ping(s.url).then((ok) => {
-          if (ok) {
-            failsRef.current[s.url] = 0;
-          } else {
-            const n = (failsRef.current[s.url] ?? 0) + 1;
-            failsRef.current[s.url] = n;
-            if (n >= MAX_FAILS) {
-              delete failsRef.current[s.url];
-              removeByUrl(s.url);
-            }
-          }
-        });
-      }
-    }, PING_MS);
-    return () => window.clearInterval(id);
-  }, [services, removeByUrl]);
 
   // Non-sticky info/success notifications: auto-dismiss on timeout (error and progress do not auto-dismiss).
   useEffect(() => {
@@ -130,12 +109,8 @@ export default function GlobalNotifications() {
   }, [items, dismiss]);
 
   const onStop = async (svc: RunningService) => {
-    if (svc.pid != null) {
-      await stopService(svc.pid); // After the main process kills the process it sends back a stopped event to remove it; also remove optimistically here
-      removeByPid(svc.pid);
-    } else {
-      removeByUrl(svc.url);
-    }
+    await stopService(svc.pid); // After the main process kills the process it sends back a stopped event to remove it; also remove optimistically here
+    removeByPid(svc.pid);
   };
 
   if (items.length === 0 && services.length === 0) return null;
@@ -161,15 +136,18 @@ export default function GlobalNotifications() {
 }
 
 /**
- * The running-services launcher: a stack of service cards that collapses into a floating ball.
+ * The running-services launcher: a stack of service cards that folds into a floating capsule.
  *
- * Collapsing is a VIEW state and nothing else — every service keeps running, and the per-card
- * stop/hide buttons are untouched. That distinction is the whole point: "hide" on a card drops that
- * service from the list, while this only folds the panel away, so a user who wants their screen back
- * does not have to dismiss services they still want to watch.
+ * Collapsing is a VIEW state and nothing else — every service keeps running, and the per-card stop
+ * buttons are untouched. That distinction is the whole point: stopping a card ends that service, while
+ * this only folds the panel away, so a user who wants their screen back does not have to stop services
+ * they still want to watch.
  *
- * The panel and the ball share a `layoutId`, so framer-motion treats them as one element and springs
- * the geometry between them rather than cross-fading two unrelated boxes.
+ * One toggle lives in both states and never changes shape; it only slides. It used to be two elements
+ * sharing a `layoutId` — a 48px ball and the whole column of cards — and morphing one into the other
+ * stretched the cards' text mid-flight while the two crossfaded: the jump people saw. Now the stack
+ * folds toward the corner on its own, the toggle glides down to meet it, and nothing with text in it is
+ * ever scaled by a layout transform.
  */
 function ServiceLauncher({
   services,
@@ -185,73 +163,75 @@ function ServiceLauncher({
   setCollapsed: (v: boolean) => void;
 }) {
   return (
-    // Default (sync) mode, not popLayout: a shared `layoutId` needs both elements present for one
-    // frame to measure the morph, and popLayout yanks the outgoing one out of flow first.
-    <AnimatePresence initial={false}>
-      {collapsed ? (
-        <motion.button
-          key="ball"
-          type="button"
-          layoutId="service-launcher"
-          onClick={() => setCollapsed(false)}
-          title={t("service.expand")}
-          aria-label={t("service.expand")}
-          aria-expanded={false}
-          transition={SPRING}
-          whileHover={{ scale: 1.06 }}
-          whileTap={{ scale: 0.94 }}
-          className="pointer-events-auto flex size-12 shrink-0 self-end items-center justify-center rounded-full border border-line bg-surface shadow-lg"
+    // `relative`: the folding stack is popped out of flow while it leaves (popLayout) and positioned
+    // against this box. That is what lets the toggle glide down over the fold instead of jumping the
+    // moment the stack unmounts.
+    <div className="pointer-events-auto relative flex w-full flex-col items-end gap-2">
+      <motion.button
+        type="button"
+        layout="position"
+        onClick={() => setCollapsed(!collapsed)}
+        title={collapsed ? t("service.expand") : t("service.collapse")}
+        aria-label={collapsed ? t("service.expand") : t("service.collapse")}
+        aria-expanded={!collapsed}
+        transition={FOLD}
+        whileHover={{ scale: 1.05 }}
+        whileTap={{ scale: 0.95 }}
+        className={cn(
+          "flex h-9 shrink-0 items-center gap-1.5 rounded-full border border-line bg-surface px-3 font-mono text-xs font-semibold tabular-nums text-ink transition-shadow duration-300",
+          // Deeper shadow once it floats alone: the same capsule, reading as a button on the page rather than a header on a panel.
+          collapsed ? "shadow-lg" : "shadow-sm",
+        )}
+      >
+        {/* The live dot doubles as the affordance: something is still running behind the capsule. */}
+        <span className="relative flex size-2 shrink-0">
+          <span className="absolute inline-flex size-full animate-ping rounded-full bg-success/60" />
+          <span className="relative inline-flex size-2 rounded-full bg-success" />
+        </span>
+        <span>{services.length}</span>
+        {/* Points down at the stack it will fold, up at the stack it will unfold. */}
+        <motion.span
+          aria-hidden
+          animate={{ rotate: collapsed ? 180 : 0 }}
+          transition={FOLD}
+          className="flex text-ink-subtle"
         >
-          {/* The live dot doubles as the affordance: something is still running behind the ball.
-              Plain spans, not motion children — a `layout` child inside a `layoutId` morph gets
-              measured mid-transition and jitters against the parent it is being carried by. */}
-          <span className="relative flex size-2.5 shrink-0">
-            <span className="absolute inline-flex size-full animate-ping rounded-full bg-success/60" />
-            <span className="relative inline-flex size-2.5 rounded-full bg-success" />
-          </span>
-          <span className="ml-1 font-mono text-xs font-semibold tabular-nums text-ink">
-            {services.length}
-          </span>
-        </motion.button>
-      ) : (
-        <motion.div
-          key="panel"
-          layoutId="service-launcher"
-          transition={SPRING}
-          className="pointer-events-auto flex w-full flex-col gap-2"
-        >
-          <div className="flex justify-end">
-            <button
-              type="button"
-              onClick={() => setCollapsed(true)}
-              title={t("service.collapse")}
-              aria-label={t("service.collapse")}
-              aria-expanded
-              className="inline-flex items-center gap-1 rounded-full border border-line bg-surface px-2 py-1 text-[11px] font-medium text-ink-subtle shadow-sm transition hover:bg-surface-muted"
-            >
-              <ChevronDown className="size-3" />
-              {services.length}
-            </button>
-          </div>
-          {/* Own AnimatePresence so a service that stops springs out instead of vanishing. `exit`
-              only runs on a direct child of an AnimatePresence — without this the prop is dead. */}
-          <AnimatePresence initial={false}>
-            {services.map((s) => (
-              <motion.div
-                key={s.url || s.pid}
-                layout
-                initial={{ opacity: 0, y: 8 }}
-                animate={{ opacity: 1, y: 0 }}
-                exit={{ opacity: 0, y: 8, transition: { duration: 0.15 } }}
-                transition={SPRING}
-              >
-                <ServiceCard svc={s} t={t} onStop={() => onStop(s)} />
-              </motion.div>
-            ))}
-          </AnimatePresence>
-        </motion.div>
-      )}
-    </AnimatePresence>
+          <ChevronDown className="size-3" />
+        </motion.span>
+      </motion.button>
+
+      <AnimatePresence initial={false} mode="popLayout">
+        {!collapsed && (
+          <motion.div
+            key="stack"
+            initial={{ opacity: 0, y: 10, scale: 0.97 }}
+            animate={{ opacity: 1, y: 0, scale: 1 }}
+            exit={{ opacity: 0, y: 10, scale: 0.97 }}
+            transition={FOLD}
+            // Toward the corner the capsule settles in, so the fold reads as the stack tucking under it.
+            style={{ transformOrigin: "100% 100%" }}
+            className="flex w-full flex-col gap-2"
+          >
+            {/* Own AnimatePresence so a service that stops springs out instead of vanishing. `exit`
+                only runs on a direct child of an AnimatePresence — without this the prop is dead. */}
+            <AnimatePresence initial={false}>
+              {services.map((s) => (
+                <motion.div
+                  key={s.pid}
+                  layout
+                  initial={{ opacity: 0, y: 8 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  exit={{ opacity: 0, y: 8, transition: { duration: 0.15 } }}
+                  transition={SPRING}
+                >
+                  <ServiceCard svc={s} t={t} onStop={() => onStop(s)} />
+                </motion.div>
+              ))}
+            </AnimatePresence>
+          </motion.div>
+        )}
+      </AnimatePresence>
+    </div>
   );
 }
 
@@ -284,16 +264,11 @@ function ServiceCard({
         <button
           type="button"
           onClick={onStop}
-          title={svc.pid != null ? t("service.stop") : t("service.hide")}
-          className={cn(
-            "inline-flex shrink-0 items-center gap-1 rounded-full border px-2 py-1 text-[11px] font-medium transition",
-            svc.pid != null
-              ? "border-danger/40 text-danger-ink hover:bg-danger/10"
-              : "border-line-strong text-ink-subtle hover:bg-surface-muted",
-          )}
+          title={t("service.stop")}
+          className="inline-flex shrink-0 items-center gap-1 rounded-full border border-danger/40 px-2 py-1 text-[11px] font-medium text-danger-ink transition hover:bg-danger/10"
         >
-          {svc.pid != null ? <Square className="size-3" /> : <X className="size-3" />}
-          {svc.pid != null ? t("service.stop") : t("service.hide")}
+          <Square className="size-3" />
+          {t("service.stop")}
         </button>
         {svc.url && <Globe className="size-3.5 shrink-0 text-ink-subtle/60" />}
       </div>

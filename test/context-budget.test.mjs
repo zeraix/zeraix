@@ -23,7 +23,24 @@ const {
   MIN_CONTEXT_BUDGET_K,
   SUGGESTED_CONTEXT_BUDGET_K,
   restoreBudgetK,
+  getContextBudgetK,
+  setContextBudgetK,
 } = await import("../src/lib/ai/contextBudget.ts");
+
+/**
+ * The storage the preference lives in, faithfully enough to matter: the library behind get/setStorage keeps
+ * dotted keys as one JSON object per top-level key, and — the point of the test below — refuses to write a
+ * falsy value at all. Installed on demand, so the pure tests above keep running without a window.
+ */
+function installLocalStorage() {
+  const mem = new Map();
+  globalThis.localStorage = {
+    getItem: (k) => (mem.has(k) ? mem.get(k) : null),
+    setItem: (k, v) => void mem.set(k, String(v)),
+    removeItem: (k) => void mem.delete(k),
+  };
+  globalThis.window = globalThis;
+}
 
 test("turning the cap on always produces a value that is actually on", () => {
   // The regression itself: nothing positive has ever been set, so the component has only the default to
@@ -61,4 +78,19 @@ test("the suggestion itself survives the store's clamping", () => {
   assert.ok(SUGGESTED_CONTEXT_BUDGET_K >= MIN_CONTEXT_BUDGET_K);
   assert.ok(SUGGESTED_CONTEXT_BUDGET_K <= MAX_CONTEXT_BUDGET_K);
   assert.equal(restoreBudgetK(SUGGESTED_CONTEXT_BUDGET_K), SUGGESTED_CONTEXT_BUDGET_K);
+});
+
+test("switching the cap OFF is written, not dropped: 0 reads back as 0", () => {
+  // The second way the same switch was inert. Turning it on wrote a positive number and worked; turning it
+  // off wrote a numeric 0, which the storage layer treats as "nothing to write". The old budget stayed, the
+  // switch read it back and re-ticked itself. Typing 0 into the field failed the same way.
+  installLocalStorage();
+  setContextBudgetK(150);
+  assert.equal(getContextBudgetK(), 150);
+  setContextBudgetK(0);
+  assert.equal(getContextBudgetK(), 0, "off must survive a storage layer that drops falsy writes");
+  setContextBudgetK(200);
+  assert.equal(getContextBudgetK(), 200, "and on again must still work after an off");
+  setContextBudgetK(-5);
+  assert.equal(getContextBudgetK(), 0, "anything non-positive is off");
 });
