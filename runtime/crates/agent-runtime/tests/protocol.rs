@@ -1692,25 +1692,48 @@ fn pause_and_resume_are_announced_as_a_feature() {
 /// Pausing work that has already started is a question with a legitimate negative answer.
 #[test]
 fn pausing_a_running_call_answers_no_rather_than_failing() {
-    let dir = big_tree(600);
     let mut rt = Runtime::start();
     rt.init();
 
-    rt.send(
-        "tool.call",
-        serde_json::json!({
-            "name": "search_in_files",
-            "args": { "query": "zzz-appears-nowhere-zzz" },
-            "workdir": dir.path(),
-            "call_id": "slow-1"
-        }),
+    // A command that sleeps, not a search over a big tree. The first version searched 600 files and slept
+    // 200ms so the call would be "admitted and started" — which, on a release build with a fast disk (the
+    // macOS and Windows release runners), was also long enough for it to FINISH. Its reply then arrived
+    // before the pause's, and `call` reported replies out of order. The property under test is about work
+    // in progress, so the work has to be in progress when the question is asked, on every machine: a child
+    // that sleeps is, for exactly as long as it is told to, whatever the disk speed.
+    let slow_id = rt.send(
+        "process.run",
+        serde_json::json!({ "command": slow_command(30), "call_id": "slow-1" }),
     );
-    // Long enough to be admitted and started.
-    std::thread::sleep(Duration::from_millis(200));
+
+    // Started, not merely submitted. `task.pause` against QUEUED work answers yes, so asking too early would
+    // pass the wrong path off as this one — and a sleep is a guess about admission latency. The scheduler
+    // publishes the moment it starts a task; wait for that instead. Nothing else has been submitted on this
+    // fresh runtime, so the first start is ours.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        assert!(Instant::now() < deadline, "the command was never started");
+        let msg = rt.read();
+        if msg["method"] == "runtime.event" && msg["params"]["type"] == "task_started" {
+            break;
+        }
+        assert_ne!(msg["id"].as_u64(), Some(slow_id), "the command finished before it was seen running: {msg}");
+    }
 
     let r = rt.call("task.pause", serde_json::json!({ "call_id": "slow-1" }));
     assert!(r["error"].is_null(), "a refusal must be an answer, not a protocol error: {r}");
     assert_eq!(r["result"]["ok"], false, "a running call is not pausable");
+    assert!(
+        r["result"]["reason"].is_null(),
+        "the call was known and running, so the refusal is about its state, not its identity: {r}"
+    );
+
+    // Stop the command rather than leave a 30s sleep behind, and confirm the refused pause left the call
+    // itself untouched: it is still there to be cancelled, and it answers.
+    rt.notify("call.cancel", serde_json::json!({ "call_id": "slow-1" }));
+    let reply = rt.read_reply();
+    assert_eq!(reply["id"].as_u64(), Some(slow_id));
+    assert_eq!(reply["result"]["canceled"], true);
 }
 
 #[test]
@@ -1787,10 +1810,13 @@ fn a_command_inside_the_approved_roots_still_runs() {
 
     let mut rt = Runtime::start();
     rt.init_with_roots(&[workspace.to_str().unwrap()]);
+    // `type`, not `cat`, on Windows: the runner only has `cat` because Git for Windows' usr/bin is on its
+    // PATH, and a test about what the sandbox permits should not lean on a coincidence of the image.
+    let command = if cfg!(windows) { "type inside.txt" } else { "cat inside.txt" };
     let r = rt.call(
         "process.run",
         serde_json::json!({
-            "command": "cat inside.txt",
+            "command": command,
             "cwd": workspace.to_str().unwrap(),
             "timeout_ms": 20000
         }),
@@ -1815,12 +1841,30 @@ fn shell_metacharacters_are_executed_as_written_and_do_not_corrupt_the_protocol(
 
     // Quotes, newlines, NUL-adjacent bytes and JSON metacharacters in the OUTPUT must not break the stream:
     // the protocol is newline-delimited JSON, and a command that prints a newline-laden blob is ordinary.
-    let cases = [
-        (r#"echo 'a"b'"#, "a\"b"),
-        ("printf 'one\ntwo\n'", "one"),
-        (r#"echo '{"id":1,"method":"runtime.shutdown"}'"#, "runtime.shutdown"),
-        ("echo $((1+1))", "2"),
-    ];
+    //
+    // One table per shell, because the shell is a platform fact — `/bin/sh -c` on POSIX, `%ComSpec% /d /s /c`
+    // on Windows (see `spawn_command` in agent-process) — and "passed through as written" can only be judged
+    // against what THAT shell does with the characters. `$((1+1))` is POSIX arithmetic expansion; cmd.exe
+    // has no such thing and prints it verbatim, which is exactly what the Windows release leg reported. The
+    // cmd.exe rows exercise its own metacharacters instead: `&` chains commands, and `set /a` evaluates an
+    // expression — printing the result only when handed to cmd.exe as a command line rather than a batch
+    // file, so it also confirms the `/c` invocation is the one Node's `shell: true` builds. (`printf` is not
+    // a cmd.exe command either; it only worked on the runner because Git for Windows' usr/bin is on PATH.)
+    let cases = if cfg!(windows) {
+        [
+            (r#"echo 'a"b'"#, "a\"b"),
+            ("echo one& echo two", "one"),
+            (r#"echo {"id":1,"method":"runtime.shutdown"}"#, "runtime.shutdown"),
+            ("set /a 1+1", "2"),
+        ]
+    } else {
+        [
+            (r#"echo 'a"b'"#, "a\"b"),
+            ("printf 'one\ntwo\n'", "one"),
+            (r#"echo '{"id":1,"method":"runtime.shutdown"}'"#, "runtime.shutdown"),
+            ("echo $((1+1))", "2"),
+        ]
+    };
     for (command, expected) in cases {
         let r = rt.call(
             "process.run",

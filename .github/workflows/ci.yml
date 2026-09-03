@@ -86,6 +86,10 @@ jobs:
       - name: Rust tests
         working-directory: runtime
         timeout-minutes: 15
+        # Backtraces on: the assertion that fails is often inside a test helper (`Runtime::call`, say), and
+        # the panic line alone then names the helper rather than the test line that reached it.
+        env:
+          RUST_BACKTRACE: "1"
         run: cargo test --locked
 
       - name: Tests
@@ -179,6 +183,10 @@ jobs:
       - name: Rust tests
         working-directory: runtime
         timeout-minutes: 15
+        # Backtraces on: the assertion that fails is often inside a test helper (`Runtime::call`, say), and
+        # the panic line alone then names the helper rather than the test line that reached it.
+        env:
+          RUST_BACKTRACE: "1"
         run: cargo test --locked
 
       # Builds the release binary AND stages it to resources/runtime/, which is the path packaging

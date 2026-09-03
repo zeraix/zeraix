@@ -133,6 +133,10 @@ jobs:
       - name: Test Rust runtime
         working-directory: runtime
         timeout-minutes: 20
+        # Backtraces on: the assertion that fails is often inside a test helper (`Runtime::call`, say), and
+        # the panic line alone then names the helper rather than the test line that reached it.
+        env:
+          RUST_BACKTRACE: "1"
         run: cargo test --release --locked
 
       # Build the sidecar before the parity gate below. dist:* would do this anyway; doing it here means
