@@ -553,6 +553,15 @@ contextBridge.exposeInMainWorld("background", {
   setTrayLabels: (labels) => ipcRenderer.send("background:set-tray-labels", labels),
 });
 
+// route:navigate can arrive before the React tree has subscribed: a notification click that had to create the
+// window first (tray mode) is sent as soon as the page has finished loading, and hydration comes later. Hold the
+// latest route until the first subscriber attaches, then replay it once, so that cold open still lands on the conversation.
+let pendingRoute = null;
+let routeSubscribers = 0;
+ipcRenderer.on("route:navigate", (_e, route) => {
+  if (routeSubscribers === 0) pendingRoute = route;
+});
+
 // System-level notifications: renderer → main-process notification service (queue / merge / rate-limit / OS popup), with click routing sent back.
 contextBridge.exposeInMainWorld("notification", {
   /** Send a system notification; returns { ok, id?, merged?, supported }. See NotificationItem for payload. */
@@ -573,7 +582,16 @@ contextBridge.exposeInMainWorld("notification", {
   onNavigate: (cb) => {
     const handler = (_e, route) => cb(route);
     ipcRenderer.on("route:navigate", handler);
-    return () => ipcRenderer.removeListener("route:navigate", handler);
+    routeSubscribers += 1;
+    if (pendingRoute != null) {
+      const route = pendingRoute;
+      pendingRoute = null;
+      queueMicrotask(() => cb(route));
+    }
+    return () => {
+      ipcRenderer.removeListener("route:navigate", handler);
+      routeSubscribers -= 1;
+    };
   },
   /** Subscribe to action-button clicks { id, index, actionId }; returns an unsubscribe function. */
   onAction: (cb) => {

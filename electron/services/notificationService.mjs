@@ -12,6 +12,7 @@
  * (beyond it, the oldest non-high priority items are dropped to prevent unbounded buildup).
  */
 import { appendRecord } from "../store/notificationStore.mjs";
+import { bringWindowToFront } from "../windowFocus.mjs";
 
 const RATE_LIMIT = { maxPerSecond: 3, maxBurst: 10 };
 
@@ -130,15 +131,14 @@ export class NotificationService {
   }
 
   /** Click a notification: bring the main window forward and dispatch route:navigate (Deep Link, §7).
-   *  In background/tray mode there may be no window at all, so create one first and wait for it to load
-   *  -- sending route:navigate at that point would otherwise be dropped before the renderer is listening. */
+   *  In background/tray mode there may be no window at all, so create one first and wait for it to load.
+   *  Even then the page has only finished loading, not hydrated: the preload holds route:navigate until the
+   *  renderer subscribes (see preload.cjs), so the route is not lost on that cold open. */
   async handleClick(item) {
     const route = normalizeRoute(item.route ?? item.url);
     const win = (await this.ensureWindow?.()) ?? this.getWindow?.();
     if (win) {
-      if (win.isMinimized()) win.restore();
-      win.show();
-      win.focus();
+      bringWindowToFront(win);
       if (route) win.webContents.send("route:navigate", route);
     }
   }
@@ -149,10 +149,7 @@ export class NotificationService {
     const action = Array.isArray(item.actions) ? item.actions[index] : undefined;
     win?.webContents.send("notify:action", { id: item.id, index, actionId: action?.actionId });
     // An action also brings the window forward by default, to ease subsequent routing.
-    if (win) {
-      win.show();
-      win.focus();
-    }
+    bringWindowToFront(win);
   }
 }
 

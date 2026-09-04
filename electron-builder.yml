@@ -124,6 +124,10 @@ extraResources:
   # model catalog, so there is nothing to gain from a CDN. localServer reads them from process.resourcesPath when packaged.
   - from: resources/moe-profiles
     to: moe-profiles
+  # Full-size app icon for OS notifications (electron/appIdentity.mjs reads it from process.resourcesPath when packaged).
+  # The window / taskbar icon does not need this: electron-builder builds the same file into the executable via buildResources.
+  - from: resources/icon.png
+    to: icon.png
   # The PP-OCRv6 adapter, shipped so it can be updated with the app. The VM image also bakes a copy in at /opt/ocr, but
   # changing that one costs a rootfs rebuild and a ~1 GB re-download per user; qemu.mjs binds this over it (GUEST_OCR_ADAPTER).
   # Staged straight from the docker build context so there is ONE copy of the file in the repo and the two cannot drift.

@@ -7,6 +7,8 @@ import { listTools, runTool, getWorkingDir, setWorkingDir, setAssetDir, saveAtta
 import { MIME_TYPES, mimeOfPath, serveWorkspaceFile, WS_PREFIX } from "./fileServing.mjs";
 // First-launch agreement to the Privacy Policy and the Terms of Service; gates every window. See legal/consentWindow.mjs.
 import { ensureLegalConsent, isLegalAccepted } from "./legal/consentWindow.mjs";
+import { appUserModelId, ensureDevStartMenuShortcut, notificationIconPath, windowIconPath } from "./appIdentity.mjs";
+import { bringWindowToFront } from "./windowFocus.mjs";
 import { setAssetHostDir } from "./tools/sandbox/qemu.mjs";
 import { setMediaDir, readIndex, writeIndex, saveMedia, openMediaDir, getMediaDir } from "./mediaStore.mjs";
 // Reports at startup whether the Rust sidecar is enabled, active, or unavailable — see warmUp.
@@ -123,9 +125,7 @@ function focusMainWindow() {
     createWindow();
     return;
   }
-  if (mainWindow.isMinimized()) mainWindow.restore();
-  mainWindow.show();
-  mainWindow.focus();
+  bringWindowToFront(mainWindow);
 }
 
 /**
@@ -352,12 +352,15 @@ async function createWindow() {
   // (tray "Open" after a --background cold start, or macOS dock activate), and a stale `true` here
   // would leave every subsequent window hidden forever.
   splashDismissed = false;
+  // Dev only (null when packaged): without it `electron .` shows Electron's own icon on the taskbar / in the Dock.
+  const icon = windowIconPath();
   mainWindow = new BrowserWindow({
     width: 1280,
     height: 800,
     minWidth: 960,
     minHeight: 640,
     autoHideMenuBar: true,
+    ...(icon ? { icon } : {}),
     // Stay hidden until content is ready; the splash screen covers the blank loading window (see dismissSplash)
     show: false,
     // Frameless window: no native title bar / overlay buttons; window controls are all drawn by the renderer
@@ -957,23 +960,19 @@ function registerWebviewWindowOpen() {
   });
 }
 
-/** System notification icon: in dev take it from the source public/, when packaged take it from the Next static-export directory Zeraix/. The adapter layer silently ignores it if missing. */
-function notificationIconPath() {
-  return isDev
-    ? path.join(__dirname, "..", "public", "logo.png")
-    : path.join(app.getAppPath(), "Zeraix", "logo.png");
-}
-
 app.whenReady().then(async () => {
   // The second instance (launched by a deep link) already called app.quit() earlier, so skip initializing windows and services and return directly.
   if (!gotSingleInstanceLock) return;
-  // Windows: Toast notifications require setting the AppUserModelID (matching the electron-builder appId),
-  // otherwise notifications show no app name/icon or do not pop at all. No side effects on macOS/Linux.
-  app.setAppUserModelId("com.operease.app");
+  // Windows: toasts and taskbar grouping key off the AppUserModelID; it must match the Start Menu shortcut
+  // (installer-written when packaged, written here for a dev launch). See appIdentity.mjs. No side effects on macOS/Linux.
+  ensureDevStartMenuShortcut();
+  app.setAppUserModelId(appUserModelId());
+  // macOS dev: `electron .` runs the stock Electron.app, whose Dock icon is the Electron atom; the packaged .app has its own icns.
+  if (process.platform === "darwin" && windowIconPath()) app.dock?.setIcon(windowIconPath());
   // First launch: the Privacy Policy and the Terms of Service are agreed to before anything else starts — no
   // service, no window. Declining (or closing the screen) ends the launch. Asked again only when the
   // documents' version changes (LEGAL_VERSION in legal/consentState.mjs).
-  if (!(await ensureLegalConsent({ iconPath: notificationIconPath() }))) {
+  if (!(await ensureLegalConsent({ iconPath: windowIconPath() }))) {
     app.quit();
     return;
   }
