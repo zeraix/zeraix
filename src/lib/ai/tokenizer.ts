@@ -118,11 +118,61 @@ export function setTokenCache(enabled: boolean): void {
   tokenCache = enabled ? new Map() : null;
 }
 
+/**
+ * A count memo that pins nothing, keyed by a fingerprint of the text rather than by the text.
+ *
+ * The estimator runs at about 1.4 MB/s on code-like text (measured 2026-09-04), and the whole conversation is
+ * counted from scratch at every turn start (chatCompaction) and, with logging on, once more per round
+ * (contextDiag): a conversation carrying 8 MB of tool output paid 5.5 s of main-thread time and a flood of
+ * short-lived allocations at each turn. Every one of those strings had been counted before. Keying the memo by
+ * the string itself (as the diagnostics cache above does) would keep every closed conversation's results alive;
+ * a fingerprint — length plus two 32-bit FNV-1a hashes — costs a scan at hundreds of MB/s and holds nothing.
+ *
+ * Only the texts where tokenizing is the expensive part are fingerprinted: from FINGERPRINT_ABOVE, below which
+ * the tokenizer is quicker than the bookkeeping, up to SAMPLE_ABOVE, above which the count is a sample of eight
+ * windows and the windows are what is hashed. A collision changes an estimate; every caller is documented as
+ * taking one. Bounded FIFO, so the memo is a few hundred kilobytes at most.
+ */
+const FINGERPRINT_ABOVE = 2048;
+const FINGERPRINT_CACHE_MAX = 8192;
+const fingerprintTokens = new Map<string, number>();
+
+function hashInto(h: [number, number], s: string, from: number, to: number): void {
+  let [a, b] = h;
+  for (let i = from; i < to; i++) {
+    const c = s.charCodeAt(i);
+    a = Math.imul(a ^ c, 0x01000193);
+    b = Math.imul(b ^ c, 0x01000193) ^ (b >>> 15);
+  }
+  h[0] = a;
+  h[1] = b;
+}
+
+function fingerprint(text: string): string {
+  const h: [number, number] = [0x811c9dc5, 0x9747b28c];
+  if (text.length <= SAMPLE_ABOVE) {
+    hashInto(h, text, 0, text.length);
+  } else {
+    // The sampled estimate depends only on the length and these windows, so hashing more would be waste.
+    const stride = (text.length - SAMPLE_WINDOW_CHARS) / (SAMPLE_WINDOWS - 1);
+    for (let k = 0; k < SAMPLE_WINDOWS; k++) {
+      const start = Math.round(k * stride);
+      hashInto(h, text, start, Math.min(text.length, start + SAMPLE_WINDOW_CHARS));
+    }
+  }
+  return `${text.length}:${h[0] >>> 0}:${h[1] >>> 0}`;
+}
+
 /** Token count for plain text. */
 export function countTokens(text: string): number {
   if (!text) return 0;
   const cached = tokenCache?.get(text);
   if (cached !== undefined) return cached;
+  const fp = text.length >= FINGERPRINT_ABOVE ? fingerprint(text) : null;
+  if (fp !== null) {
+    const hit = fingerprintTokens.get(fp);
+    if (hit !== undefined) return hit;
+  }
   let n: number;
   try {
     n = text.length > SAMPLE_ABOVE ? estimateSampled(text) : encodeWindowed(text);
@@ -131,18 +181,35 @@ export function countTokens(text: string): number {
     n = Math.ceil(text.length / 4);
   }
   tokenCache?.set(text, n);
+  if (fp !== null) {
+    if (fingerprintTokens.size >= FINGERPRINT_CACHE_MAX) {
+      fingerprintTokens.delete(fingerprintTokens.keys().next().value as string);
+    }
+    fingerprintTokens.set(fp, n);
+  }
   return n;
 }
+
+/**
+ * Per-message memo: the buffer's message objects are the same objects turn after turn, so a repeated count of the
+ * conversation is a WeakMap lookup per message, and no hashing at all. Weak, so a closed conversation's messages
+ * are not kept alive by their counts; validated by identity of the fields that were counted, so a message whose
+ * content was replaced (a stub, a withheld result) is counted afresh.
+ */
+const messageTokens = new WeakMap<object, { content: unknown; toolCalls: unknown; n: number }>();
 
 /** Token count for a single message (including content and tool_calls). */
 export function countMessageTokens(msg: MsgLike | undefined | null): number {
   if (!msg) return 0;
+  const memo = messageTokens.get(msg);
+  if (memo && memo.content === msg.content && memo.toolCalls === msg.tool_calls) return memo.n;
   let n = 0;
   if (typeof msg.content === "string") n += countTokens(msg.content);
   for (const tc of msg.tool_calls ?? []) {
     n += countTokens(tc.function?.name ?? "");
     n += countTokens(tc.function?.arguments ?? "");
   }
+  messageTokens.set(msg, { content: msg.content, toolCalls: msg.tool_calls, n });
   return n;
 }
 

@@ -55,10 +55,21 @@ const MAX_DEPTH = 4;
 const MAX_KEYS = 40;
 const MAX_ITEMS = 20;
 
+/**
+ * A string that shares no storage with `s`.
+ *
+ * V8 represents `slice` of a long string as a view onto the parent, and a view that is kept keeps the parent. The
+ * Inspector keeps its clipped outputs for the life of the execution record, so without this a 4,000-character
+ * preview of a sub-agent's read_file result held the whole file — 200 MB, for as long as the record lived.
+ */
+function owned(s: string): string {
+  return new TextDecoder().decode(new TextEncoder().encode(s));
+}
+
 /** Note the elision, so a reader knows they are looking at a fragment rather than the whole thing. */
 function clip(s: string, max: number): string {
   if (s.length <= max) return s;
-  return `${s.slice(0, max)}\n… (${s.length - max} more characters)`;
+  return `${owned(s.slice(0, max))}\n… (${s.length - max} more characters)`;
 }
 
 /**

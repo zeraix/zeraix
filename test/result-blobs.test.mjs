@@ -7,12 +7,15 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import {
   BLOB_MIN_CHARS,
+  INLINE_LOAD_MAX_CHARS,
   blobHash,
   collectBlobRefs,
   detachLargeStrings,
   inlineBlobs,
   isBlobRef,
   missingBlobNote,
+  parseUnloadedNote,
+  unloadedBlobNote,
 } from "../electron/store/resultBlobs.mjs";
 
 const big = "x".repeat(BLOB_MIN_CHARS);
@@ -65,9 +68,40 @@ test("collectBlobRefs finds every reference, and a missing blob becomes a note r
   assert.equal(typeof back.b.nested.content, "string");
 });
 
+test("a blob skipped on load is a note that becomes the same reference again on save", () => {
+  const hash = "f".repeat(64);
+  const n = INLINE_LOAD_MAX_CHARS + 1;
+  const note = unloadedBlobNote(hash, n);
+  assert.deepEqual(parseUnloadedNote(note), { hash, n });
+  assert.equal(parseUnloadedNote("[…… some other marker ……]"), null);
+  assert.equal(parseUnloadedNote(missingBlobNote(n)), null, "a missing blob is gone for good, not re-referenced");
+  // The note is short, so without the round-trip it would stay a string and the sweep would delete the file.
+  const sink = new Map();
+  const slim = detachLargeStrings({ messages: [{ content: note }] }, (h, t) => sink.set(h, t));
+  assert.deepEqual(slim.messages[0].content, { $blob: hash, n });
+  assert.equal(sink.size, 0, "nothing is rehashed or rewritten for a note");
+  assert.deepEqual([...collectBlobRefs(slim)], [[hash, n]]);
+  // Every marker the store writes has the shape the file tools refuse as content.
+  for (const s of [note, missingBlobNote(3)]) assert.ok(s.startsWith("[…… ") && s.endsWith(" ……]"), s);
+});
+
 test("an object that merely looks like a reference is left alone unless the hash is well-formed", () => {
   assert.equal(isBlobRef({ $blob: "not-a-hash", n: 1 }), false);
   assert.equal(isBlobRef({ $blob: "a".repeat(64), n: 1 }), true);
   assert.equal(isBlobRef(null), false);
   assert.equal(isBlobRef("x"), false);
+});
+
+test("selectBlobsToLoad honours both caps and takes references in document order (newest first)", async () => {
+  const { selectBlobsToLoad } = await import("../electron/store/resultBlobs.mjs");
+  const refs = new Map([
+    ["a".repeat(64), 3_000_000], // newest conversation first: fits
+    ["b".repeat(64), 5_000_000], // over the per-blob cap: never
+    ["c".repeat(64), 3_000_000], // fits
+    ["d".repeat(64), 3_000_000], // would take the total past the budget: not loaded
+    ["e".repeat(64), 1_000_000], // still fits in what is left
+  ]);
+  const chosen = selectBlobsToLoad(refs, 4_000_000, 7_500_000);
+  assert.deepEqual([...chosen], ["a".repeat(64), "c".repeat(64), "e".repeat(64)]);
+  assert.deepEqual([...selectBlobsToLoad(refs, 4_000_000, 0)], [], "a zero budget loads nothing");
 });

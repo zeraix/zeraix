@@ -14,7 +14,7 @@ import path from "node:path";
 import "../scripts/electron-stub-hook.mjs";
 
 const store = await import("../electron/store/conversationStore.mjs");
-const { BLOB_MIN_CHARS } = await import("../electron/store/resultBlobs.mjs");
+const { BLOB_MIN_CHARS, INLINE_LOAD_MAX_CHARS } = await import("../electron/store/resultBlobs.mjs");
 
 const dir = await fs.mkdtemp(path.join(os.tmpdir(), "zeraix-store-test-"));
 await store.setStorePath(dir);
@@ -22,7 +22,8 @@ const convFile = (pid) => path.join(dir, "conversations", `${pid}.json`);
 const blobDir = (pid) => path.join(dir, "conversations", `${pid}.blobs`);
 const blobs = async (pid) => (await fs.readdir(blobDir(pid)).catch(() => [])).sort();
 
-const big = "line of a large tool result\n".repeat(Math.ceil((4 * 1024 * 1024) / 28)); // ~4 MB
+// ~1 MB: over BLOB_MIN_CHARS, so it is stored out of line, and under INLINE_LOAD_MAX_CHARS, so a load reads it back.
+const big = "line of a large tool result\n".repeat(Math.ceil((1024 * 1024) / 28));
 const conv = (content) => ({
   id: "conv-1",
   projectId: "p1",
@@ -90,6 +91,25 @@ test("deleting the project removes its blobs too", async () => {
   await store.deleteProject("p1");
   assert.deepEqual(await blobs("p1"), []);
   assert.equal(await fs.stat(convFile("p1")).catch((e) => e.code), "ENOENT");
+});
+
+test("a blob over the load cap is not read back: the conversation gets a note, and a re-save keeps the file", async () => {
+  const huge = "0123456789abcdef".repeat(INLINE_LOAD_MAX_CHARS / 16 + 1); // just over the cap
+  await store.saveProject("p1", [conv(huge)]);
+  const [name] = await blobs("p1");
+  const t0 = performance.now();
+  const loaded = await store.loadProject("p1");
+  const ms = performance.now() - t0;
+  const content = loaded.conversations[0].messages[1].content;
+  assert.match(content, /^\[…… a [\d,]+-character tool result from an earlier session is kept on disk \([0-9a-f]{64}\)/);
+  assert.ok(content.includes(name.slice(0, 64)), "the note names the blob");
+  assert.ok(ms < 200, `load took ${ms.toFixed(0)} ms; the blob must not have been read`);
+  // The renderer saves the conversation back with the note in it: the file must still be there afterwards.
+  await store.saveProject("p1", loaded.conversations);
+  assert.deepEqual(await blobs("p1"), [name], "the note re-referenced the blob, so the sweep kept it");
+  const again = await store.loadProject("p1");
+  assert.equal(again.conversations[0].messages[1].content, content);
+  await store.deleteProject("p1");
 });
 
 test("the threshold is the one resultBlobs exports", () => {

@@ -973,6 +973,8 @@ const handlers = {
   async append_file({ path: p, content }) {
     const abs = resolveInside(p, { write: true });
     const add = String(content ?? "");
+    // Same refusal as write_file / edit_file in the Rust runtime (see placeholder.mjs).
+    if (isContextPlaceholder(add)) throw new Error(`content: ${PLACEHOLDER_REFUSED}`);
     // Only the appended text is normalized to the file's newline style; existing bytes (and any BOM at the start)
     // are left exactly as they are — an append must not rewrite content it isn't adding.
     let before = "";
@@ -1466,6 +1468,7 @@ export async function runTool(name, args = {}, { signal } = {}) {
 
 /** Corresponds one-to-one with the caller's C++ declarations. */
 import { TOOLS } from "./toolSchemas.mjs";
+import { isContextPlaceholder, PLACEHOLDER_REFUSED } from "./placeholder.mjs";
 
 /**
  * Return the tool declarations in the target LLM format:

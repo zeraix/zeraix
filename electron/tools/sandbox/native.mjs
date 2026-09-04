@@ -16,6 +16,7 @@ import { spawn } from "node:child_process";
 
 import { emitService } from "./events.mjs";
 import { clearRecord, forgetChild, recordChild } from "./orphans.mjs";
+import { utf8Shell } from "./shellEncoding.mjs";
 import {
   EVENT_RUNTIME_DISCONNECTED,
   onEvent,
@@ -120,6 +121,8 @@ export async function run(cmd, { cwd, timeoutMs, maxBuffer, signal } = {}) {
   //
   // The sidecar declines before it has started anything, and answers once it has. It never returns null
   // after the command may have run, because falling back would run it a second time. See tryRunProcess.
+  // UTF-8 for the child, whichever runner takes it (see shellEncoding.mjs).
+  cmd = utf8Shell(cmd);
   const offloaded = await tryRunProcess(cmd, { cwd, timeoutMs, maxBuffer, signal });
   if (offloaded) return offloaded;
   return runOnNode(cmd, { cwd, timeoutMs, maxBuffer, signal });
@@ -403,6 +406,7 @@ onEvent(EVENT_RUNTIME_DISCONNECTED, () => {
  * process keeps running in the background. Returns the startup output + a pid hint.
  */
 export async function startBackground(cmd, { cwd, notify } = {}) {
+  cmd = utf8Shell(cmd); // as in run(): the same command reaches either runner
   // Rust Agent Runtime, Stage 2b. The runtime owns the process -- spawning it, reading it, reaping it --
   // while everything a model or a user sees stays here. It declines before anything has started, so a
   // fallback costs nothing and starts nothing twice.

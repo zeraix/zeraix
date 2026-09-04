@@ -609,10 +609,14 @@ function releaseCallArguments(rawName: string, argsJson: string): string | null 
     const v = args[f];
     if (typeof v !== "string" || v.length < MIN_STUB_CHARS) continue;
     const lines = v.split("\n").length;
+    // Phrased as a note about the context, not as a value: a model that saw "content" rendered this way copied the
+    // marker verbatim as the content of its next write_file (2026-09-04), and the file on disk was the marker. The
+    // file tools now refuse the marker outright (edittext.rs is_context_placeholder), but the wording here is the
+    // first line of defence — it must read as something that was removed, never as something to send.
     args[f] =
       f === "old_string"
-        ? `[…… ${lines} lines elided: the text this call replaced ……]`
-        : `[…… ${lines} lines elided: this text was written to ${path || "the file"}; read_file it if you need it ……]`;
+        ? `[…… ${lines} lines elided from your context: the text this call replaced. Not a value to reuse ……]`
+        : `[…… ${lines} lines elided from your context: the text you wrote to ${path || "the file"} (read_file it if you need it). Not a value to reuse — a new call must carry the full text ……]`;
     changed = true;
   }
   if (!changed) return null;

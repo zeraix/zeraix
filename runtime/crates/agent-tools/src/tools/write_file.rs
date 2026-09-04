@@ -8,10 +8,10 @@
 //! newline style rather than forcing LF/no-BOM UTF-8 onto it. A model handed a CRLF file returns LF every
 //! time, and accepting that would show every line of the file as changed in the user's next `git diff`.
 
-use agent_core::Result;
+use agent_core::{Result, RuntimeError};
 use serde_json::{json, Value};
 
-use crate::edittext::{Newline, encode, read_for_edit, to_lf, unified_diff};
+use crate::edittext::{is_context_placeholder, PLACEHOLDER_REFUSED, Newline, encode, read_for_edit, to_lf, unified_diff};
 use crate::nodeerr::{coerce_string, fs_error, path_arg};
 use crate::tool::{ExecutionMode, RiskLevel, Tool, ToolContext, ToolMetadata, ToolOutput};
 
@@ -42,6 +42,9 @@ impl Tool for WriteFile {
         let p = path_arg(args_v, "path")?;
         let abs = ctx.workspace.resolve(&p)?;
         let after = to_lf(&coerce_string(args_v.get("content")));
+        if is_context_placeholder(&after) {
+            return Err(RuntimeError::invalid("tool.placeholder_content", format!("content: {PLACEHOLDER_REFUSED}")));
+        }
 
         // Read the existing file's traits so the rewrite keeps them. A missing file is a new file: LF, no BOM.
         // A non-UTF-8 file is refused by `read_for_edit`, because rewriting it as UTF-8 would convert it —
@@ -169,5 +172,18 @@ mod tests {
             .await
             .expect_err("an escape must be refused");
         assert_eq!(err.code, "tool.path_escapes_workspace");
+    }
+
+    #[tokio::test]
+    async fn the_context_placeholder_is_refused_and_nothing_is_written() {
+        let dir = tempfile::tempdir().unwrap();
+        let marker = "[…… 19 lines elided: this text was written to out.csv; read_file it if you need it ……]";
+        let err = WriteFile
+            .execute(&ctx(dir.path()), &json!({ "path": "out.csv", "content": marker }))
+            .await
+            .expect_err("placeholder content must be refused");
+        assert_eq!(err.code, "tool.placeholder_content");
+        assert!(err.message.contains("not file content"), "{}", err.message);
+        assert!(!dir.path().join("out.csv").exists(), "no file was created");
     }
 }

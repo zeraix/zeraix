@@ -19,7 +19,7 @@
 use agent_core::{Result, RuntimeError};
 use serde_json::{json, Value};
 
-use crate::edittext::{encode, read_for_edit, to_lf, unified_diff};
+use crate::edittext::{is_context_placeholder, PLACEHOLDER_REFUSED, encode, read_for_edit, to_lf, unified_diff};
 use crate::nodeerr::{coerce_string, fs_error, path_arg};
 use crate::tool::{ExecutionMode, RiskLevel, Tool, ToolContext, ToolMetadata, ToolOutput};
 
@@ -54,6 +54,9 @@ impl Tool for EditFile {
 
         let old_str = to_lf(&coerce_string(args_v.get("old_string")));
         let new_str = to_lf(&coerce_string(args_v.get("new_string")));
+        if is_context_placeholder(&new_str) {
+            return Err(RuntimeError::invalid("tool.placeholder_content", format!("new_string: {PLACEHOLDER_REFUSED}")));
+        }
         if old_str.is_empty() {
             return Err(RuntimeError::invalid("tool.invalid_args", "old_string must not be empty"));
         }
@@ -292,5 +295,17 @@ mod tests {
             .await
             .expect_err("a missing file must be reported");
         assert!(err.message.contains("ENOENT"), "{}", err.message);
+    }
+
+    #[tokio::test]
+    async fn a_placeholder_new_string_is_refused_and_the_file_is_untouched() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("f.txt"), "alpha\nbeta\n").unwrap();
+        let marker = "[…… 2 lines elided: this text was written to f.txt; read_file it if you need it ……]";
+        let err = edit(dir.path(), json!({ "path": "f.txt", "old_string": "beta", "new_string": marker }))
+            .await
+            .expect_err("placeholder replacement must be refused");
+        assert_eq!(err.code, "tool.placeholder_content");
+        assert_eq!(std::fs::read_to_string(dir.path().join("f.txt")).unwrap(), "alpha\nbeta\n");
     }
 }

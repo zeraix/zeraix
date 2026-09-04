@@ -63,3 +63,27 @@ test("a long ordinary text is estimated by sampling, and lands near the true cou
   const drift = Math.abs(ours - exact) / exact;
   assert.ok(drift < 0.05, `sampled estimate ${ours} vs exact ${exact} (${(drift * 100).toFixed(1)}% drift)`);
 });
+
+test("a repeated count of the same conversation is served from the memo, and a replaced content is recounted", () => {
+  const para = "const value = compute(index, { retries: 3 }) ?? fallbackFor(entry.name); // handle the edge case\n";
+  const msgs = Array.from({ length: 40 }, (_, i) => ({ role: "tool", content: `${i}:` + para.repeat(400) })); // ~40 KB each
+  const first = timed(() => countMessagesTokens(msgs));
+  const second = timed(() => countMessagesTokens(msgs));
+  assert.equal(second.v, first.v);
+  assert.ok(second.ms * 10 < first.ms, `memo hit took ${second.ms} ms against ${first.ms} ms for the first count`);
+  // The same strings on rebuilt message objects (what the wire copies are) hit the fingerprint memo, not the tokenizer.
+  const rebuilt = msgs.map((m) => ({ ...m }));
+  const third = timed(() => countMessagesTokens(rebuilt));
+  assert.equal(third.v, first.v);
+  assert.ok(third.ms * 5 < first.ms, `fingerprint hit took ${third.ms} ms against ${first.ms} ms`);
+  // Replacing a message's content is noticed: the count changes even though the object is the same.
+  msgs[0].content = "short";
+  assert.ok(countMessagesTokens(msgs) < first.v);
+});
+
+test("two texts of the same length with different content are counted separately", () => {
+  const a = "a".repeat(3000) + " ".repeat(3000);
+  const b = "the quick brown fox ".repeat(300);
+  assert.equal(a.length, b.length);
+  assert.notEqual(countTokens(a), countTokens(b));
+});

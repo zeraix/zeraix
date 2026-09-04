@@ -655,7 +655,12 @@ async function boot(onProgress, forceConfigured = false) {
   if (!fs.existsSync(rootfs)) throw new Error(`rootfs not found: ${rootfs}`);
   if (!fs.existsSync(path.join(vd, "Image")) || !fs.existsSync(path.join(vd, "initrd.img")))
     throw new Error(`kernel not found: need Image + initrd.img next to ${rootfs}`);
-  onProgress?.(null, "Starting the runtime environment..."); // image ready -> enter the boot phase (QEMU boot, no fine-grained progress, UI shows an indeterminate state)
+  // Image ready -> enter the boot phase. Reported at 100, not null: the "ready" message above it is broadcast
+  // milliseconds into a warm start, before the window has subscribed, and this message overwrites it. A dialog that
+  // attaches afterwards decides "image done" from the last status it can see, and with null here it saw nothing to
+  // decide from — so every warm boot read as "checking runtime environment" until the VM was up (2026-09-04). The
+  // boot itself still has no fine-grained progress; the dialog's boot step shows its own indeterminate state.
+  onProgress?.(100, "Starting the runtime environment...");
   fs.mkdirSync(vd, { recursive: true });
   // Throwaway overlay: the base image stays clean, writes are discarded on shutdown.
   const overlay = path.join(vd, "run.qcow2");

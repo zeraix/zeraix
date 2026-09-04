@@ -107,7 +107,10 @@ export function noteFileRead({ workdir, relPath, text, llm } = {}) {
     const s = sessionFor(workdir);
     if (!s.reads.has(rel) && s.reads.size >= MAX_TRACKED_FILES) return;
     const isNew = !s.reads.has(rel);
-    s.reads.set(rel, body.slice(0, MAX_FILE_CHARS));
+    // An owned copy, not a slice. V8 implements `slice` of a long string as a view onto the parent, and a view
+    // kept for the session keeps the parent: with read_file uncapped, this map pinned every large result the
+    // model ever read — a 200 MB file's text, held by its first 1,500 characters — until the app was restarted.
+    s.reads.set(rel, Buffer.from(body.slice(0, MAX_FILE_CHARS), "utf8").toString("utf8"));
 
     // Check the moment a directory reaches the file count that makes it summarisable. A periodic
     // check alone was wrong: it ran every CHECK_EVERY reads, a HIGHER bar than the two files a

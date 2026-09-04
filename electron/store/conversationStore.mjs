@@ -26,7 +26,14 @@ import {
   encryptBytes,
   decryptBytes,
 } from "../integrity/integrityStore.mjs";
-import { collectBlobRefs, detachLargeStrings, inlineBlobs, missingBlobNote } from "./resultBlobs.mjs";
+import {
+  collectBlobRefs,
+  detachLargeStrings,
+  inlineBlobs,
+  missingBlobNote,
+  selectBlobsToLoad,
+  unloadedBlobNote,
+} from "./resultBlobs.mjs";
 
 let STORE_DIR = null; // current storage directory (lazily initialized)
 
@@ -280,13 +287,22 @@ async function readBlob(projectId, hash) {
   }
 }
 
-/** Resolve every reference in a loaded document back to its text. */
+/**
+ * Resolve the references in a loaded document: the text for blobs worth loading, a note for the rest.
+ *
+ * A blob over the per-blob cap, or past the project's total budget (resultBlobs.selectBlobsToLoad), is not read
+ * — not decrypted, not stringified, not sent to the renderer. Its note names it, and the save path turns the note
+ * back into the reference (detachLargeStrings), so the file is kept for as long as the conversation is.
+ */
 async function withBlobsInlined(projectId, conversations) {
   const refs = collectBlobRefs(conversations);
   if (refs.size === 0) return conversations;
+  const chosen = selectBlobsToLoad(refs);
   const texts = new Map();
-  for (const hash of refs) texts.set(hash, await readBlob(projectId, hash));
-  return inlineBlobs(conversations, (hash, n) => texts.get(hash) ?? missingBlobNote(n));
+  for (const hash of chosen) texts.set(hash, await readBlob(projectId, hash));
+  return inlineBlobs(conversations, (hash, n) =>
+    chosen.has(hash) ? (texts.get(hash) ?? missingBlobNote(n)) : unloadedBlobNote(hash, n),
+  );
 }
 
 /** Delete the blob files the document no longer references — a deleted conversation's results, a stray temp file. */

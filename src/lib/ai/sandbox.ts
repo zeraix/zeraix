@@ -66,13 +66,17 @@ export function sandboxEnvHint(st: SandboxStatus | null): string {
     );
   }
   const p = st?.hostPlatform ?? "";
+  // Names the shell the runner actually uses, because the model writes for the shell it is told about. A host
+  // command goes through `cmd.exe /d /s /c` on Windows and `/bin/sh -c` elsewhere (native.mjs, agent-process) —
+  // one line, that shell's quoting. Told "cmd/PowerShell", a model wrote PowerShell here-strings with bash escapes
+  // and got cmd parse errors (2026-09-04); told "zsh", it would use zsh-only syntax that sh rejects.
   const osName =
     p === "win32"
-      ? "Windows（cmd/PowerShell）"
+      ? "Windows host. Each command is one line run by cmd.exe (cmd quoting; no bash or PowerShell syntax). For PowerShell, call `powershell -Command \"...\"` on one line with cmd-safe quotes; the console code page is UTF-8"
       : p === "darwin"
-        ? "macOS（zsh/bash）"
+        ? "macOS host. Each command runs through `/bin/sh -c` (POSIX sh quoting; not zsh)"
         : p === "linux"
-          ? "Linux（bash）"
+          ? "Linux host. Each command runs through `/bin/sh -c` (POSIX sh quoting)"
           : "Host Machine";
   // Deliberately does NOT repeat that doc-media-toolbox is unavailable here. messages[0] lists the skill with its own
   // description, which already ends "REQUIRES the Linux sandbox … when commands are running directly on the host, this

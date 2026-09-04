@@ -118,6 +118,28 @@ pub fn encode(text: &str, newline: Newline, has_bom: bool) -> Vec<u8> {
     out
 }
 
+/// Whether a text IS the renderer's context-trimming placeholder rather than file content.
+///
+/// The renderer replaces the bulky arguments of a completed write or edit in the model's context with a
+/// marker of the form `[…… N lines elided: … ……]` (contextCompress.ts, releaseCallArguments). A model that
+/// sees its own earlier writes rendered that way can imitate the shape when it writes the next file — seen
+/// 2026-09-04: a `write_file` whose entire content was "[…… 19 lines elided: this text was written to
+/// test_summary_detailed.csv; read_file it if you need it ……]", which then sat on disk as the file, and the
+/// model spent its next ten calls on shell workarounds because "write_file truncates". The write and edit
+/// tools refuse such content with a message that says what the marker is, and the model sends the real
+/// text. Matched on the marker's shape — the whole text is one `[…… … ……]` — so every marker the app writes into
+/// a conversation (elided arguments, a result kept on disk, a result no longer on disk) is covered, and the wording
+/// between the brackets is free to change.
+pub fn is_context_placeholder(text: &str) -> bool {
+    let t = text.trim();
+    t.starts_with("[…… ") && t.ends_with(" ……]")
+}
+
+/// The refusal the write and edit tools return for placeholder content. Model-facing.
+pub const PLACEHOLDER_REFUSED: &str = "the text you sent is the context-trimming marker \"[…… N lines elided … ……]\", \
+not file content. That marker stands in for text of your own earlier calls that was trimmed from your context; it is \
+never valid content. Send the complete text you want in the file (read_file the current file first if you need what is there).";
+
 /// A unified diff of two LF-space texts, as the tool result carries it.
 ///
 /// The frontend renders this and the model reads it, so it is part of the tool's contract rather than a
@@ -249,6 +271,20 @@ fn diff_ops<'a>(a: &[&'a str], b: &[&'a str]) -> Vec<Op<'a>> {
 mod tests {
     use super::*;
     use std::path::Path;
+
+    #[test]
+    fn the_context_placeholder_is_recognised_and_ordinary_text_is_not() {
+        assert!(is_context_placeholder(
+            "[…… 19 lines elided: this text was written to test_summary_detailed.csv; read_file it if you need it ……]"
+        ));
+        assert!(is_context_placeholder("  […… 3 lines elided: the text this call replaced ……]\n"));
+        assert!(is_context_placeholder(
+            "[…… a 209,715,232-character tool result from an earlier session is kept on disk (0123) and not loaded into the conversation; call the tool again if you need it ……]"
+        ));
+        assert!(!is_context_placeholder("const x = 1; // […… nothing elided here"));
+        assert!(!is_context_placeholder("[…… a marker, then real content ……]\nconst x = 1;"));
+        assert!(!is_context_placeholder(""));
+    }
 
     #[test]
     fn a_crlf_file_is_detected_and_a_lone_lf_file_is_not() {

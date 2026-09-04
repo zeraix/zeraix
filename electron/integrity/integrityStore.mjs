@@ -177,7 +177,11 @@ export function decryptBytes(buf) {
   if (!isEncryptedBytes(buf)) throw new Error("not an encrypted byte stream");
   const decipher = createDecipheriv("aes-256-gcm", MASTER_KEY, buf.subarray(4, 16));
   decipher.setAuthTag(buf.subarray(16, BYTES_HEADER));
-  return Buffer.concat([decipher.update(buf.subarray(BYTES_HEADER)), decipher.final()]);
+  const body = decipher.update(buf.subarray(BYTES_HEADER));
+  // GCM is a stream mode: final() verifies the tag and yields nothing, and concatenating an empty tail would copy
+  // the whole plaintext once more — 200 MB, for a 200 MB blob.
+  const tail = decipher.final();
+  return tail.length ? Buffer.concat([body, tail]) : body;
 }
 
 /**

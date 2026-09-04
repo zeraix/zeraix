@@ -69,14 +69,20 @@ const doc = await fs.stat(path.join(dir, "conversations", "p1.json"));
 check("store: document size", doc.size / 1024, "KB", "≤ 64", doc.size <= 64 * 1024);
 const blobFiles = await fs.readdir(path.join(dir, "conversations", "p1.blobs"));
 check("store: blob files", blobFiles.length, "", "= 1", blobFiles.length === 1);
-// Load is bound by AES-GCM when the store is encrypted — about 250 MB/s in Node here, measured — so the
-// target is per mode. The plaintext figure is the one the original baseline (a 153 ms JSON.parse) set.
+// Over INLINE_LOAD_MAX_CHARS the blob is not read at all: the document comes back with a note in its place and the
+// process holds no copy of the result. Reading it — decrypt, stringify, clone to the renderer — used to be the whole
+// cost of opening the app (1.4 GB resident for a 200 MB result, 2026-09-04), so the target here is "did not read it".
 const encrypted = encryptionStatus().enabled;
-const loadTarget = encrypted ? 900 : 400;
 const load = await timed(() => store.loadProject("p1"));
-check(`store: load (${encrypted ? "encrypted" : "plaintext"})`, load.ms, "ms", `≤ ${loadTarget}`, load.ms <= loadTarget);
-const same = load.v.conversations[0].messages[1].content === content;
-check("store: loaded content identical", same ? 1 : 0, "", "= 1", same);
+check(`store: load (${encrypted ? "encrypted" : "plaintext"})`, load.ms, "ms", "≤ 100", load.ms <= 100);
+check("store: heap after load", load.heapDelta, "MB", "≤ 16", load.heapDelta <= 16);
+const loadedContent = load.v.conversations[0].messages[1].content;
+const asNote = /^\[…… a [\d,]+-character tool result from an earlier session is kept on disk/.test(loadedContent);
+check("store: oversized result loads as a note", asNote ? 1 : 0, "", "= 1", asNote);
+// The renderer saves the conversation back with the note in it; the blob must survive that.
+await store.saveProject("p1", load.v.conversations);
+const kept = (await fs.readdir(path.join(dir, "conversations", "p1.blobs"))).length;
+check("store: blob kept after re-saving the note", kept, "", "= 1", kept === 1);
 await fs.rm(dir, { recursive: true, force: true });
 
 // ── wire ────────────────────────────────────────────────────────────────────────

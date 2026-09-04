@@ -160,6 +160,8 @@ const isKnownTool = (name: string) => name in TOOL_ACTIONS;
 const resolveName = (display: string) => toolNameOf(display, isKnownTool);
 
 const actionFor = (name: string): Action => TOOL_ACTIONS[resolveName(name)] ?? CALLED;
+/** The tools whose result embeds a ```diff block (edittext.rs unified_diff; append_file in aiToolkit). */
+const DIFF_TOOLS = new Set(["edit_file", "write_file", "append_file"]);
 
 /** Tint for a file badge, by extension. Unlisted types fall back to the neutral surface colour. */
 const EXT_TINTS: Record<string, string> = {
@@ -454,7 +456,10 @@ function ActionRow({ call }: { call: TraceCall }) {
   const action = actionFor(call.name);
   const Icon = action.icon;
   const target = targetOf(tool, call.args);
-  const counts = countDiffLines(extractDiff(call.result).diff);
+  // Only for the tools that produce one. This ran a regex over every result on every render of every row,
+  // expanded or not — a 200 MB read_file result, scanned in full each time the transcript re-rendered during
+  // streaming, which is many times a second. (The React Compiler memoises the derived value across renders.)
+  const counts = DIFF_TOOLS.has(tool) ? countDiffLines(extractDiff(call.result).diff) : null;
   const isFile = action.kind === "file" && !!target;
   const { dir, name } = isFile ? splitPath(target) : { dir: "", name: target };
   // "Called" says nothing about which tool ran, and it is exactly the rows that land there — an MCP server's own
