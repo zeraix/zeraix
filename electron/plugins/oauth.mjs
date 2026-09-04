@@ -360,6 +360,27 @@ export function revokeCredential(key) {
 }
 
 /**
+ * Drop every credential a plugin holds, whichever providers minted them. Returns how many were dropped.
+ *
+ * Matched by key prefix rather than through the manifest's providers on purpose: this runs from uninstall,
+ * after the plugin's files are gone, and a deleted manifest cannot be asked what it minted. The prefix is
+ * unambiguous — an id is `publisher/name`, the separator is `:`, and neither half may contain one.
+ *
+ * Local only. The grant at the provider is not revoked remotely: the record holds no revocation endpoint,
+ * the manifest that did is being deleted, and a user who wants the provider-side grant gone revokes it in
+ * the provider's own account settings, as every OAuth client documents.
+ */
+export function forgetPluginCredentials(pluginId) {
+  const all = readAll();
+  const prefix = `${pluginId}:`;
+  const keys = Object.keys(all).filter((k) => k.startsWith(prefix));
+  if (keys.length === 0) return 0;
+  for (const k of keys) delete all[k];
+  writeJsonAtomic(tokenFile(), all);
+  return keys.length;
+}
+
+/**
  * The client id/secret for a validated oauth block, whichever of the three shapes it declares.
  *
  *   host          from this build (see hostCredentials) -- the manifest names nothing

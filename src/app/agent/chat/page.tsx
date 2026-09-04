@@ -55,6 +55,7 @@ import {
 import { migrateLegacyAgentStorage, putStorage } from "@/lib/ai/agentStorage";
 import { hydrateAppConfig } from "@/lib/ai/appConfig";
 import { getContextBudgetK } from "@/lib/ai/contextBudget";
+import { DEFAULT_THINKING, thinkingParams } from "@/lib/ai/thinking";
 import { notifyAgentError } from "@/lib/ai/agentNotify";
 import { useAgentChatStore } from "@/store/agentChatStore";
 import { enabledSkills, loadInstalled } from "@/lib/ai/skills/store";
@@ -784,6 +785,12 @@ function ChatAgent() {
       endpoint,
       model: modelName,
       apiKey: apiKey.trim() || (isLocalEndpoint(endpoint) ? "local" : ""),
+      // Thinking OFF for the helper's one-sentence rewrite, in this family's spelling. The helper runs in the main
+      // process, which has no copy of the family rules; the switch travels with the config instead.
+      body: thinkingParams(
+        { ...DEFAULT_THINKING, enabled: false, sendContext: false },
+        { local: isLocalEndpoint(endpoint), model: modelName },
+      ),
     });
   }, [endpoint, modelName, apiKey]);
 

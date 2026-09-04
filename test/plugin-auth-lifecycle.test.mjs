@@ -23,7 +23,7 @@ import {
   pluginAuthHeaders,
   reauthorize,
 } from "../electron/plugins/auth.mjs";
-import { getInstalled, installPlugin, resetCache, sha512 } from "../electron/plugins/store.mjs";
+import { getInstalled, installPlugin, resetCache, sha512, uninstallPlugin } from "../electron/plugins/store.mjs";
 import { validateManifest } from "../electron/plugins/manifest.mjs";
 import { removeRoot } from "./helpers/tempRoot.mjs";
 
@@ -215,6 +215,44 @@ test(
     assert.equal(getInstalled(PLUGIN_ID).version, "1.0.0");
     assert.equal(credentialStatus(KEY).authorized, false);
     assert.match(getInstalled(PLUGIN_ID).auth.google_auth.error, /declined/);
+  }),
+);
+
+test(
+  "uninstalling forgets the plugin's grants, so a reinstall is a first-time setup; other plugins' grants stay",
+  withRoot(async () => {
+    const srv = await granting();
+    const b = browser();
+    configureOAuthHost({ openExternal: b.openExternal });
+    // The token server closes in `finally`: a failed assertion with it still listening would keep the test
+    // process alive, and the runner would wait on it rather than report the failure.
+    try {
+      await installPlugin(entry(srv.url), io);
+      await authorizeAfterInstall(PLUGIN_ID);
+      assert.equal(credentialStatus(KEY).authorized, true);
+      // Another plugin's grant in the same store, seeded as the store writes it (plaintext secretBox here).
+      const tokenFile = path.join(process.env.ZX_TEST_ROOT, "oauth.json");
+      const all = JSON.parse(fs.readFileSync(tokenFile, "utf8"));
+      const foreign = credentialKey("bob/calendar", "google_auth", "calendar_oauth");
+      all[foreign] = { enc: false, value: JSON.stringify({ access_token: "keep-me", expires_at: Date.now() + 3600_000 }) };
+      fs.writeFileSync(tokenFile, JSON.stringify(all));
+
+      assert.deepEqual(uninstallPlugin(PLUGIN_ID), { ok: true, error: null });
+      assert.equal(credentialStatus(KEY).authorized, false, "the grant went with the plugin");
+      assert.equal(credentialStatus(foreign).authorized, true, "another plugin's grant is untouched");
+      const left = Object.keys(JSON.parse(fs.readFileSync(tokenFile, "utf8")));
+      assert.deepEqual(left, [foreign], "nothing of the uninstalled plugin remains in the store");
+      assert.equal(getInstalled(PLUGIN_ID), null);
+
+      // Reinstalling runs the consent flow again: the browser opens a second time and a new grant is minted.
+      await installPlugin(entry(srv.url), io);
+      const { results } = await authorizeAfterInstall(PLUGIN_ID);
+      assert.equal(results[0].authorized, true);
+      assert.equal(b.opened.length, 2, "a fresh authorization, not a reused token");
+      assert.equal(credentialStatus(KEY).authorized, true);
+    } finally {
+      srv.close();
+    }
   }),
 );
 

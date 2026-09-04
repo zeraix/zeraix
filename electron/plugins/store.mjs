@@ -30,6 +30,7 @@ import {
   installableCapabilities,
 } from "./manifest.mjs";
 import { killListMatches } from "./feed.mjs";
+import { forgetPluginCredentials } from "./oauth.mjs";
 import { lockFile, readJson, versionDir, writeJsonAtomic } from "./storage.mjs";
 
 export const LOCKFILE_VERSION = 1;
@@ -311,11 +312,21 @@ export async function installPlugin(entry, { fetchFile }) {
   return { ok: true, installed: record, error: null };
 }
 
+/**
+ * Remove a plugin: its files, its lock record, and every credential it was granted.
+ *
+ * The credentials go with it so that installing the plugin again is a first-time setup — the consent screen
+ * is shown, a fresh grant is minted — rather than a silent reuse of a token the user believed gone when they
+ * removed the plugin. `installed.auth` (the attempt log) leaves with the record; the tokens live in their own
+ * store (oauth.mjs) and are dropped here by key prefix, since the manifest that named the providers is being
+ * deleted in the same breath.
+ */
 export function uninstallPlugin(id) {
   const lock = load();
   const existing = lock.plugins[id];
   if (!existing) return { ok: false, error: `${id} is not installed` };
   fs.rmSync(versionDir(id, existing.version), { recursive: true, force: true });
+  forgetPluginCredentials(id);
   delete lock.plugins[id];
   persist();
   return { ok: true, error: null };

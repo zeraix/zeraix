@@ -53,6 +53,13 @@ export interface ToolLLMConfig {
   model: string;
   apiKey: string;
   headers?: Record<string, string>;
+  /**
+   * Request-body fields the helper call spreads into its payload: the model family's spelling of "thinking off"
+   * (thinkingParams), computed here because the family rules live in the renderer. Without it a reasoning model
+   * thinks at length over a one-sentence rewrite — 328 s and 1,582 completion tokens for refine_question on
+   * qwen3.7-plus (2026-09-04), during which the turn appeared to hang.
+   */
+  body?: Record<string, unknown>;
 }
 
 /** Workspace directory entry (for the file tree). */
