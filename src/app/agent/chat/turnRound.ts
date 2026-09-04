@@ -1,6 +1,7 @@
 import { countMessagesTokens, countTokens } from "@/lib/ai/tokenizer";
 import { logContextDiag, logToolCall, isUsageLogEnabledSync } from "@/lib/ai/usageLog";
 import { resolveContextWindow, type ResolvedModel } from "@/lib/ai/models";
+import { getContextBudgetK } from "@/lib/ai/contextBudget";
 import { sanitizeToolCallArguments } from "@/lib/ai/toolArgs";
 import { useAgentChatStore } from "@/store/agentChatStore";
 import { prepareWire, type WireSteps } from "@/lib/agent/contextManager";
@@ -19,6 +20,7 @@ import type { createChatRequest } from "./chatRequest";
 import type { RuntimeBoundary } from "@/lib/agent/runtimeBoundary";
 import { describeContext } from "./contextDiag";
 import { capToolOutput } from "./compress";
+import { resultCeilingTokens } from "./contextCompress";
 import { phaseSummaryText, thinkingProcessText } from "./wireHelpers";
 import { groupParallelCalls, resolveToolCalls, type ResolvedCall } from "./sendPrep";
 import { isGoalActive, recordEvidence, type GoalState } from "./goalState";
@@ -164,6 +166,10 @@ export function createRoundRunner(deps: RoundRunnerDeps) {
         acceptsImages: !!activeModel?.multimodal,
         sendReasoningContext: sendReasoningContext(),
         modelId: activeModel?.model,
+        resultCeilingTokens: resultCeilingTokens(
+          activeModel?.contextWindow ?? resolveContextWindow(activeModel?.model ?? ""),
+          getContextBudgetK(),
+        ),
       },
       steps: wireSteps,
       onImagesStripped: (modelId) =>

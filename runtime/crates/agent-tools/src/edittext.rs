@@ -207,8 +207,9 @@ enum Op<'a> {
 
 /// Longest-common-subsequence diff.
 ///
-/// Quadratic in the number of lines, which is fine for the sizes this sees: the tools already refuse files
-/// above `MAX_READ_BYTES`, and a diff is only produced for a file the model just wrote.
+/// Quadratic in the number of lines, which is fine for the sizes this sees: a diff is only produced for a
+/// file the model just wrote, and a model writes files a few thousand lines long at most. (`read_file` no
+/// longer caps what it reads, but reading is not what gets diffed.)
 fn diff_ops<'a>(a: &[&'a str], b: &[&'a str]) -> Vec<Op<'a>> {
     let (n, m) = (a.len(), b.len());
     // lcs[i][j] = length of the LCS of a[i..] and b[j..]

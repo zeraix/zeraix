@@ -51,6 +51,15 @@ export interface WireModelContext {
   sendReasoningContext: boolean;
   /** For the log line when images are stripped; not used in any decision. */
   modelId?: string;
+  /**
+   * The most tokens one tool result may occupy on the wire; 0 or undefined for no ceiling.
+   *
+   * Resolved by the caller from the model's window and the working-set budget
+   * (contextCompress.resultCeilingTokens). Carried as a number rather than as the model, so a runtime that
+   * decides this elsewhere — the Rust context runtime, or a read_file that spills oversized results to disk
+   * and reports their shape — passes its own figure and nothing in this module changes.
+   */
+  resultCeilingTokens?: number;
 }
 
 /**
@@ -62,7 +71,7 @@ export interface WireModelContext {
  * the ORDER can be asserted independently of what any individual step does.
  */
 export interface WireSteps {
-  buildWireContext: (messages: ApiMsg[], compaction: unknown) => ApiMsg[];
+  buildWireContext: (messages: ApiMsg[], compaction: unknown, resultCeilingTokens?: number) => ApiMsg[];
   sanitizeToolCallPairs: (messages: ApiMsg[]) => ApiMsg[];
   materializeReminders: (messages: ApiMsg[]) => ApiMsg[];
   stripWireMetadata: (messages: ApiMsg[]) => ApiMsg[];
@@ -108,7 +117,7 @@ export function prepareWire(
   // Compaction first, and tool-call pairing repaired on the way out: an assistant.tool_calls whose result is
   // missing makes the provider reject the entire conversation, which is how a turn interrupted by a crash
   // used to become an unreopenable one.
-  let wire = steps.sanitizeToolCallPairs(steps.buildWireContext(convo, compaction));
+  let wire = steps.sanitizeToolCallPairs(steps.buildWireContext(convo, compaction, model.resultCeilingTokens));
   // Fold each turn's <system-reminder> block into its content — on this outgoing copy only, never on the
   // buffer or on disk.
   wire = steps.materializeReminders(wire);

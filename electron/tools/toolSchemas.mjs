@@ -7,7 +7,6 @@
  *
  * Executing a tool still lives in aiToolkit. This file is declarations only.
  */
-const READ_DEFAULT_MAX_LINES = 2000; // mirrors aiToolkit's default; schemas are declarations, so this must not import it back
 const str = (description) => ({ type: "string", description });
 const bool = (description) => ({ type: "boolean", description });
 const num = (description) => ({ type: "number", description });
@@ -20,10 +19,10 @@ const fn = (name, description, properties, required) => ({
 
 export const TOOLS = [
   fn("read_file",
-     `Read the UTF-8 text content of a file. Small files come back whole. For a large file, read the slice you actually need via offset/limit instead of pulling in the entire file — use search_in_files first to find the line you want, then read around it. The result says which lines you got and whether more remain (up to ${READ_DEFAULT_MAX_LINES} lines per call by default).`,
+     "Read the UTF-8 text content of a file. Without offset/limit the whole file comes back, whatever its size. To read only part of a large file, pass offset/limit — use search_in_files first to find the line you want, then read around it; the result then says which lines you got and whether more remain.",
      { path: str("File path."),
        offset: num("First line to read, 1-based. Defaults to 1 (start of file)."),
-       limit: num(`How many lines to read from offset. Defaults to ${READ_DEFAULT_MAX_LINES}.`) },
+       limit: num("How many lines to read from offset. Omit to read to the end of the file.") },
      ["path"]),
   fn("open_path",
      "Open a file or folder in the host's DEFAULT APPLICATION for the user to see (view an image, play a video/audio, open a document/PDF, reveal a folder). This runs on the host machine. Use THIS — not run_command — to open/show/play a file: run_command may be running inside an isolated headless Linux sandbox with no GUI, so it cannot launch the user's apps. Path is resolved inside the working directory.",

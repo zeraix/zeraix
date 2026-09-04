@@ -31,17 +31,14 @@ pub use registry::ToolRegistry;
 pub use schema::{validate, ValidationMode, Violation};
 pub use tool::{ExecutionMode, RiskLevel, Tool, ToolContext, ToolMetadata, ToolOutput};
 
-/// Read cap for a single file. Mirrors `MAX_READ_BYTES` in aiToolkit.mjs.
-pub const MAX_READ_BYTES: u64 = 2 * 1024 * 1024;
-/// Lines returned by `read_file` when no explicit limit is given. Mirrors `READ_DEFAULT_MAX_LINES`.
+/// Per-file ceiling for `search_in_files`: anything larger is skipped as a binary or a generated blob
+/// rather than searched. Mirrors the guard the JS handler had.
 ///
-/// This constant is load-bearing beyond this crate: `contextCompress.ts` mirrors it again in the
-/// renderer to compute read spans for stale-read dedup, with a comment saying it cannot be shared
-/// across the process boundary. When the context runtime migrates (decision D4), that third copy
-/// collapses into this one.
-pub const READ_DEFAULT_MAX_LINES: usize = 2000;
-/// Per-call character ceiling for `read_file`; a line cap cannot bound a minified single-line file.
-pub const READ_MAX_CHARS: usize = 200_000;
+/// Not a `read_file` limit. `read_file` has none — no byte cap, no character trim, no default line
+/// window (2026-09-04) — and reads whatever the model names, whole. The two tools answer different
+/// questions: a search sweeps every file and has to stay cheap per file, a read is one file the model
+/// chose and asked for in full.
+pub const MAX_READ_BYTES: u64 = 2 * 1024 * 1024;
 /// `search_*` result cap.
 pub const MAX_MATCHES: usize = 200;
 /// `list_directory` result cap. A bare listing is cheaper per row than a search hit, so it runs higher.

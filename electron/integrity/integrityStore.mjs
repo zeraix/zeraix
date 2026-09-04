@@ -146,6 +146,40 @@ export function decryptEnvelope(env) {
   return JSON.parse(pt.toString("utf8"));
 }
 
+// ── AES-256-GCM over raw bytes, for files too large for the JSON envelope ─────────────
+/**
+ * A 100 MB tool result through encryptJson costs a JSON string of it, a base64 copy, and a JSON parse on the
+ * way back — 1.6 s and three transient copies, measured. This is the same cipher and the same master key
+ * with none of that: a fixed header, then the ciphertext of the bytes as given.
+ *
+ *   magic "ZXB1" (4) | iv (12) | auth tag (16) | ciphertext
+ */
+const BYTES_MAGIC = Buffer.from("ZXB1", "latin1");
+const BYTES_HEADER = 4 + 12 + 16;
+
+/** Encrypt a Buffer. Null when encryption is disabled, so the caller writes plaintext, as it does for the envelope. */
+export function encryptBytes(plain) {
+  if (!isEncryptionEnabled()) return null;
+  const iv = randomBytes(12);
+  const cipher = createCipheriv("aes-256-gcm", MASTER_KEY, iv);
+  const ct = Buffer.concat([cipher.update(plain), cipher.final()]);
+  return Buffer.concat([BYTES_MAGIC, iv, cipher.getAuthTag(), ct]);
+}
+
+/** Whether a Buffer starts the way encryptBytes writes it. */
+export function isEncryptedBytes(buf) {
+  return Buffer.isBuffer(buf) && buf.length >= BYTES_HEADER && buf.subarray(0, 4).equals(BYTES_MAGIC);
+}
+
+/** Decrypt what encryptBytes produced. Throws on a missing key or a tag mismatch, like decryptEnvelope. */
+export function decryptBytes(buf) {
+  if (!MASTER_KEY) throw new Error("Encryption key unavailable, cannot decrypt");
+  if (!isEncryptedBytes(buf)) throw new Error("not an encrypted byte stream");
+  const decipher = createDecipheriv("aes-256-gcm", MASTER_KEY, buf.subarray(4, 16));
+  decipher.setAuthTag(buf.subarray(16, BYTES_HEADER));
+  return Buffer.concat([decipher.update(buf.subarray(BYTES_HEADER)), decipher.final()]);
+}
+
 /**
  * Derive a separate 32B raw key for SQLCipher (whole-database encryption of the memory store), returned as a hex string.
  * Derived from the master key via HKDF, keeping it distinct from encryptJson's direct use of the master key

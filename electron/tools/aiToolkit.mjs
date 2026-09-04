@@ -133,8 +133,7 @@ function isAppKillingCommand(cmd) {
 }
 
 // ── Limits / defaults ────────────────────────────────────────────────────────
-const MAX_READ_BYTES = 2 * 1024 * 1024; // read_file per-file cap: 2MB
-export const READ_DEFAULT_MAX_LINES = 2000; // read_file: lines returned when no explicit limit is given
+const MAX_READ_BYTES = 2 * 1024 * 1024; // editor open cap (wsReadFile). The read_file TOOL has no size limit — see read_file.rs.
 const CMD_TIMEOUT_MS = 60_000; // run_command timeout
 /**
  * The ceiling for commands whose job IS to fetch over the network.

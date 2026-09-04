@@ -19,7 +19,7 @@
  */
 import { foldReminders, renderSnapshot } from "./reminders";
 import type { ApiMsg, ContentPart } from "./types";
-import { countMessagesTokens } from "@/lib/ai/tokenizer";
+import { countMessagesTokens, countTokens } from "@/lib/ai/tokenizer";
 import { resolveToolCall } from "@/lib/ai/toolRouter";
 
 // ── Tunable parameters ──────────────────────────────────────────────────────────────────
@@ -63,22 +63,22 @@ export function resolveHybridBudget(
 const READ_TOOLS = new Set(["read_file"]);
 
 /**
- * `read_file` returns a 1-based inclusive LINE SPAN, not the whole file: it takes `offset` (1-based
- * first line, default 1) and `limit` (line count, default READ_DEFAULT_MAX_LINES), returning
- * [offset, offset + limit - 1]. Dedup therefore has to compare spans, not just paths — an agent
- * walking a large file emits reads like {offset:460,limit:90} / {offset:550,limit:90} /
- * {offset:640,limit:50}, which are DISJOINT. Treating a later one as superseding an earlier one
- * (as keying on path alone does) would stub live content the model still needs.
+ * `read_file` returns a 1-based inclusive LINE SPAN: it takes `offset` (1-based first line, default 1)
+ * and `limit` (line count; absent = to the end of the file), returning [offset, offset + limit - 1].
+ * Dedup therefore has to compare spans, not just paths — an agent walking a large file emits reads
+ * like {offset:460,limit:90} / {offset:550,limit:90} / {offset:640,limit:50}, which are DISJOINT.
+ * Treating a later one as superseding an earlier one (as keying on path alone does) would stub live
+ * content the model still needs.
  *
- * Note a bare `read_file {path}` is NOT a whole-file read — it is [1, READ_DEFAULT_MAX_LINES], so on
- * a longer file it does not cover later chunks either.
+ * A bare `read_file {path}` IS a whole-file read — the tool has had no default line window since
+ * 2026-09-04 — so its span is [1, ∞) and it covers every chunk read of the same path. (Before that it
+ * was [1, 2000] and covered nothing past line 2000; the note in read_file.rs describes the pairing.)
  *
- * Mirrors `read_file` in electron/tools/aiToolkit.mjs (different process, so the constant cannot be
- * shared) — keep this in sync with READ_DEFAULT_MAX_LINES there.
+ * Mirrors `read_file` in runtime/crates/agent-tools/src/tools/read_file.rs (different process, so
+ * nothing can be shared) — keep the argument semantics in sync with it.
  */
-const READ_DEFAULT_MAX_LINES = 2000;
 
-/** A 1-based, inclusive line span returned by one read call. */
+/** A 1-based, inclusive line span returned by one read call. `end` is Infinity for a read to the end of the file. */
 export interface ReadRange {
   start: number;
   end: number;
@@ -87,8 +87,9 @@ export interface ReadRange {
 /** Resolve a read call's arguments to the line span it actually returned. */
 function readRange(args: Record<string, unknown>): ReadRange {
   const start = Math.max(1, Math.floor(Number(args.offset) || 1));
-  const count = Math.max(1, Math.floor(Number(args.limit) || READ_DEFAULT_MAX_LINES));
-  return { start, end: start + count - 1 };
+  // `Number(v) || x` treats 0 and NaN as absent, exactly as the tool does.
+  const count = Number(args.limit) || Infinity;
+  return { start, end: Number.isFinite(count) ? start + Math.max(1, Math.floor(count)) - 1 : Infinity };
 }
 
 /**
@@ -263,6 +264,95 @@ function estTokens(messages: ApiMsg[]): number {
   return countMessagesTokens(messages);
 }
 
+// ── Oversized results (wire-only) ─────────────────────────────────────────────────
+
+/**
+ * The most tokens ONE tool result may occupy on the wire: the compaction target.
+ *
+ * `read_file` no longer caps what it returns (2026-09-04), so a result can be larger than any model's
+ * window — a 100 MB file is about 25 million tokens. Such a result stays in the transcript and on disk
+ * and is withheld from the request, replaced by a note saying what it was and how to read it in pieces.
+ * The threshold is the compaction target rather than the window because a single message larger than the
+ * target can never be compacted under it: compaction summarises what precedes the live rounds, and the
+ * result is in a live round. Sending it would fail the turn after uploading all of it.
+ *
+ * One number for the planner, the wire builder and the context bar, so the three agree on what the model
+ * sees. 0 means no ceiling.
+ */
+export function resultCeilingTokens(contextWindow: number, budgetK: number): number {
+  const budget = resolveHybridBudget(contextWindow, budgetK);
+  return Math.floor(budget?.targetTokens ?? contextWindow * COMPACT_TARGET_PCT);
+}
+
+/**
+ * What the withholding rule knows about a result.
+ *
+ * Measured from the text here. A runtime that spills an oversized result to disk instead of returning it
+ * (the Rust read_file could, handing back a handle and the head) would report these numbers itself, and
+ * the rule and its note below would not change: neither needs the text.
+ */
+export interface ResultShape {
+  chars: number;
+  lines: number;
+  /** An estimate — the sampled estimator, for a text this long. */
+  tokens: number;
+}
+
+/** No cache: counting the newlines of a flat 100 MB string is ~20 ms, and caching would pin the string. */
+export function measureResult(text: string): ResultShape {
+  let lines = 0;
+  for (let i = text.indexOf("\n"); i >= 0; i = text.indexOf("\n", i + 1)) lines++;
+  if (text.length > 0 && !text.endsWith("\n")) lines++;
+  return { chars: text.length, lines, tokens: countTokens(text) };
+}
+
+/**
+ * The note the model gets instead of an oversized result. Model-facing, so not localised.
+ *
+ * It says what ran, how big the answer was, that nothing failed or was cut, and — for read_file, the tool
+ * this exists for — how to get at the content in pieces. A Rust port reproduces this string byte for byte,
+ * the way read_file.rs mirrors its own note.
+ */
+export function oversizedResultStub(call: { name: string; path?: string }, shape: ResultShape, ceiling: number): string {
+  const n = (v: number) => Math.round(v).toLocaleString("en-US");
+  const what = call.path ? `${call.name} ${call.path}` : call.name;
+  const how =
+    call.name === "read_file"
+      ? `Read the part you need with read_file offset/limit (the file has ${n(shape.lines)} lines; for example offset:1, limit:2000), or find the lines first with search_in_files.`
+      : "Ask for less: a narrower range, a filter, or a search.";
+  return (
+    `[tool result withheld: ${what} returned ${n(shape.lines)} lines, ${n(shape.chars)} characters, about ${n(shape.tokens)} tokens — ` +
+    `more than the ${n(ceiling)} tokens one result may occupy in this model's context. The call succeeded and nothing was ` +
+    `truncated; the full result is kept in the conversation. ${how}]`
+  );
+}
+
+/** A character is never more than this many tokens, so a shorter result cannot exceed the ceiling and is not measured. */
+const MAX_TOKENS_PER_CHAR = 4;
+
+/**
+ * Replace every tool result over `ceiling` tokens with its note. Pure; the same array back when nothing
+ * qualifies, which is every conversation that has no oversized result in it.
+ */
+export function withholdOversizedResults(
+  messages: ApiMsg[],
+  calls: Map<string, { name: string; path: string }>,
+  ceiling: number,
+): ApiMsg[] {
+  if (!(ceiling > 0)) return messages;
+  let out: ApiMsg[] | null = null;
+  for (let i = 0; i < messages.length; i++) {
+    const m = messages[i];
+    if (m.role !== "tool" || typeof m.content !== "string" || m.content.length * MAX_TOKENS_PER_CHAR <= ceiling) continue;
+    const shape = measureResult(m.content);
+    if (shape.tokens <= ceiling) continue;
+    const info = calls.get(m.tool_call_id);
+    if (!out) out = messages.slice();
+    out[i] = { ...m, content: oversizedResultStub({ name: info?.name ?? "tool", path: info?.path }, shape, ceiling) };
+  }
+  return out ?? messages;
+}
+
 /**
  * Plan a compaction: called at the "start of each turn". Returning null means no compression is needed (usage hasn't crossed the threshold) — in which case the compaction state should be cleared,
  * so the wire view == the full conversation, keeping the prefix cache most stable. When a plan is returned:
@@ -288,17 +378,23 @@ export function planCompaction(
   },
 ): { plan: CompactionPlan; summarizeMessages: ApiMsg[] } | null {
   const trigger = opts.triggerTokens ?? opts.contextWindow * COMPACT_TRIGGER_PCT;
+  const target = opts.targetTokens ?? opts.contextWindow * COMPACT_TARGET_PCT;
+  // Oversized results go first: the planner has to measure the wire the model will actually get, and a
+  // result withheld from it must not count toward the trigger either — or one giant read would trip
+  // compaction on every turn for the rest of the conversation. Same ceiling as buildWireContext.
+  const calls = indexCalls(messages);
+  const withheld = withholdOversizedResults(messages, calls, Math.floor(target));
+  const currentTokens = withheld === messages ? opts.currentTokens : estTokens(withheld);
+  messages = withheld;
   // force: manual "compress now", ignoring the threshold and compressing as hard as possible (dedup + summarize the history before the last KEEP_TAIL_TURNS).
-  if (!opts.force && opts.currentTokens <= trigger) return null;
+  if (!opts.force && currentTokens <= trigger) return null;
 
   const frozenLen = messages.length;
-  const calls = indexCalls(messages);
   const hasSystem = messages[0]?.role === "system";
   const bodyStart = hasSystem ? 1 : 0;
 
   // First do dedup only, and see if that's already enough to drop below the target line.
   const dedupOnly = computeStaleStubs(messages, calls, bodyStart);
-  const target = opts.targetTokens ?? opts.contextWindow * COMPACT_TARGET_PCT;
   const afterDedup = estTokens(applyStubs(messages, dedupOnly));
   if (!opts.force && afterDedup <= target) {
     return {
@@ -405,7 +501,9 @@ function describeCall(rawName: string, argsJson: string): string {
         : "";
   if (READ_TOOLS.has(name) && p) {
     const r = readRange(args);
-    return `${name} ${p} lines ${r.start}-${r.end}`;
+    // A whole-file read needs no span; a read to the end from an offset names where it started.
+    if (Number.isFinite(r.end)) return `${name} ${p} lines ${r.start}-${r.end}`;
+    return r.start > 1 ? `${name} ${p} lines ${r.start}-end` : `${name} ${p}`;
   }
   if (p) return `${name} ${p}`;
   const firstStr = Object.values(args).find((v) => typeof v === "string" && v) as string | undefined;
@@ -669,11 +767,15 @@ function foldSummary(summaryText: string, kept: ApiMsg[], snapshot?: string): Ap
 export function buildWireContext(
   messages: ApiMsg[],
   state: CompactionState | null | undefined,
+  /** The most tokens one tool result may occupy (resultCeilingTokens); 0 or omitted for no ceiling. */
+  resultCeiling = 0,
 ): ApiMsg[] {
-  // Both applied compaction or not. trimEditDiffs drops an echo that duplicates the assistant's own
-  // tool-call arguments; applyReleases drops raw tool output whose round is over. Order matters only
-  // in that releases win — a released result is already reduced to its descriptor.
-  const trimmed = trimEditDiffs(messages, indexCalls(messages));
+  // Applied compaction or not. Oversized results are withheld before anything else looks at the array
+  // (the planner did the same, with the same ceiling). trimEditDiffs drops an echo that duplicates the
+  // assistant's own tool-call arguments; applyReleases drops raw tool output whose round is over. Order
+  // matters only in that releases win — a released result is already reduced to its descriptor.
+  const calls = indexCalls(messages);
+  const trimmed = trimEditDiffs(withholdOversizedResults(messages, calls, resultCeiling), calls);
   const withResults = applyReleases(trimmed, computeReleasedResults(trimmed));
   const base = releaseCallPayloads(withResults);
   if (!state) return base;

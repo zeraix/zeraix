@@ -284,7 +284,7 @@ function simulateOne(input: SimulationInput, cand: BudgetCandidate): BudgetRepor
     // so state stays null and the next turn starts from an uncompressed prefix, exactly like production.
 
     // Peak wire = the heaviest point of the turn: this turn's full tool spew under the frozen plan.
-    const wire = buildWireContext(endSnap, state);
+    const wire = buildWireContext(endSnap, state, Math.floor(cand.targetTokens ?? contextWindow * COMPACT_TARGET_PCT));
     const peakWireTokens = countMessagesTokens(wire) + schemaTokens;
 
     // Prefix-cache cold write: did the frozen prefix (summary + stubs + coversCount) change?

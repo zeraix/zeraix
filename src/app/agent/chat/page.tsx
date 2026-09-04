@@ -54,6 +54,7 @@ import {
 } from "@/constants/Agent";
 import { migrateLegacyAgentStorage, putStorage } from "@/lib/ai/agentStorage";
 import { hydrateAppConfig } from "@/lib/ai/appConfig";
+import { getContextBudgetK } from "@/lib/ai/contextBudget";
 import { notifyAgentError } from "@/lib/ai/agentNotify";
 import { useAgentChatStore } from "@/store/agentChatStore";
 import { enabledSkills, loadInstalled } from "@/lib/ai/skills/store";
@@ -66,6 +67,7 @@ import {
   buildWireContext,
   sanitizeToolCallPairs,
   deserializeCompaction,
+  resultCeilingTokens,
   type CompactionState,
 } from "./contextCompress";
 import {
@@ -202,7 +204,8 @@ const afterPaint = () =>
  * the object every round would allocate for nothing.
  */
 const WIRE_STEPS: WireSteps = {
-  buildWireContext: (messages, compaction) => buildWireContext(messages, compaction as CompactionState | null),
+  buildWireContext: (messages, compaction, ceiling) =>
+    buildWireContext(messages, compaction as CompactionState | null, ceiling),
   sanitizeToolCallPairs,
   materializeReminders,
   stripWireMetadata,
@@ -2080,6 +2083,10 @@ function ChatAgent() {
             acceptsImages: !!activeModel?.multimodal,
             sendReasoningContext: sendReasoningContext(),
             modelId: activeModel?.model,
+            resultCeilingTokens: resultCeilingTokens(
+              activeModel?.contextWindow ?? resolveContextWindow(activeModel?.model ?? ""),
+              getContextBudgetK(),
+            ),
           },
           steps: WIRE_STEPS,
         });

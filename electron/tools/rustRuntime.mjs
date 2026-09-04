@@ -333,13 +333,27 @@ function teardown(reason) {
   }
 }
 
-/** Parse whatever complete lines have arrived and settle the calls they answer. */
+/**
+ * Parse whatever complete lines have arrived and settle the calls they answer.
+ *
+ * Only the chunk that just arrived can hold the newline that completes a line, so that is the only text
+ * scanned; the backlog waits as a list of chunks and is joined once, when a newline actually shows up. The
+ * earlier version appended every chunk to one string and searched it from the start each time, which is
+ * quadratic in the length of a line — 12 s of the main process for a 32 MB result, measured — and a
+ * `read_file` result is as long as the file, with nothing capping it (2026-09-04).
+ */
 function onData(s, chunk) {
-  s.buffer += chunk;
+  if (!chunk.includes("\n")) {
+    s.partial.push(chunk);
+    return;
+  }
+  const text = s.partial.length ? s.partial.join("") + chunk : chunk;
+  s.partial.length = 0;
+  let from = 0;
   let idx;
-  while ((idx = s.buffer.indexOf("\n")) >= 0) {
-    const line = s.buffer.slice(0, idx).trim();
-    s.buffer = s.buffer.slice(idx + 1);
+  while ((idx = text.indexOf("\n", from)) >= 0) {
+    const line = text.slice(from, idx).trim();
+    from = idx + 1;
     if (!line) continue;
     let msg;
     try {
@@ -383,6 +397,7 @@ function onData(s, chunk) {
     if (msg.error) entry.reject(Object.assign(new Error(msg.error.message ?? "runtime error"), { runtimeError: msg.error }));
     else entry.resolve(msg.result);
   }
+  if (from < text.length) s.partial.push(text.slice(from));
 }
 
 /**
@@ -632,7 +647,8 @@ async function ensureStarted() {
   const s = {
     child,
     pending: new Map(),
-    buffer: "",
+    /// Chunks of an incomplete stdout line, joined only when the newline that ends it arrives (see onData).
+    partial: [],
     tools: new Set(),
     /// Of `tools`, those that change something — see tryRunTool's catch.
     mutatingTools: new Set(),

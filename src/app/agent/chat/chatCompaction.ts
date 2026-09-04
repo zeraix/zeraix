@@ -32,6 +32,7 @@ import {
   compactionSavings,
   planCompaction,
   resolveHybridBudget,
+  resultCeilingTokens,
   serializeCompaction,
   MANUAL_COMPACT_MIN_PCT,
   MAX_SUMMARY_REUSE,
@@ -267,7 +268,7 @@ export function createCompaction(deps: CompactionDeps): CompactionApi {
     // Refresh the progress bar immediately: estimate usage from the post-compaction wire size, without waiting for the next
     // request. Only meaningful for the conversation actually on screen — a background round must not move the active view's bar.
     if (!targetConvId || targetConvId === convIdRef.current) {
-      setCtxTokens(countMessagesTokens(buildWireContext(full, next)));
+      setCtxTokens(countMessagesTokens(buildWireContext(full, next, resultCeilingTokens(cw, getContextBudgetK()))));
     }
     return next;
   };
