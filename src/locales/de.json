@@ -976,6 +976,8 @@
   "skills.save": "Speichern",
   "skills.cancel": "Abbrechen",
   "skills.badge.custom": "Eigene",
+  "skills.badge.builtin": "Integriert",
+  "skills.builtinHint": "Wird mit der App ausgeliefert und kann nicht deinstalliert werden – schalte ihn aus, wenn du ihn nicht brauchst.",
   "skills.detail.open": "Details zu {name} anzeigen",
   "skills.detail.instructions": "Anweisungen",
   "skills.detail.tools": "Empfohlene Werkzeuge",

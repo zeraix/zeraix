@@ -133,6 +133,10 @@ extraResources:
   # Staged straight from the docker build context so there is ONE copy of the file in the repo and the two cannot drift.
   - from: sandbox/qemu/rapidocr_v6_api.py
     to: ocr/rapidocr_v6_api.py
+  # Helper scripts of the built-in document skills (docx / xlsx / pptx / pdf). Plain Python files: the sandbox binds
+  # this folder read-only at /mnt/skills (electron/tools/builtinSkills.mjs), and on the host the skill text points here.
+  - from: resources/skills
+    to: skills
   # The Rust Agent Runtime sidecar, staged by scripts/build-rust-runtime.mjs. It lands at
   # Contents/Resources/runtime/ (mac) or resources\runtime\ (win), which is the FIRST path
   # binaryPath() in electron/tools/rustRuntime.mjs probes — keep the two in step or the packaged app

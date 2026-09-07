@@ -976,6 +976,8 @@
   "skills.save": "保存",
   "skills.cancel": "キャンセル",
   "skills.badge.custom": "カスタム",
+  "skills.badge.builtin": "組み込み",
+  "skills.builtinHint": "アプリに組み込まれているためアンインストールできません。不要な場合はオフにしてください。",
   "skills.detail.open": "「{name}」の詳細を表示",
   "skills.detail.instructions": "指示内容",
   "skills.detail.tools": "推奨ツール",

@@ -976,6 +976,8 @@
   "skills.save": "Enregistrer",
   "skills.cancel": "Annuler",
   "skills.badge.custom": "Personnalisée",
+  "skills.badge.builtin": "Intégrée",
+  "skills.builtinHint": "Fournie avec l'application, elle ne peut pas être désinstallée : désactivez-la si vous n'en voulez pas.",
   "skills.detail.open": "Voir les détails de {name}",
   "skills.detail.instructions": "Instructions",
   "skills.detail.tools": "Outils recommandés",

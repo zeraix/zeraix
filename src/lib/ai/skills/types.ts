@@ -49,8 +49,9 @@ export interface InstalledSkill extends Skill {
   installedAt: number;
   /** Whether it is enabled in the current conversation (= whether it enters the chat config). */
   enabled: boolean;
-  /** Source: "user" = a custom skill uploaded by the user (editable); omitted = downloaded from the marketplace. */
-  source?: "user";
+  /** Source: "user" = a custom skill uploaded by the user (editable); "builtin" = ships with the app (can be switched
+   *  off, never uninstalled — see documentSkills.ts); omitted = downloaded from the marketplace. */
+  source?: "user" | "builtin";
   /** The raw Markdown of a user skill (frontmatter + body) — the source of truth when editing; can be reloaded into the editor and re-parsed. */
   sourceMarkdown?: string;
 }

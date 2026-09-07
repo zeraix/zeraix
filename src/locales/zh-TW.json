@@ -976,6 +976,8 @@
   "skills.save": "儲存",
   "skills.cancel": "取消",
   "skills.badge.custom": "自訂",
+  "skills.badge.builtin": "內建",
+  "skills.builtinHint": "隨應用程式內建，無法解除安裝——不需要時可將其關閉。",
   "skills.detail.open": "檢視「{name}」的詳細資訊",
   "skills.detail.instructions": "指令內容",
   "skills.detail.tools": "推薦工具",

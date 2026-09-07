@@ -95,6 +95,7 @@ function SkillCard({
   description,
   audienceLabel,
   customLabel,
+  customTitle,
   onOpen,
   openLabel,
   children,
@@ -104,6 +105,8 @@ function SkillCard({
   description: string;
   audienceLabel?: string;
   customLabel?: string;
+  /** Tooltip for customLabel (the built-in badge explains why there is no uninstall button). */
+  customTitle?: string;
   onOpen?: () => void;
   openLabel?: string;
   children?: React.ReactNode;
@@ -144,6 +147,7 @@ function SkillCard({
               <span
                 className="rounded-full px-1.5 py-0.5 text-[10px] font-medium"
                 style={{ backgroundColor: ACCENT_TINT, color: ACCENT }}
+                title={customTitle}
               >
                 {customLabel}
               </span>
@@ -515,7 +519,14 @@ export default function AgentSkillsPage() {
                     version={s.version}
                     description={s.description}
                     audienceLabel={audienceLabel(s.audience)}
-                    customLabel={s.source === "user" ? t("skills.badge.custom") : undefined}
+                    customLabel={
+                      s.source === "user"
+                        ? t("skills.badge.custom")
+                        : s.source === "builtin"
+                          ? t("skills.badge.builtin")
+                          : undefined
+                    }
+                    customTitle={s.source === "builtin" ? t("skills.builtinHint") : undefined}
                     onOpen={() => openDetail(s)}
                     openLabel={t("skills.detail.open", { name: s.name })}
                   >
@@ -536,15 +547,18 @@ export default function AgentSkillsPage() {
                           <Pencil className="size-4" />
                         </button>
                       )}
-                      <button
-                        type="button"
-                        onClick={() => onRemove(s.id)}
-                        aria-label={t("skills.action.uninstall")}
-                        title={t("skills.action.uninstall")}
-                        className="flex size-6 items-center justify-center rounded-md text-muted-foreground transition hover:text-destructive"
-                      >
-                        <Trash2 className="size-4" />
-                      </button>
+                      {/* Built-ins ship with the app: they can be switched off, never uninstalled (store.ts). */}
+                      {s.source !== "builtin" && (
+                        <button
+                          type="button"
+                          onClick={() => onRemove(s.id)}
+                          aria-label={t("skills.action.uninstall")}
+                          title={t("skills.action.uninstall")}
+                          className="flex size-6 items-center justify-center rounded-md text-muted-foreground transition hover:text-destructive"
+                        >
+                          <Trash2 className="size-4" />
+                        </button>
+                      )}
                     </div>
                   </SkillCard>
                 ))}
@@ -580,6 +594,15 @@ export default function AgentSkillsPage() {
                     {t("skills.badge.custom")}
                   </span>
                 )}
+                {"source" in detail && detail.source === "builtin" && (
+                  <span
+                    className="rounded-full px-1.5 py-0.5 text-[10px] font-medium"
+                    style={{ backgroundColor: ACCENT_TINT, color: ACCENT }}
+                    title={t("skills.builtinHint")}
+                  >
+                    {t("skills.badge.builtin")}
+                  </span>
+                )}
                 {audienceLabel(detail.audience) && (
                   <span className="rounded-full bg-surface-muted px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground">
                     {audienceLabel(detail.audience)}
@@ -604,6 +627,10 @@ export default function AgentSkillsPage() {
                   </span>
                 )}
               </div>
+
+              {"source" in detail && detail.source === "builtin" && (
+                <p className="text-[11px] text-muted-foreground">{t("skills.builtinHint")}</p>
+              )}
 
               {(detailBody?.allowedTools ?? []).length > 0 && (
                 <div className="text-[11px] text-muted-foreground">

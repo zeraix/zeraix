@@ -979,6 +979,8 @@
   "skills.save": "保存",
   "skills.cancel": "取消",
   "skills.badge.custom": "自定义",
+  "skills.badge.builtin": "内置",
+  "skills.builtinHint": "随应用内置，无法卸载——不需要时可将其关闭。",
   "skills.detail.open": "查看「{name}」的详情",
   "skills.detail.instructions": "指令内容",
   "skills.detail.tools": "推荐工具",

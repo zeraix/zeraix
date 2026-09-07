@@ -976,6 +976,8 @@
   "skills.save": "Save",
   "skills.cancel": "Cancel",
   "skills.badge.custom": "Custom",
+  "skills.badge.builtin": "Built-in",
+  "skills.builtinHint": "Ships with the app and cannot be uninstalled — switch it off if you don't want it offered.",
   "skills.detail.open": "View details for {name}",
   "skills.detail.instructions": "Instructions",
   "skills.detail.tools": "Recommended tools",

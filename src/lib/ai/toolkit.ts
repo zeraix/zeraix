@@ -37,6 +37,8 @@ interface AiToolsBridge {
   setWorkingDir(dir: string): Promise<string>;
   chooseWorkingDir(): Promise<string | null>;
   defaultWorkingDir(): Promise<string>;
+  /** Folder of the built-in document skills' helper scripts: on the host, and at its fixed sandbox mount point. */
+  skillsDir?(): Promise<{ host: string; sandbox: string }>;
   getPathForFile?(file: File): string;
   saveAttachment?(payload: { name: string; srcPath?: string; url?: string; bytes?: ArrayBuffer; subdir?: string }): Promise<string>;
   wsReadDir?(relPath?: string): Promise<WsEntry[]>;
@@ -186,6 +188,16 @@ export function chooseWorkingDir(): Promise<string | null> {
 /** Everyday mode: create and set a default working directory under the install directory (used when the user hasn't picked a folder), returning its absolute path. */
 export function defaultWorkingDir(): Promise<string> {
   return bridge().defaultWorkingDir();
+}
+
+/**
+ * Where the built-in document skills' helper scripts are (see electron/tools/builtinSkills.mjs). Rejects when the
+ * preload predates the bridge, which callers treat as "unknown" rather than as an error.
+ */
+export function skillsDir(): Promise<{ host: string; sandbox: string }> {
+  const b = bridge();
+  if (!b.skillsDir) return Promise.reject(new Error("skillsDir is unavailable (the preload version is too old)"));
+  return b.skillsDir();
 }
 /** Get the host's real path for a dropped / selected file (empty string if none). Used to persist efficiently by path, avoiding byte transfer.
  *  Must be called in the renderer with the original File object (Electron webUtils); returns an empty string in a non-Electron environment. */

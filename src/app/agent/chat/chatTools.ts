@@ -21,6 +21,8 @@
  */
 import { getSkillInstructions } from "@/lib/ai/skills/runtime";
 import { SANDBOX_TOOLBOX_SKILL } from "@/lib/ai/skills/builtin";
+import { isDocumentSkill, resolveSkillsDir } from "@/lib/ai/skills/documentSkills";
+import { skillsDir } from "@/lib/ai/toolkit";
 import type { InstalledSkill } from "@/lib/ai/skills/types";
 import { isSandboxEngine, type SandboxStatus } from "@/lib/ai/sandbox";
 import { capabilityAvailable, generate, imageErrorKey } from "@/lib/ai/generation";
@@ -155,14 +157,24 @@ export function createRendererTools(deps: RendererToolDeps): Record<string, Rend
   };
 
   // load_skill: return the full instructions of an enabled skill (progressive disclosure), fed back to the model; also show a bubble.
-  const loadSkill = (ctx: RunCtx, rawArgs: Record<string, unknown>): string => {
+  const loadSkill = async (ctx: RunCtx, rawArgs: Record<string, unknown>): Promise<string> => {
     const id = String(rawArgs.id ?? "");
-    const enabled = runtimeSkills();
+    let enabled = runtimeSkills();
     // The built-in toolbox is advertised in messages[0] unconditionally — it has to be, or the prompt prefix would differ per
     // install — so the model can legitimately ask for it. But its whole toolchain (imagemagick, ffmpeg, pandoc, OCR) lives in the
     // sandbox image, so handing over the instructions while running natively would send it off to call tools that do not exist.
     // Only resolve it while the sandbox is actually up.
     const sandboxUp = isSandboxEngine(sandboxStatusRef.current?.active);
+    // The built-in document skills name their helper-script folder through a placeholder: the folder sits at a fixed mount
+    // point inside the sandbox and at the real resources path on the host, and which one is valid depends on where commands
+    // run right now. Resolved here, at load time, so the text the model acts on names a path that exists for it. One IPC
+    // round-trip per load_skill; "unknown" (old preload, browser tab) leaves a visible marker rather than a wrong path.
+    if (isDocumentSkill(id)) {
+      const dirs = await skillsDir().catch(() => null);
+      enabled = enabled.map((s) =>
+        s.id === id ? { ...s, instructions: resolveSkillsDir(s.instructions, { sandboxUp, dirs }) } : s,
+      );
+    }
     const text =
       id === SANDBOX_TOOLBOX_SKILL.id && !sandboxUp
         ? `Skill not enabled: ${id} requires the Linux sandbox, which is not running right now (commands are executing directly on the host). ` +

@@ -976,6 +976,8 @@
   "skills.save": "Salva",
   "skills.cancel": "Annulla",
   "skills.badge.custom": "Personalizzata",
+  "skills.badge.builtin": "Integrata",
+  "skills.builtinHint": "Inclusa nell'app e non disinstallabile: disattivala se non la vuoi.",
   "skills.detail.open": "Vedi i dettagli di {name}",
   "skills.detail.instructions": "Istruzioni",
   "skills.detail.tools": "Strumenti consigliati",

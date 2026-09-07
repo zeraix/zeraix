@@ -42,6 +42,8 @@ contextBridge.exposeInMainWorld("aiTools", {
   stopProcess: (pid) => ipcRenderer.invoke("ai-tools:stop-process", pid),
   /** List current background services [{ pid, url, command }]. */
   listProcesses: () => ipcRenderer.invoke("ai-tools:list-processes"),
+  /** Folder of the built-in document skills' helper scripts: { host, sandbox } (see electron/tools/builtinSkills.mjs). */
+  skillsDir: () => ipcRenderer.invoke("ai-tools:skills-dir"),
   /** Subscribe to background-service start/stop events { type:'started'|'stopped', pid, url?, command? }; returns an unsubscribe function. */
   onServiceEvent: (cb) => {
     const handler = (_e, evt) => cb(evt);

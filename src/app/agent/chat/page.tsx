@@ -1250,7 +1250,7 @@ function ChatAgent() {
   // the "document / media processing toolbox" is automatically attached (so the model directly uses the tools preinstalled in the image, rather than suggesting a pip/apt install).
   // Built-in skills are not persisted to storage and do not appear in the skills panel; they are rebuilt on every send based on the sandbox status, taking effect immediately on ready/downgrade.
   const runtimeSkills = () => {
-    // The installed skills the user enabled + the enabled project skills (.claude/.cursor/.zeraix) + skills from installed plugins + conditionally-equipped built-in skills.
+    // The installed skills the user enabled (loadInstalled() already merges the built-in document skills, enabled unless switched off) + the enabled project skills (.claude/.cursor/.zeraix) + skills from installed plugins.
     const list = [...enabledSkills(installedSkillsRef.current), ...projectSkillsRef.current, ...pluginSkillsRef.current];
     // The built-in toolbox is NOT added here. messages[0] lists it unconditionally, so including it would list it twice — and
     // worse, the list would change whenever the VM came up or fell back, which is exactly the churn the skills change event

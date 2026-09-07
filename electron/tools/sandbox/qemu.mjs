@@ -33,6 +33,7 @@ import { qmp, guestAgent } from "./control.mjs";
 import { startNinepServer } from "./ninep-server.mjs";
 import { createProgressReporter } from "./progress.mjs";
 import { vmDir, vmVersion, guestArch, localDataDir } from "./vmpaths.mjs";
+import { GUEST_SKILLS_DIR, resolveSkillsHostDir, skillsHostDirExists } from "../builtinSkills.mjs";
 import { resolveHfEndpoint } from "../../llm/hfEndpoint.mjs";
 
 export const id = "qemu";
@@ -97,6 +98,18 @@ function assetBind() {
     return [];
   }
   return ["--ro-bind", guestPath(ASSET_HOST_DIR), GUEST_ASSETS];
+}
+/**
+ * The read-only bind of the built-in skills' helper scripts (resources/skills → /mnt/skills), or nothing.
+ *
+ * Same shape as assetBind: skipped when the folder is absent, because bwrap fails the whole command on a bind whose
+ * source is missing. Read-only for the same reason the asset library is — the scripts are application code the model
+ * runs, and a shell command that misfires must not be able to rewrite them for every later conversation.
+ */
+function skillsBind() {
+  const dir = resolveSkillsHostDir({ isPackaged: app.isPackaged, resourcesPath: process.resourcesPath, appPath: app.getAppPath() });
+  if (!skillsHostDirExists(dir)) return [];
+  return ["--ro-bind", guestPath(dir), GUEST_SKILLS_DIR];
 }
 /**
  * Backing directory for the sandbox's /tmp, on the guest's DISK rather than in RAM.
@@ -409,6 +422,8 @@ function bwrapFlags(cwd) {
     // The second root: readable, never writable. See assetBind and tools/paths.mjs — the file tools enforce
     // the identical split on the host side, and the two must not disagree about what is writable.
     ...assetBind(),
+    // The built-in document skills' helper scripts, readable at a fixed path (see builtinSkills.mjs).
+    ...skillsBind(),
     "--chdir", GUEST_WORKSPACE,
     // NOT --unshare-user: bwrap runs as root in the guest, and a user namespace makes the 9p
     // share (security_model=none) refuse the bind source with EPERM. bwrap-as-root still confines

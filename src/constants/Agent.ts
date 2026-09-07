@@ -37,6 +37,8 @@ export const AGENT_STORAGE_ROOT = "agent";
 export const AGENT_SELECTION_KEY = "agent.selection";
 /** Dot path: list of installed skills (shared by /agent/skills download management and /agent/chat enablement). */
 export const AGENT_SKILLS_KEY = "agent.skills";
+/** Dot path: ids of built-in skills the user switched OFF (they ship enabled; only the exceptions are stored — see skills/store.ts). */
+export const AGENT_BUILTIN_SKILLS_OFF_KEY = "agent.builtinSkillsOff";
 /** Dot path: the working directory the user explicitly selected (chosen on the /agent home page, then carried over by the /agent/chat page). */
 export const AGENT_WORKDIR_KEY = "agent.workdir";
 /** Dot path: recently used working directories (most recent first, capped), offered in the WorkdirSelector panel so switching back doesn't need the native folder dialog. */

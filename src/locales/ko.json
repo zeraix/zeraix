@@ -976,6 +976,8 @@
   "skills.save": "저장",
   "skills.cancel": "취소",
   "skills.badge.custom": "사용자 지정",
+  "skills.badge.builtin": "기본 제공",
+  "skills.builtinHint": "앱에 기본 제공되어 제거할 수 없습니다. 필요 없으면 꺼 두세요.",
   "skills.detail.open": "'{name}' 세부 정보 보기",
   "skills.detail.instructions": "지시 내용",
   "skills.detail.tools": "권장 도구",

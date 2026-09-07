@@ -60,6 +60,7 @@ export const SANDBOX_TOOLBOX_SKILL: InstalledSkill = {
 - Universal conversion: LibreOffice headless: soffice --headless --convert-to pdf in.docx --outdir . (use unoserver for batch / low latency)
 - pandoc / pypandoc: convert between md / html / docx / latex / epub
 - mammoth: docx → clean HTML/Markdown; trafilatura: web-page body text → Markdown
+- Building or editing a Word / Excel / PowerPoint / PDF deliverable: load the docx / xlsx / pptx / pdf skills as well — they carry the deeper recipes and helper scripts (tracked changes, comments, formula recalculation, PDF forms, OCR, slide thumbnails)
 
 ## Images / graphics (edit & create — no API/model needed)
 You CAN edit and create images right here; never tell the user that image editing is out of scope. Editing an existing file is what the tools below are for; to generate a brand-new picture from a text description (AI text-to-image), use the image_generation tool instead when it is available. Always write outputs into the working directory. (ImageMagick 7 exposes the same commands as \`magick …\`; \`convert\` also works.)

@@ -10,6 +10,7 @@ import { ensureLegalConsent, isLegalAccepted } from "./legal/consentWindow.mjs";
 import { appUserModelId, ensureDevStartMenuShortcut, notificationIconPath, windowIconPath } from "./appIdentity.mjs";
 import { bringWindowToFront } from "./windowFocus.mjs";
 import { setAssetHostDir } from "./tools/sandbox/qemu.mjs";
+import { GUEST_SKILLS_DIR, resolveSkillsHostDir } from "./tools/builtinSkills.mjs";
 import { setMediaDir, readIndex, writeIndex, saveMedia, openMediaDir, getMediaDir } from "./mediaStore.mjs";
 // Reports at startup whether the Rust sidecar is enabled, active, or unavailable — see warmUp.
 import { warmUp as warmUpRustRuntime, shutdown as shutdownRustRuntime } from "./tools/rustRuntime.mjs";
@@ -514,6 +515,12 @@ function registerAiTools() {
   // Stop a background service (by pid); list current background services (initial sync).
   ipcMain.handle("ai-tools:stop-process", (_e, pid) => stopProcess(pid));
   ipcMain.handle("ai-tools:list-processes", () => listProcesses());
+  // Where the built-in document skills' helper scripts are: on the host, and at the fixed sandbox mount point.
+  // The renderer substitutes one of these for `{{SKILLS_DIR}}` in a skill's instructions (see chatTools loadSkill).
+  ipcMain.handle("ai-tools:skills-dir", () => ({
+    host: resolveSkillsHostDir({ isPackaged: app.isPackaged, resourcesPath: process.resourcesPath, appPath: app.getAppPath() }),
+    sandbox: GUEST_SKILLS_DIR,
+  }));
   // Sandbox status: initial sync + engine routing (the active session's secure-environment switch) + initialization progress broadcast to all windows.
   ipcMain.handle("sandbox:get-status", () => getSandboxStatus());
   ipcMain.handle("sandbox:set-mode", (_e, preference) => setSandboxMode(preference));
