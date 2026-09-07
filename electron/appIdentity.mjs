@@ -50,7 +50,11 @@ export function notificationIconPath() {
  * the dev launch writes its own shortcut, under the dev AppUserModelID. Idempotent: rewritten only when the target,
  * arguments, icon or id drift (a moved checkout, an Electron upgrade). Shortcut icons must be .ico -- resources/icon.ico
  * is the multi-size build of resources/icon.png that electron-builder also uses for the Windows installer.
- * The first toast after the shortcut appears can still say "Electron": the shell picks the new shortcut up asynchronously.
+ *
+ * What this does and does not fix in dev, verified with Get-StartApps on 2026-09-04: the shortcut makes Windows treat
+ * com.zeraix.app.dev as a registered app (toast clicks get routed, the logo shows), but the app *name* Windows attaches
+ * to it is electron.exe's FileDescription -- "Electron" -- not the shortcut's file name, so a dev toast header still
+ * reads "Electron". Only the packaged build, whose executable is Zeraix.exe, is headed "Zeraix".
  */
 export function ensureDevStartMenuShortcut() {
   if (!isDev || process.platform !== "win32") return;

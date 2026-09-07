@@ -176,6 +176,8 @@ win:
     # RFC 3161 Timestamping: Ensures signatures remain valid long after the certificate expires (without a timestamp, the signature becomes invalid as soon as the certificate expires).
     rfc3161TimeStampServer: http://timestamp.digicert.com
 nsis:
+  # Custom NSIS hooks (customInstall: run-after-install launches the exe, not the shortcut). See the file for why.
+  include: resources/installer.nsh
   # Assisted, per-user — the wizard shows a directory page so users can pick the install
   # location (e.g. a different hard drive / D:\), while updates stay silent.
   #
