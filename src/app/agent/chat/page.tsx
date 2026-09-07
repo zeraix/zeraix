@@ -180,6 +180,9 @@ import { ContextUsageRing } from "./ContextUsageRing";
 import { useTranscriptWindow } from "./useTranscriptWindow";
 import { useSandboxEnv } from "./useSandboxEnv";
 import { usePerConvState } from "./usePerConvState";
+import { createTurnCheckpoint, describeInterruptedTurn, summarizeInterruptedTurn } from "./turnState";
+import { lastSession } from "@/lib/ai/recovery";
+import { RecoveryBanner, type RecoveryNotice } from "./RecoveryBanner";
 import { useModelSelection } from "./useModelSelection";
 import { createJobHandlers } from "./jobEvents";
 import { checkTurnGoal, finishTurn } from "./turnFinish";
@@ -350,7 +353,23 @@ function ChatAgent() {
   const brokerRef = useRef<{ broker: CapabilityBroker; audit: InMemoryAuditLog } | null>(null);
   const orchestrationDeclsRef = useRef<Map<string, ToolDeclaration> | null>(null);
   const [status, setStatus] = useState(""); // While generating, show the user "what it is doing"
-  const [error, setError] = useState<string | null>(null);
+  /**
+   * The error banner, tagged with the conversation it belongs to.
+   *
+   * It used to be a bare string, and the banner is rendered at the foot of the transcript — so a failure in one
+   * conversation stayed on screen while the user read a different one, attributing "Failed to fetch" to a chat that
+   * had never made a request. Only two paths cleared it ("new chat" and "clear chat"); switching conversations was
+   * not one of them.
+   *
+   * Tagged rather than cleared on switch, which is the pattern the rest of this view already follows for the todo
+   * list, the goal, the queue and the recovery banner: the error belongs to a turn, so switching away hides it and
+   * switching back brings it with the conversation it describes. `setError` keeps its one-argument shape, so every
+   * call site is unchanged and none of them has to remember to pass an id.
+   */
+  const [errorState, setErrorState] = useState<{ convId: string | null; text: string } | null>(null);
+  const setError = (text: string | null) =>
+    setErrorState(text ? { convId: convIdRef.current, text } : null);
+  const error = errorState && errorState.convId === viewConvId ? errorState.text : null;
   const [toolsReady, setToolsReady] = useState(false);
   // Mirror, for callers that outlive the render they were created in. __seedPrefix is registered in a mount-only effect, so it
   // closes over the FIRST render's toolsReady (false) permanently — reading the state there silently drops the whole local-tool
@@ -396,6 +415,19 @@ function ChatAgent() {
     setInstalledSkills(list);
   };
   const [skillsOpen, setSkillsOpen] = useState(false);
+  /**
+   * The interrupted-turn notice (docs/agent-runtime-crash-recovery.md C2).
+   *
+   * Set when a conversation is opened with a leftover turn checkpoint, which can only happen if the process died
+   * mid-turn. `recoveryNotice` is what the user sees; `pendingRecoveryRef` is the sentence the model is told on the
+   * next send, keyed by conversation because a background conversation may be reopened later and must still get its
+   * own notice. Both are one-shot: the banner is dismissible and the reminder is emitted once (reminders.ts).
+   */
+  const [recoveryNotice, setRecoveryNotice] = useState<RecoveryNotice | null>(null);
+  const pendingRecoveryRef = useRef<Map<string, string>>(new Map());
+  /** Whether the PREVIOUS app session died without a clean shutdown (C9). Announced once by the effect below. */
+  const [priorCrash, setPriorCrash] = useState(false);
+  const priorCrashToldRef = useRef(false);
   /** The Sub-agent Execution Inspector. Its entry point hides itself when nothing has been delegated. */
   const [inspectorOpen, setInspectorOpen] = useState(false);
   // The settings area (working directory / run parameters) is collapsed by default; it expands on demand in dev mode when a working directory is missing.
@@ -521,6 +553,7 @@ function ChatAgent() {
     clearQueue,
     shiftQueued,
     queueLength,
+    queuedTexts,
     todos,
     todosFor,
     setTodosFor,
@@ -675,6 +708,10 @@ function ChatAgent() {
       // Off by default, in which case every logging call below is a no-op.
       void primeUsageLog();
       setInstalledSkillsBoth(loadInstalled()); // Restore installed skills (including enabled state)
+      // C9: the previous session left its lock behind, so it died before finishing its teardown. Only the flag is
+      // read here — the toast is fired by its own effect below, which can depend on the translator without
+      // dragging this mount-only block along with it.
+      void lastSession().then((prev) => setPriorCrash(prev.unclean));
       // Working directory: prefer the directory explicitly chosen and persisted on the home page (the previous stage); otherwise take the main process's current directory.
       const savedWorkdir = getStorage(AGENT_WORKDIR_KEY);
       if (typeof savedWorkdir === "string" && savedWorkdir) {
@@ -697,6 +734,15 @@ function ChatAgent() {
     // initActiveModel is stable (useCallback with no deps), so listing it keeps this mount-only.
   }, [initActiveModel]);
 
+
+  // Say it once, quietly, and only after the translator is ready: the actionable detail is per-conversation and
+  // arrives as the banner above when an interrupted conversation is opened. Latched, so a language change (which
+  // re-runs this effect) does not announce the same crash a second time.
+  useEffect(() => {
+    if (!priorCrash || priorCrashToldRef.current) return;
+    priorCrashToldRef.current = true;
+    toast.info(t("chat.recovery.uncleanShutdown"));
+  }, [priorCrash, t]);
 
   // Input-box auto-fit height: grows with content, up to 30vh, then scrolls internally.
   // FALLBACK ONLY. Where the engine has `field-sizing: content` the box sizes itself in CSS
@@ -956,6 +1002,22 @@ function ChatAgent() {
       conv.secureEnv ?? store.secureEnvDefaultFor(conv.projectId) ?? DEFAULT_SECURE_ENV,
       { persist: false },
     );
+    // A checkpoint left on the record means the previous turn never reached its end — the process died while it was
+    // running (docs/agent-runtime-crash-recovery.md C2). Read here, at the one point a conversation is opened: the
+    // banner states the facts to the user, and the sentence for the model waits for the next send rather than being
+    // injected into a turn nobody asked for. Nothing is resumed and nothing is re-run — `running` may already have
+    // had side effects.
+    //
+    // Deliberately NOT cleared here. The record is what guarantees the model is told before it acts again, and a user
+    // who opens the conversation, quits, and comes back tomorrow to send a message would otherwise get a model that
+    // knows nothing about the interrupted work. It is consumed at the send that announces it (and overwritten by that
+    // turn's own first checkpoint moments later), so the cost of keeping it is that the banner reappears until the
+    // conversation is actually used again — which is true, and dismissible.
+    if (conv.turnState && !runsRef.current.has(id)) {
+      const interrupted = conv.turnState;
+      pendingRecoveryRef.current.set(id, describeInterruptedTurn(interrupted));
+      setRecoveryNotice({ convId: id, ...summarizeInterruptedTurn(interrupted) });
+    }
     // Restore this conversation's checklist / Task Memory brief / goal, and put them on screen.
     adoptConversation(id, conv);
     store.setActiveConversation(id);
@@ -1694,6 +1756,23 @@ function ChatAgent() {
     // One id per generation, shared by everything this turn spends (see RunCtx.turnId).
     const turnId = `${genConvId}-${Date.now().toString(36)}`;
     /**
+     * This turn's crash checkpoint (docs/agent-runtime-crash-recovery.md C2, turnState.ts).
+     *
+     * The loop's own state — the round it is on and the tool calls that are out — lives in refs that die with the
+     * renderer. Writing it to the conversation record at every round boundary is what lets the next session say
+     * what was interrupted instead of showing a repaired transcript with no trace of the interruption. Cleared in
+     * `finally` below on every route out of the turn, so a record that survives means a crash and nothing else.
+     */
+    const checkpoint = createTurnCheckpoint({
+      turnId,
+      save: (state) => useAgentChatStore.getState().setConversationTurnState(genConvId, state),
+      queued: () => queuedTexts(genConvId),
+      // Only this turn's own scheduler counts: schedulerRef may already hold the NEXT turn's by the time a late
+      // write lands, and reporting that one would attribute another turn's delegations to this crash.
+      delegations: () =>
+        schedulerRef.current?.turnId === turnId ? schedulerRef.current.sched.outstanding().length : 0,
+    });
+    /**
      * The Runtime/UI boundary for this turn (docs/agent-runtime-loop.md §13, milestone M2).
      *
      * Built here, from the refs and state this component already owns, and handed to whatever needs it —
@@ -1956,12 +2035,19 @@ function ChatAgent() {
           imageGenerationAvailable: capabilityAvailable("image_generation"),
           videoGenerationAvailable: capabilityAvailable("video_generation"),
           task: renderTaskMemory(taskMemoryFor(genConvId)),
+          // A crash notice claimed when this conversation was opened, if any. Consumed here so it rides the same
+          // change event as everything else and is said exactly once — a second send never repeats it.
+          recovery: pendingRecoveryRef.current.get(genConvId),
           // The goal rides the same road as the mission brief, and for the same reason: it is re-rendered from
           // structured state every turn, so the model sees the current condition, criteria and plan even after
           // compaction has discarded every message that produced them.
           goal: renderGoalState(goalFor(genConvId)),
         });
         const delta = diffReminder(current, foldReminders(roundConvo));
+        // Consumed: said on this turn, so it must not be said again on the next one. The persisted checkpoint that
+        // produced it is not cleared here — this turn's own `roundStarted` overwrites it a moment later, and if this
+        // send fails before that, the record is still there to be reported again, which is the correct outcome.
+        pendingRecoveryRef.current.delete(genConvId);
         // The two one-shot nudges that fire on a turn's first request ride the same carrier. They are persisted like everything
         // else: a nudge that appears in the wire on one turn and is gone on the next breaks the prefix at that turn, which costs
         // more than the handful of tokens it saves. They carry no payload — a nudge is not standing state.
@@ -2033,6 +2119,7 @@ function ChatAgent() {
         runRound: createRoundRunner({
           convId: genConvId,
           turnId,
+          checkpoint,
           signal: ctrl.signal,
           active,
           t,
@@ -2184,6 +2271,10 @@ function ChatAgent() {
         notifyAgentError("api", errMsg, genConvId);
       }
     } finally {
+      // The turn is over by SOME route — a reply, an error, or the user's Stop. All three are ends the app
+      // survived, so the checkpoint has done its job and must go: only a record that outlives the process
+      // means an interruption (docs/agent-runtime-crash-recovery.md C2).
+      checkpoint.clear();
       if (runsRef.current.get(genConvId) === ctrl) runsRef.current.delete(genConvId);
       // Stop any delegation still running for this turn. Nothing can consume a conclusion once the turn is
       // over — the wire is closed and the display is done — so letting one finish would only spend tokens
@@ -2530,6 +2621,12 @@ function ChatAgent() {
             toast.success(t("goal.cleared", { condition: g.condition }));
           }}
         />
+      )}
+
+      {/* The previous turn was cut short by a crash (docs/agent-runtime-crash-recovery.md C2). Rendered only for the
+          conversation it belongs to, so switching away takes it off screen; dismissible, and gone once dismissed. */}
+      {recoveryNotice && recoveryNotice.convId === viewConvId && (
+        <RecoveryBanner notice={recoveryNotice} onDismiss={() => setRecoveryNotice(null)} />
       )}
 
       {/* Task list: fixed above the input box, showing progress.

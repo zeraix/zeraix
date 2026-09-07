@@ -832,13 +832,35 @@ export async function refineQuestion({ question, context } = {}, { signal } = {}
 // HTML to readable text.
 
 /** GET a URL with a browser-like UA and a hard timeout. Returns the Response (throws on error/timeout). */
-async function httpGet(url, { accept } = {}) {
+/**
+ * Stop, checked at a point where continuing would be work the user has already abandoned.
+ *
+ * Thrown rather than returned: `runTool` turns a throw into `{ ok: false }` and the loop is already checking the
+ * signal, so a handler that aborts needs no special contract of its own. The message is what the model reads, so it
+ * says who stopped it — a tool that merely says "aborted" reads as a fault the model should work around.
+ */
+function throwIfAborted(signal) {
+  if (signal?.aborted) throw new Error("The user stopped this operation.");
+}
+
+/**
+ * One GET, bounded by the request timeout AND by the caller's Stop.
+ *
+ * The two used to be separate: the timeout aborted the fetch, and the user's Stop was not passed in at all, so a
+ * search or a page fetch ran to completion after the user had already given up on it (docs/agent-runtime-crash-recovery.md
+ * C6). Composed with `AbortSignal.any`, whichever fires first aborts the socket — which is the point of §15 of the
+ * runtime spec: a timeout must trigger real cancellation rather than merely returning a timeout error.
+ */
+async function httpGet(url, { accept, signal } = {}) {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), WEB_TIMEOUT_MS);
+  // AbortSignal.any is Node 20+/Electron; the fallback keeps the timeout working if it is ever absent.
+  const composed =
+    signal && typeof AbortSignal.any === "function" ? AbortSignal.any([signal, ctrl.signal]) : (signal ?? ctrl.signal);
   try {
     return await fetch(url, {
       redirect: "follow",
-      signal: ctrl.signal,
+      signal: composed,
       headers: {
         "User-Agent": WEB_UA,
         "Accept-Language": "en-US,en;q=0.9",
@@ -997,7 +1019,8 @@ const handlers = {
 
 
 
-  async append_file({ path: p, content }) {
+  async append_file({ path: p, content }, { signal } = {}) {
+    throwIfAborted(signal);
     const abs = resolveInside(p, { write: true });
     const add = String(content ?? "");
     // Same refusal as write_file / edit_file in the Rust runtime (see placeholder.mjs).
@@ -1021,13 +1044,15 @@ const handlers = {
     return `Appended ${Buffer.byteLength(addNorm)} bytes to ${rel(abs)} (${abs}).${diff}`;
   },
 
-  async delete_file({ path: p }) {
+  async delete_file({ path: p }, { signal } = {}) {
+    throwIfAborted(signal);
     const abs = resolveInside(p, { write: true });
     await fs.unlink(abs);
     return `Deleted ${rel(abs)}.`;
   },
 
-  async copy_file({ source, destination }) {
+  async copy_file({ source, destination }, { signal } = {}) {
+    throwIfAborted(signal);
     // The source is only read — copying an asset INTO the workspace is the intended way to work with one.
     const s = resolveInside(source);
     const d = resolveInside(destination, { write: true });
@@ -1036,7 +1061,8 @@ const handlers = {
     return `Copied ${rel(s)} -> ${rel(d)} (${d}).`;
   },
 
-  async move_file({ source, destination }) {
+  async move_file({ source, destination }, { signal } = {}) {
+    throwIfAborted(signal);
     // Both are writes: a move REMOVES the source, which is exactly what the asset folder must not permit.
     const s = resolveInside(source, { write: true });
     const d = resolveInside(destination, { write: true });
@@ -1048,7 +1074,8 @@ const handlers = {
 
 
 
-  async create_directory({ path: p }) {
+  async create_directory({ path: p }, { signal } = {}) {
+    throwIfAborted(signal);
     const abs = resolveInside(p, { write: true });
     await fs.mkdir(abs, { recursive: true });
     return `Created directory ${rel(abs)} (${abs}).`;
@@ -1264,13 +1291,14 @@ const handlers = {
    * same code works for both app editions. The model uses this as its primary way to look things
    * up; it can then fetch_url a result to read it in full.
    */
-  async web_search({ query, count } = {}) {
+  async web_search({ query, count } = {}, { signal } = {}) {
     const q = String(query ?? "").trim();
     if (!q) throw new Error("query must not be empty");
     const want = Math.max(1, Math.min(WEB_SEARCH_MAX, Number(count) || WEB_SEARCH_DEFAULT));
 
     const endpoint = `https://www.bing.com/search?q=${encodeURIComponent(q)}&count=20`;
-    const res = await httpGet(endpoint, { accept: "text/html" });
+    throwIfAborted(signal);
+    const res = await httpGet(endpoint, { accept: "text/html", signal });
     if (!res.ok) throw new Error(`search backend returned HTTP ${res.status}`);
     const html = await res.text();
 
@@ -1316,11 +1344,13 @@ const handlers = {
    * JSON / plain text is returned as-is. Does not run JavaScript and cannot log in / interact —
    * for that the model should use openBrowser + browser instead.
    */
-  async fetch_url({ url } = {}) {
+  async fetch_url({ url } = {}, { signal } = {}) {
     const target = String(url ?? "").trim();
     if (!/^https?:\/\//i.test(target)) throw new Error("url must be an absolute http(s) URL");
 
+    throwIfAborted(signal);
     const res = await httpGet(target, {
+      signal,
       accept: "text/html,application/xhtml+xml,application/json,text/plain;q=0.9,*/*;q=0.8",
     });
     const ctype = (res.headers.get("content-type") || "").toLowerCase();
@@ -1354,7 +1384,7 @@ const handlers = {
    * inside the working directory like every other path this toolkit accepts, never a raw file:// the model
    * composed itself.
    */
-  async page_console({ url, wait_ms, level, max } = {}) {
+  async page_console({ url, wait_ms, level, max } = {}, { signal } = {}) {
     const raw = String(url ?? "").trim();
     if (!raw) throw new Error("url is required");
     let target = raw;
@@ -1366,7 +1396,8 @@ const handlers = {
       await fs.access(abs, FS.R_OK); // fail with "no such file" rather than a blank about:blank capture
       target = pathToFileURL(abs).href;
     }
-    return capturePageConsole({ url: target, waitMs: wait_ms, level, max });
+    throwIfAborted(signal);
+    return capturePageConsole({ url: target, waitMs: wait_ms, level, max, signal });
   },
 
   // mcp_discover / mcp_connect. Spread rather than written inline: they operate on app configuration

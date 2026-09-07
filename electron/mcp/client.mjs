@@ -16,6 +16,7 @@
  * so a server whose tool names contain characters providers reject can still be addressed.
  */
 import { CONNECT_TIMEOUT_DOWNLOAD_MS, CONNECT_TIMEOUT_MS, getServer, listServers, usesPackageRunner } from "./config.mjs";
+import { recordChild, forgetChild } from "../tools/sandbox/orphans.mjs";
 import { pluginAuthHeaders } from "../plugins/auth.mjs";
 import {
   EVENT_RUNTIME_DISCONNECTED,
@@ -483,6 +484,10 @@ export function connectServer(id) {
       e.client = client;
       e.transport = transport;
       e.pid = cfg.kind === "stdio" ? (transport.pid ?? null) : null;
+      // Recorded for the startup sweep (docs/agent-runtime-crash-recovery.md C4). A stdio server is a child process
+      // this app spawned, and `before-quit` closes it — but a hard kill of the main process never runs `before-quit`,
+      // and nothing else would ever reach this one. The sweep knew only about command trees before this.
+      if (e.pid) recordChild(e.pid, `mcp server: ${cfg.command}`);
 
       // Servers add and remove tools at runtime; a cache with no invalidation hands the model tools
       // that no longer exist. listTools() also re-primes the SDK's argument validators.
@@ -501,6 +506,7 @@ export function connectServer(id) {
         e.client = null;
         e.transport = null;
         e.tools = [];
+        if (e.pid) forgetChild(e.pid);
         e.pid = null;
         reindex();
         emit();
@@ -555,6 +561,7 @@ export async function disconnectServer(id) {
   e.client = null;
   e.transport = null;
   e.tools = [];
+  if (e.pid) forgetChild(e.pid);
   e.pid = null;
   e.status = "idle";
   reindex();

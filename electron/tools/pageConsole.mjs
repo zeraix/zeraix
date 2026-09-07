@@ -48,7 +48,30 @@ function atLeast(entries, want) {
  * `url` must already be absolute (http/https, or a file:// URL the caller resolved inside the working
  * directory — this module does no path resolution and must never be handed a raw model-supplied path).
  */
-export async function capturePageConsole({ url, waitMs, level, max } = {}) {
+/**
+ * A wait that ends early when the caller gives up.
+ *
+ * Both of this module's waits — the load race and the settle pause — used to be plain timers, so a Stop left a hidden
+ * window loading a page for up to twenty more seconds and the user's cancel did nothing they could observe
+ * (docs/agent-runtime-crash-recovery.md C6). Resolving on abort lets the normal teardown run at once; it does not
+ * reject, because every caller here treats the wait as "we have waited long enough" rather than as a step that
+ * can fail.
+ */
+function waitOrAbort(ms, signal) {
+  return new Promise((resolve) => {
+    if (signal?.aborted) return resolve();
+    const timer = setTimeout(done, ms);
+    function done() {
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", done);
+      resolve();
+    }
+    signal?.addEventListener("abort", done, { once: true });
+  });
+}
+
+export async function capturePageConsole({ url, waitMs, level, max, signal } = {}) {
+  if (signal?.aborted) throw new Error("The user stopped this operation.");
   const target = String(url ?? "").trim();
   if (!/^(https?|file):\/\//i.test(target)) throw new Error("url must be an absolute http(s) URL");
   if (active >= MAX_CONCURRENT) {
@@ -129,11 +152,15 @@ export async function capturePageConsole({ url, waitMs, level, max } = {}) {
           r();
         }, LOAD_TIMEOUT_MS);
       }),
+      // Stop ends the race too, so the window is torn down now rather than up to LOAD_TIMEOUT_MS from now.
+      waitOrAbort(LOAD_TIMEOUT_MS, signal).then(() => {
+        if (signal?.aborted) loadError ||= "stopped by the user";
+      }),
     ]);
     clearTimeout(loadTimer); // the race is settled either way; leaving it armed holds a timer for 20s
     // Settle even after a load error: an error page still finished loading, and a partially loaded page
     // often throws right afterwards — that throw is exactly what the caller is asking about.
-    if (settle > 0 && !win.isDestroyed()) await new Promise((r) => setTimeout(r, settle));
+    if (settle > 0 && !win.isDestroyed()) await waitOrAbort(settle, signal);
 
     const finalUrl = win.isDestroyed() ? target : wc.getURL() || target;
     const title = win.isDestroyed() ? "" : wc.getTitle();
@@ -142,6 +169,14 @@ export async function capturePageConsole({ url, waitMs, level, max } = {}) {
     const errors = entries.filter((e) => e.level === "error").length;
     const warns = entries.filter((e) => e.level === "warn").length;
 
+    // A capture the user stopped is reported as stopped: the messages below are whatever arrived before that, and
+    // calling a truncated capture "clean" would be the one wrong answer.
+    if (signal?.aborted) {
+      return (
+        `The user stopped this page capture. ${entries.length} console message(s) had arrived by then` +
+        (entries.length ? `:\n\n${atLeast(entries, want).slice(-limit).map((e) => `[${e.level}] ${e.text}`).join("\n")}` : ".")
+      );
+    }
     const head =
       `Loaded ${finalUrl}${title ? ` — "${title}"` : ""} headlessly` +
       `${loadError ? ` (load error: ${loadError})` : ""}, waited ${settle}ms. ` +

@@ -50,6 +50,40 @@ summary = df.groupby("Region", as_index=False)["Amount"].sum().sort_values("Amou
 `pd.read_excel` returns **cached values**, never formulas; a workbook written by openpyxl and never opened
 in Excel has no cached values (NaN) — run `recalc.py --inplace` first if you must read computed results.
 
+## Make it look designed
+
+A spreadsheet is read, not admired, so its design job is different: make the numbers scannable and make the
+structure obvious at a glance. The shared system does both in four calls.
+
+```python
+import sys; sys.path.insert(0, "{{SKILLS_DIR}}/office")
+import theme
+
+theme.xlsx_header(ws, 1, last_col)                      # styled, frozen, filtered header row
+theme.xlsx_body(ws, 2, last_row, last_col, numeric_from=2)   # font, hairlines, numbers right-aligned
+theme.xlsx_total_row(ws, last_row + 1, last_col)        # bold with a rule above, no fill
+theme.xlsx_fit_columns(ws); theme.xlsx_finish(ws)       # width to content, screen gridlines off
+```
+
+- **Turn the screen gridlines off.** `xlsx_finish` does it. Gridlines are graph paper; once a sheet has a
+  styled header and hairline row rules they are visual noise competing with the data.
+- **Right-align every number, left-align every label,** and give numbers a format
+  (`theme.NUMBER_FORMATS`). A column of numbers that is left-aligned cannot be compared by eye, which is
+  the only thing a column of numbers is for.
+- **Freeze the header and size the columns.** `#####` or a clipped header is the clearest possible signal
+  that nobody looked at the file.
+- **One accent, on the header row only.** Not a different fill per column, not a colour per sheet tab.
+- **Banding is optional and must be nearly invisible.** `theme.TINT` is deliberately faint; anything
+  stronger fights the numbers. Wide tables benefit, narrow ones do not.
+- **Colour is for meaning, never decoration.** `theme.POSITIVE` / `NEGATIVE` / `WARNING` on a variance
+  column, through conditional formatting, so the rule is visible and stays true when the data changes.
+- **A total row reads as a total** because of a rule above it and bold weight — not a heavy fill.
+
+Never do these: merged cells anywhere data is read (they break sorting, filtering and every formula that
+crosses them); a rainbow of fills; borders on every cell; a title merged across the top of the data instead
+of living in row 1 above a blank row; raw numbers with no format; a sheet still called "Sheet1"; numbers
+stored as text, which is what silently breaks every later calculation.
+
 ## Create a workbook with openpyxl
 
 ```python
@@ -59,6 +93,9 @@ from openpyxl.utils import get_column_letter
 from openpyxl.chart import BarChart, LineChart, Reference
 from openpyxl.worksheet.table import Table, TableStyleInfo
 from openpyxl.formatting.rule import CellIsRule
+
+import sys; sys.path.insert(0, "{{SKILLS_DIR}}/office")
+import theme
 
 wb = Workbook(); ws = wb.active; ws.title = "Sales"
 FONT = "Arial"
@@ -72,22 +109,26 @@ for i in range(first, last + 1):
     ws[f"E{i}"] = f"=IF($D${last + 1}=0,0,D{i}/$D${last + 1})"     # guard divisions
 ws[f"A{last + 1}"] = "Total"; ws[f"B{last + 1}"] = f"=SUM(B{first}:B{last})"; ws[f"D{last + 1}"] = f"=SUM(D{first}:D{last})"
 
-thin = Side(style="thin", color="BFBFBF")
-for c in ws[1]:
-    c.font = Font(name=FONT, bold=True, color="FFFFFF"); c.fill = PatternFill("solid", fgColor="1F4E78")
-    c.alignment = Alignment(horizontal="center", vertical="center"); c.border = Border(bottom=thin)
-for row in ws.iter_rows(min_row=2, max_row=last + 1):
-    for c in row: c.font = Font(name=FONT); c.border = Border(bottom=thin)
+# The whole visual system, in four calls (see "Make it look designed" above).
+theme.xlsx_header(ws, 1, len(header))
+theme.xlsx_body(ws, 2, last, len(header), numeric_from=1)
+theme.xlsx_total_row(ws, last + 1, len(header))
 for i in range(2, last + 2):
-    ws[f"B{i}"].number_format = "#,##0"; ws[f"C{i}"].number_format = "#,##0.00"
-    ws[f"D{i}"].number_format = "#,##0.00"; ws[f"E{i}"].number_format = "0.0%"
-for c in ws[last + 1]: c.font = Font(name=FONT, bold=True)
-for col in range(1, len(header) + 1):
-    ws.column_dimensions[get_column_letter(col)].width = max(12, len(header[col - 1]) + 4)
-ws.freeze_panes = "A2"; ws.auto_filter.ref = f"A1:E{last}"
-ws.conditional_formatting.add(f"D{first}:D{last}", CellIsRule(operator="lessThan", formula=["1000"], fill=PatternFill("solid", fgColor="FCE4D6")))
+    ws[f"B{i}"].number_format = theme.NUMBER_FORMATS["int"]
+    ws[f"C{i}"].number_format = theme.NUMBER_FORMATS["money"]
+    ws[f"D{i}"].number_format = theme.NUMBER_FORMATS["money"]
+    ws[f"E{i}"].number_format = theme.NUMBER_FORMATS["pct"]
+theme.xlsx_fit_columns(ws)
+theme.xlsx_finish(ws)   # screen gridlines off; the styled header is the structure now
+# Colour for MEANING, through a rule, so it stays true when the data changes.
+ws.conditional_formatting.add(
+    f"D{first}:D{last}",
+    CellIsRule(operator="lessThan", formula=["1000"], font=Font(color=theme.NEGATIVE)),
+)
 
-chart = BarChart(); chart.title = "Revenue by region"; chart.y_axis.title = "Revenue"; chart.style = 10
+chart = BarChart(); chart.title = "Revenue by region"; chart.y_axis.title = "Revenue"
+chart.style = 2                                        # flat, no gradient or bevel
+chart.legend = None                                    # one series needs no legend
 chart.add_data(Reference(ws, min_col=4, min_row=1, max_row=last), titles_from_data=True)
 chart.set_categories(Reference(ws, min_col=1, min_row=first, max_row=last))
 chart.width, chart.height = 16, 8; ws.add_chart(chart, "G2")
@@ -155,7 +196,10 @@ python -c "import pandas as pd; pd.read_excel('in.xlsx', sheet_name='Sales').to_
 
 ## Deliverable checklist
 
-- Header row styled, frozen (`freeze_panes`), filters on; columns wide enough; one consistent font.
+- **Render it and look**: `python {{SKILLS_DIR}}/office/render.py book.xlsx --png` shows what the print
+  view actually looks like, which is the only way to catch a table running off the page.
+- Header row styled, frozen and filtered; columns wide enough that nothing shows `#####`; screen gridlines
+  off; one consistent font.
 - Numbers as numbers with number formats (thousands, decimals, %, dates) — never numeric strings.
 - Formulas, not pasted values, wherever the user will change inputs; totals via `SUM`, not hard-coded.
 - `recalc.py` reports zero errors; spot-checked values; no stray sheets ("Sheet1") or test cells.

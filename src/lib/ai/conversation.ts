@@ -156,6 +156,8 @@ export interface Conversation {
    *  refuses to end a turn on an unmet goal, so a goal that did not survive reopen would silently turn a
    *  half-finished task into a finished one. A runtime artifact, not part of the integrity hash. */
   goal?: StoredGoalState;
+  /** The in-flight turn's checkpoint (optional); non-empty on reopen = the previous turn was interrupted by a crash. See StoredTurnState. */
+  turnState?: StoredTurnState;
   /**
    * The task checklist (optional): what `update_todos` last recorded, and what the panel above the composer
    * shows.
@@ -212,6 +214,29 @@ export interface StoredTaskMemory {
  * read back goes through normalizeGoal(), which repairs partial and older records anyway.
  */
 export type StoredGoalState = Record<string, unknown>;
+
+/**
+ * The in-flight turn, checkpointed at every round boundary (see app/agent/chat/turnState.ts).
+ *
+ * docs/agent-runtime-crash-recovery.md C2. Written when a round starts and when its tool calls start and finish;
+ * cleared when the turn ends by any route (reply, error, user stop). A record still present when the conversation is
+ * next opened therefore means exactly one thing: the process died mid-turn. It is reported — to the model as a change
+ * event, to the user as a banner — and never used to re-run anything: `running` may already have had side effects.
+ * A runtime artifact like compaction / taskMemory / goal, and not part of the integrity hash.
+ */
+export interface StoredTurnState {
+  turnId: string;
+  startedAt: number;
+  updatedAt: number;
+  /** 1-based round that was in progress. */
+  round: number;
+  /** Tool calls that had been dispatched and had not returned. `mutating` is the conservative reading (see turnState.ts). */
+  running: { callId: string; name: string; mutating: boolean }[];
+  /** Outstanding sub-agent delegations at the last checkpoint. */
+  delegations: number;
+  /** User messages queued behind this turn that were never sent. */
+  queued: string[];
+}
 
 
 /**

@@ -250,6 +250,8 @@ export function buildReminderState(input: {
   task: string;
   /** The rendered Goal State block, or "" when no goal is in force (see goalState.renderGoalState). */
   goal: string;
+  /** The interrupted-turn notice for this send, or undefined (the common case). See turnState.describeInterruptedTurn. */
+  recovery?: string;
 }): ReminderState {
   const now = new Date();
   const pad = (n: number) => String(n).padStart(2, "0");
@@ -285,5 +287,8 @@ export function buildReminderState(input: {
     ],
     task: input.task,
     goal: input.goal,
+    // Spread rather than assigned: diffReminder skips undefined keys, and an explicit `recovery: undefined` would
+    // still be a key that could later be diffed against. Absent means "nothing to say", on every ordinary send.
+    ...(input.recovery ? { recovery: input.recovery } : {}),
   };
 }

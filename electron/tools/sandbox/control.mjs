@@ -210,7 +210,17 @@ export async function guestAgent({ port = +(process.env.GA_PORT || 4445) } = {})
       }
       let canceled = false;
       for (;;) {
-        const st = await c.send({ execute: 'guest-exec-status', arguments: { pid } });
+        // From here the guest process EXISTS. If the channel dies during this loop the command was already
+        // running, which is a different fact from "it never started" — and the difference decides whether the
+        // caller may say the command did not run. See run() in qemu.mjs and §5 of the crash-recovery doc.
+        let st;
+        try {
+          st = await c.send({ execute: 'guest-exec-status', arguments: { pid } });
+        } catch (e) {
+          e.started = true;
+          e.guestPid = pid;
+          throw e;
+        }
         if (st.exited) {
           const code = st.exitcode ?? 0;
           return {

@@ -1,4 +1,5 @@
 import { countMessagesTokens, countTokens } from "@/lib/ai/tokenizer";
+import type { TurnCheckpoint } from "./turnState";
 import { logContextDiag, logToolCall, isUsageLogEnabledSync } from "@/lib/ai/usageLog";
 import { resolveContextWindow, type ResolvedModel } from "@/lib/ai/models";
 import { getContextBudgetK } from "@/lib/ai/contextBudget";
@@ -61,6 +62,8 @@ export interface RoundRunnerDeps {
 
   // ── This turn's state ────────────────────────────────────────────────────────────────────────────────────
   buf: TurnBuffer;
+  /** Crash-recovery checkpoint (turnState.ts): told when a round starts and when its tool calls start and finish. */
+  checkpoint?: TurnCheckpoint;
   /** The compaction plan frozen at the start of the turn; the wire is derived through it every round. */
   compaction: unknown;
   log: RoundLog;
@@ -122,6 +125,7 @@ export interface RoundRunnerDeps {
  */
 export function createRoundRunner(deps: RoundRunnerDeps) {
   const {
+    checkpoint,
     convId: genConvId, turnId, signal, active, t,
     buf, compaction, log,
     activeModel, modelName, isLocalModel, sendReasoningContext, wireSteps, tools, requestChat, boundary, ctx,
@@ -148,6 +152,9 @@ export function createRoundRunner(deps: RoundRunnerDeps) {
 
   return async ({ reasoning: roundReasoning }: RoundRequest): Promise<RoundResult> => {
     ctx.status(t("chat.thinking"));
+    // Checkpoint the round before the request goes out: a crash while waiting for the model then reads as
+    // "round N, nothing in flight" rather than as a turn that never happened (turnState.ts).
+    checkpoint?.roundStarted();
     // Wire view: the "sent to the model" version of this round's local buffer derived through the compaction plan (a background conversation does not depend on the active view).
     // Also backfill tool-call pairing as a fallback: prevents assistant.tool_calls with missing results from getting a 400 from the provider when "reopening an interrupted / backend-crashed conversation".
     // The buffer → wire transformation (docs/agent-runtime-loop.md §10, M5a). Six steps that used to sit
@@ -259,6 +266,16 @@ export function createRoundRunner(deps: RoundRunnerDeps) {
       onDelta,
       { actor: "main", convId: genConvId, turnId },
       roundReasoning.config,
+      // A transport retry is announced on the same status line as "Thinking…", so a failing network reads as a
+      // retry in progress rather than as an app that has quietly stopped (docs/agent-runtime-crash-recovery.md C8).
+      ({ attempt, attempts, kind, delayMs }) =>
+        ctx.status(
+          t(kind === "rate-limit" ? "chat.retryingRateLimited" : "chat.retryingNetwork", {
+            attempt: String(attempt + 1),
+            attempts: String(attempts),
+            seconds: String(Math.max(1, Math.round(delayMs / 1000))),
+          }),
+        ),
     );
     // Cancelled mid-round. Reported as an empty round rather than by returning from send():
     // the loop re-checks the signal and stops with reason `cancelled`, so there is one place
@@ -403,6 +420,9 @@ export function createRoundRunner(deps: RoundRunnerDeps) {
 
       // Batched on the RESOLVED name, so a dispatched read is recognised as read-only (see groupParallelCalls).
       const groups = groupParallelCalls(calls, (tc) => callOf(tc).name, PARALLEL_SAFE_TOOLS);
+      // The calls this round is about to run, by the ids the transcript will carry. Written before the first one
+      // starts, so a crash mid-execution names them — and whether they could have had side effects.
+      checkpoint?.callsStarted(calls.map((tc) => ({ callId: tc.id, name: callOf(tc).name })));
 
       // The loop guard's reading of every call in THIS round, judged together once the round is complete:
       // a round is only stalled when nothing in it was productive, so a single real result anywhere in a
@@ -477,6 +497,9 @@ export function createRoundRunner(deps: RoundRunnerDeps) {
           roundResults.push({ toolCallId: tc.id, name, args, content: cappedContent, ok, ms: 0 });
         }
       }
+      // Every dispatched call has settled (or the batch was abandoned on cancel): nothing is in flight, so a crash
+      // from here on reads as "round N, no tool running" rather than naming calls that already returned.
+      checkpoint?.callsFinished();
       // Wrap-up alignment: for any tool_call with no result yet (this round was cut short early because the user canceled), append a placeholder result,
       // ensuring assistant.tool_calls and tool results correspond one-to-one — otherwise, when continuing the chat / reopening, it would be rejected by the provider because "tool_calls were not answered".
       // The placeholder is also persisted, staying consistent with the conversation fed back to the model.

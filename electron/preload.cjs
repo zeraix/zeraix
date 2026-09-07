@@ -52,6 +52,21 @@ contextBridge.exposeInMainWorld("aiTools", {
   },
 });
 
+// Crash recovery (docs/agent-runtime-crash-recovery.md): the previous session's fate and the recovery log. Read-only.
+contextBridge.exposeInMainWorld("recovery", {
+  /** { unclean, previous } — whether the previous session died without a clean shutdown. */
+  lastSession: () => ipcRenderer.invoke("recovery:last-session"),
+  /** The last N recovery-log entries, oldest first. */
+  read: (limit = 200) => ipcRenderer.invoke("recovery:read", limit),
+  /** Where the recovery log is, for a bug report. Shown by the crash page. */
+  logPath: () => ipcRenderer.invoke("recovery:log-path"),
+  /** The Rust sidecar supervisor: ready / backoff / disabled, and what the last run left unfinished. */
+  bridgeStatus: () => ipcRenderer.invoke("recovery:bridge-status"),
+  /** Crash page only: navigate this window back to the app, and quit. */
+  reloadWindow: () => ipcRenderer.send("recovery:reload-window"),
+  quitApp: () => ipcRenderer.send("recovery:quit-app"),
+});
+
 // Project-level skill discovery: detects skill files in directories such as .claude/.cursor/.zeraix, and manages the user's
 // "add / ignore" decisions in .zeraix/config.json. See electron/tools/projectSkills.mjs for the main-process implementation.
 contextBridge.exposeInMainWorld("projectSkills", {

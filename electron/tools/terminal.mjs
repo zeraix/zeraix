@@ -15,6 +15,7 @@
  * (electron-builder does npmRebuild by default).
  */
 import os from "node:os";
+import { recordChild, forgetChild } from "./sandbox/orphans.mjs";
 import process from "node:process";
 import fs from "node:fs";
 import nodePty from "node-pty";
@@ -99,11 +100,17 @@ export function createTerminal(webContents, opts = {}) {
 
   const id = ++seq;
   sessions.set(id, { pty, webContents });
+  // Recorded for the startup sweep (docs/agent-runtime-crash-recovery.md C4). `before-quit` kills every session,
+  // but a hard kill of the main process never runs it, and a shell holding a build or a dev server then outlives
+  // the app with nothing left able to see it. Paired with the forget in onExit below, so the record only ever
+  // names sessions that are still running.
+  recordChild(pty.pid, `terminal: ${shell}`);
 
   pty.onData((data) => {
     if (!webContents.isDestroyed()) webContents.send("terminal:data", { id, data });
   });
   pty.onExit(({ exitCode, signal }) => {
+    forgetChild(pty.pid);
     sessions.delete(id);
     if (!webContents.isDestroyed()) webContents.send("terminal:exit", { id, exitCode, signal });
   });

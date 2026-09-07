@@ -48,6 +48,8 @@ export interface PerConvState {
   /** Take the front of a conversation's queue, or undefined when it is empty. */
   shiftQueued: (convId: string) => QueuedMsg | undefined;
   queueLength: (convId: string) => number;
+  /** The queued messages' text, for the crash checkpoint (docs/agent-runtime-crash-recovery.md C2). */
+  queuedTexts: (convId: string) => string[];
 
   // ── Task list ────────────────────────────────────────────────────────────────────────────────────────────
   todos: Todo[];
@@ -146,6 +148,10 @@ export function usePerConvState({ convIdRef }: { convIdRef: React.RefObject<stri
   };
 
   const queueLength = (convId: string) => queueRef.current.get(convId)?.length ?? 0;
+
+  // Read by the turn checkpoint: a crash mid-turn loses the queue (it lives in this component), so the record of
+  // what was waiting is the only way the next session can tell the user which messages never went out.
+  const queuedTexts = (convId: string) => (queueRef.current.get(convId) ?? []).map((m) => m.text);
 
   // Task list (update_todos): fixed above the input box. Owned per conversation, not globally — the panel belongs to
   // the conversation that created it, so switching away must take it off screen and switching back must bring it back.
@@ -313,6 +319,7 @@ export function usePerConvState({ convIdRef }: { convIdRef: React.RefObject<stri
     clearQueue,
     shiftQueued,
     queueLength,
+    queuedTexts,
     todos,
     todosFor,
     setTodosFor,

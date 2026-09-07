@@ -17,6 +17,7 @@ import { app } from "electron";
 import fs from "node:fs/promises";
 import fssync from "node:fs";
 import path from "node:path";
+import { recordRecovery } from "./recoveryLog.mjs";
 import { randomUUID } from "node:crypto";
 import {
   encryptJson,
@@ -163,16 +164,69 @@ export async function loadIndex() {
   }
 }
 
+/**
+ * Projects whose file exists but could not be read (docs/agent-runtime-crash-recovery.md C1).
+ *
+ * This set is the fix for a silent data-loss path, not bookkeeping. `loadProject` answers a failure with an empty
+ * list, the renderer shows a project with no conversations, and the first change writes that empty document back —
+ * destroying bytes that a person could otherwise have recovered. Recording the failure lets `saveProject` refuse,
+ * so the damage stops at "this project looks empty until you restart" instead of reaching the disk.
+ *
+ * Cleared by a successful load, so a project that was unreadable because the key was briefly unavailable saves
+ * normally again the moment it actually opens.
+ */
+const unreadable = new Set();
+
+/** Whether the last read of this project's file failed. Exported for the tests and for a future diagnostics view. */
+export function isProjectUnreadable(projectId) {
+  return unreadable.has(projectId);
+}
+
+/**
+ * Move bytes that cannot be parsed out of the way, so the next write starts clean and the original survives.
+ *
+ * Only for a JSON parse failure: those bytes are structurally not a document, so preserving them under another name
+ * is strictly better than leaving them where the next save would land. A *decryption* failure is deliberately not
+ * quarantined — the ciphertext may be perfectly good and only the key missing, and renaming a user's intact data
+ * because their keychain was locked would be the worse error.
+ */
+async function quarantine(file, projectId, reason) {
+  const target = `${file}.corrupt-${Date.now()}`;
+  try {
+    await fs.rename(file, target);
+    console.error(`[store] ${path.basename(file)} could not be read (${reason}); kept as ${path.basename(target)}`);
+    recordRecovery("store", "quarantined", { project: projectId, kept: path.basename(target), reason: String(reason).slice(0, 200) });
+    return true;
+  } catch (e) {
+    console.error("[store] could not quarantine the unreadable file:", e?.message ?? e);
+    return false;
+  }
+}
+
 export async function loadProject(projectId) {
   ensureInit();
   try {
     const raw = JSON.parse(await fs.readFile(convFile(projectId), "utf8"));
     // Encrypted envelope -> decrypt to retrieve { conversations }; legacy plaintext -> read as-is (lazy migration: the next write encrypts it).
     const data = isEnvelope(raw) ? decryptEnvelope(raw) : raw;
+    unreadable.delete(projectId); // read cleanly: whatever was wrong before is not wrong now
     return { conversations: Array.isArray(data?.conversations) ? await withBlobsInlined(projectId, data.conversations) : [] };
   } catch (e) {
-    // A missing file is normal; a decryption failure (missing key / tampering) also falls back to empty and never throws in a way that takes down loading.
-    if (e?.code !== "ENOENT") console.error("loadProject failed:", e);
+    // A missing file is normal and means an empty project, not a damaged one.
+    if (e?.code === "ENOENT") {
+      unreadable.delete(projectId);
+      return { conversations: [] };
+    }
+    console.error("loadProject failed:", e);
+    // Structurally invalid bytes are certainly damaged, so they are moved aside and the project starts clean.
+    // Anything else — a missing key above all — leaves the file exactly where it is and only blocks writes.
+    const corruptJson = e instanceof SyntaxError;
+    if (corruptJson && (await quarantine(convFile(projectId), projectId, e.message))) {
+      unreadable.delete(projectId);
+    } else {
+      unreadable.add(projectId);
+      recordRecovery("store", "unreadable", { project: projectId, reason: String(e?.message ?? e).slice(0, 200) });
+    }
     return { conversations: [] };
   }
 }
@@ -182,7 +236,10 @@ export async function saveIndex(projects) {
   try {
     await fs.mkdir(STORE_DIR, { recursive: true });
     const safe = Array.isArray(projects) ? projects : [];
-    await fs.writeFile(indexFile(), JSON.stringify({ projects: safe }, null, 2), "utf8");
+    // Through writeAtomic like everything else. This was a direct overwrite, which made the index — the one file
+    // that names every project — the *least* crash-safe file in the store: a crash mid-write left it torn, and a
+    // torn index is every project disappearing at once.
+    await writeAtomic(indexFile(), JSON.stringify({ projects: safe }, null, 2));
     return true;
   } catch (e) {
     console.error("saveIndex failed:", e);
@@ -224,6 +281,13 @@ export function saveProject(projectId, conversations) {
 }
 
 async function writeProject(projectId, conversations) {
+  // The guard that turns a read failure into an inconvenience instead of data loss: a project whose file exists but
+  // could not be parsed or decrypted has been reported as empty upstream, and writing that back would overwrite the
+  // very bytes someone might still recover. Refused until a load actually succeeds. See `unreadable`.
+  if (unreadable.has(projectId)) {
+    console.error(`[store] refusing to overwrite ${projectId}: its file could not be read this session`);
+    return false;
+  }
   try {
     await fs.mkdir(convDir(), { recursive: true });
     const safe = Array.isArray(conversations) ? conversations : [];
@@ -247,12 +311,44 @@ async function writeProject(projectId, conversations) {
   }
 }
 
-/** Write to a sibling temp file and rename over the target, so a crash mid-write leaves the old file, not half a new one. */
+/**
+ * Write to a sibling temp file and rename over the target, so a crash mid-write leaves the old file, not half a new one.
+ *
+ * The rename is what makes the swap atomic; the two flushes are what make it survive a POWER loss rather than only a
+ * process crash (docs/agent-runtime-crash-recovery.md C1). Without them the rename can reach the disk before the bytes
+ * do, and the result is the one outcome this pattern exists to prevent: a file that is neither the old one nor the
+ * new one. Flushing the directory as well is what makes the rename itself durable — on Linux the entry can otherwise
+ * be lost even though both files were written.
+ *
+ * Both flushes are best effort. A filesystem that refuses to open a directory (Windows) or to fsync it is not a
+ * reason to fail a write that has otherwise succeeded; it just means this write is as durable as it used to be.
+ */
 let tmpSeq = 0;
 async function writeAtomic(file, body) {
   const tmp = `${file}.${process.pid}.${++tmpSeq}.tmp`;
-  await fs.writeFile(tmp, body, Buffer.isBuffer(body) ? undefined : "utf8");
+  let handle;
+  try {
+    handle = await fs.open(tmp, "w");
+    await handle.writeFile(body, Buffer.isBuffer(body) ? undefined : "utf8");
+    await handle.sync(); // the bytes are on the disk before anything points at them
+  } finally {
+    await handle?.close().catch(() => {});
+  }
   await fs.rename(tmp, file);
+  await syncDir(path.dirname(file));
+}
+
+/** Flush a directory entry, so a rename survives a power loss. Best effort: not every platform permits it. */
+async function syncDir(dir) {
+  let handle;
+  try {
+    handle = await fs.open(dir, "r");
+    await handle.sync();
+  } catch {
+    /* Windows refuses to open a directory, and some filesystems refuse to fsync one. Neither is a write failure. */
+  } finally {
+    await handle?.close().catch(() => {});
+  }
 }
 
 /**

@@ -44,6 +44,7 @@
  * not start. The model sees a command that failed, never a command that silently happened twice.
  */
 import { spawn } from "node:child_process";
+import { recordRecovery } from "../store/recoveryLog.mjs";
 import { createRequire } from "node:module";
 import fs from "node:fs";
 import path from "node:path";
@@ -56,6 +57,30 @@ const PROTOCOL_VERSION = "1.0";
 const CALL_TIMEOUT_MS = 180_000;
 /** Handshake budget. Generous: a cold binary on a slow disk still has to be paged in. */
 const INIT_TIMEOUT_MS = 10_000;
+
+/**
+ * Respawn backoff (docs/agent-runtime-crash-recovery.md C3).
+ *
+ * `ensureStarted` is lazy, so before this a crashed sidecar was respawned by the very next tool call — which for a
+ * binary that dies during its handshake meant a fresh process per call until the failure latch caught it. The latch
+ * bounded the damage; it did not stop a burst. Waiting between attempts does, and it costs nothing when the runtime
+ * is healthy because the schedule is only consulted after a failure.
+ *
+ * Indexed by the number of failures so far, and held at the last entry.
+ */
+const RESPAWN_BACKOFF_MS = [1_000, 4_000, 15_000];
+
+/**
+ * Idle heartbeat.
+ *
+ * A sidecar that dies is noticed at once — the pipe closes. A sidecar that is ALIVE but wedged is not noticed at
+ * all: its stdout simply never produces a reply, and every caller waits out its own timeout, one at a time. This
+ * pings a runtime that has been idle and treats one missed reply as death, so the fallback engages once rather
+ * than per call. Cheap by construction: `runtime.status` is served from memory, and the ping is skipped entirely
+ * whenever a real request is already in flight.
+ */
+const HEARTBEAT_INTERVAL_MS = 30_000;
+const HEARTBEAT_TIMEOUT_MS = 5_000;
 /**
  * Consecutive spawn failures after which we stop trying for the rest of the session.
  *
@@ -121,6 +146,17 @@ let state = null; // { child, pending, buffer, tools, features, nextId, ready }
 let callSeq = 0;
 let spawnFailures = 0;
 let disabled = false;
+/** Epoch ms before which no respawn is attempted. Set after every failure; see RESPAWN_BACKOFF_MS. */
+let nextAttemptAt = 0;
+/**
+ * Which binary the failures above are about.
+ *
+ * A failure record describes one executable: it is that binary that would not spawn, or crashed, or failed its
+ * handshake. If the path resolves somewhere else, none of that history applies to what is there now. In a packaged
+ * app the path never moves and this never fires; it matters where the path CAN move — a developer rebuilding the
+ * sidecar, and the tests, which point the bridge at a series of scripted binaries in one process.
+ */
+let failedBin = "";
 
 /**
  * Handlers for runtime→host events, by method name.
@@ -304,6 +340,7 @@ function teardown(reason) {
   const s = state;
   state = null;
   if (!s) return;
+  stopHeartbeat(s);
   if (s.ready) {
     // Only for a runtime that was actually serving: a failed handshake never started anything.
     try {
@@ -481,6 +518,14 @@ function reportRecovered(plan) {
   if (!plan) return;
   const queued = plan.resumable?.length ?? 0;
   const started = plan.interrupted?.length ?? 0;
+  if (started || queued || plan.torn_tail || plan.corrupt_lines) {
+    recordRecovery("sidecar", "journal-replayed", {
+      interrupted: (plan.interrupted ?? []).map((t) => ({ id: t.id, label: t.label })),
+      resumable: queued,
+      tornTail: !!plan.torn_tail,
+      corruptLines: plan.corrupt_lines ?? 0,
+    });
+  }
   if (started > 0) {
     console.warn(
       `[rust-runtime] ${started} task(s) were RUNNING when the previous runtime stopped and may have had ` +
@@ -622,6 +667,113 @@ export function recoveredWork() {
   return recovered;
 }
 
+/**
+ * What the supervisor is currently doing (docs/agent-runtime-crash-recovery.md C3).
+ *
+ * Read by the host so a session running entirely on the JS fallback is distinguishable from one that never had a
+ * sidecar — before this, the difference existed only as a console line nobody was looking at.
+ */
+export function bridgeStatus() {
+  return {
+    /** "ready" | "starting" | "backoff" | "disabled" | "off" | "stopped" */
+    state: disabled
+      ? "disabled"
+      : flagState() === "off"
+        ? "off"
+        : state?.ready
+          ? "ready"
+          : state
+            ? "starting"
+            : nextAttemptAt && Date.now() < nextAttemptAt
+              ? "backoff"
+              : "stopped",
+    failures: spawnFailures,
+    maxFailures: MAX_SPAWN_FAILURES,
+    /** Ms until the next respawn is allowed, or 0 when one may happen now. */
+    retryInMs: nextAttemptAt ? Math.max(0, nextAttemptAt - Date.now()) : 0,
+    /**
+     * Work the PREVIOUS runtime left behind, as the journal classified it. `interrupted` had begun and may have
+     * had side effects, so it is reported and never re-run; `resumable` never started.
+     *
+     * Not routed to the conversation that owned each task: a journal record carries the task's id, label, priority
+     * and resource, and no conversation id, so there is nothing to route on yet. Surfacing it needs a field on the
+     * Rust side first — see §8 of the design doc.
+     */
+    recovered: recovered
+      ? {
+          interrupted: (recovered.interrupted ?? []).map((t) => ({ id: t.id, label: t.label, attempts: t.attempts })),
+          resumable: (recovered.resumable ?? []).length,
+          tornTail: !!recovered.torn_tail,
+          corruptLines: recovered.corrupt_lines ?? 0,
+        }
+      : null,
+  };
+}
+
+/**
+ * Start pinging an idle runtime, so a wedged-but-alive sidecar is noticed once rather than per call.
+ *
+ * Skipped whenever a real request is in flight: that request is a better liveness probe than a ping, and pinging
+ * a busy runtime would only add work to the queue it is already behind on. The timer is unref'd so it never holds
+ * the process open on its own.
+ */
+function startHeartbeat(s) {
+  stopHeartbeat(s);
+  s.heartbeat = setInterval(async () => {
+    if (state !== s || !s.ready || s.closing) return stopHeartbeat(s);
+    if (s.pending.size > 0) return; // busy: a real reply proves more than a ping would
+    try {
+      await request(s, "runtime.status", {}, HEARTBEAT_TIMEOUT_MS);
+    } catch (e) {
+      if (state !== s || s.closing) return;
+      // Alive but not answering. Tearing it down is what makes the fallback engage once, instead of every
+      // later call waiting out its own multi-minute timeout against a process that will never reply.
+      console.warn("[rust-runtime] heartbeat missed; treating the runtime as gone:", e?.message ?? e);
+      recordRecovery("sidecar", "heartbeat-missed", { timeoutMs: HEARTBEAT_TIMEOUT_MS });
+      teardown("heartbeat missed");
+      try {
+        s.child.kill();
+      } catch {
+        /* already gone */
+      }
+      noteFailure("heartbeat missed");
+    }
+  }, HEARTBEAT_INTERVAL_MS);
+  s.heartbeat?.unref?.();
+}
+
+function stopHeartbeat(s) {
+  if (s?.heartbeat) {
+    clearInterval(s.heartbeat);
+    s.heartbeat = null;
+  }
+}
+
+/**
+ * Record a failed start or an unexpected exit: advance the counter, arm the backoff, latch off at the limit.
+ *
+ * One function because the three used to be updated at four separate sites, and a site that bumped the counter
+ * without arming the backoff is exactly how "wait before retrying" quietly becomes "retry immediately".
+ */
+function noteFailure(why) {
+  spawnFailures += 1;
+  failedBin = binaryPath() || failedBin;
+  const wait = RESPAWN_BACKOFF_MS[Math.min(spawnFailures - 1, RESPAWN_BACKOFF_MS.length - 1)];
+  nextAttemptAt = Date.now() + wait;
+  if (spawnFailures >= MAX_SPAWN_FAILURES) {
+    if (!disabled) {
+      disabled = true;
+      console.warn(`[rust-runtime] disabled for this session after ${spawnFailures} failures (${why})`);
+      // The latch used to be a console line only, so a session running entirely on the JS fallback looked
+      // identical to one that never had a sidecar. C10: it leaves a record now.
+      recordRecovery("sidecar", "disabled", { failures: spawnFailures, why: String(why).slice(0, 200) });
+    }
+    return;
+  }
+  console.warn(`[rust-runtime] ${why}; next attempt in ${wait}ms (failure ${spawnFailures}/${MAX_SPAWN_FAILURES})`);
+  recordRecovery("sidecar", "restart-scheduled", { failures: spawnFailures, waitMs: wait, why: String(why).slice(0, 200) });
+}
+
 /** Spawn and handshake. Returns the live state, or null if the runtime is unavailable for any reason. */
 async function ensureStarted() {
   if (disabled || flagState() === "off") return null;
@@ -633,13 +785,22 @@ async function ensureStarted() {
     disabled = true; // not built -- there is nothing to retry
     return null;
   }
+  // A different executable than the one those failures were about: the history does not apply to it.
+  if (failedBin && failedBin !== bin) {
+    spawnFailures = 0;
+    nextAttemptAt = 0;
+    disabled = false;
+    failedBin = "";
+  }
+  // Backoff after a failure of THIS binary. The call takes the JS handler rather than waiting: a tool call must
+  // not be held for fifteen seconds because the sidecar is unwell, and the next call past the window respawns it.
+  if (nextAttemptAt && Date.now() < nextAttemptAt) return null;
 
   let child;
   try {
     child = spawn(bin, stateDirArgs(), { stdio: ["pipe", "pipe", "pipe"], windowsHide: true });
   } catch (e) {
-    if (++spawnFailures >= MAX_SPAWN_FAILURES) disabled = true;
-    console.warn("[rust-runtime] spawn failed:", e?.message ?? e);
+    noteFailure(`spawn failed: ${e?.message ?? e}`);
     return null;
   }
 
@@ -656,6 +817,8 @@ async function ensureStarted() {
     nextId: 0,
     ready: false,
     closing: false,
+    /// Idle-liveness timer; see startHeartbeat. Null while none is running.
+    heartbeat: null,
   };
   state = s;
 
@@ -677,10 +840,7 @@ async function ensureStarted() {
     // exit usually won the race and the counter never moved, which is exactly the kind of difference a
     // slower machine turns into a red run.
     if (s.closing) return;
-    if (code !== 0 && ++spawnFailures >= MAX_SPAWN_FAILURES) {
-      disabled = true;
-      console.warn(`[rust-runtime] disabled after ${spawnFailures} failures`);
-    }
+    if (code !== 0) noteFailure(`runtime exited (code=${code} signal=${signal ?? "-"})`);
   });
   child.on("error", (e) => {
     if (state === s) teardown(`runtime error: ${e?.message ?? e}`);
@@ -705,6 +865,8 @@ async function ensureStarted() {
     for (const name of init?.features ?? []) s.features.add(name);
     s.ready = true;
     spawnFailures = 0;
+    nextAttemptAt = 0;
+    startHeartbeat(s);
     // Said once, at the handshake, rather than discovered one failed call at a time.
     const missing = RUNTIME_ONLY_TOOLS.filter((name) => !s.tools.has(name));
     if (missing.length) {
@@ -722,9 +884,8 @@ async function ensureStarted() {
   } catch (e) {
     // A version mismatch lands here too, which is the point of negotiating: the host falls back
     // cleanly instead of failing somewhere deep in a turn.
-    console.warn("[rust-runtime] handshake failed:", e?.message ?? e);
     teardown("handshake failed");
-    if (++spawnFailures >= MAX_SPAWN_FAILURES) disabled = true;
+    noteFailure(`handshake failed: ${e?.message ?? e}`);
     return null;
   }
 }
@@ -1128,6 +1289,13 @@ export function isReady() {
 export async function shutdown() {
   const s = state;
   if (s) s.closing = true; // deliberate: see the exit handler
+  // A deliberate stop ends the lifecycle those failures belonged to, so the next start is a fresh start rather
+  // than a retry: the counter, the latch and the backoff window all go with it. Same principle as the renderer
+  // crash page's "Try again" — only a deliberate act grants a fresh budget, and this is one.
+  spawnFailures = 0;
+  nextAttemptAt = 0;
+  disabled = false;
+  failedBin = "";
   if (!s?.ready) {
     teardown("shutdown");
     return;

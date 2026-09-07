@@ -40,6 +40,15 @@ export type ReminderState = {
   task?: string;
   /** The rendered Goal State block (objective + criteria + plan + progress); "" once a goal is cleared. See goalState.ts. */
   goal?: string;
+  /**
+   * One-shot: the previous turn was interrupted by a crash (turnState.ts describeInterruptedTurn).
+   *
+   * Set on the first send after a conversation was reopened carrying a leftover checkpoint, and undefined on every
+   * other send — diffReminder skips undefined keys, so it is announced once and never restated or retracted. Unlike
+   * every other field here it describes an event rather than standing state, which is why renderBody omits it from a
+   * compaction snapshot (see reminders.ts).
+   */
+  recovery?: string;
 };
 
 export type ApiMsg =

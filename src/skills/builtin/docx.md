@@ -45,6 +45,43 @@ soffice --headless --convert-to docx legacy.doc       # .doc/.odt/.rtf → .docx
 
 Word comments are not exported by pandoc: read `word/comments.xml` after `unpack.py` (below).
 
+## Make it look designed
+
+Every deliverable goes through `{{SKILLS_DIR}}/office/theme.py`, which holds one design system for all four
+document skills: a type scale, a near-neutral palette with a single accent, and spacing that groups related
+things. Import it and the document inherits the whole system in one call.
+
+```python
+import sys; sys.path.insert(0, "{{SKILLS_DIR}}/office")
+import theme
+from docx import Document
+
+doc = theme.docx_base(Document())          # fonts, sizes, line spacing, margins, heading styles
+doc = theme.docx_base(Document(), serif=True)   # long-form prose that will be printed
+```
+
+What separates a document that looks considered from one that looks generated is a short list, and almost
+all of it is decided by the two calls above plus `theme.docx_table`:
+
+- **One accent, spent once.** `theme.ACCENT` on the table header rule or a section marker — not on headings
+  *and* borders *and* links. Everything else is ink, body, muted, hairline.
+- **Space before a heading beats space after it,** so a heading belongs to the text below rather than
+  floating between two blocks. `docx_base` sets this; do not override it with blank paragraphs.
+- **Tables get horizontal rules only.** `Table Grid` boxes every cell and turns data into a wall of lines.
+  `theme.docx_table(t)` strips the box, rules under the header and between rows, right-aligns the numeric
+  columns and sets the caption-sized type. It is the single biggest visual upgrade available here.
+- **Never centre body text or headings.** Left-aligned with a ragged right edge is what reading text does;
+  centring is for a title page and nothing else.
+- **One blank line is a paragraph gap, not a layout tool.** Use `space_before` / `space_after`, page breaks
+  and `keep_with_next`. A document spaced with empty paragraphs reflows into nonsense on any other machine.
+
+Never do these, in any document: `Table Grid` left as-is; underlined text (it means a hyperlink); ALL CAPS
+running text; more than two typefaces; a different colour per heading level; text over a photograph without
+a scrim; a logo stretched off its aspect ratio; Calibri 11 defaults left untouched, which is the tell that
+nobody chose anything.
+
+To match a brand, change `theme.ACCENT` and `theme.ACCENT_TINT` together and leave the rest alone.
+
 ## Create with python-docx
 
 ```python
@@ -55,13 +92,10 @@ from docx.enum.table import WD_TABLE_ALIGNMENT
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 
-doc = Document()
-# Base font (set on the Normal style so every paragraph inherits it). East Asian text needs w:eastAsia too.
-normal = doc.styles["Normal"]
-normal.font.name = "Arial"; normal.font.size = Pt(11)
-normal.element.rPr.rFonts.set(qn("w:eastAsia"), "Microsoft YaHei")
-for s in doc.sections:
-    s.top_margin = s.bottom_margin = Cm(2.5); s.left_margin = s.right_margin = Cm(2.5)
+import sys; sys.path.insert(0, "{{SKILLS_DIR}}/office")
+import theme
+
+doc = theme.docx_base(Document())   # the whole system: fonts, scale, spacing, margins, heading styles
 
 doc.add_heading("Quarterly Report", level=0)          # Title style
 doc.add_heading("1. Summary", level=1)                 # real Heading styles: TOC and navigation depend on them
@@ -71,19 +105,18 @@ p.add_run(" year over year.")
 doc.add_paragraph("First point", style="List Bullet")  # "List Number" for numbered lists
 doc.add_paragraph("Second point", style="List Bullet")
 
-table = doc.add_table(rows=1, cols=3, style="Table Grid")
-table.alignment = WD_TABLE_ALIGNMENT.CENTER
+table = doc.add_table(rows=1, cols=3)
 for cell, text in zip(table.rows[0].cells, ["Region", "Q1", "Q2"]):
     cell.text = text
-    cell.paragraphs[0].runs[0].bold = True
-    shd = OxmlElement("w:shd"); shd.set(qn("w:fill"), "D9E2F3"); cell._tc.get_or_add_tcPr().append(shd)
 for row in [["North", "1,200", "1,350"], ["South", "980", "1,010"]]:
     cells = table.add_row().cells
     for i, v in enumerate(row):
         cells[i].text = v
-        if i: cells[i].paragraphs[0].alignment = WD_ALIGN_PARAGRAPH.RIGHT   # numbers right-aligned
+# One call does the rest: strips the boxed grid, rules the header and rows, right-aligns from column 1 on.
+theme.docx_table(table, numeric_from=1)
 
 doc.add_picture("chart.png", width=Cm(15))            # keeps aspect ratio
+theme.docx_caption(doc, "Figure 1. Revenue by region, 2026.")   # small, muted, tight to the image
 doc.paragraphs[-1].alignment = WD_ALIGN_PARAGRAPH.CENTER
 doc.add_page_break()
 
@@ -199,10 +232,18 @@ python {{SKILLS_DIR}}/office/render.py out.docx --png --dpi 60     # PDF + one P
 pandoc out.docx -t plain | head -60                                 # text reads in the right order?
 ```
 
-Check: page count is plausible, no empty pages, headings are real Heading styles (`p.style.name`),
-tables have a header row, numbers are right-aligned, fonts consistent (one body font, one heading
-font), images not overflowing the margins, header/footer present on every section. When the request
-was a PDF, deliver the rendered PDF as well.
+**Open the PNGs and look at them.** A document is a visual object, and the only way to know it works is to
+see it. Check in this order, because each item is worse than the one after it:
+
+1. **Nothing is broken.** No empty page, no heading orphaned at the foot of a page, no table split across a
+   break with its header left behind, no image pushed past the margin.
+2. **The page has a shape.** Even margins, one clear column of text, headings that step down in size, white
+   space that groups sections rather than scattering them.
+3. **The details are right.** Numbers right-aligned, one body font and one heading font, the accent used
+   once, captions under figures, a header or footer on every section, real Heading styles (`p.style.name`)
+   so navigation and the TOC work.
+
+Fix what you see and render again. When the request was a PDF, deliver the rendered PDF as well.
 
 ## Pitfalls
 

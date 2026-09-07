@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Zeraix</title>
+<style>
+  :root {
+    --ground: #f6f6f7; --surface: #ffffff; --ink: #17171a; --muted: #5c5c66;
+    --line: #e0e0e4; --accent: #3f6fd1;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --ground: #121215; --surface: #1a1a1f; --ink: #ececed; --muted: #9a9aa4; --line: #2c2c33; --accent: #7fa0d9; }
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    background: var(--ground); color: var(--ink);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    display: grid; place-items: center; padding: 32px;
+    -webkit-user-select: none; user-select: none; cursor: default;
+  }
+  .card {
+    width: 100%; max-width: 520px; background: var(--surface);
+    border: 1px solid var(--line); border-radius: 14px; padding: 28px 30px;
+    display: flex; flex-direction: column; gap: 14px;
+  }
+  h1 { font-size: 17px; font-weight: 650; letter-spacing: -0.01em; }
+  p { font-size: 13.5px; line-height: 1.6; color: var(--muted); }
+  code {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 12px; background: var(--ground); border: 1px solid var(--line);
+    border-radius: 5px; padding: 2px 6px; user-select: text; word-break: break-all;
+  }
+  .row { display: flex; gap: 10px; margin-top: 4px; }
+  button {
+    font: inherit; font-size: 13px; font-weight: 550; cursor: pointer;
+    padding: 8px 16px; border-radius: 8px; border: 1px solid var(--line);
+    background: var(--surface); color: var(--ink); transition: background .15s;
+  }
+  button:hover { background: var(--ground); }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  button.primary:hover { filter: brightness(1.06); }
+  button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .zh { color: var(--muted); font-size: 12.5px; border-top: 1px solid var(--line); padding-top: 12px; }
+</style>
+</head>
+<body>
+  <main class="card">
+    <h1 id="title">The window kept closing unexpectedly</h1>
+    <p id="body">
+      Zeraix reloaded it twice and it stopped again, so it has been left as it is rather than restarted in a loop.
+      Your conversations are saved. Any reply that was interrupted is reported when you reopen that conversation.
+    </p>
+    <p id="logLabel">Details for a bug report are in the recovery log:</p>
+    <p><code id="logPath">…</code></p>
+    <div class="row">
+      <button class="primary" id="reload">Try again</button>
+      <button id="quit">Quit</button>
+    </div>
+    <p class="zh" id="zh">
+      窗口反复意外关闭，已停止自动重载以避免循环。你的对话已保存；被中断的回复会在重新打开该对话时提示。
+    </p>
+  </main>
+  <script>
+    const api = window.recovery;
+    const path = document.getElementById("logPath");
+    if (api && api.logPath) {
+      api.logPath().then((p) => { path.textContent = p || "unavailable"; }).catch(() => { path.textContent = "unavailable"; });
+    } else {
+      path.textContent = "unavailable";
+    }
+    document.getElementById("reload").addEventListener("click", () => api && api.reloadWindow && api.reloadWindow());
+    document.getElementById("quit").addEventListener("click", () => api && api.quitApp && api.quitApp());
+  </script>
+</body>
+</html>

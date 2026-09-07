@@ -1,19 +1,23 @@
-import { app, BrowserWindow, dialog, ipcMain, protocol, shell, utilityProcess } from "electron";
+import { app, BrowserWindow, dialog, ipcMain, powerMonitor, protocol, shell, utilityProcess } from "electron";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { reapOrphans } from "./tools/sandbox/orphans.mjs";
+import { reapOrphans, recordChild, forgetChild } from "./tools/sandbox/orphans.mjs";
+import { setRecoveryLogDir, recordRecovery, readRecoveryLog, recoveryLogPath } from "./store/recoveryLog.mjs";
+import { sweepAndRecord } from "./store/tempSweep.mjs";
+import { acquireSessionLock, releaseSessionLock, lastSession } from "./store/sessionLock.mjs";
+import { createCrashPolicy } from "./rendererRecovery.mjs";
 import { listTools, runTool, getWorkingDir, setWorkingDir, setAssetDir, saveAttachment, setLLMConfig, getLLMConfig, setServiceEventHandler, stopProcess, listProcesses, initEngine, disposeEngines, getSandboxStatus, setSandboxMode, onSandboxStatus, restartSandbox, sandboxVmInfo, wsReadDir, wsReadFile, wsWriteFile, getAssetDir } from "./tools/aiToolkit.mjs";
 import { MIME_TYPES, mimeOfPath, serveWorkspaceFile, WS_PREFIX } from "./fileServing.mjs";
 // First-launch agreement to the Privacy Policy and the Terms of Service; gates every window. See legal/consentWindow.mjs.
 import { ensureLegalConsent, isLegalAccepted } from "./legal/consentWindow.mjs";
 import { appUserModelId, ensureDevStartMenuShortcut, notificationIconPath, windowIconPath } from "./appIdentity.mjs";
 import { bringWindowToFront } from "./windowFocus.mjs";
-import { setAssetHostDir } from "./tools/sandbox/qemu.mjs";
+import { setAssetHostDir, probeAfterResume } from "./tools/sandbox/qemu.mjs";
 import { GUEST_SKILLS_DIR, resolveSkillsHostDir } from "./tools/builtinSkills.mjs";
 import { setMediaDir, readIndex, writeIndex, saveMedia, openMediaDir, getMediaDir } from "./mediaStore.mjs";
 // Reports at startup whether the Rust sidecar is enabled, active, or unavailable — see warmUp.
-import { warmUp as warmUpRustRuntime, shutdown as shutdownRustRuntime } from "./tools/rustRuntime.mjs";
+import { warmUp as warmUpRustRuntime, shutdown as shutdownRustRuntime, bridgeStatus as rustBridgeStatus } from "./tools/rustRuntime.mjs";
 // Sub-agent scheduling in the runtime (Stage 4b). Opt-in; see subagentBridge.mjs.
 import { initSubagentBridge, subagentsEnabled } from "./agent/subagentBridge.mjs";
 import { discoverProjectSkills, setProjectSkillDecision, readProjectSkillFile, loadEnabledProjectSkills } from "./tools/projectSkills.mjs";
@@ -320,6 +324,9 @@ let mainWindow = null;
 let splashWindow = null;
 /** True once a real quit is under way, so the window `close` handler stops hiding and lets it through. */
 let isQuitting = false;
+/** Each window's renderer-crash record (electron/rendererRecovery.mjs). Weak, so a closed window is not retained. */
+const crashPolicies = new WeakMap();
+const crashPolicyFor = (win) => crashPolicies.get(win);
 
 /** Main window ready: show the main window (the splash screen has been removed, splashWindow is always null, so it takes the direct-show branch). Safe to call repeatedly (idempotent). */
 let splashDismissed = false;
@@ -404,10 +411,42 @@ async function createWindow() {
     });
   });
 
-  // Renderer (main window) crash: only log it, leaving a manual refresh to the developer / user.
-  // Note: do not auto-reload here -- if the renderer keeps crashing it would cause an infinite refresh loop.
+  // Renderer (main window) crash: reload it, up to a bound (docs/agent-runtime-crash-recovery.md C7).
+  //
+  // This used to only log, on the grounds that auto-reloading a renderer that crashes on load spins forever. That is
+  // right about the danger and wrong about the conclusion: the fix for a loop is a bound, not a blank window. A crash
+  // is far more often one bad frame than a page that cannot load, the conversation is on disk either way, and the
+  // interrupted turn is reported by its own checkpoint when the conversation is reopened. Past the bound the loop is
+  // real, and the window says so instead of flickering.
+  const crashPolicy = createCrashPolicy();
+  crashPolicies.set(mainWindow, crashPolicy);
+  // Starts the renderer's uptime clock. Deliberately NOT a reset: a page that loads and then dies a second later
+  // would clear its own record on every attempt, so the bound would never be reached and the reload would loop —
+  // which is the failure the bound exists to prevent. Only surviving STABLE_MS forgives the history.
+  mainWindow.webContents.on("did-finish-load", () => crashPolicy.noteLoaded());
   mainWindow.webContents.on("render-process-gone", (_e, details) => {
-    console.error("[main] renderer process gone:", details?.reason);
+    const verdict = crashPolicy.onCrash(details, { quitting: isQuitting });
+    if (verdict.action === "ignore") return; // our own teardown reported as clean-exit / killed
+    console.error(`[main] renderer process gone: ${verdict.reason} (${verdict.count} in the last 5 min)`);
+    // C10: the one record of a renderer crash that outlives the session. The interrupted TURN is recorded separately
+    // by the renderer's own checkpoint (Conversation.turnState) and reported when that conversation is reopened.
+    recordRecovery("renderer", "process-gone", {
+      reason: verdict.reason,
+      exitCode: details?.exitCode ?? null,
+      crashesInWindow: verdict.count,
+      action: verdict.action,
+    });
+    if (mainWindow?.isDestroyed()) return;
+    if (verdict.action === "reload") {
+      mainWindow.webContents.reload();
+      return;
+    }
+    // Persistent: stop reloading and show what happened, with the log path for a bug report. Its own did-finish-load
+    // starts an uptime clock that will never matter — the page is static and cannot crash — and "Try again" resets
+    // the record explicitly, which is the user asking for a fresh budget rather than the app granting itself one.
+    void mainWindow.loadFile(path.join(__dirname, "crash.html")).catch((e) => {
+      console.error("[main] could not show the crash page:", e?.message ?? e);
+    });
   });
 
   // Sync the maximize state to the renderer to drive the icon toggle of the self-drawn "zoom" button.
@@ -437,12 +476,22 @@ async function createWindow() {
   });
 
   if (isDev) {
-    await mainWindow.loadURL(DEV_SERVER_URL);
+    await loadAppInto(mainWindow);
     mainWindow.webContents.openDevTools({ mode: "detach" });
   } else {
-    await mainWindow.loadURL(APP_URL);
+    await loadAppInto(mainWindow);
   }
   dismissSplash();
+}
+
+/**
+ * Point a window at the app itself.
+ *
+ * Factored out of createWindow because the crash page needs the same thing: its "Try again" button has to navigate
+ * back to the app, and `webContents.reload()` there would only reload the crash page (see render-process-gone).
+ */
+function loadAppInto(win) {
+  return win.loadURL(isDev ? DEV_SERVER_URL : APP_URL);
 }
 
 /** AI toolkit IPC: renderer window.aiTools.* -> main process execution (fs / child process) */
@@ -515,6 +564,22 @@ function registerAiTools() {
   // Stop a background service (by pid); list current background services (initial sync).
   ipcMain.handle("ai-tools:stop-process", (_e, pid) => stopProcess(pid));
   ipcMain.handle("ai-tools:list-processes", () => listProcesses());
+  // Crash recovery (docs/agent-runtime-crash-recovery.md C9 / C10): whether the previous session died, and the log
+  // of what the app did about it. Read-only; the renderer shows a one-time notice and, later, a Diagnostics view.
+  ipcMain.handle("recovery:last-session", () => lastSession());
+  ipcMain.handle("recovery:read", (_e, limit) => readRecoveryLog(Number.isInteger(limit) ? limit : 200));
+  ipcMain.handle("recovery:log-path", () => recoveryLogPath());
+  ipcMain.handle("recovery:bridge-status", () => rustBridgeStatus());
+  // The crash page's two buttons. It is loaded into the same webContents, so it reaches these through the ordinary
+  // preload. "Try again" navigates rather than reloading (webContents.reload() would only redraw the crash page) and
+  // clears the crash record first: the user asking to retry is what grants a fresh budget, never the app itself.
+  ipcMain.on("recovery:reload-window", (e) => {
+    const win = BrowserWindow.fromWebContents(e.sender);
+    if (!win || win.isDestroyed()) return;
+    crashPolicyFor(win)?.reset();
+    void loadAppInto(win);
+  });
+  ipcMain.on("recovery:quit-app", () => app.quit());
   // Where the built-in document skills' helper scripts are: on the host, and at the fixed sandbox mount point.
   // The renderer substitutes one of these for `{{SKILLS_DIR}}` in a skill's instructions (see chatTools loadSkill).
   ipcMain.handle("ai-tools:skills-dir", () => ({
@@ -888,6 +953,9 @@ function registerAutomation() {
       serviceName: "cdp-automation",
       stdio: "inherit",
     });
+    // Recorded for the startup sweep (docs/agent-runtime-crash-recovery.md C4). `before-quit` kills it; a hard
+    // kill of the main process does not, and a browser-driving child left behind holds a Chrome instance open.
+    if (automationChild?.pid) recordChild(automationChild.pid, "automation: cdpAgent");
     automationChild.on("message", (msg) => {
       // action-result: resolve the corresponding action Promise; forward all other messages to the renderer (status / triggers).
       if (msg && msg.type === "action-result") {
@@ -901,6 +969,7 @@ function registerAutomation() {
       relay(msg);
     });
     automationChild.on("exit", () => {
+      if (automationChild?.pid) forgetChild(automationChild.pid);
       automationChild = null;
       // Child process exit: fail all pending actions.
       for (const [, resolve] of automationPending) resolve({ ok: false, error: "Automation process has exited" });
@@ -983,17 +1052,49 @@ app.whenReady().then(async () => {
     app.quit();
     return;
   }
+  // C9: did the previous session end cleanly? The lock is removed at the very end of before-quit, so any lock
+  // found here whose process is gone means the last run died before its teardown finished. Recorded first so
+  // the sweep and the sidecar's journal replay below can be read against it.
+  setRecoveryLogDir(path.join(app.getPath("userData"), "logs"));
+  {
+    const session = acquireSessionLock({ dir: app.getPath("userData"), version: app.getVersion() });
+    if (session.unclean) {
+      console.warn(
+        `[session] the previous session (pid ${session.previous?.pid}, v${session.previous?.version ?? "?"}) ended without a clean shutdown`,
+      );
+    }
+  }
   // Kill command trees left running by a previous session that never got to clean up after itself --
   // End Task, a crash, an OS shutdown. Nothing else will: on Windows a child simply outlives its parent,
   // so a build the agent started can hold a core indefinitely with no app left to show it. Deliberately
   // not awaited (it shells out to check start times, and the window should not wait on that), and the
   // result is logged because an app that silently kills processes at boot is worse to debug than the
   // orphans were. See electron/tools/sandbox/orphans.mjs.
+  // Abandoned `*.tmp` siblings from an atomic write that was interrupted (C4). Cheap, shallow, and only files
+  // older than an hour — a younger one may belong to a write happening right now. Synchronous because it is a
+  // handful of stat calls against directories this app owns, and it must finish before anything writes there.
+  try {
+    sweepAndRecord([
+      getStorePath(),
+      app.getPath("userData"),
+      path.join(app.getPath("userData"), "logs"),
+    ]);
+  } catch (e) {
+    console.warn("[temp] sweep failed:", e?.message ?? e);
+  }
+  // Waking from sleep is a partial crash for the sandbox (docs/agent-runtime-crash-recovery.md C5): qemu is still
+  // running, so nothing about the process says anything is wrong, while the guest's clock has jumped and its agent
+  // socket is commonly dead. Without this the first command after waking pays a full timeout to discover that, and
+  // reports a timeout — which reads as a slow command rather than a sandbox that was asleep.
+  powerMonitor.on("resume", () => {
+    void probeAfterResume().catch(() => {});
+  });
   void reapOrphans()
     .then((killed) => {
       if (killed.length) {
         console.log(`[orphans] killed ${killed.length} command tree(s) left by a previous run:`);
         for (const k of killed) console.log(`[orphans]   pid ${k.pid}: ${k.command}`);
+        recordRecovery("orphans", "reaped", { count: killed.length, pids: killed.map((k) => k.pid) });
       }
     })
     .catch(() => {});
@@ -1164,6 +1265,13 @@ app.on("before-quit", () => {
   // Close the automation database so WAL is checkpointed rather than left for recovery on next open.
   try {
     closeDb();
+  } catch {
+    /* ignore */
+  }
+  // LAST: the session ended cleanly only if everything above ran. A crash anywhere in this handler leaves the
+  // lock behind, and the next launch reports an unclean shutdown — which is the truth.
+  try {
+    releaseSessionLock();
   } catch {
     /* ignore */
   }

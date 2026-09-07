@@ -11,6 +11,7 @@
  * exactly what the inline closures used to do.
  */
 import { chatViaProxy, chatStreamViaProxy, isLlmProxyAvailable, isLlmStreamAvailable } from "@/lib/ai/llm";
+import { ChatRequestError, withRequestRetry, type RetryInfo } from "@/lib/ai/requestError";
 import { isLocalEndpoint } from "@/lib/ai/localModel";
 import { markVisionUnsupported, OFFICIAL_PROVIDER_ID, type ResolvedModel } from "@/lib/ai/models";
 import {
@@ -34,6 +35,9 @@ export type TurnUsage = {
   cached: number;
   estimated: boolean;
 };
+
+/** What a retry tells the UI. Defined by the retry runner; re-exported name kept local for readability. */
+type RetryNotice = (info: RetryInfo) => void;
 
 export function createChatRequest(cfg: {
   activeModel: ResolvedModel | null;
@@ -196,7 +200,7 @@ export function createChatRequest(cfg: {
     const streamErr = (res: { ok: boolean; status: number; error?: string }): ChatResponse | never => {
       if (!res.ok) {
         if (signal?.aborted) return assemble(); // Aborted: return the accumulated part (the caller then exits on aborted and will not use it)
-        throw new Error(localErr(res.status, res.error));
+        throw new ChatRequestError(localErr(res.status, res.error), res.status);
       }
       return assemble();
     };
@@ -225,7 +229,7 @@ export function createChatRequest(cfg: {
       } else {
         const res = await chatViaProxy({ endpoint, apiKey: apiKey.trim() || "local", body, headers: localHeaders, meta });
         if (!res.ok) {
-          throw new Error(localErr(res.status, res.error));
+          throw new ChatRequestError(localErr(res.status, res.error), res.status);
         }
         data = res.data as ChatResponse;
       }
@@ -241,7 +245,7 @@ export function createChatRequest(cfg: {
       } else {
         const res = await chatViaProxy({ endpoint, apiKey: apiKey.trim(), body, meta });
         if (!res.ok) {
-          throw new Error(`HTTP ${res.status}${res.error ? ` — ${res.error.slice(0, 300)}` : ""}`);
+          throw new ChatRequestError(`HTTP ${res.status}${res.error ? ` — ${res.error.slice(0, 300)}` : ""}`, res.status);
         }
         data = res.data as ChatResponse;
       }
@@ -258,7 +262,7 @@ export function createChatRequest(cfg: {
       });
       if (!res.ok) {
         const text = await res.text().catch(() => "");
-        throw new Error(`HTTP ${res.status}${text ? ` — ${text.slice(0, 300)}` : ""}`);
+        throw new ChatRequestError(`HTTP ${res.status}${text ? ` — ${text.slice(0, 300)}` : ""}`, res.status);
       }
       if (wantStream && res.body) {
         const reader = res.body.getReader();
@@ -349,6 +353,44 @@ export function createChatRequest(cfg: {
   };
 
   /**
+   * `sendChatOnce`, retried when the failure was the transport rather than the request (C8).
+   *
+   * Sits BELOW the image / thinking fallbacks on purpose. Those change the request and resend it because the provider
+   * objected to its contents; this resends the identical request because it never arrived. Keeping them separate means
+   * a dropped connection during a fallback attempt is retried too, and neither mechanism has to know about the other.
+   *
+   * Safe with respect to side effects, which is the rule this whole area is built on: the model request is the FIRST
+   * thing a round does, so no tool of this round has run when a retry fires. Earlier rounds' tool results are already
+   * in the buffer and resending them is a read. Nothing here re-executes anything.
+   *
+   * A partial stream is discarded rather than kept: `sendChatOnce` builds a fresh accumulator per call, and the reset
+   * is announced to the UI first so the half-written reply visibly clears instead of appearing to rewind on its own.
+   */
+  const sendWithRetry = (
+    messages: ApiMsg[],
+    tools?: unknown[],
+    signal?: AbortSignal,
+    onDelta?: (d: { content: string; reasoning: string }) => void,
+    log?: RequestLog,
+    reasoning?: ThinkingConfig,
+    onRetry?: RetryNotice,
+  ): Promise<ChatResponse> =>
+    withRequestRetry(() => sendChatOnce(messages, tools, signal, onDelta, log, reasoning), {
+      signal,
+      onRetry: (info) => {
+        console.warn(
+          `[chat] ${info.kind} failure (attempt ${info.attempt}/${info.attempts}), retrying in ${info.delayMs}ms: ${info.message}`,
+        );
+        // Told, never silent: a retry nobody sees turns a failing network into an app that is merely slow.
+        onRetry?.(info);
+      },
+      // Clear the partial reply before the next attempt writes over it, so the user sees a restart rather than text
+      // that appears to un-write itself. The discarded text was never persisted — `sendChatOnce` builds a fresh
+      // accumulator per call and only a completed response is ever appended.
+      onBeforeRetry: () => onDelta?.({ content: "", reasoning: "" }),
+    });
+
+  /**
    * One request, with a fail-safe for models that cannot accept images.
    *
    * Image capability is no longer predicted before sending (see modelAcceptsImages): a wrong prediction
@@ -377,6 +419,8 @@ export function createChatRequest(cfg: {
     log?: RequestLog,
     /** Per-request reasoning, from the Runtime's phase policy. Omitted → the session setting. */
     reasoning?: ThinkingConfig,
+    /** Told when a transport failure is being retried, so the UI can say so (C8). */
+    onRetry?: RetryNotice,
   ): Promise<ChatResponse> => {
     const hasImages = messages.some(
       (m) => Array.isArray(m.content) && m.content.some((p) => p.type === "image_url"),
@@ -398,7 +442,7 @@ export function createChatRequest(cfg: {
         turnId: log?.turnId,
       });
     try {
-      return await sendChatOnce(messages, tools, signal, onDelta, log, reasoning);
+      return await sendWithRetry(messages, tools, signal, onDelta, log, reasoning, onRetry);
     } catch (e) {
       // The provider rejected the thinking switch itself (a 400 naming the field): retire it for this
       // model and send the same request again. Checked first because it is the one failure that is
@@ -409,7 +453,7 @@ export function createChatRequest(cfg: {
         console.warn(`[thinking] ${modelName} rejected the thinking parameter; sending without it`, e);
         thinkingUnsupported().add(modelName);
         try {
-          return await sendChatOnce(messages, tools, signal, onDelta, log, reasoning);
+          return await sendWithRetry(messages, tools, signal, onDelta, log, reasoning, onRetry);
         } catch (retryErr) {
           logFailure(retryErr);
           throw retryErr;
@@ -428,7 +472,7 @@ export function createChatRequest(cfg: {
         console.warn(`[thinking] ${modelName} rejected replayed thinking blocks; sending without them`, e);
         reasoningContextUnsupported().add(modelName);
         try {
-          return await sendChatOnce(stripReasoningContent(messages), tools, signal, onDelta, log, reasoning);
+          return await sendWithRetry(stripReasoningContent(messages), tools, signal, onDelta, log, reasoning, onRetry);
         } catch (retryErr) {
           logFailure(retryErr);
           throw retryErr;
@@ -444,7 +488,7 @@ export function createChatRequest(cfg: {
       // The retry is logged as its own invocation: it is a second request that the provider bills for.
       let data: ChatResponse;
       try {
-        data = await sendChatOnce(stripped, tools, signal, onDelta, log, reasoning); // throws the retry's own error if it also fails
+        data = await sendWithRetry(stripped, tools, signal, onDelta, log, reasoning, onRetry); // throws the retry's own error if it also fails
       } catch (retryErr) {
         logFailure(retryErr);
         throw retryErr;

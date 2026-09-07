@@ -143,23 +143,68 @@ RapidOCR is built in (Chinese, Japanese, Korean, Latin scripts). Do **not** inst
 docling or marker — they will not fit or cannot download models in the sandbox. Skewed or dark scans
 improve with `unpaper` or `convert page.png -deskew 40% -normalize page2.png` before OCR.
 
-## Create PDFs
+## Make it look designed
 
-**Styled documents (reports, invoices, letters, certificates): write HTML + CSS, render with weasyprint.**
+A generated PDF is judged the way print is: by its margins, its type and whether the eye knows where to go.
+The shared design system ships the whole thing as CSS, so a weasyprint document inherits it in one line.
 
 ```python
+import sys; sys.path.insert(0, "{{SKILLS_DIR}}/office")
+import theme
 from weasyprint import HTML, CSS
-html = """<html><head><meta charset="utf-8"><style>
-@page { size: A4; margin: 20mm; @bottom-center { content: "Page " counter(page) " of " counter(pages); font-size: 9pt; color: #666; } }
-body { font-family: "Noto Sans", "Noto Sans CJK SC", sans-serif; font-size: 11pt; line-height: 1.45; color: #222; }
-h1 { font-size: 22pt; margin: 0 0 4mm; } h2 { font-size: 14pt; margin-top: 8mm; border-bottom: 1px solid #ccc; }
-table { border-collapse: collapse; width: 100%; } th, td { border: 1px solid #bbb; padding: 4px 8px; }
-th { background: #eef2f7; text-align: left; } td.num { text-align: right; font-variant-numeric: tabular-nums; }
-.page-break { page-break-before: always; }
-</style></head><body>
-<h1>Invoice #1042</h1> ... <table><tr><th>Item</th><th>Amount</th></tr><tr><td>Design</td><td class="num">1,200.00</td></tr></table>
+
+HTML(string=html, base_url=".").write_pdf("out.pdf", stylesheets=[CSS(string=theme.PDF_CSS)])
+HTML(string=html).write_pdf("out.pdf", stylesheets=[CSS(string=theme.pdf_css("#7A1E2B"))])  # brand accent
+```
+
+`theme.PDF_CSS` already sets: A4 with a 2.6cm margin, page numbers in the footer, a type scale, hairline
+tables whose header repeats on every page, `break-inside: avoid` on rows and figures, tabular figures for
+numeric columns, and a callout style. Write semantic HTML and it is styled: `<h1>`–`<h3>`, `<p>`, `<table>`
+with `<thead>`/`<tfoot>`, `td class="num"`, `p class="caption"`, `div class="callout"`,
+`div class="page-break"`.
+
+- **Set the measure, not just the margin.** 10.5pt on A4 at a 2.6cm margin gives about 90 characters, which
+  is the top of the comfortable range. Longer lines lose the reader between them.
+- **Tables get horizontal rules only,** a filled header, right-aligned numbers, and a repeated header on
+  every page. Vertical rules are the fastest way to make a report look like a database dump.
+- **One accent, spent once** — the table header rule, or a callout's left edge. Not both plus the headings.
+- **Anchor figures.** A chart floating between two paragraphs with no caption forces the reader to guess
+  what it shows. `p class="caption"` under it, always.
+- **Check the page breaks, because that is where generated PDFs fail.** A heading alone at the foot, a table
+  header orphaned from its rows, a figure split in half. The CSS prevents the common cases; the render is
+  what tells you about the rest.
+
+Never do these: a colour per heading level; underlined body text; centred paragraphs; a full-bleed
+background colour behind running text (it wastes ink and lowers contrast); a font not named in the CSS
+fallback stack, which silently substitutes on another machine; type below 9pt for anything but a caption.
+
+For **reportlab**, there is no CSS: take the values from `theme` directly — `theme.TYPE`, `theme.INK`,
+`theme.ACCENT`, `theme.HAIRLINE`, `theme.MARGIN_CM` — so a programmatic PDF matches the rest.
+
+## Create PDFs
+
+**Styled documents (reports, invoices, letters, certificates): write semantic HTML, style it with
+`theme.PDF_CSS`, render with weasyprint.** Write the content; the system does the design.
+
+```python
+import sys; sys.path.insert(0, "{{SKILLS_DIR}}/office")
+import theme
+from weasyprint import HTML, CSS
+
+html = """<html><head><meta charset="utf-8"></head><body>
+  <p class="title">Invoice #1042</p>
+  <p class="subtitle">Acme Ltd · due 30 July 2026</p>
+  <table>
+    <thead><tr><th>Item</th><th class="num">Amount</th></tr></thead>
+    <tbody><tr><td>Design</td><td class="num">1,200.00</td></tr>
+           <tr><td>Build</td><td class="num">3,400.00</td></tr></tbody>
+    <tfoot><tr><td>Total</td><td class="num">4,600.00</td></tr></tfoot>
+  </table>
+  <p class="caption">Table 1. Line items, excluding VAT.</p>
+  <div class="callout">Payment is due within 30 days of the invoice date.</div>
 </body></html>"""
-HTML(string=html, base_url=".").write_pdf("invoice.pdf")     # base_url resolves relative <img src>
+# base_url resolves relative <img src>; the stylesheet is the whole design system.
+HTML(string=html, base_url=".").write_pdf("invoice.pdf", stylesheets=[CSS(string=theme.PDF_CSS)])
 ```
 
 Charts for a report: make a PNG with matplotlib (`plt.savefig("chart.png", dpi=200, bbox_inches="tight")`)
@@ -202,6 +247,12 @@ pdftotext -layout out.pdf - | head -40               # text present and in order
 pdftoppm -r 50 -png out.pdf check                    # small PNGs: look at them for layout problems
 ```
 
-Confirm every requested page/field/watermark is present, that text is selectable where it should be (OCR
-output), and that the file opens (`qpdf --check`). Report the output path, what was done, and any fidelity
-loss (tables approximated, fonts substituted, scans OCR'd with possible errors).
+**Look at the PNGs**, and look at the page breaks first — that is where a generated PDF fails. A heading
+alone at the foot of a page, a table header separated from its rows, a figure cut in half, a caption on the
+page after its figure. Then check the shape of the page: even margins, one column of text, a clear
+hierarchy, the accent used once. Then the details: numbers right-aligned, captions present, the footer on
+every page.
+
+Confirm every requested page, field and watermark is present, that text is selectable where it should be
+(OCR output), and that the file opens (`qpdf --check`). Report the output path, what was done, and any
+fidelity loss — tables approximated, fonts substituted, scans OCR'd with possible errors.

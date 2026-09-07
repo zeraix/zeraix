@@ -38,6 +38,41 @@ python {{SKILLS_DIR}}/pptx/thumbnails.py deck.pptx            # PNG per slide + 
 python {{SKILLS_DIR}}/office/unpack.py deck.pptx unpacked/    # raw XML: ppt/slides/slideN.xml, ppt/media/, ppt/slideLayouts/
 ```
 
+## Make it look designed
+
+Slides fail visually in ways pages do not: type that is too small to read from the back of a room, six
+bullets where one sentence would do, and a different arrangement on every slide. Import the shared design
+system and most of it is decided for you.
+
+```python
+import sys; sys.path.insert(0, "{{SKILLS_DIR}}/office")
+import theme
+p = theme.pptx_palette()   # colours as RGBColor, the slide type scale, and a 12-column grid
+```
+
+- **Type is large or it is not read.** `p["type"]`: hero 44pt (title slide only), title 30pt, lead 20pt,
+  body 17pt. 17pt is the floor — if content will not fit at 17, the slide is holding two ideas, so split it.
+- **A grid, so slides do not drift.** `p["grid"]` gives a 0.75in margin, a 0.25in gutter and a 0.9375in
+  column on a 13.33in slide. Put every element on a column boundary and the deck reads as one deck. Titles
+  start at the same `top` on every slide; nothing else lines up if that does not.
+- **One idea per slide, stated in the title.** "Revenue grew 18% on renewals" beats "Revenue". The title is
+  the takeaway; the body is the evidence. A deck whose titles read as a list of nouns says nothing.
+- **Left-align everything except the title slide.** Centred body text has a ragged left edge, which is the
+  one edge the eye actually uses to find the next line.
+- **Bullets are a last resort.** One number set large, one chart, one image with a short caption, or three
+  short lines — all read better than a five-item list. When bullets are right, cap them at six and at about
+  ten words each.
+- **Charts show data, not furniture.** `theme.pptx_style_chart(chart, series_count=n)` removes the legend
+  for a single series, fades the gridlines to hairline, colours series from the shared palette and sets the
+  label type. Never 3-D, never a pie with more than four slices.
+- **Let it breathe.** Roughly a third of a good slide is empty. If nothing can be removed, the content
+  belongs on two slides.
+
+Never do these: text smaller than 17pt in the body; a wall of bullets; text placed over a busy photograph
+without a dark scrim behind it; a different accent per slide; drop shadows and 3-D bevels; a logo on every
+slide (title and closing slide are enough); stretched images — crop instead, keeping the aspect ratio;
+"Click to add title" left in place anywhere.
+
 ## Build a deck with python-pptx
 
 Plan first: write the outline (title, 3–6 bullets or one visual per slide, speaker notes) and agree the
@@ -52,60 +87,66 @@ from pptx.enum.shapes import MSO_SHAPE
 from pptx.chart.data import CategoryChartData
 from pptx.enum.chart import XL_CHART_TYPE, XL_LEGEND_POSITION
 
+import sys; sys.path.insert(0, "{{SKILLS_DIR}}/office")
+import theme
+
 prs = Presentation()                                  # or Presentation("template.pptx") to inherit its masters
 prs.slide_width, prs.slide_height = Inches(13.333), Inches(7.5)   # 16:9 (skip when using a template)
 W, H = prs.slide_width, prs.slide_height
-NAVY, ACCENT, INK, MUTED = RGBColor(0x1B, 0x2A, 0x49), RGBColor(0xE8, 0x6F, 0x2D), RGBColor(0x22, 0x22, 0x22), RGBColor(0x6B, 0x72, 0x80)
-FONT = "Calibri"                                      # one font family for the whole deck
+P = theme.pptx_palette()
+INK, MUTED, ACCENT, PAPER = P["ink"], P["muted"], P["accent"], P["paper"]
+FONT, TYPE, GRID = P["font"], P["type"], P["grid"]
 BLANK = prs.slide_layouts[6]
 
-def text(slide, x, y, w, h, s, size=18, bold=False, color=INK, align=PP_ALIGN.LEFT, anchor=MSO_ANCHOR.TOP):
+def col(n):        # left edge of grid column n (0-based), for placing anything on the grid
+    return Inches(GRID["margin"] + n * (GRID["col"] + GRID["gutter"]))
+
+def text(slide, x, y, w, h, s, size=TYPE["body"], bold=False, color=INK, align=PP_ALIGN.LEFT, anchor=MSO_ANCHOR.TOP):
     box = slide.shapes.add_textbox(x, y, w, h); tf = box.text_frame; tf.word_wrap = True; tf.vertical_anchor = anchor
     lines = s if isinstance(s, list) else [s]
     for i, line in enumerate(lines):
         p = tf.paragraphs[0] if i == 0 else tf.add_paragraph()
         p.text, p.alignment = line, align
-        r = p.runs[0]; r.font.name, r.font.size, r.font.bold, r.font.color.rgb = FONT, Pt(size), bold, color
+        r = p.runs[0]; r.font.name, r.font.size, r.font.bold, r.font.color.rgb = FONT, size, bold, color
     return box
 
-def bullets(slide, x, y, w, h, items, size=18):
+def bullets(slide, x, y, w, h, items, size=TYPE["body"]):
     box = slide.shapes.add_textbox(x, y, w, h); tf = box.text_frame; tf.word_wrap = True
     for i, item in enumerate(items):
         p = tf.paragraphs[0] if i == 0 else tf.add_paragraph()
         lvl = 1 if item.startswith("  ") else 0
         p.text, p.level = ("• " if lvl == 0 else "– ") + item.strip(), lvl
-        p.space_after = Pt(6); r = p.runs[0]; r.font.name, r.font.size, r.font.color.rgb = FONT, Pt(size - 2 * lvl), INK
+        p.space_after = Pt(6); r = p.runs[0]; r.font.name, r.font.size, r.font.color.rgb = FONT, Pt(size.pt - 2 * lvl), INK
     return box
 
 def title_bar(slide, title):
-    bar = slide.shapes.add_shape(MSO_SHAPE.RECTANGLE, 0, 0, W, Inches(1.1)); bar.fill.solid(); bar.fill.fore_color.rgb = NAVY; bar.line.fill.background()
-    text(slide, Inches(0.6), Inches(0.25), W - Inches(1.2), Inches(0.7), title, size=28, bold=True, color=RGBColor(255, 255, 255), anchor=MSO_ANCHOR.MIDDLE)
+    bar = slide.shapes.add_shape(MSO_SHAPE.RECTANGLE, 0, 0, W, Inches(1.1)); bar.fill.solid(); bar.fill.fore_color.rgb = INK; bar.line.fill.background()
+    text(slide, Inches(0.6), Inches(0.25), W - Inches(1.2), Inches(0.7), title, size=TYPE["title"], bold=True, color=RGBColor(255, 255, 255), anchor=MSO_ANCHOR.MIDDLE)
 
 # 1. title slide
 s = prs.slides.add_slide(BLANK)
-bg = s.shapes.add_shape(MSO_SHAPE.RECTANGLE, 0, 0, W, H); bg.fill.solid(); bg.fill.fore_color.rgb = NAVY; bg.line.fill.background()
-text(s, Inches(0.8), Inches(2.6), W - Inches(1.6), Inches(1.2), "Q2 Business Review", size=44, bold=True, color=RGBColor(255, 255, 255))
-text(s, Inches(0.8), Inches(3.9), W - Inches(1.6), Inches(0.8), "Acme Ltd · July 2026", size=20, color=RGBColor(0xC9, 0xD1, 0xE0))
+bg = s.shapes.add_shape(MSO_SHAPE.RECTANGLE, 0, 0, W, H); bg.fill.solid(); bg.fill.fore_color.rgb = INK; bg.line.fill.background()
+text(s, Inches(0.8), Inches(2.6), W - Inches(1.6), Inches(1.2), "Q2 Business Review", size=TYPE["hero"], bold=True, color=RGBColor(255, 255, 255))
+text(s, Inches(0.8), Inches(3.9), W - Inches(1.6), Inches(0.8), "Acme Ltd · July 2026", size=TYPE["lead"], color=RGBColor(0xC9, 0xD1, 0xE0))
 
 # 2. bullets + chart
 s = prs.slides.add_slide(BLANK); title_bar(s, "Revenue grew 18% year over year")
 bullets(s, Inches(0.6), Inches(1.5), Inches(5.6), Inches(5), ["North up 12%", "  driven by renewals", "South up 31%", "Churn flat at 2.1%"])
 cd = CategoryChartData(); cd.categories = ["Q1", "Q2", "Q3", "Q4"]; cd.add_series("2025", (4.1, 4.4, 4.9, 5.3)); cd.add_series("2026", (5.0, 5.4, 6.1, 6.4))
 chart = s.shapes.add_chart(XL_CHART_TYPE.COLUMN_CLUSTERED, Inches(6.6), Inches(1.5), Inches(6.2), Inches(5), cd).chart
-chart.has_legend, chart.legend.position, chart.legend.include_in_layout = True, XL_LEGEND_POSITION.BOTTOM, False
-chart.value_axis.has_major_gridlines = False; chart.font.size, chart.font.name = Pt(12), FONT
+theme.pptx_style_chart(chart, series_count=2)   # legend only when earned, hairline gridlines, palette series
 
 # 3. picture + caption, 4. table
 s = prs.slides.add_slide(BLANK); title_bar(s, "Product shots")
 s.shapes.add_picture("photo.jpg", Inches(0.6), Inches(1.5), width=Inches(7))          # width only → aspect kept
-text(s, Inches(8), Inches(1.5), Inches(4.7), Inches(3), ["What changed", "Faster onboarding, fewer clicks."], size=16, color=MUTED)
+text(s, Inches(8), Inches(1.5), Inches(4.7), Inches(3), ["What changed", "Faster onboarding, fewer clicks."], size=TYPE["label"], color=MUTED)
 s = prs.slides.add_slide(BLANK); title_bar(s, "Plan by region")
 rows = [["Region", "Q3 target", "Owner"], ["North", "1,400", "A. Chen"], ["South", "1,100", "R. Silva"]]
 tbl = s.shapes.add_table(len(rows), 3, Inches(0.6), Inches(1.6), Inches(12), Inches(0.4) * len(rows)).table
 for r, row in enumerate(rows):
     for c, v in enumerate(row):
         cell = tbl.cell(r, c); cell.text = v; p = cell.text_frame.paragraphs[0]
-        p.runs[0].font.size, p.runs[0].font.name, p.runs[0].font.bold = Pt(14), FONT, r == 0
+        p.runs[0].font.size, p.runs[0].font.name, p.runs[0].font.bold = TYPE["label"], FONT, r == 0
         if c == 1 and r: p.alignment = PP_ALIGN.RIGHT
 s.notes_slide.notes_text_frame.text = "Speaker notes: mention hiring plan."
 prs.save("deck.pptx")

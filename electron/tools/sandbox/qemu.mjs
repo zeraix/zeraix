@@ -34,6 +34,7 @@ import { startNinepServer } from "./ninep-server.mjs";
 import { createProgressReporter } from "./progress.mjs";
 import { vmDir, vmVersion, guestArch, localDataDir } from "./vmpaths.mjs";
 import { GUEST_SKILLS_DIR, resolveSkillsHostDir, skillsHostDirExists } from "../builtinSkills.mjs";
+import { recordRecovery } from "../../store/recoveryLog.mjs";
 import { resolveHfEndpoint } from "../../llm/hfEndpoint.mjs";
 
 export const id = "qemu";
@@ -242,6 +243,20 @@ let svcSeq = 0;
 // ── Paths / directories ───────────────────────────────────────────────────────────────
 // VM image directory: see ./vmpaths.mjs (per-platform local app-data directory; shared by the runtime and the build/publish scripts).
 // The app name is taken from the basename of userData, ensuring it matches llama/userData (dev=Zeraix, packaged=OperEase).
+/** How long the guest gets to answer a liveness probe after the host wakes. See probeAfterResume. */
+const RESUME_PROBE_MS = 5000;
+
+/**
+ * Foreground commands currently talking to the guest agent.
+ *
+ * The agent channel matches replies to requests POSITIONALLY (see jsonSock in control.mjs), which is only sound while
+ * one caller is in flight — the file says so itself: "positional matching against a shared channel is only sound if
+ * nothing else can be in flight, and nothing else enforced that". Anything that sends concurrently with a running
+ * command can hand that command someone else's reply. The resume probe is such a sender, so it counts here and stands
+ * down rather than risking it.
+ */
+let commandsInFlight = 0;
+
 const VM_FILES = ["rootfs.qcow2", "Image", "initrd.img"];
 // Version directory root (.../vm): independent of the ZERAIX_VMDIR override, always points to the default layout, used for version enumeration/cleanup.
 function vmRoot() { return path.join(localDataDir(path.basename(app.getPath("userData"))), "vm"); }
@@ -799,6 +814,7 @@ async function boot(onProgress, forceConfigured = false) {
           try { proc.kill(); } catch { /* ignore */ }
           try { fs.rmSync(rootfs, { force: true, maxRetries: 20, retryDelay: 100 }); }
           catch { /* still locked: the next start finds it corrupt again and says so */ }
+          recordRecovery("sandbox", "image-condemned", { report: String(corruptReport).slice(0, 300) });
         }
         throw new Error(
           `the runtime disk image is corrupt (${corruptReport}). ` +
@@ -869,19 +885,141 @@ function sandboxFailure(reason) {
   return { stdout: "", stderr: `Sandbox unavailable: ${reason}\nThe command was NOT run. It is not retried on the host, because it would then run outside the sandbox and against the host's own toolchain.`, code: 126, killed: false };
 }
 
+/**
+ * The sandbox died while a command was RUNNING (docs/agent-runtime-crash-recovery.md C5, and §5's rule).
+ *
+ * A different answer from `sandboxFailure`, and the difference is the whole point. That one says "the command was NOT
+ * run", which is true when the VM was never up — and flatly wrong here, where the command had started, may have run to
+ * completion, and may already have written files or installed packages. Telling the model a command did not run when
+ * it may have is exactly how a crash turns into a second `npm install`.
+ *
+ * There is no partial output to hand back: qemu's guest agent returns a command's stdout only once it has exited, so a
+ * VM that dies mid-command takes the bytes with it. Saying so is better than implying the command produced nothing.
+ */
+function sandboxDiedMidCommand(reason) {
+  console.warn(`[sandbox/qemu] the sandbox stopped while a command was running: ${reason}`);
+  recordRecovery("sandbox", "died-mid-command", { reason: String(reason).slice(0, 200) });
+  return {
+    stdout: "",
+    stderr:
+      `The sandbox stopped while this command was running (${reason}).\n` +
+      "STATUS UNKNOWN: the command had already started, so it may have completed, partly completed, or done nothing. " +
+      "Its output was lost with the sandbox. Do NOT assume it failed and do NOT simply repeat it — check the working " +
+      "directory and whatever it would have changed first, and repeat it only if the work is verifiably not done.",
+    code: 125,
+    killed: false,
+    unknown: true,
+  };
+}
+
+/**
+ * Check that the guest is still answering, and bring it back if it is not (C5).
+ *
+ * Written for suspend/resume, which is the one failure this file could not see. The host sleeps, the VM's clock jumps
+ * by however long the lid was shut, and the guest-agent socket is commonly dead on the other side — but qemu is still
+ * running, so nothing about the process tells us anything is wrong. The first command after waking then pays a full
+ * timeout to discover it, and reports a timeout, which reads as "your command was slow" rather than "the sandbox was
+ * asleep".
+ *
+ * A short probe answers it in a second, and a failure takes the same route as any other death: restart once, at most
+ * once, and record it. Skipped while a command is in flight — that command is a better probe than this one, and
+ * restarting under it would be the very thing this file is trying to stop happening by accident.
+ */
+export async function probeAfterResume() {
+  // A running command is a better liveness probe than this one, and — more importantly — sending concurrently on the
+  // agent channel can hand that command someone else's reply. See commandsInFlight.
+  if (!vm || restarting || commandsInFlight > 0) return { ok: true, skipped: true };
+  try {
+    // Bounded HERE rather than relying on the call: `guest.exec` polls guest-exec-status in an unbounded loop, so a
+    // guest whose socket is alive but which never completes anything would keep this pending for ever — which is
+    // precisely the state the probe exists to detect, and the one it would then never report. A healthy agent answers
+    // a `/bin/true` in milliseconds, so anything past this is the answer.
+    await Promise.race([
+      vm.guest.exec("/bin/true", []),
+      new Promise((_, reject) => {
+        const t = setTimeout(() => reject(new Error(`guest did not answer within ${RESUME_PROBE_MS}ms`)), RESUME_PROBE_MS);
+        t.unref?.();
+      }),
+    ]);
+    return { ok: true };
+  } catch (e) {
+    console.warn("[sandbox/qemu] the guest did not answer after the host resumed:", e?.message ?? e);
+    recordRecovery("sandbox", "unresponsive-after-resume", { reason: String(e?.message ?? e).slice(0, 200) });
+    await restartAfterDeath("unresponsive after the host resumed");
+    return { ok: false };
+  }
+}
+
+/**
+ * Bring the sandbox back after it died under a running command, at most once per death.
+ *
+ * Bounded the same way every other restart in this document is: a VM that dies on every boot must not be rebooted per
+ * command. `boot()` already self-heals a corrupt image and reaps an orphan, so the work here is only to make sure the
+ * NEXT command finds a live sandbox instead of every later call rediscovering the same corpse — and to say plainly in
+ * the log when it could not.
+ */
+let restarting = null;
+async function restartAfterDeath(reason) {
+  if (restarting) return restarting;
+  restarting = (async () => {
+    try {
+      // An automatic restart must never become an automatic DOWNLOAD. `boot()` goes through `ensureRootfs`, which
+      // fetches a multi-gigabyte image when one is missing — and "missing" is exactly the state the self-heal leaves
+      // behind after condemning a corrupt image. Starting that in the background, with no consent, no progress and no
+      // dialog, off the back of one failed command is not a recovery; it is a surprise. When the image is not already
+      // on disk this stands down and the user starts the sandbox themselves, which is the path that reports progress.
+      const vd = path.join(vmRoot(), bootVersion());
+      const missing = VM_FILES.filter((f) => !fs.existsSync(path.join(vd, f)));
+      if (missing.length) {
+        console.warn(`[sandbox/qemu] not restarting automatically: ${missing.join(", ")} would have to be downloaded first`);
+        recordRecovery("sandbox", "restart-skipped", { reason: "image not present", missing });
+        return;
+      }
+      try {
+        await dispose({ waitMs: 2000 });
+      } catch {
+        /* it is already gone; that is the case we are here for */
+      }
+      await boot();
+      console.info("[sandbox/qemu] restarted after the sandbox stopped mid-command");
+      recordRecovery("sandbox", "restarted", { reason: String(reason).slice(0, 200), ok: true });
+    } catch (e) {
+      console.warn("[sandbox/qemu] could not restart the sandbox:", e?.message ?? e);
+      recordRecovery("sandbox", "restarted", { reason: String(reason).slice(0, 200), ok: false, error: String(e?.message ?? e).slice(0, 200) });
+    } finally {
+      restarting = null;
+    }
+  })();
+  return restarting;
+}
+
 /** Foreground execution: inside the guest, bwrap confined to the mount set, bash -c cmd, with a timeout; never throws. */
 export async function run(cmd, opts = {}) {
   const { cwd, timeoutMs, maxBuffer, signal } = opts;
   try {
     if (!vm) throw new Error("vm not ready");
     const argv = ["/usr/bin/bwrap", ...bwrapFlags(cwd), "--", "/bin/bash", "-c", cmd];
-    const { out, err, code, killed, canceled } = await vm.guest.runStatus(argv, {
-      timeoutSec: Math.max(1, Math.round((timeoutMs ?? 60000) / 1000)),
-      signal,
-    });
+    commandsInFlight += 1;
+    let settled;
+    try {
+      settled = await vm.guest.runStatus(argv, {
+        timeoutSec: Math.max(1, Math.round((timeoutMs ?? 60000) / 1000)),
+        signal,
+      });
+    } finally {
+      commandsInFlight -= 1;
+    }
+    const { out, err, code, killed, canceled } = settled;
     const cap = (s) => (maxBuffer && s.length > maxBuffer ? s.slice(0, maxBuffer) : s);
     return { stdout: cap(out), stderr: cap(err), code, killed, canceled: !!canceled };
   } catch (e) {
+    // Started, then the channel died: the command's fate is unknown and must not be reported as "not run".
+    if (e?.started) {
+      // One automatic restart, so the NEXT command has a sandbox to run in rather than every later call
+      // rediscovering the same corpse. Fire-and-forget: this command's answer does not depend on it.
+      void restartAfterDeath(`command interrupted: ${e?.message ?? e}`);
+      return sandboxDiedMidCommand(e?.message ?? String(e));
+    }
     return sandboxFailure(`exec failed: ${e?.message ?? e}`);
   }
 }
@@ -1259,6 +1397,7 @@ function reapOrphanVm(vd) {
     for (const pid of findOrphanPids(match)) {
       if (!Number.isInteger(pid) || pid <= 0 || pid === process.pid) continue;
       console.warn(`[sandbox] reaping orphaned VM (pid ${pid}) left by a previous session`);
+      recordRecovery("sandbox", "orphan-vm-reaped", { pid });
       try {
         // taskkill /F rather than process.kill: Windows has no SIGTERM, so process.kill(pid, "SIGTERM") on a process we
         // did not spawn is unreliable, and a half-killed qemu still holds the overlay. /T takes the process tree with it.

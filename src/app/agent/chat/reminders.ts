@@ -150,6 +150,13 @@ function renderBody(state: ReminderState, atCut: boolean): string {
     const { date, model, tz } = state.ctx;
     lines.push(`- date ${date}; model ${model}; time zone ${tz}.`);
   }
+  // A crash notice is an event, not standing state: it is said once, on the turn after the conversation was reopened.
+  // Excluded from a compaction snapshot for that reason — replaying it at a cut would tell the model an interruption
+  // is happening now, months of turns after it did. Last of all, being the most volatile line there is: it appears on
+  // exactly one turn, so anything placed after it would lose its cached prefix on that turn.
+  if (state.recovery && !atCut) {
+    lines.push(`- ${state.recovery}`);
+  }
   return lines.length ? [lead, ...lines].join("\n") : "";
 }
 

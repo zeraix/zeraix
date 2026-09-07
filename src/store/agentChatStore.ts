@@ -16,6 +16,7 @@ import {
   type StoredTaskMemory,
   type StoredGoalState,
   type StoredTodo,
+  type StoredTurnState,
 } from "@/lib/ai/conversation";
 
 /** Temporary storage for the "initial message" to be sent when transitioning from Home to Chat page (passed in-memory via SPA client navigation). */
@@ -122,6 +123,8 @@ type AgentChatState = {
   setConversationTaskMemory: (id: string, taskMemory: StoredTaskMemory | null) => void;
   /** Saves or clears the Goal State (objective / criteria / plan / verification) for a conversation (persists to disk only). */
   setConversationGoal: (id: string, goal: StoredGoalState | null) => void;
+  /** Checkpoints or clears the in-flight turn (crash recovery, docs/agent-runtime-crash-recovery.md C2). Persists to disk only. */
+  setConversationTurnState: (id: string, turnState: StoredTurnState | null) => void;
   setConversationTodos: (id: string, todos: StoredTodo[] | null) => void;
   /** Freeze this conversation's composed system message, so reopening it replays the same prefix instead of recomputing one. */
   setConversationSystemPrompt: (id: string, systemPrompt: string) => void;
@@ -142,20 +145,25 @@ export const useAgentChatStore = create<AgentChatState>((set, get) => {
   let indexDirty = false;
   let flushTimer: ReturnType<typeof setTimeout> | undefined;
 
+  /** Write every pending change now. Extracted from scheduleFlush so a caller that cannot afford the debounce can force it. */
+  const flushNow = () => {
+    if (flushTimer) clearTimeout(flushTimer);
+    flushTimer = undefined;
+    const { projects, conversations } = get();
+    if (indexDirty) {
+      indexDirty = false;
+      void saveIndex(projects);
+    }
+    const pids = [...dirtyProjects];
+    dirtyProjects.clear();
+    for (const pid of pids) {
+      void saveProjectConversations(pid, conversations.filter((c) => c.projectId === pid));
+    }
+  };
+
   const scheduleFlush = () => {
     if (flushTimer) clearTimeout(flushTimer);
-    flushTimer = setTimeout(() => {
-      const { projects, conversations } = get();
-      if (indexDirty) {
-        indexDirty = false;
-        void saveIndex(projects);
-      }
-      const pids = [...dirtyProjects];
-      dirtyProjects.clear();
-      for (const pid of pids) {
-        void saveProjectConversations(pid, conversations.filter((c) => c.projectId === pid));
-      }
-    }, 250);
+    flushTimer = setTimeout(flushNow, 250);
   };
   const markProjectDirty = (pid: string) => {
     dirtyProjects.add(pid);
@@ -493,6 +501,36 @@ export const useAgentChatStore = create<AgentChatState>((set, get) => {
       }));
       // Like compaction and taskMemory: a runtime artifact, flushed to disk only.
       if (pid) markProjectDirty(pid);
+    },
+
+    /**
+     * The in-flight turn's checkpoint (docs/agent-runtime-crash-recovery.md C2).
+     *
+     * Written several times per round, so it takes the same debounced disk path as compaction rather than a
+     * synchronous write: the flush coalesces a turn's worth of updates into one save, and the only reader that
+     * matters runs after a crash — by which time the 250 ms debounce has long since fired. Clearing a checkpoint
+     * that is already absent returns early, so an ordinary turn end costs nothing.
+     */
+    setConversationTurnState: (id, turnState) => {
+      const conv = get().getConversation(id);
+      if (!conv) return;
+      if (!conv.turnState && !turnState) return;
+      const pid = conv.projectId;
+      // Whether this write flips the answer to "was a turn in flight when the process died". Only two do: the
+      // first write of a turn and the clear at its end. Everything between them refines a record that already
+      // says "interrupted", so losing one to the debounce costs a stale round number and nothing else.
+      const decisive = !conv.turnState || !turnState;
+      set((s) => ({
+        conversations: s.conversations.map((c) => (c.id === id ? { ...c, turnState: turnState ?? undefined } : c)),
+      }));
+      // Like compaction / taskMemory / goal: a runtime artifact, flushed to disk only.
+      if (!pid) return;
+      markProjectDirty(pid);
+      // The debounce restarts on every write, so a turn that keeps writing could keep postponing its own
+      // checkpoint — and a crash is exactly when the timer never fires. The two decisive writes go now:
+      // losing the first would hide a real interruption, and losing the clear would report one that never
+      // happened. (Same asymmetry, and the same reasoning, as the Rust task journal's fsync policy.)
+      if (decisive) flushNow();
     },
 
     setConversationTodos: (id, todos) => {
