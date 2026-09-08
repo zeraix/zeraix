@@ -258,7 +258,25 @@ async fn a_panicking_delegation_does_not_affect_its_siblings() {
     let good = s.spawn("good".into(), None, Grant::empty(), answering("fine", 20));
 
     let j = s.join(&[], JoinMode::All, Some(Duration::from_secs(5)), true).await;
-    let by_id = |id: &str| j.ready.iter().find(|(v, _)| v.id == id).map(|(_, o)| o.clone()).unwrap();
+    // Says WHICH delegation is missing and what the join actually returned. `.unwrap()` here reported
+    // only "called `Option::unwrap()` on a `None` value" from inside the closure, which is the same
+    // message whether the panicking job never settled, the healthy sibling never settled, or the join
+    // timed out — three different bugs. This flaked once on a Windows runner and the log could not
+    // distinguish them.
+    let by_id = |id: &str| {
+        j.ready
+            .iter()
+            .find(|(v, _)| v.id == id)
+            .map(|(_, o)| o.clone())
+            .unwrap_or_else(|| {
+                panic!(
+                    "no outcome for {id}: ready={:?}, pending={:?}, timed_out={}",
+                    j.ready.iter().map(|(v, o)| (&v.id, v.state, &o.result)).collect::<Vec<_>>(),
+                    j.pending,
+                    j.timed_out,
+                )
+            })
+    };
 
     let failed = by_id(&bad.id);
     assert_eq!(failed.state, JobState::Failed, "a panic should be a failed outcome");
