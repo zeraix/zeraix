@@ -56,6 +56,7 @@ import { type TFunc } from "@/lib/i18n";
 import { cn } from "@/lib/utils";
 import { ToggleSwitch } from "./ToggleSwitch";
 import { FIELD_CLS, PRIMARY_BTN } from "./styles";
+import { Group, NOTE, Pane } from "./pane";
 
 /** The editor's working copy: free text the user types, parsed into config only on save. */
 interface Draft {
@@ -195,49 +196,57 @@ export function McpSection({ t }: { t: TFunc }) {
   };
 
   return (
-    <div className="max-w-2xl mx-auto">
-      <h2 className="mb-2 text-xl font-bold text-ink">{t("settings.mcp")}</h2>
-      <p className="mb-5 text-xs text-ink-subtle">{t("mcp.desc")}</p>
-
+    <Pane
+      title={t("settings.mcp")}
+      desc={t("mcp.desc")}
+      actions={
+        available ? (
+          <button type="button" onClick={() => setDraft({ ...EMPTY_DRAFT })} className={PRIMARY_BTN}>
+            <Plus className="size-3.5" />
+            {t("mcp.add")}
+          </button>
+        ) : undefined
+      }
+    >
       {!available ? (
-        <p className="rounded-xl border border-line bg-surface-muted/50 px-4 py-3.5 text-xs text-ink-subtle">
-          {t("mcp.unsupported")}
-        </p>
+        <p className={NOTE}>{t("mcp.unsupported")}</p>
       ) : (
-        <>
-          <div className="mb-4 flex flex-wrap items-center gap-2">
-            <button type="button" onClick={() => setDraft({ ...EMPTY_DRAFT })} className={PRIMARY_BTN}>
-              <Plus className="size-3.5" />
-              {t("mcp.add")}
-            </button>
-            <button
-              type="button"
-              onClick={() => setImportText(importText === null ? "" : null)}
-              className="flex items-center gap-1 rounded-lg border border-line-strong bg-surface px-3 py-1.5 text-xs text-ink-muted transition hover:bg-surface-muted"
-            >
-              <FileJson className="size-3.5" />
-              {t("mcp.import")}
-            </button>
-            <button
-              type="button"
-              onClick={() => void openMcpConfig()}
-              className="flex items-center gap-1 rounded-lg border border-line-strong bg-surface px-3 py-1.5 text-xs text-ink-muted transition hover:bg-surface-muted"
-            >
-              <FolderOpen className="size-3.5" />
-              {t("mcp.openConfig")}
-            </button>
-            <button
-              type="button"
-              onClick={refresh}
-              className="flex items-center gap-1 rounded-lg border border-line-strong bg-surface px-3 py-1.5 text-xs text-ink-muted transition hover:bg-surface-muted"
-            >
-              <RefreshCw className="size-3.5" />
-              {t("mcp.refresh")}
-            </button>
-          </div>
-
+        <Group
+          title={t("mcp.servers")}
+          anchor="mcp/servers"
+          count={snap.servers.length}
+          actions={
+            <>
+              <button
+                type="button"
+                onClick={() => setImportText(importText === null ? "" : null)}
+                className="flex items-center gap-1 rounded-lg border border-line-strong bg-surface px-2.5 py-1 text-[11px] text-ink-muted transition hover:bg-surface-muted"
+              >
+                <FileJson className="size-3.5" />
+                {t("mcp.import")}
+              </button>
+              <button
+                type="button"
+                onClick={() => void openMcpConfig()}
+                className="flex items-center gap-1 rounded-lg border border-line-strong bg-surface px-2.5 py-1 text-[11px] text-ink-muted transition hover:bg-surface-muted"
+              >
+                <FolderOpen className="size-3.5" />
+                {t("mcp.openConfig")}
+              </button>
+              <button
+                type="button"
+                onClick={refresh}
+                aria-label={t("mcp.refresh")}
+                title={t("mcp.refresh")}
+                className="flex items-center gap-1 rounded-lg border border-line-strong bg-surface px-2 py-1 text-[11px] text-ink-muted transition hover:bg-surface-muted"
+              >
+                <RefreshCw className="size-3.5" />
+              </button>
+            </>
+          }
+        >
           {importText !== null && (
-            <div className="mb-4 rounded-xl border border-line bg-surface-muted/50 p-4">
+            <div className="mb-3 rounded-xl border border-line bg-surface-muted/40 p-4">
               <p className="mb-1 text-sm font-semibold text-ink">{t("mcp.importTitle")}</p>
               <p className="mb-2 text-[11px] text-ink-subtle">{t("mcp.importHint")}</p>
               <textarea
@@ -266,16 +275,16 @@ export function McpSection({ t }: { t: TFunc }) {
           {draft && <ServerEditor t={t} draft={draft} setDraft={setDraft} onSave={save} onCancel={() => setDraft(null)} busy={busy === draft.id} />}
 
           {snap.servers.length === 0 ? (
-            <p className="rounded-xl border border-line bg-surface-muted/50 px-4 py-3.5 text-xs text-ink-subtle">{t("mcp.empty")}</p>
+            <p className={NOTE}>{t("mcp.empty")}</p>
           ) : (
-            <div className="space-y-3">
+            <div className="space-y-2.5">
               {snap.servers.map((s) => {
                 const st = statusById.get(s.id);
                 const state = st?.status ?? "idle";
                 const target = s.kind === "http" ? s.url : [s.command, ...s.args].join(" ");
                 const open = expanded.has(s.id);
                 return (
-                  <div key={s.id} className="rounded-xl border border-line bg-surface-muted/50 px-4 py-3">
+                  <div key={s.id} className="rounded-xl border border-line bg-surface-muted/40 px-4 py-3">
                     <div className="flex items-center gap-2">
                       <span className={cn("size-2 shrink-0 rounded-full", DOT[state])} aria-hidden />
                       <p className="truncate text-sm font-semibold text-ink">{s.id}</p>
@@ -406,9 +415,9 @@ export function McpSection({ t }: { t: TFunc }) {
               })}
             </div>
           )}
-        </>
+        </Group>
       )}
-    </div>
+    </Pane>
   );
 }
 

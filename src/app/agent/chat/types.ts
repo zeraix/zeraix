@@ -34,6 +34,14 @@ export type ReminderState = {
   assets?: string;
   /** Where run_command actually runs: the Linux sandbox, or the host directly. Flips when the VM comes up or falls back. */
   env?: string;
+  /**
+   * How tool calls are being approved (approvalMode.approvalReminderLine).
+   *
+   * Standing state that the USER changes mid-conversation, which is exactly what this channel is for:
+   * a model that has been told writes pause for approval behaves differently from one that knows they
+   * are blocked outright, and neither can be inferred from a refusal after the fact.
+   */
+  approval?: string;
   ctx?: { date: string; model: string; tz: string };
   skills?: { id: string; description: string }[];
   disabledTools?: string[];

@@ -5,6 +5,7 @@ import { Brain, CheckCircle2, FileCog, Loader2, RefreshCw, RotateCcw } from "luc
 import { type TFunc } from "@/lib/i18n";
 import { callTool, getWorkingDir, isToolkitAvailable, wsReadFile, wsWriteFile } from "@/lib/ai/toolkit";
 import { cn } from "@/lib/utils";
+import { Group, NOTE, PANEL } from "./pane";
 
 /** Filename of the per-workspace project map (electron/tools/projectMemory/constants.mjs). */
 export const PROJECT_MEMORY_FILE = "ZERAIX.md";
@@ -100,17 +101,17 @@ export function ProjectMemorySection({ t }: { t: TFunc }) {
     });
 
   return (
-    <div className="mt-10 border-t border-line pt-8">
-      <p className="mb-1 flex items-center gap-1.5 text-sm font-semibold text-ink">
-        <FileCog className="size-4 text-ink-muted" />
-        {t("projmem.title")}
-      </p>
-      <p className="mb-4 text-xs text-ink-subtle">{t("projmem.desc")}</p>
-
+    // Part of the Memory pane, not a pane of its own: it is the project's memory file, and it belongs
+    // under the same heading as the memories it sits beside.
+    <Group
+      title={t("projmem.title")}
+      desc={t("projmem.desc")}
+      icon={FileCog}
+      anchor="memory/project"
+      className="mt-7 border-t border-line pt-7"
+    >
       {!available ? (
-        <p className="rounded-xl border border-line bg-surface-muted/50 px-4 py-3.5 text-xs text-ink-subtle">
-          {t("memory.unavailable")}
-        </p>
+        <p className={NOTE}>{t("memory.unavailable")}</p>
       ) : (
         <>
           <p className="mb-3 truncate text-[11px] text-ink-subtle" title={workdir}>
@@ -118,7 +119,7 @@ export function ProjectMemorySection({ t }: { t: TFunc }) {
           </p>
 
           {text === null ? (
-            <div className="rounded-xl border border-line bg-surface-muted/50 px-4 py-3.5">
+            <div className={PANEL}>
               <p className="mb-3 text-xs text-ink-subtle">{t("projmem.none")}</p>
               <button
                 type="button"
@@ -196,6 +197,6 @@ export function ProjectMemorySection({ t }: { t: TFunc }) {
           )}
         </>
       )}
-    </div>
+    </Group>
   );
 }

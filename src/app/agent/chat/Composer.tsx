@@ -19,6 +19,8 @@ import {
   type ThinkingConfig,
   type ThinkingEffort,
 } from "@/lib/ai/thinking";
+import { type ApprovalMode } from "@/lib/ai/approvalMode";
+import { ApprovalModePicker } from "@/components/ai/ApprovalModePicker";
 import type { Attachment } from "./types";
 import { formatBytes } from "./format";
 import { useT } from "@/lib/i18n";
@@ -64,6 +66,8 @@ export function Composer({
   onGoSettings,
   thinking,
   onThinkingChange,
+  approvalMode,
+  onApprovalModeChange,
   contextIndicator,
 }: {
   input: string;
@@ -85,6 +89,9 @@ export function Composer({
   /** Thinking mode: the master switch plus the gear it uses while on. */
   thinking: ThinkingConfig;
   onThinkingChange: (next: ThinkingConfig) => void;
+  /** How tool calls are approved: default / trust / manual / plan. See lib/ai/approvalMode.ts. */
+  approvalMode: ApprovalMode;
+  onApprovalModeChange: (next: ApprovalMode) => void;
   /**
    * Rendered immediately left of the send button — the context-usage ring. A slot rather than the half-dozen props
    * the indicator needs, so the composer stays out of the compaction business entirely.
@@ -510,6 +517,15 @@ export function Composer({
               </DropdownMenuContent>
             </DropdownMenu>
 
+            {/* Approval mode: what happens when the agent reaches for a tool that changes something.
+                Beside the thinking gears because both are "how should it work this turn", and the same
+                control the home composer shows — one global setting, one implementation. */}
+            <ApprovalModePicker
+              mode={approvalMode}
+              onChange={onApprovalModeChange}
+              triggerClassName="border-line-strong px-3 py-1.5 text-xs font-medium"
+            />
+
             {/* Trailing group, right-aligned: context ring, then stop / send. The group carries the anchor so the
                 buttons keep their position whether or not the ring is there. */}
             <div className="ml-auto flex shrink-0 items-center gap-2">
@@ -540,6 +556,7 @@ export function Composer({
           </div>
         </div>
       </div>
+
     </div>
   );
 }

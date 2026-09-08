@@ -56,6 +56,7 @@ import { migrateLegacyAgentStorage, putStorage } from "@/lib/ai/agentStorage";
 import { hydrateAppConfig } from "@/lib/ai/appConfig";
 import { getContextBudgetK } from "@/lib/ai/contextBudget";
 import { DEFAULT_THINKING, thinkingParams } from "@/lib/ai/thinking";
+import { approvalReminderLine } from "@/lib/ai/approvalMode";
 import { notifyAgentError } from "@/lib/ai/agentNotify";
 import { useAgentChatStore } from "@/store/agentChatStore";
 import { enabledSkills, loadInstalled } from "@/lib/ai/skills/store";
@@ -267,6 +268,9 @@ function ChatAgent() {
     isLocalModel,
     thinking,
     changeThinking,
+    approvalMode,
+    changeApprovalMode,
+    approvalModeRef,
     thinkingUnsupportedRef,
     reasoningContextUnsupportedRef,
     sendReasoningContext,
@@ -1810,6 +1814,7 @@ function ChatAgent() {
       t,
       requestConsent,
       allowedTools: () => allowedToolsRef.current,
+      approvalMode: () => approvalModeRef.current,
       wireBuffer: () => convoRef.current,
       compaction: () => compactionRef.current,
       // Lets a tool's bubble go up before the call and be completed in place. `completeDisplay` rather than
@@ -2026,6 +2031,9 @@ function ChatAgent() {
         const current = buildReminderState({
           workdir: effectiveWorkdir || "",
           sandbox: sandboxStatusRef.current,
+          // Read from the ref, not the state closed over by this turn: the user can switch modes while a
+          // turn is running, and the tool loop below already honours the change per call.
+          approval: approvalReminderLine(approvalModeRef.current),
           // Read per turn rather than cached: the library follows the data-storage location, which the user
           // can change from Settings mid-session, and a cached path would keep announcing the old folder —
           // the one failure this announcement exists to prevent. One IPC call against a model request is free.
@@ -2693,6 +2701,8 @@ function ChatAgent() {
         onGoSettings={() => router.push("/agent/settings")}
         thinking={thinking}
         onThinkingChange={changeThinking}
+        approvalMode={approvalMode}
+        onApprovalModeChange={changeApprovalMode}
         contextIndicator={
           activeModel && (
             <ContextUsageRing

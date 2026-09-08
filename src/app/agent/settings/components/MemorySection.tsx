@@ -17,10 +17,11 @@ import { type TFunc } from "@/lib/i18n";
 import { cn } from "@/lib/utils";
 import { fmtDate } from "./formatDate";
 import { FIELD_CLS, PRIMARY_BTN } from "./styles";
+import { Group, NOTE, Pane } from "./pane";
 
 
 /** Memory section: visually manage the memories the AI writes (one Markdown file per entry) — view / refresh / open directory / delete. */
-export function MemorySection({ t }: { t: TFunc }) {
+export function MemorySection({ t, children }: { t: TFunc; children?: React.ReactNode }) {
   const available = isMemoryFilesAvailable();
   const [items, setItems] = useState<MemoryFile[]>([]);
   const [loading, setLoading] = useState(false);
@@ -94,25 +95,17 @@ export function MemorySection({ t }: { t: TFunc }) {
   };
 
   return (
-    <div className="max-w-2xl">
-      <h2 className="mb-2 text-xl font-bold text-ink">{t("settings.memory")}</h2>
-      <p className="mb-5 text-xs text-ink-subtle">{t("memory.desc")}</p>
-
+    <Pane title={t("settings.memory")} desc={t("memory.desc")}>
       {!available ? (
-        <p className="rounded-xl border border-line bg-surface-muted/50 px-4 py-3.5 text-xs text-ink-subtle">
-          {t("memory.unavailable")}
-        </p>
+        <p className={NOTE}>{t("memory.unavailable")}</p>
       ) : (
-        <>
-          <div className="mb-3 flex items-center justify-between gap-2">
-            <p className="flex items-center gap-1.5 text-sm font-semibold text-ink">
-              <Brain className="size-4 text-ink-muted" />
-              {t("memory.items")}
-              <span className="rounded-full bg-primary/15 px-1.5 py-0.5 text-[10px] font-medium text-primary">
-                {items.length}
-              </span>
-            </p>
-            <div className="flex flex-wrap items-center gap-1.5">
+        <Group
+          title={t("memory.items")}
+          icon={Brain}
+          anchor="memory/items"
+          count={items.length}
+          actions={
+            <div className="flex flex-wrap items-center justify-end gap-1.5">
               <button
                 type="button"
                 onClick={() => setCreating((v) => !v)}
@@ -165,11 +158,11 @@ export function MemorySection({ t }: { t: TFunc }) {
                 {t("memory.openDir")}
               </button>
             </div>
-          </div>
-
+          }
+        >
           {/* Manual new-memory form */}
           {creating && (
-            <div className="mb-3 space-y-2 rounded-xl border border-line bg-surface-muted/50 px-4 py-3.5">
+            <div className="mb-3 space-y-2 rounded-xl border border-line bg-surface-muted/40 px-4 py-3.5">
               <input
                 value={newTitle}
                 onChange={(e) => setNewTitle(e.target.value)}
@@ -208,15 +201,13 @@ export function MemorySection({ t }: { t: TFunc }) {
           )}
 
           {items.length === 0 ? (
-            <p className="rounded-xl border border-line bg-surface-muted/50 px-4 py-3.5 text-xs text-ink-subtle">
-              {t("memory.empty")}
-            </p>
+            <p className={NOTE}>{t("memory.empty")}</p>
           ) : (
             <div className="space-y-2">
               {items.map((m) => {
                 const open = expanded === m.id;
                 return (
-                  <div key={m.id} className="rounded-xl border border-line bg-surface-muted/50 px-4 py-3">
+                  <div key={m.id} className="rounded-xl border border-line bg-surface-muted/40 px-4 py-3">
                     <div className="flex items-start justify-between gap-2">
                       <button
                         type="button"
@@ -253,8 +244,10 @@ export function MemorySection({ t }: { t: TFunc }) {
               })}
             </div>
           )}
-        </>
+        </Group>
       )}
-    </div>
+      {/* The project-memory group is passed in by the page: same pane, same column. */}
+      {children}
+    </Pane>
   );
 }

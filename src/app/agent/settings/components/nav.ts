@@ -3,17 +3,51 @@ import { Boxes, Brain, Info, KeyRound, Plug, ScrollText, SlidersHorizontal, User
 
 export type SectionId = "account" | "models" | "keys" | "mcp" | "memory" | "notify" | "logs" | "general" | "about";
 
-export const NAV: { id: SectionId; labelKey: string; icon: typeof User }[] = [
-  { id: "account", labelKey: "settings.account", icon: User },
-  { id: "models", labelKey: "settings.models", icon: Boxes },
-  { id: "keys", labelKey: "settings.keys", icon: KeyRound },
-  { id: "mcp", labelKey: "settings.mcp", icon: Plug },
-  { id: "memory", labelKey: "settings.memory", icon: Brain },
-  { id: "notify", labelKey: "settings.notify", icon: Volume2 },
-  { id: "logs", labelKey: "settings.logs", icon: ScrollText },
-  { id: "general", labelKey: "settings.general", icon: SlidersHorizontal },
-  { id: "about", labelKey: "settings.about", icon: Info },
+export interface NavItem {
+  id: SectionId;
+  labelKey: string;
+  icon: typeof User;
+}
+
+/**
+ * The nav, in groups.
+ *
+ * Nine flat entries gave no clue which of them was the one you wanted -- "Keys" and "MCP" and
+ * "Memory" all read as peers of "About". The groups say what each section is *for*: who you are and
+ * how the app behaves, what the agent can do, and the machinery underneath.
+ *
+ * Order within a group is deliberate (the thing people came for first); the group order is the order
+ * of the list below.
+ */
+export const NAV_GROUPS: { labelKey: string; items: NavItem[] }[] = [
+  {
+    labelKey: "settings.group.basic",
+    items: [
+      { id: "account", labelKey: "settings.account", icon: User },
+      { id: "general", labelKey: "settings.general", icon: SlidersHorizontal },
+      { id: "notify", labelKey: "settings.notify", icon: Volume2 },
+    ],
+  },
+  {
+    labelKey: "settings.group.agent",
+    items: [
+      { id: "models", labelKey: "settings.models", icon: Boxes },
+      { id: "keys", labelKey: "settings.keys", icon: KeyRound },
+      { id: "mcp", labelKey: "settings.mcp", icon: Plug },
+      { id: "memory", labelKey: "settings.memory", icon: Brain },
+    ],
+  },
+  {
+    labelKey: "settings.group.system",
+    items: [
+      { id: "logs", labelKey: "settings.logs", icon: ScrollText },
+      { id: "about", labelKey: "settings.about", icon: Info },
+    ],
+  },
 ];
+
+/** Flattened, for anything that only cares about the sections themselves (deep links, search). */
+export const NAV: NavItem[] = NAV_GROUPS.flatMap((g) => g.items);
 
 /** The i18n keys each section contributes to search (title + description + fields), matched by substring after translation. */
 export const SECTION_KEYS: Record<SectionId, string[]> = {

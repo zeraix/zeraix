@@ -49,6 +49,7 @@ import { type TFunc } from "@/lib/i18n";
 import { cn } from "@/lib/utils";
 import { ToggleSwitch } from "./ToggleSwitch";
 import { FIELD_CLS } from "./styles";
+import { Group, NOTE, PANEL, Pane } from "./pane";
 
 /** One page of entries. Big enough that a normal day fits, bounded so a runaway day cannot hang the UI. */
 const PAGE = 400;
@@ -226,230 +227,220 @@ export function LogsSection({ t }: { t: TFunc }) {
 
   if (!available) {
     return (
-      <div className="max-w-2xl">
-        <h2 className="mb-1 text-xl font-bold text-ink">{t("settings.logs")}</h2>
-        <p className="mb-5 text-sm text-ink-subtle">{t("logs.desc")}</p>
-        <p className="rounded-xl border border-line bg-surface-muted/50 px-4 py-3.5 text-xs text-ink-subtle">
-          {t("logs.unsupported")}
-        </p>
-      </div>
+      <Pane title={t("settings.logs")} desc={t("logs.desc")}>
+        <p className={NOTE}>{t("logs.unsupported")}</p>
+      </Pane>
     );
   }
 
   return (
-    <div className="max-w-4xl mx-auto">
-      <h2 className="mb-1 text-xl font-bold text-ink">{t("settings.logs")}</h2>
-      <p className="mb-5 text-sm text-ink-subtle">{t("logs.desc")}</p>
-
+    <Pane title={t("settings.logs")} desc={t("logs.desc")} wide>
       {/* The switch. Off by default: this writes a line per model call and per tool call. */}
-      <div className="mb-4 rounded-xl border border-line bg-surface-muted/50 px-4 py-3.5">
-        <div className="flex items-center justify-between gap-4">
-          <div className="min-w-0">
-            <p className="text-sm font-semibold text-ink">{t("logs.enable")}</p>
-            <p className="mt-0.5 text-xs text-ink-subtle">{t("logs.enableDesc")}</p>
+      <Group title={t("logs.enable")} desc={t("logs.enableDesc")} anchor="logs/recording">
+        <div className={PANEL}>
+          <div className="flex items-center justify-between gap-4">
+            <p className="min-w-0 text-sm font-medium text-ink">{t("logs.enable")}</p>
+            <ToggleSwitch on={enabled} onChange={(v) => void toggle(v)} label={t("logs.enable")} />
           </div>
-          <ToggleSwitch on={enabled} onChange={(v) => void toggle(v)} label={t("logs.enable")} />
+          {dir && <p className="mt-2 break-all font-mono text-[11px] text-ink-subtle">{dir}</p>}
+          {!enabled && <p className="mt-2 text-[11px] text-ink-subtle">{t("logs.disabledNote")}</p>}
         </div>
-        {dir && (
-          <p className="mt-2 break-all font-mono text-[11px] text-ink-subtle">{dir}</p>
-        )}
-        {!enabled && <p className="mt-2 text-[11px] text-ink-subtle">{t("logs.disabledNote")}</p>}
-      </div>
+      </Group>
 
       {/* Controls: day, filters, view switch, folder / clear actions. */}
-      <div className="mb-4 flex flex-wrap items-center gap-2">
-        <select value={day} onChange={(e) => setDay(e.target.value)} className={cn(FIELD_CLS, "text-xs")} aria-label={t("logs.day")}>
-          {days.length === 0 && <option value={day}>{day || t("logs.noDays")}</option>}
-          {days.map((d) => (
-            <option key={d.day} value={d.day}>
-              {d.day} · {fmtBytes(d.bytes)}
-            </option>
-          ))}
-        </select>
+      <Group title={t("logs.activity")} anchor="logs/activity">
+        <div className="mb-3 flex flex-wrap items-center gap-2">
+          <select value={day} onChange={(e) => setDay(e.target.value)} className={cn(FIELD_CLS, "text-xs")} aria-label={t("logs.day")}>
+            {days.length === 0 && <option value={day}>{day || t("logs.noDays")}</option>}
+            {days.map((d) => (
+              <option key={d.day} value={d.day}>
+                {d.day} · {fmtBytes(d.bytes)}
+              </option>
+            ))}
+          </select>
 
-        <select value={kind} onChange={(e) => setKind(e.target.value as "" | UsageLogKind)} className={cn(FIELD_CLS, "text-xs")} aria-label={t("logs.filterKind")}>
-          {KINDS.map((k) => (
-            <option key={k.value} value={k.value}>
-              {t(k.labelKey)}
-            </option>
-          ))}
-        </select>
+          <select value={kind} onChange={(e) => setKind(e.target.value as "" | UsageLogKind)} className={cn(FIELD_CLS, "text-xs")} aria-label={t("logs.filterKind")}>
+            {KINDS.map((k) => (
+              <option key={k.value} value={k.value}>
+                {t(k.labelKey)}
+              </option>
+            ))}
+          </select>
 
-        <select value={actor} onChange={(e) => setActor(e.target.value)} className={cn(FIELD_CLS, "text-xs")} aria-label={t("logs.filterActor")}>
-          <option value="">{t("logs.actorAll")}</option>
-          {actorOptions.map((a) => (
-            <option key={a} value={a}>
-              {actorLabel(a, t)}
-            </option>
-          ))}
-        </select>
+          <select value={actor} onChange={(e) => setActor(e.target.value)} className={cn(FIELD_CLS, "text-xs")} aria-label={t("logs.filterActor")}>
+            <option value="">{t("logs.actorAll")}</option>
+            {actorOptions.map((a) => (
+              <option key={a} value={a}>
+                {actorLabel(a, t)}
+              </option>
+            ))}
+          </select>
 
-        <div className="relative min-w-[160px] flex-1">
-          <Search className="pointer-events-none absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-ink-subtle" />
-          <input
-            value={query}
-            onChange={(e) => setQuery(e.target.value)}
-            placeholder={t("logs.search")}
-            aria-label={t("logs.search")}
-            className={cn(FIELD_CLS, "w-full pl-8 text-xs")}
-          />
+          <div className="relative min-w-[160px] flex-1">
+            <Search className="pointer-events-none absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-ink-subtle" />
+            <input
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder={t("logs.search")}
+              aria-label={t("logs.search")}
+              className={cn(FIELD_CLS, "w-full pl-8 text-xs")}
+            />
+          </div>
+
+          {/* View switch: the same data, laid out flat or against the clock. */}
+          <div className="flex shrink-0 overflow-hidden rounded-lg border border-line-strong">
+            {(["list", "timeline"] as const).map((v) => (
+              <button
+                key={v}
+                type="button"
+                onClick={() => setView(v)}
+                className={cn(
+                  "flex items-center gap-1 px-2.5 py-1.5 text-xs font-medium transition",
+                  view === v ? "bg-primary text-primary-foreground" : "bg-surface text-ink-muted hover:bg-surface-muted",
+                )}
+              >
+                {v === "list" ? <ScrollText className="size-3.5" /> : <ListTree className="size-3.5" />}
+                {t(v === "list" ? "logs.viewList" : "logs.viewTimeline")}
+              </button>
+            ))}
+          </div>
+
+          <button
+            type="button"
+            onClick={() => void refreshDays()}
+            title={t("logs.refresh")}
+            className="inline-flex size-7 shrink-0 items-center justify-center rounded-md border border-line-strong bg-surface text-ink-muted transition hover:bg-surface-muted hover:text-ink"
+          >
+            <RefreshCw className={cn("size-3.5", loading && "animate-spin")} />
+          </button>
+          <button
+            type="button"
+            onClick={() => void openDir()}
+            title={t("logs.openDir")}
+            className="inline-flex size-7 shrink-0 items-center justify-center rounded-md border border-line-strong bg-surface text-ink-muted transition hover:bg-surface-muted hover:text-ink"
+          >
+            <FolderOpen className="size-3.5" />
+          </button>
+          <button
+            type="button"
+            onClick={() => void clear("day")}
+            disabled={!day}
+            title={t("logs.clearDay")}
+            className="inline-flex size-7 shrink-0 items-center justify-center rounded-md border border-line-strong bg-surface text-ink-muted transition hover:bg-danger/10 hover:text-danger-ink disabled:opacity-40"
+          >
+            <Trash2 className="size-3.5" />
+          </button>
+          <button
+            type="button"
+            onClick={() => void clear("all")}
+            disabled={days.length === 0}
+            className="shrink-0 rounded-md border border-line-strong bg-surface px-2 py-1 text-[11px] font-medium text-ink-muted transition hover:bg-danger/10 hover:text-danger-ink disabled:opacity-40"
+          >
+            {t("logs.clearAll")}
+          </button>
         </div>
 
-        {/* View switch: the same data, laid out flat or against the clock. */}
-        <div className="flex shrink-0 overflow-hidden rounded-lg border border-line-strong">
-          {(["list", "timeline"] as const).map((v) => (
-            <button
-              key={v}
-              type="button"
-              onClick={() => setView(v)}
-              className={cn(
-                "flex items-center gap-1 px-2.5 py-1.5 text-xs font-medium transition",
-                view === v ? "bg-primary text-primary-foreground" : "bg-surface text-ink-muted hover:bg-surface-muted",
-              )}
-            >
-              {v === "list" ? <ScrollText className="size-3.5" /> : <ListTree className="size-3.5" />}
-              {t(v === "list" ? "logs.viewList" : "logs.viewTimeline")}
-            </button>
-          ))}
-        </div>
+        {msg && <p className="mb-3 text-[11px] text-warning-ink">{msg}</p>}
 
-        <button
-          type="button"
-          onClick={() => void refreshDays()}
-          title={t("logs.refresh")}
-          className="inline-flex size-7 shrink-0 items-center justify-center rounded-md border border-line-strong bg-surface text-ink-muted transition hover:bg-surface-muted hover:text-ink"
-        >
-          <RefreshCw className={cn("size-3.5", loading && "animate-spin")} />
-        </button>
-        <button
-          type="button"
-          onClick={() => void openDir()}
-          title={t("logs.openDir")}
-          className="inline-flex size-7 shrink-0 items-center justify-center rounded-md border border-line-strong bg-surface text-ink-muted transition hover:bg-surface-muted hover:text-ink"
-        >
-          <FolderOpen className="size-3.5" />
-        </button>
-        <button
-          type="button"
-          onClick={() => void clear("day")}
-          disabled={!day}
-          title={t("logs.clearDay")}
-          className="inline-flex size-7 shrink-0 items-center justify-center rounded-md border border-line-strong bg-surface text-ink-muted transition hover:bg-danger/10 hover:text-danger-ink disabled:opacity-40"
-        >
-          <Trash2 className="size-3.5" />
-        </button>
-        <button
-          type="button"
-          onClick={() => void clear("all")}
-          disabled={days.length === 0}
-          className="shrink-0 rounded-md border border-line-strong bg-surface px-2 py-1 text-[11px] font-medium text-ink-muted transition hover:bg-danger/10 hover:text-danger-ink disabled:opacity-40"
-        >
-          {t("logs.clearAll")}
-        </button>
-      </div>
-
-      {msg && <p className="mb-3 text-[11px] text-warning-ink">{msg}</p>}
-
-      {/* Day summary. */}
-      {stats && (
-        <div className="mb-4 grid grid-cols-2 gap-2 sm:grid-cols-4">
-          {/* Displayed exactly like the input stat below: headline is net of cache (tokens actually
-              paid for), and the sub-line reports the gross total and how much was served from cache. */}
-          <Stat
-            label={t("logs.totalTokens")}
-            value={fmtNum(Math.max(0, stats.totalTokens - stats.cachedTokens))}
-            hint={
-              [
+        {/* Day summary. */}
+        {stats && (
+          <div className="mb-3 grid grid-cols-2 gap-2 sm:grid-cols-4">
+            {/* Displayed exactly like the input stat below: headline is net of cache (tokens actually
+                paid for), and the sub-line reports the gross total and how much was served from cache. */}
+            <Stat
+              label={t("logs.totalTokens")}
+              value={fmtNum(Math.max(0, stats.totalTokens - stats.cachedTokens))}
+              hint={
+                [
+                  stats.cachedTokens
+                    ? t("logs.inputBreakdown", { total: fmtNum(stats.totalTokens), cached: fmtNum(stats.cachedTokens) })
+                    : null,
+                  stats.estimated ? t("logs.estimatedNote") : null,
+                ]
+                  .filter(Boolean)
+                  .join(" · ") || undefined
+              }
+            />
+            {/* Headline = fresh input (prompt minus what the prefix cache served) — the tokens actually
+                paid for. The sub-line still reports the total input and how much of it was cached, so the
+                gross figure is not hidden. clamp at 0 in case a provider reports more cached than prompt. */}
+            <Stat
+              label={t("logs.inputTokens")}
+              value={fmtNum(Math.max(0, stats.promptTokens - stats.cachedTokens))}
+              hint={
                 stats.cachedTokens
-                  ? t("logs.inputBreakdown", { total: fmtNum(stats.totalTokens), cached: fmtNum(stats.cachedTokens) })
-                  : null,
-                stats.estimated ? t("logs.estimatedNote") : null,
-              ]
-                .filter(Boolean)
-                .join(" · ") || undefined
-            }
-          />
-          {/* Headline = fresh input (prompt minus what the prefix cache served) — the tokens actually
-              paid for. The sub-line still reports the total input and how much of it was cached, so the
-              gross figure is not hidden. clamp at 0 in case a provider reports more cached than prompt. */}
-          <Stat
-            label={t("logs.inputTokens")}
-            value={fmtNum(Math.max(0, stats.promptTokens - stats.cachedTokens))}
-            hint={
-              stats.cachedTokens
-                ? t("logs.inputBreakdown", { total: fmtNum(stats.promptTokens), cached: fmtNum(stats.cachedTokens) })
-                : undefined
-            }
-          />
-          <Stat label={t("logs.outputTokens")} value={fmtNum(stats.completionTokens)} />
-          <Stat label={t("logs.modelCalls")} value={fmtNum(stats.calls)} />
-          <Stat
-            label={t("logs.toolCalls")}
-            value={fmtNum(stats.toolCalls)}
-            hint={stats.toolResultTokens ? t("logs.toolTokensHint", { n: fmtNum(stats.toolResultTokens) }) : undefined}
-          />
-          <Stat label={t("logs.subagentRuns")} value={fmtNum(stats.subagentRuns)} />
-          <Stat label={t("logs.errors")} value={fmtNum(stats.errors)} />
-          <Stat label={t("logs.entries")} value={fmtNum(stats.entries)} />
-        </div>
-      )}
+                  ? t("logs.inputBreakdown", { total: fmtNum(stats.promptTokens), cached: fmtNum(stats.cachedTokens) })
+                  : undefined
+              }
+            />
+            <Stat label={t("logs.outputTokens")} value={fmtNum(stats.completionTokens)} />
+            <Stat label={t("logs.modelCalls")} value={fmtNum(stats.calls)} />
+            <Stat
+              label={t("logs.toolCalls")}
+              value={fmtNum(stats.toolCalls)}
+              hint={stats.toolResultTokens ? t("logs.toolTokensHint", { n: fmtNum(stats.toolResultTokens) }) : undefined}
+            />
+            <Stat label={t("logs.subagentRuns")} value={fmtNum(stats.subagentRuns)} />
+            <Stat label={t("logs.errors")} value={fmtNum(stats.errors)} />
+            <Stat label={t("logs.entries")} value={fmtNum(stats.entries)} />
+          </div>
+        )}
 
-      {/* Breakdowns: where the tokens went, and what the agents spent their time doing. */}
-      {stats && stats.entries > 0 && (
-        <div className="mb-5 grid gap-3 sm:grid-cols-3">
-          <Breakdown
-            title={t("logs.byModel")}
-            rows={Object.entries(stats.byModel)
-              .sort((a, b) => b[1].totalTokens - a[1].totalTokens)
-              .slice(0, 6)
-              .map(([name, v]) => ({ name, value: fmtNum(v.totalTokens), weight: v.totalTokens }))}
-          />
-          <Breakdown
-            title={t("logs.byActor")}
-            rows={Object.entries(stats.byActor)
-              .sort((a, b) => b[1].totalTokens - a[1].totalTokens)
-              .slice(0, 6)
-              .map(([name, v]) => ({
-                name: actorLabel(name, t),
-                value: `${fmtNum(v.totalTokens)} · ${fmtNum(v.toolCalls ?? 0)}⚒`,
-                weight: v.totalTokens,
-              }))}
-          />
-          <Breakdown
-            title={t("logs.byTool")}
-            rows={Object.entries(stats.byTool)
-              .sort((a, b) => b[1].calls - a[1].calls)
-              .slice(0, 6)
-              .map(([name, v]) => ({
-                name,
-                value: v.resultTokens ? `${fmtNum(v.calls)}× · ~${fmtNum(v.resultTokens)}` : `${fmtNum(v.calls)}×`,
-                weight: v.calls,
-              }))}
-          />
-        </div>
-      )}
+        {/* Breakdowns: where the tokens went, and what the agents spent their time doing. */}
+        {stats && stats.entries > 0 && (
+          <div className="mb-3 grid gap-3 sm:grid-cols-3">
+            <Breakdown
+              title={t("logs.byModel")}
+              rows={Object.entries(stats.byModel)
+                .sort((a, b) => b[1].totalTokens - a[1].totalTokens)
+                .slice(0, 6)
+                .map(([name, v]) => ({ name, value: fmtNum(v.totalTokens), weight: v.totalTokens }))}
+            />
+            <Breakdown
+              title={t("logs.byActor")}
+              rows={Object.entries(stats.byActor)
+                .sort((a, b) => b[1].totalTokens - a[1].totalTokens)
+                .slice(0, 6)
+                .map(([name, v]) => ({
+                  name: actorLabel(name, t),
+                  value: `${fmtNum(v.totalTokens)} · ${fmtNum(v.toolCalls ?? 0)}⚒`,
+                  weight: v.totalTokens,
+                }))}
+            />
+            <Breakdown
+              title={t("logs.byTool")}
+              rows={Object.entries(stats.byTool)
+                .sort((a, b) => b[1].calls - a[1].calls)
+                .slice(0, 6)
+                .map(([name, v]) => ({
+                  name,
+                  value: v.resultTokens ? `${fmtNum(v.calls)}× · ~${fmtNum(v.resultTokens)}` : `${fmtNum(v.calls)}×`,
+                  weight: v.calls,
+                }))}
+            />
+          </div>
+        )}
 
-      {entries.length === 0 ? (
-        <p className="rounded-xl border border-line bg-surface-muted/50 px-4 py-6 text-center text-xs text-ink-subtle">
-          {enabled ? t("logs.empty") : t("logs.emptyDisabled")}
-        </p>
-      ) : view === "list" ? (
-        <EntryList t={t} entries={entries} expanded={expanded} setExpanded={setExpanded} />
-      ) : (
-        <Timeline t={t} entries={entries} />
-      )}
+        {entries.length === 0 ? (
+          <p className={cn(NOTE, "py-6 text-center")}>{enabled ? t("logs.empty") : t("logs.emptyDisabled")}</p>
+        ) : view === "list" ? (
+          <EntryList t={t} entries={entries} expanded={expanded} setExpanded={setExpanded} />
+        ) : (
+          <Timeline t={t} entries={entries} />
+        )}
 
-      {/* Paging: matched counts the whole day, entries only what was fetched. */}
-      {matched > entries.length && (
-        <button
-          type="button"
-          onClick={() => setLimit((n) => n + PAGE)}
-          className="mt-3 w-full rounded-lg border border-line-strong bg-surface py-2 text-xs font-medium text-ink-muted transition hover:bg-surface-muted"
-        >
-          {t("logs.loadMore", { shown: entries.length, total: matched })}
-        </button>
-      )}
-    </div>
+        {/* Paging: matched counts the whole day, entries only what was fetched. */}
+        {matched > entries.length && (
+          <button
+            type="button"
+            onClick={() => setLimit((n) => n + PAGE)}
+            className="mt-3 w-full rounded-lg border border-line-strong bg-surface py-2 text-xs font-medium text-ink-muted transition hover:bg-surface-muted"
+          >
+            {t("logs.loadMore", { shown: entries.length, total: matched })}
+          </button>
+        )}
+      </Group>
+    </Pane>
   );
 }
 

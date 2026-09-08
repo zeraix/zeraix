@@ -19,6 +19,7 @@ import { type TFunc } from "@/lib/i18n";
 import { cn } from "@/lib/utils";
 import { fmtDate } from "./formatDate";
 import { FIELD_CLS, PRIMARY_BTN } from "./styles";
+import { Group, LIST, NOTE, Pane } from "./pane";
 
 /** API keys section: configure a key for each provider / custom model in the list (shared by both official and custom models). */
 export function KeysSection({ t }: { t: TFunc }) {
@@ -116,35 +117,30 @@ export function KeysSection({ t }: { t: TFunc }) {
   };
 
   return (
-    <div className="max-w-2xl mx-auto">
-      <h2 className="mb-2 text-xl font-bold text-ink">{t("settings.keys")}</h2>
-      <p className="mb-5 text-xs text-ink-subtle">{t("keys.desc")}</p>
-
+    <Pane title={t("settings.keys")} desc={t("keys.desc")}>
       {/* Official API key */}
-      <div className="mb-6">
-        <div className="mb-1 flex items-center justify-between gap-2">
-          <p className="text-sm font-semibold text-ink">{t("keys.official")}</p>
+      <Group
+        title={t("keys.official")}
+        desc={t("keys.officialDesc")}
+        anchor="keys/official"
+        actions={
           <button type="button" onClick={regenerate} disabled={okBusy} className={cn(PRIMARY_BTN, "h-[30px]")}>
             <RotateCcw className="size-3.5" />
             {official.length ? t("keys.regenerate") : t("keys.generate")}
           </button>
-        </div>
-        <p className="mb-2 text-[11px] text-ink-subtle">{t("keys.officialDesc")}</p>
+        }
+      >
         {okState === "loading" ? (
-          <p className="rounded-xl border border-line bg-surface-muted/50 px-4 py-3.5 text-xs text-ink-subtle">
-            {t("models.loading")}
-          </p>
+          <p className={NOTE}>{t("models.loading")}</p>
         ) : okState === "error" ? (
-          <p className="rounded-xl border border-line bg-surface-muted/50 px-4 py-3.5 text-xs text-warning-ink">
+          <p className={cn(NOTE, "text-warning-ink")}>
             {t("keys.officialError")}
             {okError ? ` (${okError})` : ""}
           </p>
         ) : official.length === 0 ? (
-          <p className="rounded-xl border border-line bg-surface-muted/50 px-4 py-3.5 text-xs text-ink-subtle">
-            {t("keys.officialEmpty")}
-          </p>
+          <p className={NOTE}>{t("keys.officialEmpty")}</p>
         ) : (
-          <div className="divide-y divide-line rounded-xl border border-line bg-surface-muted/50">
+          <div className={LIST}>
             {official.map((k, i) => (
               <div key={k.id ?? i} className="flex items-center gap-3 px-4 py-3">
                 <div className="min-w-0 flex-1">
@@ -170,33 +166,32 @@ export function KeysSection({ t }: { t: TFunc }) {
             ))}
           </div>
         )}
-      </div>
+      </Group>
 
       {/* Provider / custom model keys (saved locally) */}
-      <p className="mb-2 text-sm font-semibold text-ink">{t("keys.localTitle")}</p>
-      {groups.length === 0 ? (
-        <p className="rounded-xl border border-line bg-surface-muted/50 px-4 py-3.5 text-xs text-ink-subtle">
-          {t("keys.empty")}
-        </p>
-      ) : (
-        <div className="divide-y divide-line rounded-xl border border-line bg-surface-muted/50">
-          {groups.map((g) => (
-            <div key={g.ref} className="px-4 py-3">
-              <label className="mb-1.5 block text-sm font-medium text-ink">
-                {t("keys.forProvider")} {g.label}
-              </label>
-              <input
-                type="password"
-                autoComplete="off"
-                value={keys[g.ref] ?? ""}
-                onChange={(e) => onChange(g.ref, e.target.value)}
-                placeholder={t("keys.placeholder")}
-                className={cn(FIELD_CLS, "w-full font-mono text-xs")}
-              />
-            </div>
-          ))}
-        </div>
-      )}
-    </div>
+      <Group title={t("keys.localTitle")} anchor="keys/local">
+        {groups.length === 0 ? (
+          <p className={NOTE}>{t("keys.empty")}</p>
+        ) : (
+          <div className={LIST}>
+            {groups.map((g) => (
+              <div key={g.ref} className="px-4 py-3">
+                <label className="mb-1.5 block text-sm font-medium text-ink">
+                  {t("keys.forProvider")} {g.label}
+                </label>
+                <input
+                  type="password"
+                  autoComplete="off"
+                  value={keys[g.ref] ?? ""}
+                  onChange={(e) => onChange(g.ref, e.target.value)}
+                  placeholder={t("keys.placeholder")}
+                  className={cn(FIELD_CLS, "w-full font-mono text-xs")}
+                />
+              </div>
+            ))}
+          </div>
+        )}
+      </Group>
+    </Pane>
   );
 }

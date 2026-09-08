@@ -22,6 +22,7 @@ import { useAgentChatStore } from "@/store/agentChatStore";
 import { type TFunc } from "@/lib/i18n";
 import { cn } from "@/lib/utils";
 import { ToggleSwitch } from "./ToggleSwitch";
+import { Group, LIST, NOTE, PANEL, Pane, Row } from "./pane";
 import { useImeGuard } from "@/lib/ime";
 
 /** General section: data storage path. */
@@ -108,67 +109,60 @@ export function GeneralSection({ t }: { t: TFunc }) {
   };
 
   return (
-    <div className="max-w-2xl mx-auto">
-      <h2 className="mb-5 text-xl font-bold text-ink">{t("settings.general")}</h2>
-
-      <p className="mb-2 flex items-center gap-1.5 text-sm font-semibold text-ink">
-        <Database className="size-4 text-ink-muted" />
-        {t("general.storage")}
-      </p>
-      {configurable ? (
-        <div className="rounded-xl border border-line bg-surface-muted/50 px-4 py-3.5">
-          <p className="mb-2 text-xs text-ink-subtle">{t("general.storageDesc")}</p>
-          <div className="flex flex-wrap items-center gap-2">
-            <input
-              value={input}
-              onChange={(e) => setInput(e.target.value)}
-              {...ime.bind}
-              onKeyDown={(e) => {
-                if (ime.isImeKey(e)) return; // a path can be typed on an IME — see lib/ime.ts
-                if (e.key === "Enter") {
-                  e.preventDefault();
-                  void apply();
-                }
-              }}
-              placeholder={t("general.dirPlaceholder")}
-              className="min-w-[220px] flex-1 rounded-lg border border-line-strong bg-surface px-2.5 py-1.5 font-mono text-xs outline-none transition focus:border-ring focus:ring-2 focus:ring-primary/10"
-            />
-            <button
-              onClick={() => void browse()}
-              className="shrink-0 rounded-lg border border-line-strong bg-surface px-3 py-1.5 text-xs font-medium text-ink transition hover:bg-surface-muted"
-            >
-              {t("general.chooseDir")}
-            </button>
-            <button
-              onClick={() => void apply()}
-              disabled={!input.trim()}
-              className="shrink-0 rounded-lg bg-gradient-to-br from-primary to-primary/85 px-3 py-1.5 text-xs font-semibold text-white shadow-sm transition hover:brightness-105 disabled:opacity-50"
-            >
-              {t("general.apply")}
-            </button>
+    <Pane title={t("settings.general")}>
+      <Group title={t("general.storage")} desc={t("general.storageDesc")} icon={Database} anchor="general/storage">
+        {configurable ? (
+          <div className={PANEL}>
+            <div className="flex flex-wrap items-center gap-2">
+              <input
+                value={input}
+                onChange={(e) => setInput(e.target.value)}
+                {...ime.bind}
+                onKeyDown={(e) => {
+                  if (ime.isImeKey(e)) return; // a path can be typed on an IME — see lib/ime.ts
+                  if (e.key === "Enter") {
+                    e.preventDefault();
+                    void apply();
+                  }
+                }}
+                placeholder={t("general.dirPlaceholder")}
+                className="min-w-[220px] flex-1 rounded-lg border border-line-strong bg-surface px-2.5 py-1.5 font-mono text-xs outline-none transition focus:border-ring focus:ring-2 focus:ring-primary/10"
+              />
+              <button
+                onClick={() => void browse()}
+                className="shrink-0 rounded-lg border border-line-strong bg-surface px-3 py-1.5 text-xs font-medium text-ink transition hover:bg-surface-muted"
+              >
+                {t("general.chooseDir")}
+              </button>
+              <button
+                onClick={() => void apply()}
+                disabled={!input.trim()}
+                className="shrink-0 rounded-lg bg-gradient-to-br from-primary to-primary/85 px-3 py-1.5 text-xs font-semibold text-white shadow-sm transition hover:brightness-105 disabled:opacity-50"
+              >
+                {t("general.apply")}
+              </button>
+            </div>
+            <p className="mt-2 text-[11px] text-ink-subtle">
+              {t("general.current")}
+              <span className="break-all font-mono text-ink-muted">{path || t("general.default")}</span>
+              {t("general.migrateNote")}
+            </p>
+            {msg && <p className="mt-1 text-[11px] text-warning-ink">{msg}</p>}
           </div>
-          <p className="mt-2 text-[11px] text-ink-subtle">
-            {t("general.current")}
-            <span className="break-all font-mono text-ink-muted">{path || t("general.default")}</span>
-            {t("general.migrateNote")}
-          </p>
-          {msg && <p className="mt-1 text-[11px] text-warning-ink">{msg}</p>}
-        </div>
-      ) : (
-        <p className="rounded-xl border border-line bg-surface-muted/50 px-4 py-3.5 text-xs text-ink-subtle">
-          {t("general.unsupported")}
-        </p>
-      )}
+        ) : (
+          <p className={NOTE}>{t("general.unsupported")}</p>
+        )}
+      </Group>
 
       {/* Context working-set budget: caps auto-compaction at an absolute token budget so large-window
           models don't hoard hundreds of thousands of tokens. Available in every build (localStorage pref). */}
-      <div className="mt-6">
-        <p className="mb-2 flex items-center gap-1.5 text-sm font-semibold text-ink">
-          <Gauge className="size-4 text-ink-muted" />
-          {t("general.contextBudget")}
-        </p>
-        <div className="rounded-xl border border-line bg-surface-muted/50 px-4 py-3.5">
-          <p className="mb-2 text-xs text-ink-subtle">{t("general.contextBudgetDesc")}</p>
+      <Group
+        title={t("general.contextBudget")}
+        desc={t("general.contextBudgetDesc")}
+        icon={Gauge}
+        anchor="general/context-budget"
+      >
+        <div className={PANEL}>
           {/* An explicit switch, because "type 0 to disable" is a rule you have to already know. The number
               stays the way to TUNE the cap; this is the way to turn it off, and toggling back on restores the
               value rather than the default. */}
@@ -226,17 +220,17 @@ export function GeneralSection({ t }: { t: TFunc }) {
             {budgetK > 0 && budgetK < MIN_CONTEXT_BUDGET_K ? ` (min ${MIN_CONTEXT_BUDGET_K})` : ""}
           </p>
         </div>
-      </div>
+      </Group>
 
       {/* app.config: open the persisted config file in the system's default editor (desktop app only). */}
       {appConfigOk && (
-        <div className="mt-6">
-          <p className="mb-2 flex items-center gap-1.5 text-sm font-semibold text-ink">
-            <FileCog className="size-4 text-ink-muted" />
-            {t("general.appConfig")}
-          </p>
-          <div className="rounded-xl border border-line bg-surface-muted/50 px-4 py-3.5">
-            <p className="mb-2 text-xs text-ink-subtle">{t("general.appConfigDesc")}</p>
+        <Group
+          title={t("general.appConfig")}
+          desc={t("general.appConfigDesc")}
+          icon={FileCog}
+          anchor="general/app-config"
+        >
+          <div className={PANEL}>
             <button
               onClick={() => void openAppConfig()}
               className="shrink-0 rounded-lg border border-line-strong bg-surface px-3 py-1.5 text-xs font-medium text-ink transition hover:bg-surface-muted"
@@ -247,69 +241,58 @@ export function GeneralSection({ t }: { t: TFunc }) {
               <p className="mt-2 text-[11px] text-warning-ink">{appConfigMsg}</p>
             )}
           </div>
-        </div>
+        </Group>
       )}
 
       {/* Background / tray mode: desktop only. Scheduled automations cannot fire while the app is
           not running, so this is the setting that makes the automation scheduler useful at all. */}
       {bg && (
-        <>
-          <p className="mb-2 mt-6 flex items-center gap-1.5 text-sm font-semibold text-ink">
-            <Activity className="size-4 text-ink-muted" />
-            {t("general.background")}
-          </p>
-          <div className="rounded-xl border border-line bg-surface-muted/50 px-4 py-3.5">
-            <p className="mb-3 text-xs text-ink-subtle">{t("general.backgroundDesc")}</p>
-            {bg.traySupported ? (
-              <>
-                <div className="flex items-center justify-between gap-4">
-                  <div>
-                    <p className="text-sm font-medium text-ink">{t("general.backgroundEnable")}</p>
-                    <p className="text-xs text-ink-subtle">{t("general.backgroundEnableDesc")}</p>
-                  </div>
-                  <ToggleSwitch
-                    on={bg.enabled}
-                    label={t("general.backgroundEnable")}
-                    onChange={(v) => {
-                      // Optimistic: the main process is the source of truth, but disabling background
-                      // mode also clears autostart there, so mirror that here to stay consistent.
-                      setBg({ ...bg, enabled: v, openAtLogin: v ? bg.openAtLogin : false });
-                      // Enabling can still be refused (no system tray) -- reconcile with the result
-                      // rather than leaving the toggle showing a state the main process rejected.
-                      void setBackgroundEnabled(v).then((actual) => {
-                        if (actual !== v) void getBackgroundState().then(setBg);
-                      });
-                    }}
-                  />
-                </div>
-                <div
-                  className={cn(
-                    "mt-3 flex items-center justify-between gap-4 border-t border-line pt-3 transition",
-                    !bg.enabled && "pointer-events-none opacity-40",
-                  )}
-                >
-                  <div>
-                    <p className="text-sm font-medium text-ink">{t("general.backgroundAutostart")}</p>
-                    <p className="text-xs text-ink-subtle">{t("general.backgroundAutostartDesc")}</p>
-                  </div>
-                  <ToggleSwitch
-                    on={bg.openAtLogin}
-                    label={t("general.backgroundAutostart")}
-                    onChange={(v) => {
-                      setBg({ ...bg, openAtLogin: v });
-                      void setBackgroundOpenAtLogin(v);
-                    }}
-                  />
-                </div>
-              </>
-            ) : (
-              <p className="text-xs text-warning-ink">
-                {t("general.backgroundUnsupported")}
-              </p>
-            )}
-          </div>
-        </>
+        <Group
+          title={t("general.background")}
+          desc={t("general.backgroundDesc")}
+          icon={Activity}
+          anchor="general/background"
+        >
+          {bg.traySupported ? (
+            <div className={LIST}>
+              <Row title={t("general.backgroundEnable")} desc={t("general.backgroundEnableDesc")}>
+                <ToggleSwitch
+                  on={bg.enabled}
+                  label={t("general.backgroundEnable")}
+                  onChange={(v) => {
+                    // Optimistic: the main process is the source of truth, but disabling background
+                    // mode also clears autostart there, so mirror that here to stay consistent.
+                    setBg({ ...bg, enabled: v, openAtLogin: v ? bg.openAtLogin : false });
+                    // Enabling can still be refused (no system tray) -- reconcile with the result
+                    // rather than leaving the toggle showing a state the main process rejected.
+                    void setBackgroundEnabled(v).then((actual) => {
+                      if (actual !== v) void getBackgroundState().then(setBg);
+                    });
+                  }}
+                />
+              </Row>
+              {/* Autostart only means anything while background mode is on: dimmed, not hidden, so
+                  it is clear what enabling the parent switch would give you. */}
+              <Row
+                title={t("general.backgroundAutostart")}
+                desc={t("general.backgroundAutostartDesc")}
+                disabled={!bg.enabled}
+              >
+                <ToggleSwitch
+                  on={bg.openAtLogin}
+                  label={t("general.backgroundAutostart")}
+                  onChange={(v) => {
+                    setBg({ ...bg, openAtLogin: v });
+                    void setBackgroundOpenAtLogin(v);
+                  }}
+                />
+              </Row>
+            </div>
+          ) : (
+            <p className={cn(NOTE, "text-warning-ink")}>{t("general.backgroundUnsupported")}</p>
+          )}
+        </Group>
       )}
-    </div>
+    </Pane>
   );
 }

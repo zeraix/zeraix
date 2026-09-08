@@ -6,6 +6,7 @@ import { errorKey, mergeUpdaterState, updaterBridge, type UpdaterState } from "@
 import { APP_NAME, APP_VERSION, GITHUB_URL } from "@/constants/App";
 import { type TFunc } from "@/lib/i18n";
 import { PRIMARY_BTN } from "./styles";
+import { Group, PANEL, Pane } from "./pane";
 
 /**
  * About section: app identity + update check + repository link.
@@ -62,11 +63,9 @@ export function AboutSection({ t }: { t: TFunc }) {
   const openGithub = () => window.open(GITHUB_URL, "_blank", "noopener,noreferrer");
 
   return (
-    <div className="max-w-2xl mx-auto">
-      <h2 className="mb-5 text-xl font-bold text-ink">{t("about.title")}</h2>
-
+    <Pane title={t("about.title")}>
       {/* Identity */}
-      <div className="mb-6 flex items-center gap-4 rounded-xl border border-line bg-surface-muted/50 px-4 py-4">
+      <div className="flex items-center gap-4 rounded-xl border border-line bg-surface-muted/40 px-4 py-4">
         {/* eslint-disable-next-line @next/next/no-img-element -- static export: plain <img> avoids the optimizer entirely */}
         <img src="/logo.png" alt="" className="size-12 shrink-0 rounded-xl object-contain" />
         <div className="min-w-0">
@@ -79,92 +78,88 @@ export function AboutSection({ t }: { t: TFunc }) {
       </div>
 
       {/* Updates */}
-      <p className="mb-2 flex items-center gap-1.5 text-sm font-semibold text-ink">
-        <RefreshCw className="size-4 text-ink-muted" />
-        {t("about.updates")}
-      </p>
-      <div className="rounded-xl border border-line bg-surface-muted/50 px-4 py-3.5">
-        <div className="flex flex-wrap items-center gap-2">
-          <button
-            onClick={() => void check()}
-            disabled={!supported || busy}
-            className={PRIMARY_BTN}
-          >
-            {busy ? <Loader2 className="size-3.5 animate-spin" /> : <RefreshCw className="size-3.5" />}
-            {busy ? t("about.checking") : t("about.check")}
-          </button>
-
-          {/* An update the user can act on: consent to download, then choose when to restart. */}
-          {status === "available" && (
-            <button onClick={() => void updaterBridge()?.download()} className={PRIMARY_BTN}>
-              <Download className="size-3.5" />
-              {t("update.action.download")}
+      <Group title={t("about.updates")} icon={RefreshCw} anchor="about/updates">
+        <div className={PANEL}>
+          <div className="flex flex-wrap items-center gap-2">
+            <button
+              onClick={() => void check()}
+              disabled={!supported || busy}
+              className={PRIMARY_BTN}
+            >
+              {busy ? <Loader2 className="size-3.5 animate-spin" /> : <RefreshCw className="size-3.5" />}
+              {busy ? t("about.checking") : t("about.check")}
             </button>
-          )}
-          {status === "downloaded" && (
-            <button onClick={() => void updaterBridge()?.install()} className={PRIMARY_BTN}>
-              <RefreshCw className="size-3.5" />
-              {t("update.action.installNow")}
-            </button>
-          )}
-        </div>
 
-        {/* Outcome of the last check. Nothing is shown while idle — there is nothing to report yet. */}
-        {!supported ? (
-          <p className="mt-2 text-[11px] text-ink-subtle">{t("about.unsupported")}</p>
-        ) : status === "not-available" ? (
-          <p className="mt-2 flex items-center gap-1.5 text-[11px] text-success-ink">
-            <CheckCircle2 className="size-3.5" /> {t("about.upToDate")}
-          </p>
-        ) : status === "available" ? (
-          <p className="mt-2 text-[11px] text-ink-subtle">
-            {t("update.available.body", { version: state?.version ?? "" })}
-          </p>
-        ) : status === "downloading" ? (
-          <div className="mt-2">
-            <p className="text-[11px] text-ink-subtle">
-              {t("update.downloading.body", { percent: state?.percent ?? 0 })}
-            </p>
-            <div className="mt-1.5 h-1 w-full overflow-hidden rounded-full bg-surface">
-              <div
-                className="h-full rounded-full bg-primary transition-[width] duration-300"
-                style={{ width: `${Math.max(2, state?.percent ?? 0)}%` }}
-              />
-            </div>
+            {/* An update the user can act on: consent to download, then choose when to restart. */}
+            {status === "available" && (
+              <button onClick={() => void updaterBridge()?.download()} className={PRIMARY_BTN}>
+                <Download className="size-3.5" />
+                {t("update.action.download")}
+              </button>
+            )}
+            {status === "downloaded" && (
+              <button onClick={() => void updaterBridge()?.install()} className={PRIMARY_BTN}>
+                <RefreshCw className="size-3.5" />
+                {t("update.action.installNow")}
+              </button>
+            )}
           </div>
-        ) : status === "downloaded" ? (
-          <p className="mt-2 text-[11px] text-ink-subtle">
-            {t("update.ready.body", { version: state?.version ?? "" })} {t("update.later.hint")}
-          </p>
-        ) : status === "error" ? (
-          <p className="mt-2 text-[11px] text-warning-ink">
-            {t(errorKey(state?.error ?? null))}
-          </p>
-        ) : null}
-      </div>
+
+          {/* Outcome of the last check. Nothing is shown while idle — there is nothing to report yet. */}
+          {!supported ? (
+            <p className="mt-2 text-[11px] text-ink-subtle">{t("about.unsupported")}</p>
+          ) : status === "not-available" ? (
+            <p className="mt-2 flex items-center gap-1.5 text-[11px] text-success-ink">
+              <CheckCircle2 className="size-3.5" /> {t("about.upToDate")}
+            </p>
+          ) : status === "available" ? (
+            <p className="mt-2 text-[11px] text-ink-subtle">
+              {t("update.available.body", { version: state?.version ?? "" })}
+            </p>
+          ) : status === "downloading" ? (
+            <div className="mt-2">
+              <p className="text-[11px] text-ink-subtle">
+                {t("update.downloading.body", { percent: state?.percent ?? 0 })}
+              </p>
+              <div className="mt-1.5 h-1 w-full overflow-hidden rounded-full bg-surface">
+                <div
+                  className="h-full rounded-full bg-primary transition-[width] duration-300"
+                  style={{ width: `${Math.max(2, state?.percent ?? 0)}%` }}
+                />
+              </div>
+            </div>
+          ) : status === "downloaded" ? (
+            <p className="mt-2 text-[11px] text-ink-subtle">
+              {t("update.ready.body", { version: state?.version ?? "" })} {t("update.later.hint")}
+            </p>
+          ) : status === "error" ? (
+            <p className="mt-2 text-[11px] text-warning-ink">
+              {t(errorKey(state?.error ?? null))}
+            </p>
+          ) : null}
+        </div>
+      </Group>
 
       {/* Links */}
-      <p className="mb-2 mt-6 flex items-center gap-1.5 text-sm font-semibold text-ink">
-        <ExternalLink className="size-4 text-ink-muted" />
-        {t("about.links")}
-      </p>
-      <div className="rounded-xl border border-line bg-surface-muted/50 px-4 py-3.5">
-        <div className="flex flex-wrap items-center justify-between gap-2">
-          <div className="min-w-0">
-            <p className="flex items-center gap-1.5 text-sm font-medium text-ink">
-              <Github className="size-4 text-ink-muted" />
-              {t("about.github")}
-            </p>
-            <p className="mt-0.5 break-all text-[11px] text-ink-subtle">{t("about.githubDesc")}</p>
+      <Group title={t("about.links")} icon={ExternalLink} anchor="about/links">
+        <div className={PANEL}>
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="min-w-0">
+              <p className="flex items-center gap-1.5 text-sm font-medium text-ink">
+                <Github className="size-4 text-ink-muted" />
+                {t("about.github")}
+              </p>
+              <p className="mt-0.5 break-all text-[11px] text-ink-subtle">{t("about.githubDesc")}</p>
+            </div>
+            <button
+              onClick={openGithub}
+              className="shrink-0 rounded-lg border border-line-strong bg-surface px-3 py-1.5 text-xs font-medium text-ink transition hover:bg-surface-muted"
+            >
+              {t("about.open")}
+            </button>
           </div>
-          <button
-            onClick={openGithub}
-            className="shrink-0 rounded-lg border border-line-strong bg-surface px-3 py-1.5 text-xs font-medium text-ink transition hover:bg-surface-muted"
-          >
-            {t("about.open")}
-          </button>
         </div>
-      </div>
-    </div>
+      </Group>
+    </Pane>
   );
 }

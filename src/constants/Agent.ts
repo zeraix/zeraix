@@ -63,6 +63,9 @@ export const AGENT_THINKING_EFFORT_KEY = "agent.thinking.effort";
 /** Dot path: replay past thinking blocks as context on later requests. Off by default — see ThinkingConfig.sendContext. */
 export const AGENT_THINKING_SEND_CONTEXT_KEY = "agent.thinking.sendContext";
 
+/** How tool calls are approved in chat: default / trust / manual / plan. See lib/ai/approvalMode.ts. */
+export const AGENT_APPROVAL_MODE_KEY = "agent.approval.mode";
+
 /** Dot path: runtime parameters (manually adjustable in settings).
  *  - maxToolRounds: the maximum number of consecutive tool-call rounds within a single conversation turn (round cap).
  *  - maxSameToolCalls: when the same "tool + params" is called repeatedly up to this count, it's judged as no progress and aborted (infinite-loop guard).

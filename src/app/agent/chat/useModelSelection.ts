@@ -14,6 +14,13 @@ import {
 } from "@/lib/ai/models";
 import { isLocalEndpoint, localLlm, LOCAL_PROVIDER_ID } from "@/lib/ai/localModel";
 import {
+  APPROVAL_MODE_CHANGE_EVENT,
+  DEFAULT_APPROVAL_MODE,
+  loadApprovalMode,
+  saveApprovalMode,
+  type ApprovalMode,
+} from "@/lib/ai/approvalMode";
+import {
   loadThinking,
   saveThinking,
   THINKING_CHANGE_EVENT,
@@ -50,6 +57,13 @@ export interface ModelSelection {
   modelName: string;
   apiKey: string;
   isLocalModel: boolean;
+
+  // ── Approval mode ────────────────────────────────────────────────────────────────────────────────────────
+  /** How tool calls are approved: default / trust / manual / plan. See lib/ai/approvalMode.ts. */
+  approvalMode: ApprovalMode;
+  changeApprovalMode: (next: ApprovalMode) => void;
+  /** The same value for the tool loop, which reads it per call from a closure built earlier in the turn. */
+  approvalModeRef: React.RefObject<ApprovalMode>;
 
   // ── Thinking ─────────────────────────────────────────────────────────────────────────────────────────────
   thinking: ThinkingConfig;
@@ -116,6 +130,38 @@ export function useModelSelection({
     const sync = () => setThinking(loadThinking());
     window.addEventListener(THINKING_CHANGE_EVENT, sync);
     return () => window.removeEventListener(THINKING_CHANGE_EVENT, sync);
+  }, []);
+
+  // How tool calls are approved (default / trust / manual / plan). Global and persisted like the
+  // model and the thinking gears — see lib/ai/approvalMode.ts for why it is not per-conversation.
+  const [approvalMode, setApprovalMode] = useState<ApprovalMode>(loadApprovalMode);
+  /**
+   * The same value, readable at tool-call time.
+   *
+   * The tool loop asks for the mode per call rather than per turn, and it is not a React consumer — it
+   * needs the current value out of a closure built before the user changed it. Written only from events
+   * (the setter below, and the cross-mount sync), never during render: a ref assigned while rendering
+   * is exactly what react-hooks/refs forbids, and here it would also be a lie under StrictMode's
+   * double render.
+   */
+  // Seeded with the constant, not with loadApprovalMode(): useRef has no lazy initialiser, so an
+  // argument here is a localStorage read on EVERY render — and this component re-renders per streamed
+  // chunk. The stored value lands in the mount effect below, which runs long before a tool call can.
+  const approvalModeRef = useRef<ApprovalMode>(DEFAULT_APPROVAL_MODE);
+  const changeApprovalMode = (next: ApprovalMode) => {
+    approvalModeRef.current = next;
+    setApprovalMode(next);
+    saveApprovalMode(next);
+  };
+  useEffect(() => {
+    const sync = () => {
+      const next = loadApprovalMode();
+      approvalModeRef.current = next;
+      setApprovalMode(next);
+    };
+    sync(); // adopt what was stored, into the ref the tool loop reads
+    window.addEventListener(APPROVAL_MODE_CHANGE_EVENT, sync);
+    return () => window.removeEventListener(APPROVAL_MODE_CHANGE_EVENT, sync);
   }, []);
 
   const thinkingUnsupportedRef = useRef<Set<string>>(new Set());
@@ -211,6 +257,9 @@ export function useModelSelection({
     isLocalModel,
     thinking,
     changeThinking,
+    approvalMode,
+    changeApprovalMode,
+    approvalModeRef,
     thinkingUnsupportedRef,
     reasoningContextUnsupportedRef,
     sendReasoningContext,

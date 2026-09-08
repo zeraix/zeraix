@@ -25,6 +25,13 @@ import {
   type ThinkingEffort,
 } from "@/lib/ai/thinking";
 import {
+  APPROVAL_MODE_CHANGE_EVENT,
+  loadApprovalMode,
+  saveApprovalMode,
+  type ApprovalMode,
+} from "@/lib/ai/approvalMode";
+import { ApprovalModePicker } from "@/components/ai/ApprovalModePicker";
+import {
   OFFICIAL_PROVIDER_ID,
   ensureModelListSeeded,
   getSelectedModel,
@@ -85,6 +92,19 @@ export default function AgentComposer({
     setThinking(next);
     saveThinking(next);
   };
+  // Tool approval: the same global setting the chat composer edits, and it has to be reachable here
+  // for the same reason thinking is — the first message of a conversation is sent from this box, and
+  // the mode governs what that first turn is allowed to do.
+  const [approvalMode, setApprovalMode] = useState<ApprovalMode>(loadApprovalMode);
+  const changeApprovalMode = (next: ApprovalMode) => {
+    setApprovalMode(next);
+    saveApprovalMode(next);
+  };
+  useEffect(() => {
+    const sync = () => setApprovalMode(loadApprovalMode());
+    window.addEventListener(APPROVAL_MODE_CHANGE_EVENT, sync);
+    return () => window.removeEventListener(APPROVAL_MODE_CHANGE_EVENT, sync);
+  }, []);
   // The chat page's own toolbar writes the same global setting, so follow it rather than show a stale switch.
   useEffect(() => {
     const sync = () => setThinking(loadThinking());
@@ -380,6 +400,13 @@ export default function AgentComposer({
             </p>
           </DropdownMenuContent>
         </DropdownMenu>
+
+        {/* Tool approval: same control, same global setting as the chat composer's toolbar. */}
+        <ApprovalModePicker
+          mode={approvalMode}
+          onChange={changeApprovalMode}
+          triggerClassName="border-line px-3 py-1.5 text-sm"
+        />
 
         {/* Send */}
         <button

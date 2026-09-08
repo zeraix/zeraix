@@ -14,6 +14,7 @@
  *
  * See docs/cache-stable-prompt-context.md.
  */
+import { APPROVAL_RESTORED_LINE } from "@/lib/ai/approvalMode";
 import type { ApiMsg, ReminderState } from "./types";
 
 /** Wrapper marking the block as operator-injected rather than user-typed. */
@@ -97,6 +98,13 @@ function renderBody(state: ReminderState, atCut: boolean): string {
   // them; leading with the static sandbox prose keeps that part shared and confines the break to the tail.
   if (state.env !== undefined) {
     lines.push(state.env);
+  }
+  // Right behind the environment text: the mode changes when the user reaches for it, which is rarer
+  // than anything below, so it keeps the cached prefix of every later line intact. "" is the default
+  // mode, which says nothing on its own — it only ever appears here as a retraction of a mode that
+  // WAS announced, because diffReminder drops an empty value nobody has been told about.
+  if (state.approval !== undefined) {
+    lines.push(state.approval ? state.approval : APPROVAL_RESTORED_LINE);
   }
   if (state.skills) {
     lines.push(

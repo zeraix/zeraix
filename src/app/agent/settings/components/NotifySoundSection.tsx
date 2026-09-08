@@ -22,6 +22,7 @@ import { type TFunc } from "@/lib/i18n";
 import { cn } from "@/lib/utils";
 import { ToggleSwitch } from "./ToggleSwitch";
 import { FIELD_CLS } from "./styles";
+import { Group, LIST, PANEL, Pane, Row, WARN_NOTE } from "./pane";
 
 /**
  * Notification sounds section: customize the system-notification sound per type (info/success/warning/error).
@@ -71,149 +72,131 @@ export function NotifySoundSection({ t }: { t: TFunc }) {
   };
 
   return (
-    <div className="max-w-2xl mx-auto">
-      <h2 className="mb-1 text-xl font-bold text-ink">{t("settings.notify")}</h2>
-      <p className="mb-5 text-sm text-ink-subtle">{t("notify.desc")}</p>
-
-      {!available && (
-        <p className="mb-4 rounded-xl border border-warning/30 bg-warning/10 px-4 py-3 text-xs text-warning-ink">
-          {t("notify.unsupported")}
-        </p>
-      )}
+    <Pane title={t("settings.notify")} desc={t("notify.desc")}>
+      {!available && <p className={WARN_NOTE}>{t("notify.unsupported")}</p>}
 
       {/* Notification reminders: round complete / permission / question */}
-      <p className="mb-2 text-sm font-semibold text-ink">{t("notify.remindersTitle")}</p>
-      <div className="mb-6 divide-y divide-line rounded-xl border border-line">
-        {/* Round-complete notification (dropdown: never / only when the app is unfocused / always) */}
-        <div className="flex items-center justify-between gap-3 px-4 py-3">
-          <div className="min-w-0">
-            <p className="text-sm font-medium text-ink">{t("notify.roundComplete")}</p>
-            <p className="mt-0.5 text-xs text-ink-subtle">{t("notify.roundCompleteDesc")}</p>
-          </div>
-          <select
-            value={prefs.replyCompleteMode}
-            onChange={(e) => patchPrefs({ replyCompleteMode: e.target.value as ReplyCompleteMode })}
-            className={cn(FIELD_CLS, "shrink-0")}
-          >
-            <option value="never">{t("notify.mode.never")}</option>
-            <option value="unfocused">{t("notify.mode.unfocused")}</option>
-            <option value="always">{t("notify.mode.always")}</option>
-          </select>
+      <Group title={t("notify.remindersTitle")} anchor="notify/reminders">
+        <div className={LIST}>
+          {/* Round-complete notification (dropdown: never / only when the app is unfocused / always) */}
+          <Row title={t("notify.roundComplete")} desc={t("notify.roundCompleteDesc")}>
+            <select
+              value={prefs.replyCompleteMode}
+              onChange={(e) => patchPrefs({ replyCompleteMode: e.target.value as ReplyCompleteMode })}
+              className={cn(FIELD_CLS, "shrink-0")}
+            >
+              <option value="never">{t("notify.mode.never")}</option>
+              <option value="unfocused">{t("notify.mode.unfocused")}</option>
+              <option value="always">{t("notify.mode.always")}</option>
+            </select>
+          </Row>
+          {/* Enable permission notifications */}
+          <Row title={t("notify.permission")} desc={t("notify.permissionDesc")}>
+            <ToggleSwitch
+              on={prefs.permissionEnabled}
+              onChange={(v) => patchPrefs({ permissionEnabled: v })}
+              label={t("notify.permission")}
+            />
+          </Row>
+          {/* Enable question notifications */}
+          <Row title={t("notify.question")} desc={t("notify.questionDesc")}>
+            <ToggleSwitch
+              on={prefs.questionEnabled}
+              onChange={(v) => patchPrefs({ questionEnabled: v })}
+              label={t("notify.question")}
+            />
+          </Row>
         </div>
-        {/* Enable permission notifications */}
-        <div className="flex items-center justify-between gap-3 px-4 py-3">
-          <div className="min-w-0">
-            <p className="text-sm font-medium text-ink">{t("notify.permission")}</p>
-            <p className="mt-0.5 text-xs text-ink-subtle">{t("notify.permissionDesc")}</p>
-          </div>
-          <ToggleSwitch
-            on={prefs.permissionEnabled}
-            onChange={(v) => patchPrefs({ permissionEnabled: v })}
-            label={t("notify.permission")}
-          />
-        </div>
-        {/* Enable question notifications */}
-        <div className="flex items-center justify-between gap-3 px-4 py-3">
-          <div className="min-w-0">
-            <p className="text-sm font-medium text-ink">{t("notify.question")}</p>
-            <p className="mt-0.5 text-xs text-ink-subtle">{t("notify.questionDesc")}</p>
-          </div>
-          <ToggleSwitch
-            on={prefs.questionEnabled}
-            onChange={(v) => patchPrefs({ questionEnabled: v })}
-            label={t("notify.question")}
-          />
-        </div>
-      </div>
+      </Group>
 
       {/* Notification sounds */}
-      <p className="mb-2 text-sm font-semibold text-ink">{t("notify.soundsTitle")}</p>
-
-      {/* Master switch + volume */}
-      <div className="mb-6 rounded-xl border border-line bg-surface-muted/50 px-4 py-3.5">
-        <div className="flex items-center justify-between">
-          <div>
-            <p className="text-sm font-semibold text-ink">{t("notify.master")}</p>
-            <p className="mt-0.5 text-xs text-ink-subtle">{t("notify.masterDesc")}</p>
+      <Group title={t("notify.soundsTitle")} anchor="notify/sounds">
+        {/* Master switch + volume */}
+        <div className={cn(PANEL, "mb-3")}>
+          <div className="flex items-center justify-between gap-3">
+            <div className="min-w-0">
+              <p className="text-sm font-medium text-ink">{t("notify.master")}</p>
+              <p className="mt-0.5 text-xs text-ink-subtle">{t("notify.masterDesc")}</p>
+            </div>
+            <ToggleSwitch on={cfg.enabled} onChange={(v) => patchMaster({ enabled: v })} label={t("notify.master")} />
           </div>
-          <ToggleSwitch on={cfg.enabled} onChange={(v) => patchMaster({ enabled: v })} label={t("notify.master")} />
+          <div className={cn("mt-3 flex items-center gap-3", !cfg.enabled && "pointer-events-none opacity-40")}>
+            <Volume2 className="size-4 shrink-0 text-ink-muted" />
+            <input
+              type="range"
+              min={0}
+              max={1}
+              step={0.05}
+              value={cfg.volume}
+              onChange={(e) => patchMaster({ volume: Number(e.target.value) })}
+              className="h-1.5 flex-1 cursor-pointer accent-primary"
+              aria-label={t("notify.volume")}
+            />
+            <span className="w-9 shrink-0 text-right text-xs tabular-nums text-ink-muted">
+              {Math.round(cfg.volume * 100)}%
+            </span>
+          </div>
         </div>
-        <div className={cn("mt-3 flex items-center gap-3", !cfg.enabled && "pointer-events-none opacity-40")}>
-          <Volume2 className="size-4 shrink-0 text-ink-muted" />
-          <input
-            type="range"
-            min={0}
-            max={1}
-            step={0.05}
-            value={cfg.volume}
-            onChange={(e) => patchMaster({ volume: Number(e.target.value) })}
-            className="h-1.5 flex-1 cursor-pointer accent-primary"
-            aria-label={t("notify.volume")}
-          />
-          <span className="w-9 shrink-0 text-right text-xs tabular-nums text-ink-muted">
-            {Math.round(cfg.volume * 100)}%
-          </span>
-        </div>
-      </div>
 
-      {/* Per-type settings */}
-      <div className={cn("space-y-2", !cfg.enabled && "pointer-events-none opacity-40")}>
-        {NOTIFY_TYPE_META.map(({ type, labelKey, className }) => {
-          const ts = cfg.perType[type];
-          const isCustom = ts.src !== defaultSoundFor(type);
-          return (
-            <div key={type} className="flex flex-wrap items-center gap-3 rounded-xl border border-line bg-surface px-4 py-3">
-              <span className={cn("shrink-0 rounded border px-2 py-0.5 text-xs font-medium", className)}>
-                {t(labelKey)}
-              </span>
-              <span className="min-w-0 flex-1 truncate text-xs text-ink-subtle">
-                {isCustom ? t("notify.custom") : t("notify.builtin")}
-              </span>
+        {/* Per-type settings */}
+        <div className={cn("space-y-2", !cfg.enabled && "pointer-events-none opacity-40")}>
+          {NOTIFY_TYPE_META.map(({ type, labelKey, className }) => {
+            const ts = cfg.perType[type];
+            const isCustom = ts.src !== defaultSoundFor(type);
+            return (
+              <div key={type} className="flex flex-wrap items-center gap-3 rounded-xl border border-line bg-surface px-4 py-3">
+                <span className={cn("shrink-0 rounded border px-2 py-0.5 text-xs font-medium", className)}>
+                  {t(labelKey)}
+                </span>
+                <span className="min-w-0 flex-1 truncate text-xs text-ink-subtle">
+                  {isCustom ? t("notify.custom") : t("notify.builtin")}
+                </span>
 
-              {/* Preview */}
-              <button
-                type="button"
-                onClick={() => playNotifySound(type)}
-                title={t("notify.preview")}
-                className="inline-flex size-7 items-center justify-center rounded-md border border-line-strong bg-surface text-ink-muted transition hover:bg-surface-muted hover:text-ink"
-              >
-                <Play className="size-3.5" />
-              </button>
-
-              {/* Upload custom sound */}
-              <label className="inline-flex cursor-pointer items-center gap-1 rounded-md border border-line-strong bg-surface px-2 py-1 text-xs font-medium text-ink transition hover:bg-surface-muted">
-                <Upload className="size-3" />
-                {t("notify.upload")}
-                <input
-                  type="file"
-                  accept="audio/*"
-                  className="hidden"
-                  onChange={(e) => {
-                    const f = e.target.files?.[0];
-                    if (f) onUpload(type, f);
-                    e.target.value = "";
-                  }}
-                />
-              </label>
-
-              {/* Reset to default (shown only when customized) */}
-              {isCustom && (
+                {/* Preview */}
                 <button
                   type="button"
-                  onClick={() => patchType(type, { src: defaultSoundFor(type) })}
-                  title={t("notify.reset")}
+                  onClick={() => playNotifySound(type)}
+                  title={t("notify.preview")}
                   className="inline-flex size-7 items-center justify-center rounded-md border border-line-strong bg-surface text-ink-muted transition hover:bg-surface-muted hover:text-ink"
                 >
-                  <RotateCcw className="size-3.5" />
+                  <Play className="size-3.5" />
                 </button>
-              )}
 
-              {/* Toggle for this type */}
-              <ToggleSwitch on={ts.enabled} onChange={(v) => patchType(type, { enabled: v })} label={t(labelKey)} />
-            </div>
-          );
-        })}
-      </div>
-    </div>
+                {/* Upload custom sound */}
+                <label className="inline-flex cursor-pointer items-center gap-1 rounded-md border border-line-strong bg-surface px-2 py-1 text-xs font-medium text-ink transition hover:bg-surface-muted">
+                  <Upload className="size-3" />
+                  {t("notify.upload")}
+                  <input
+                    type="file"
+                    accept="audio/*"
+                    className="hidden"
+                    onChange={(e) => {
+                      const f = e.target.files?.[0];
+                      if (f) onUpload(type, f);
+                      e.target.value = "";
+                    }}
+                  />
+                </label>
+
+                {/* Reset to default (shown only when customized) */}
+                {isCustom && (
+                  <button
+                    type="button"
+                    onClick={() => patchType(type, { src: defaultSoundFor(type) })}
+                    title={t("notify.reset")}
+                    className="inline-flex size-7 items-center justify-center rounded-md border border-line-strong bg-surface text-ink-muted transition hover:bg-surface-muted hover:text-ink"
+                  >
+                    <RotateCcw className="size-3.5" />
+                  </button>
+                )}
+
+                {/* Toggle for this type */}
+                <ToggleSwitch on={ts.enabled} onChange={(v) => patchType(type, { enabled: v })} label={t(labelKey)} />
+              </div>
+            );
+          })}
+        </div>
+      </Group>
+    </Pane>
   );
 }

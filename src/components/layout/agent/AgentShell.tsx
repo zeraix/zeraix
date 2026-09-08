@@ -20,6 +20,7 @@ import WindowControls, {
 import { TitleBarSlotContext, FilesSidebarContext, TITLE_BAR_HEIGHT } from "./titleBar";
 import LocalModelSync from "@/components/ai/LocalModelSync";
 import TrayLabelSync from "@/components/ai/TrayLabelSync";
+import DeepLinkRouter from "@/components/electron/DeepLinkRouter";
 import { requestCloseFile } from "@/lib/fileViewer";
 
 /** Sidebar frame width. The rails are flush, so this is the rail itself with nothing
@@ -77,6 +78,8 @@ export default function AgentShell({ children }: { children: React.ReactNode }) 
     <TitleBarSlotContext.Provider value={titleSlot}>
     <FilesSidebarContext.Provider value={filesSidebar}>
     <div className="relative flex h-full w-full overflow-hidden bg-background">
+      {/* Global: a zeraix:// link opens the page it names, from anywhere in the shell. */}
+      <DeepLinkRouter />
       {/* Global: local model ready/stopped -> sync the chat model list (persists across pages, so leaving the model-library page doesn't lose the ready event). */}
       <LocalModelSync />
       <TrayLabelSync />

@@ -1,8 +1,8 @@
 "use client";
 
-import { useState } from "react";
-import { LogOut } from "lucide-react";
+import { LogIn, LogOut, User } from "lucide-react";
 import { type TFunc } from "@/lib/i18n";
+import { Group, Pane, PANEL } from "./pane";
 // NOTE: the privacy-toggle block below is commented out, so ToggleSwitch is not imported here.
 // Restore the import from "./ToggleSwitch" along with that block if it is ever re-enabled.
 
@@ -22,56 +22,60 @@ export function AccountSection({
   onLogout: () => void;
   onSignIn: () => void;
 }) {
-  const [privacy, setPrivacy] = useState(false);
   return (
-    <div className="max-w-2xl mx-auto">
-      <h2 className="mb-5 text-xl font-bold text-ink">{t("settings.account")}</h2>
-
-      {/* <p className="mb-2 text-sm font-semibold text-ink">{t("account.info")}</p>
-      <div className="mb-6 divide-y divide-line rounded-xl border border-line bg-surface-muted/50">
-        <div className="flex items-center justify-between gap-3 px-4 py-3">
-          <div className="min-w-0">
-            <p className="text-sm font-medium text-ink">{name}</p>
-            {sub && <p className="truncate text-xs text-ink-subtle">{sub}</p>}
+    <Pane title={t("settings.account")}>
+      {/* Who you are signed in as. It used to be that this pane said nothing at all about the
+          account until you noticed which of the two buttons it was showing. */}
+      <Group title={t("account.info")} icon={User} anchor="account/info">
+        <div className={PANEL}>
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div className="min-w-0">
+              <p className="truncate text-sm font-medium text-ink">{isLoggedIn ? name : t("account.guest")}</p>
+              <p className="truncate text-xs text-ink-subtle">
+                {isLoggedIn ? sub || t("account.signedIn") : t("account.guestDesc")}
+              </p>
+            </div>
+            {isLoggedIn ? (
+              <button
+                onClick={onLogout}
+                className="flex shrink-0 items-center gap-1.5 rounded-lg border border-line-strong bg-surface px-3 py-1.5 text-xs font-medium text-destructive transition hover:bg-surface-muted"
+              >
+                <LogOut className="size-3.5" />
+                {t("account.logout")}
+              </button>
+            ) : (
+              <button
+                onClick={onSignIn}
+                className="flex shrink-0 items-center gap-1.5 rounded-lg border border-line-strong bg-surface px-3 py-1.5 text-xs font-medium text-ink transition hover:bg-surface-muted"
+              >
+                <LogIn className="size-3.5" />
+                {t("auth.signIn")}
+              </button>
+            )}
           </div>
-          <button className="shrink-0 rounded-md border border-line-strong bg-surface px-3 py-1.5 text-xs font-medium text-ink transition hover:bg-surface-muted">
-            {t("account.manage")}
-          </button>
         </div>
-        <div className="flex items-center justify-between gap-3 px-4 py-3">
-          <div className="min-w-0">
-            <p className="text-sm font-medium text-ink">{t("plan.free")}</p>
-            <p className="text-xs text-ink-subtle">{t("account.upgradeDesc")}</p>
-          </div>
+      </Group>
+
+      {/* Parked, not deleted: the plan / privacy blocks below are switched off, not gone. Kept as a
+          comment so re-enabling them is a matter of uncommenting plus restoring the ToggleSwitch
+          import, and so the copy keys they use stay accounted for.
+
+      <Group title={t("account.privacy")} anchor="account/privacy">
+        <div className="flex items-center justify-between gap-3 rounded-xl border border-line bg-surface-muted/40 px-4 py-3">
+          <p className="text-xs text-ink-subtle">{t("account.privacyDesc")}</p>
+          <ToggleSwitch on={privacy} onChange={setPrivacy} label={t("account.privacy")} />
+        </div>
+      </Group>
+
+      <Group title={t("plan.free")} anchor="account/plan">
+        <div className="flex items-center justify-between gap-3 rounded-xl border border-line bg-surface-muted/40 px-4 py-3">
+          <p className="text-xs text-ink-subtle">{t("account.upgradeDesc")}</p>
           <button className="shrink-0 rounded-md border border-line-strong bg-surface px-3 py-1.5 text-xs font-medium text-ink transition hover:bg-surface-muted">
             {t("account.upgrade")}
           </button>
         </div>
-      </div>
-
-      <p className="mb-2 text-sm font-semibold text-ink">{t("account.privacy")}</p>
-      <div className="mb-6 flex items-center justify-between gap-3 rounded-xl border border-line bg-surface-muted/50 px-4 py-3">
-        <p className="text-xs text-ink-subtle">{t("account.privacyDesc")}</p>
-        <ToggleSwitch on={privacy} onChange={setPrivacy} label={t("account.privacy")} />
-      </div> */}
-
-      {isLoggedIn ? (
-        <button
-          onClick={onLogout}
-          className="flex items-center gap-1.5 rounded-lg border border-line-strong bg-surface px-3.5 py-2 text-sm font-medium text-destructive transition hover:bg-surface-muted"
-        >
-          <LogOut className="size-4" />
-          {t("account.logout")}
-        </button>
-      ) : (
-        <button
-          onClick={onSignIn}
-          className="flex items-center gap-1.5 rounded-lg border border-line-strong bg-surface px-3.5 py-2 text-sm font-medium text-ink transition hover:bg-surface-muted"
-        >
-          <LogOut className="size-4" />
-          {t("auth.signIn")}
-        </button>
-      )}
-    </div>
+      </Group>
+      */}
+    </Pane>
   );
 }

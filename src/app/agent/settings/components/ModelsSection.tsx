@@ -40,6 +40,7 @@ import { type TFunc } from "@/lib/i18n";
 import { cn } from "@/lib/utils";
 import { ToggleSwitch } from "./ToggleSwitch";
 import { FIELD_CLS, PRIMARY_BTN } from "./styles";
+import { Group, LIST, NOTE, PANEL, Pane } from "./pane";
 
 /** Sentinel value for the "Add model manually" option in the model dropdown (not a real model ID). */
 export const MANUAL_MODEL = "__manual__";
@@ -237,157 +238,155 @@ export function ModelsSection({ t }: { t: TFunc }) {
         : (PROVIDERS.find((p) => p.id === m.providerId)?.label ?? m.providerId);
 
   return (
-    <div className="max-w-2xl mx-auto">
-      <h2 className="mb-2 text-xl font-bold text-ink">{t("settings.models")}</h2>
-      <p className="mb-5 text-xs text-ink-subtle">{t("models.desc")}</p>
-
+    <Pane title={t("settings.models")} desc={t("models.desc")}>
       {/* Added list (single-select default) */}
-      <p className="mb-2 text-sm font-semibold text-ink">{t("models.added")}</p>
-      {list.length === 0 ? (
-        <p className="mb-6 rounded-xl border border-line bg-surface-muted/50 px-4 py-3.5 text-xs text-ink-subtle">
-          {t("models.empty")}
-        </p>
-      ) : (
-        <div className="mb-6 divide-y divide-line rounded-xl border border-line bg-surface-muted/50">
-          {list.map((m) => (
-            <div key={m.id} className="flex items-center gap-3 px-4 py-3">
-              <button
-                type="button"
-                onClick={() => setDefault(m.id)}
-                title={t("models.default")}
-                aria-label={t("models.default")}
-                className="shrink-0"
-              >
-                <span
-                  className={cn(
-                    "flex size-4 items-center justify-center rounded-full border",
-                    selectedId === m.id ? "border-primary" : "border-line-strong",
-                  )}
-                >
-                  {selectedId === m.id && <span className="size-2 rounded-full bg-primary" />}
-                </span>
-              </button>
-              <div className="min-w-0 flex-1">
-                <p className="flex items-center gap-1.5 truncate text-sm font-medium text-ink">
-                  <span className="truncate">{m.label}</span>
-                  {/* Deliberately NOT the send path's predicate: that one is optimistic and would badge
-                      every model. This shows only what is actually known about the model. */}
-                  {modelLikelyVision(m) && (
-                    <span className="shrink-0 rounded-full bg-primary/15 px-1.5 py-0.5 text-[10px] font-medium text-primary">
-                      {t("models.multimodal")}
-                    </span>
-                  )}
-                  {/* The app decided this model rejects images and is stripping them before every send. Shown
-                      because the only other evidence the user gets is the model answering "I cannot see
-                      images" — which reads as a broken model rather than an app-side verdict. */}
-                  {visionBlocked(m) && (
-                    <span
-                      title={t("models.visionBlockedHint")}
-                      className="flex shrink-0 items-center gap-1 rounded-full bg-warning/15 px-1.5 py-0.5 text-[10px] font-medium text-warning-ink"
-                    >
-                      <ImageOff className="size-3" />
-                      {t("models.visionBlocked")}
-                    </span>
-                  )}
-                </p>
-                <p className="truncate text-xs text-ink-subtle">
-                  {providerLabel(m)} · {m.model}
-                  {m.custom && m.endpoint ? ` · ${m.endpoint}` : ""}
-                </p>
-              </div>
-              {/* Undo the verdict without deleting the model — which used to be the only way back, taking the
-                  API key and the default selection with it. */}
-              {visionBlocked(m) && (
+      <Group title={t("models.added")} anchor="models/added" count={list.length}>
+        {list.length === 0 ? (
+          <p className={NOTE}>{t("models.empty")}</p>
+        ) : (
+          <div className={LIST}>
+            {list.map((m) => (
+              <div key={m.id} className="flex items-center gap-3 px-4 py-3">
                 <button
                   type="button"
-                  onClick={() => setList(clearVisionUnsupported(m.id))}
-                  className="shrink-0 rounded-md border border-line px-2 py-1 text-[11px] text-ink-subtle transition hover:bg-surface hover:text-ink"
+                  onClick={() => setDefault(m.id)}
+                  title={t("models.default")}
+                  aria-label={t("models.default")}
+                  className="shrink-0"
                 >
-                  {t("models.visionReset")}
+                  <span
+                    className={cn(
+                      "flex size-4 items-center justify-center rounded-full border",
+                      selectedId === m.id ? "border-primary" : "border-line-strong",
+                    )}
+                  >
+                    {selectedId === m.id && <span className="size-2 rounded-full bg-primary" />}
+                  </span>
                 </button>
-              )}
-              <button
-                type="button"
-                onClick={() => {
-                  setList(removeModel(m.id)); // Update directly with the post-removal list to avoid read-back timing issues
-                  setSelectedId(getSelectedModelId());
-                }}
-                title={t("ctx.delete")}
-                aria-label={t("ctx.delete")}
-                className="shrink-0 rounded-md p-1.5 text-ink-muted transition hover:bg-surface hover:text-destructive"
-              >
-                <Trash2 className="size-4" />
-              </button>
-            </div>
-          ))}
-        </div>
-      )}
+                <div className="min-w-0 flex-1">
+                  <p className="flex items-center gap-1.5 truncate text-sm font-medium text-ink">
+                    <span className="truncate">{m.label}</span>
+                    {/* Deliberately NOT the send path's predicate: that one is optimistic and would badge
+                        every model. This shows only what is actually known about the model. */}
+                    {modelLikelyVision(m) && (
+                      <span className="shrink-0 rounded-full bg-primary/15 px-1.5 py-0.5 text-[10px] font-medium text-primary">
+                        {t("models.multimodal")}
+                      </span>
+                    )}
+                    {/* The app decided this model rejects images and is stripping them before every send. Shown
+                        because the only other evidence the user gets is the model answering "I cannot see
+                        images" — which reads as a broken model rather than an app-side verdict. */}
+                    {visionBlocked(m) && (
+                      <span
+                        title={t("models.visionBlockedHint")}
+                        className="flex shrink-0 items-center gap-1 rounded-full bg-warning/15 px-1.5 py-0.5 text-[10px] font-medium text-warning-ink"
+                      >
+                        <ImageOff className="size-3" />
+                        {t("models.visionBlocked")}
+                      </span>
+                    )}
+                  </p>
+                  <p className="truncate text-xs text-ink-subtle">
+                    {providerLabel(m)} · {m.model}
+                    {m.custom && m.endpoint ? ` · ${m.endpoint}` : ""}
+                  </p>
+                </div>
+                {/* Undo the verdict without deleting the model — which used to be the only way back, taking the
+                    API key and the default selection with it. */}
+                {visionBlocked(m) && (
+                  <button
+                    type="button"
+                    onClick={() => setList(clearVisionUnsupported(m.id))}
+                    className="shrink-0 rounded-md border border-line px-2 py-1 text-[11px] text-ink-subtle transition hover:bg-surface hover:text-ink"
+                  >
+                    {t("models.visionReset")}
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={() => {
+                    setList(removeModel(m.id)); // Update directly with the post-removal list to avoid read-back timing issues
+                    setSelectedId(getSelectedModelId());
+                  }}
+                  title={t("ctx.delete")}
+                  aria-label={t("ctx.delete")}
+                  className="shrink-0 rounded-md p-1.5 text-ink-muted transition hover:bg-surface hover:text-destructive"
+                >
+                  <Trash2 className="size-4" />
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
+      </Group>
 
       {/* Add from the official catalog: official models come from the platform's GET /v1/models and are sent using the "official API key" */}
-      <p className="mb-2 text-sm font-semibold text-ink">{t("models.addOfficial")}</p>
-      <div className="mb-6 rounded-xl border border-line bg-surface-muted/50 px-4 py-3.5">
-        {omState === "loading" ? (
-          <p className="text-xs">{t("models.loading")}</p>
-        ) : omState === "error" ? (
-          <p className="text-xs text-warning-ink">
-            {t("models.officialError")}
-            {omError ? ` (${omError})` : ""}
-          </p>
-        ) : officialModels.length === 0 ? (
-          <p className="text-xs">{t("models.officialEmpty")}</p>
-        ) : (
-          <>
-            <div className="flex flex-wrap items-end gap-2">
-              <label className="flex flex-1 flex-col gap-1 text-xs">
-                {t("models.model")}
-                <select
-                  value={omSelected}
-                  onChange={(e) => setOmSelected(e.target.value)}
-                  className={cn(FIELD_CLS, "min-w-[200px]")}
-                >
-                  {officialModels.map((m) => (
-                    <option key={m.id} value={m.id}>
-                      {m.id}
-                      {m.type && m.type !== "chat" ? ` (${m.type})` : ""}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <button type="button" onClick={addOfficialFromCatalog} className={cn(PRIMARY_BTN, "h-[34px]")}>
-                <Plus className="size-3.5" />
-                {t("models.add")}
-              </button>
-            </div>
-            <p className="mt-2 text-[11px]">ⓘ {t("models.officialNote")}</p>
-          </>
-        )}
-      </div>
+      <Group title={t("models.addOfficial")} anchor="models/official">
+        <div className={PANEL}>
+          {omState === "loading" ? (
+            <p className="text-xs">{t("models.loading")}</p>
+          ) : omState === "error" ? (
+            <p className="text-xs text-warning-ink">
+              {t("models.officialError")}
+              {omError ? ` (${omError})` : ""}
+            </p>
+          ) : officialModels.length === 0 ? (
+            <p className="text-xs">{t("models.officialEmpty")}</p>
+          ) : (
+            <>
+              <div className="flex flex-wrap items-end gap-2">
+                <label className="flex flex-1 flex-col gap-1 text-xs">
+                  {t("models.model")}
+                  <select
+                    value={omSelected}
+                    onChange={(e) => setOmSelected(e.target.value)}
+                    className={cn(FIELD_CLS, "min-w-[200px]")}
+                  >
+                    {officialModels.map((m) => (
+                      <option key={m.id} value={m.id}>
+                        {m.id}
+                        {m.type && m.type !== "chat" ? ` (${m.type})` : ""}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <button type="button" onClick={addOfficialFromCatalog} className={cn(PRIMARY_BTN, "h-[34px]")}>
+                  <Plus className="size-3.5" />
+                  {t("models.add")}
+                </button>
+              </div>
+              <p className="mt-2 text-[11px]">ⓘ {t("models.officialNote")}</p>
+            </>
+            )}
+        </div>
+      </Group>
+
       {/* Add third-party model */}
-      <p className="mb-2 text-sm font-semibold text-ink">{t("models.addThirdParty")}</p>
-      <div className="mb-6 space-y-2.5 rounded-xl border border-line bg-surface-muted/50 px-4 py-3.5">
-        <div className="flex flex-wrap items-end gap-2">
-          <label className="flex flex-col gap-1 text-xs ">
-            {t("models.provider")}
-            <select value={provId} onChange={(e) => onProvChange(e.target.value)} className={cn(FIELD_CLS, "min-w-[170px]")}>
-              {officialProviders.map((p) => (
-                <option key={p.id} value={p.id}>
-                  {p.label}
-                </option>
-              ))}
-            </select>
-          </label>
-          <label className="flex flex-col gap-1 text-xs ">
-            {t("models.model")}
-            <select value={modelName} onChange={(e) => setModelName(e.target.value)} className={cn(FIELD_CLS, "min-w-[170px]")}>
-              {provModels.map((m) => (
-                <option key={m} value={m}>
-                  {m}
-                </option>
-              ))}
-              {/* Every provider can manually add new models not in the catalog (when the app hasn't been updated in time) */}
-              <option value={MANUAL_MODEL}>{t("models.manualOption")}</option>
-            </select>
-          </label>
+      <Group title={t("models.addThirdParty")} anchor="models/third-party">
+        <div className={cn(PANEL, "space-y-2.5")}>
+          <div className="flex flex-wrap items-end gap-2">
+            <label className="flex flex-col gap-1 text-xs ">
+              {t("models.provider")}
+              <select value={provId} onChange={(e) => onProvChange(e.target.value)} className={cn(FIELD_CLS, "min-w-[170px]")}>
+                {officialProviders.map((p) => (
+                  <option key={p.id} value={p.id}>
+                    {p.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="flex flex-col gap-1 text-xs ">
+              {t("models.model")}
+              <select value={modelName} onChange={(e) => setModelName(e.target.value)} className={cn(FIELD_CLS, "min-w-[170px]")}>
+                {provModels.map((m) => (
+                  <option key={m} value={m}>
+                    {m}
+                  </option>
+                ))}
+                {/* Every provider can manually add new models not in the catalog (when the app hasn't been updated in time) */}
+                <option value={MANUAL_MODEL}>{t("models.manualOption")}</option>
+              </select>
+            </label>
         </div>
         {/* Manual add: fill in the model ID + display name; the endpoint and key reuse the provider selected above */}
         {manualMode && (
@@ -434,7 +433,8 @@ export function ModelsSection({ t }: { t: TFunc }) {
             {t("models.add")}
           </button>
         </div>
-      </div>
+        </div>
+      </Group>
 
       {/* Generation engines the user added.
           Shown separately from the model list, and deliberately so: these are not selectable and never appear
@@ -442,13 +442,12 @@ export function ModelsSection({ t }: { t: TFunc }) {
           them here is what makes an added engine verifiable at all; without it the only way to know whether
           one took would be to ask for an image and see. */}
       {engines.length > 0 && (
-        <>
-          <p className="mb-2 text-sm font-semibold text-ink">{t("models.engines")}</p>
-          <div className="mb-5 space-y-2">
+        <Group title={t("models.engines")} anchor="models/engines" count={engines.length}>
+          <div className="space-y-2">
             {engines.map((e) => (
               <div
                 key={e.id}
-                className="flex items-center gap-3 rounded-xl border border-line bg-surface-muted/50 px-4 py-2.5"
+                className="flex items-center gap-3 rounded-xl border border-line bg-surface-muted/40 px-4 py-2.5"
               >
                 <div className="min-w-0 flex-1">
                   <p className="truncate text-sm font-medium text-ink">{e.label}</p>
@@ -468,27 +467,27 @@ export function ModelsSection({ t }: { t: TFunc }) {
               </div>
             ))}
           </div>
-        </>
+        </Group>
       )}
 
       {/* Add custom model */}
-      <p className="mb-2 text-sm font-semibold text-ink">{t("models.addCustom")}</p>
-      <div className="space-y-3 rounded-xl border border-line bg-surface-muted/50 px-4 py-3.5">
-        {/* What is being added. Video is absent on purpose: CapabilityId has it, but no video adapter exists
-            yet, so offering it would let the user configure something that cannot run. */}
-        <div>
-          <label className="mb-1 block text-xs font-medium text-ink">
-            <span className="text-destructive">*</span> {t("models.kind")}
-          </label>
-          <select
-            value={cKind}
-            onChange={(e) => setCKind(e.target.value as "chat" | "image_generation" | "video_generation")}
-            className={cn(FIELD_CLS, "w-full")}
-          >
-            <option value="chat">{t("models.kindChat")}</option>
-            <option value="image_generation">{t("models.kindImage")}</option>
-            <option value="video_generation">{t("models.kindVideo")}</option>
-          </select>
+      <Group title={t("models.addCustom")} anchor="models/custom">
+        <div className={cn(PANEL, "space-y-3")}>
+          {/* What is being added. Video is absent on purpose: CapabilityId has it, but no video adapter exists
+              yet, so offering it would let the user configure something that cannot run. */}
+          <div>
+            <label className="mb-1 block text-xs font-medium text-ink">
+              <span className="text-destructive">*</span> {t("models.kind")}
+            </label>
+            <select
+              value={cKind}
+              onChange={(e) => setCKind(e.target.value as "chat" | "image_generation" | "video_generation")}
+              className={cn(FIELD_CLS, "w-full")}
+            >
+              <option value="chat">{t("models.kindChat")}</option>
+              <option value="image_generation">{t("models.kindImage")}</option>
+              <option value="video_generation">{t("models.kindVideo")}</option>
+            </select>
         </div>
 
         {/* API format — the chat request shape, or the image RESPONSE shape, which is the part that varies. */}
@@ -675,7 +674,8 @@ export function ModelsSection({ t }: { t: TFunc }) {
           <Plus className="size-3.5" />
           {t("models.add")}
         </button>
-      </div>
-    </div>
+        </div>
+      </Group>
+    </Pane>
   );
 }

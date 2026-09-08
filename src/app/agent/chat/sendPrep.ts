@@ -252,6 +252,8 @@ export function buildReminderState(input: {
   goal: string;
   /** The interrupted-turn notice for this send, or undefined (the common case). See turnState.describeInterruptedTurn. */
   recovery?: string;
+  /** How tool calls are approved right now, as the model-facing line (approvalMode.approvalReminderLine). */
+  approval: string;
 }): ReminderState {
   const now = new Date();
   const pad = (n: number) => String(n).padStart(2, "0");
@@ -273,6 +275,9 @@ export function buildReminderState(input: {
     // The command environment, announced on change rather than baked into messages[0]. It depends on the VM being up, and
     // the VM can fall back to native mid-conversation — a system prompt frozen at the first send cannot express either.
     env: sandboxEnvHint(input.sandbox),
+    // Announced like the environment, and for the same reason: it decides what the model may do, it
+    // changes mid-conversation, and the only other way it finds out is by being refused.
+    approval: input.approval,
     ctx: {
       date: `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}`,
       model: input.activeModel ? `${input.activeModel.label} (${input.activeModel.model})` : "unknown",

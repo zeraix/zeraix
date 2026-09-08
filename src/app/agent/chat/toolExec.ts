@@ -8,6 +8,13 @@ import type { ConsentRequester } from "./ConsentPanel";
 import { makeUnifiedDiff } from "./diffUtil";
 import { pathProvenance, type CompactionState } from "./contextCompress";
 import { toolNeedsConsent, toolStatusText } from "./constants";
+import { classifyCommand } from "@/lib/ai/commandSafety";
+import {
+  DEFAULT_APPROVAL_MODE,
+  PLAN_MODE_REFUSAL,
+  approvalDecision,
+  type ApprovalMode,
+} from "@/lib/ai/approvalMode";
 import type { ApiMsg, DisplayMsg, RunCtx } from "./types";
 
 /**
@@ -82,6 +89,13 @@ export interface ToolExecDeps {
    */
   /** Tools the user answered "don't ask again" for, in this session. */
   allowedTools: () => Set<string>;
+  /**
+   * The approval mode as of THIS call, not as of the turn: the user can switch modes while a turn is
+   * running, and a mode read once at the top of the turn would keep asking after they stopped wanting
+   * to be asked (or, worse, keep running after they switched to plan). Optional so a host that has no
+   * such setting — a test, a headless runtime — behaves exactly as the app did before it existed.
+   */
+  approvalMode?: () => ApprovalMode;
   /** Read to judge whether a mutation targets a file the model only knows from compressed history. */
   wireBuffer: () => ApiMsg[];
   compaction: () => CompactionState | null;
@@ -111,6 +125,7 @@ let execToolSeq = 0;
  */
 export function createToolExec(deps: ToolExecDeps) {
   const { t, requestConsent, allowedTools, wireBuffer, compaction, replaceDisplay } = deps;
+  const approvalMode = deps.approvalMode ?? (() => DEFAULT_APPROVAL_MODE);
 
   // Execute a single tool call (including sensitive-operation confirmation), push a display bubble, and return the result text fed back to the model.
   // displayName is only for display (subagent calls carry an "agentId→" prefix).
@@ -201,13 +216,33 @@ export function createToolExec(deps: ToolExecDeps) {
       });
     };
 
-    // Consent policy lives in toolNeedsConsent (constants.ts) so the rules can grow in one place. Currently every sensitive
-    // tool is confirmed. The "always" allowance still short-circuits repeat prompts.
-    // A sub-agent's call always asks, even for a tool the user allowed with "don't ask again": that answer
-    // was given about work the user had themselves requested and was watching. An autonomous delegation
-    // deciding to write a file is a different question, and inheriting the earlier yes would silently make
-    // sub-agents more powerful than the agent the user is actually looking at.
-    if (toolNeedsConsent(name) && (requester !== null || !allowedTools().has(name))) {
+    // Which tools are sensitive lives in toolNeedsConsent (constants.ts); what to DO about a sensitive
+    // tool lives in approvalDecision (lib/ai/approvalMode.ts), including the rule that a sub-agent's
+    // call still asks even for a tool the user allowed with "don't ask again". Both are one-place
+    // policies on purpose: this function is the only gate, and a branch added here instead of there is
+    // a rule nobody can find.
+    // A shell command is classified rather than taken as one thing: `git log` and `rm -rf /` reach
+    // this line as the same tool, and the policy cannot route them apart without being told which is
+    // which (commandSafety.ts, which fails closed — an unparseable command is never "read-only").
+    const outcome = approvalDecision(approvalMode(), {
+      sensitive: toolNeedsConsent(name),
+      alreadyAllowed: allowedTools().has(name),
+      fromSubagent: requester !== null,
+      command: name === "run_command" ? classifyCommand(String(args.command ?? "")) : null,
+    });
+
+    // Plan mode: the call never runs, and the model is told the app blocked it rather than the user.
+    if (outcome === "refuse") {
+      if (!ctx.executionId) {
+        ctx.push({ kind: "tool", name: displayName, args, ok: false, result: PLAN_MODE_REFUSAL });
+      }
+      log(false, PLAN_MODE_REFUSAL, true);
+      observe(false, PLAN_MODE_REFUSAL);
+      onResult?.(false);
+      return PLAN_MODE_REFUSAL;
+    }
+
+    if (outcome === "ask") {
       const previewDiff = await buildPreviewDiff(name, args);
       // §A1: warn when this mutation targets a file the model only "knows" from compressed history — its
       // latest read/write was folded into the summary and never re-verified at the tail. Pure lookup, no cost.

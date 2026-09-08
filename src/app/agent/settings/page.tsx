@@ -10,7 +10,7 @@
  *
  * Top search: filters the section navigation by translated title / description; the runtime-parameters section further filters by field.
  */
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState, useSyncExternalStore } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { ArrowLeft, Search } from "lucide-react";
 import { useAuthStore } from "@/store/authStore";
@@ -20,7 +20,8 @@ import { useT } from "@/lib/i18n";
 import { cn } from "@/lib/utils";
 import CustomScrollbar, { PAGE_SCROLLBAR } from "@/components/CustomScrollbar";
 import { TITLE_BAR_HEIGHT_PX } from "@/components/layout/agent/titleBar";
-import { type SectionId, NAV, SECTION_KEYS, makeMatcher } from "./components/nav";
+import { type SectionId, NAV, NAV_GROUPS, SECTION_KEYS, makeMatcher } from "./components/nav";
+import { parseSettingsHash } from "@/lib/deepLink";
 import { AccountSection } from "./components/AccountSection";
 import { ModelsSection } from "./components/ModelsSection";
 import { KeysSection } from "./components/KeysSection";
@@ -51,30 +52,90 @@ function TitleBand() {
   );
 }
 
+/**
+ * The address bar is the state.
+ *
+ * `/agent/settings#general/background` opens General and scrolls to the background group, and
+ * clicking a section writes that hash back — so any pane, and any group inside one, can be linked
+ * to from outside the app (a zeraix:// deep link resolves to exactly this form; see lib/deepLink).
+ * Subscribing through useSyncExternalStore rather than an effect keeps the hash a *read* of browser
+ * state instead of a copy of it that can drift.
+ */
+function subscribeToHash(onChange: () => void) {
+  window.addEventListener("hashchange", onChange);
+  return () => window.removeEventListener("hashchange", onChange);
+}
+const getHash = () => (typeof window === "undefined" ? "" : window.location.hash);
+
+/** How long an anchored group stays highlighted after being scrolled to. */
+const FLASH_MS = 1400;
+
 export default function AgentSettingsPage() {
   const t = useT();
   const router = useRouter();
   const { userInfo, isLoggedIn, logOut } = useAuthStore();
   const requireLogin = useLoginModalStore((s) => s.requireLogin);
-  const [section, setSection] = useState<SectionId>("account");
-  // Deep link /agent/settings?section=local (the chat page's "local model not started" prompt jumps straight to the local models section).
-  // Must be read reactively via useSearchParams: when only the query changes on the same route the component is not remounted (App Router soft navigation),
-  // so reading window.location during useState initialization would stay on the previous section (appearing to jump to "Account").
+  const hash = useSyncExternalStore(subscribeToHash, getHash, () => "");
+  const { section: hashSection, anchor } = parseSettingsHash(hash);
+  // ?section=… is the older form and still works: the chat page's "local model not started" prompt
+  // links to it. Read reactively via useSearchParams — on a soft navigation only the query changes
+  // and the component is not remounted, so reading window.location once would go stale.
   const searchParams = useSearchParams();
+  const paramSection = searchParams?.get("section") ?? null;
   useEffect(() => {
-    const s = searchParams?.get("section");
-    if (s === "local") { router.push("/agent/models"); return; } // Local models have moved to "Model Library"; redirect old links
-    if (s && NAV.some((n) => n.id === s)) setSection(s as SectionId);
-  }, [searchParams, router]);
+    // Local models have moved to "Model Library"; redirect old links.
+    if (paramSection === "local") router.push("/agent/models");
+  }, [paramSection, router]);
+  const known = (id: string | null): id is SectionId => !!id && NAV.some((n) => n.id === id);
+  const section: SectionId = known(hashSection) ? hashSection : known(paramSection) ? paramSection : "account";
+  /** Selecting a section writes the hash, which is what re-renders this page — and leaves a URL
+   *  worth copying. Assignment rather than replaceState: only assignment fires hashchange. */
+  const selectSection = useCallback((id: SectionId) => {
+    window.location.hash = id;
+  }, []);
   const [query, setQuery] = useState("");
 
   const name = userInfo?.username || userInfo?.name || "Username";
   const sub = userInfo?.phone || "";
 
+  // Scroll the addressed group into view once its pane has rendered, and flash it so it is obvious
+  // which of a dozen switches the link meant. The attribute is set on the DOM node rather than held
+  // in state: it is a transient decoration, and re-rendering the pane to show it would be silly.
+  useEffect(() => {
+    if (!anchor) return;
+    let cancelled = false;
+    let flash: ReturnType<typeof setTimeout> | undefined;
+    // Some groups only exist once their section has answered the main process (background mode is
+    // hidden until getBackgroundState resolves), so a link that arrives first would find nothing to
+    // scroll to. Keep looking for a couple of seconds, then give up quietly.
+    const deadline = Date.now() + 2500;
+    const attempt = () => {
+      if (cancelled) return;
+      const el = document.getElementById(anchor);
+      if (!el) {
+        if (Date.now() < deadline) requestAnimationFrame(attempt);
+        return;
+      }
+      el.scrollIntoView({ block: "start", behavior: "smooth" });
+      el.dataset.flash = "";
+      flash = setTimeout(() => delete el.dataset.flash, FLASH_MS);
+    };
+    attempt();
+    return () => {
+      cancelled = true;
+      clearTimeout(flash);
+    };
+  }, [anchor, section]);
+
   const matches = makeMatcher(query);
   // Whether a section matches: translate all of that section's searchable keys and match them together.
   const sectionHit = (id: SectionId) => matches(...SECTION_KEYS[id].map((k) => t(k)));
   const visibleNav = NAV.filter((n) => sectionHit(n.id));
+  // Search filters the items; a group whose items all dropped out drops its heading with them.
+  const visibleGroups = NAV_GROUPS.map((g) => ({
+    ...g,
+    items: g.items.filter((n) => sectionHit(n.id)),
+  })).filter((g) => g.items.length > 0);
   // If the current section is filtered out by search, fall back to the first matching section.
   const effectiveSection: SectionId | null = visibleNav.some((n) => n.id === section)
     ? section
@@ -111,24 +172,33 @@ export default function AgentSettingsPage() {
           />
         </div>
 
-        <nav className="flex flex-col gap-0.5">
-          {visibleNav.map((n) => {
-            const Icon = n.icon;
-            const active = effectiveSection === n.id;
-            return (
-              <button
-                key={n.id}
-                onClick={() => setSection(n.id)}
-                className={cn(
-                  "flex items-center gap-2 rounded-lg px-3 py-2 text-left text-sm transition-colors",
-                  active ? "bg-accent font-medium text-ink" : "text-ink-muted hover:bg-accent",
-                )}
-              >
-                <Icon className="size-4 shrink-0" />
-                {t(n.labelKey)}
-              </button>
-            );
-          })}
+        {/* Grouped nav. The headings are labels, not controls: a group is a place to look, and
+            collapsing one would only hide the section someone is hunting for. */}
+        <nav className="flex flex-col gap-3">
+          {visibleGroups.map((g) => (
+            <div key={g.labelKey} className="flex flex-col gap-0.5">
+              <h2 className="px-3 pb-1 text-[11px] font-semibold uppercase tracking-wider text-ink-subtle">
+                {t(g.labelKey)}
+              </h2>
+              {g.items.map((n) => {
+                const Icon = n.icon;
+                const active = effectiveSection === n.id;
+                return (
+                  <button
+                    key={n.id}
+                    onClick={() => selectSection(n.id)}
+                    className={cn(
+                      "flex items-center gap-2 rounded-lg px-3 py-2 text-left text-sm transition-colors",
+                      active ? "bg-accent font-medium text-ink" : "text-ink-muted hover:bg-accent",
+                    )}
+                  >
+                    <Icon className="size-4 shrink-0" />
+                    {t(n.labelKey)}
+                  </button>
+                );
+              })}
+            </div>
+          ))}
           {visibleNav.length === 0 && (
             <p className="px-2.5 py-2 text-sm text-ink-subtle">{t("settings.noResults")}</p>
           )}
@@ -160,10 +230,10 @@ export default function AgentSettingsPage() {
           ) : effectiveSection === "mcp" ? (
             <McpSection t={t} />
           ) : effectiveSection === "memory" ? (
-            <div className="max-w-2xl mx-auto">
-              <MemorySection t={t} />
+            // One pane, two groups: the project's memory file belongs under the same heading.
+            <MemorySection t={t}>
               <ProjectMemorySection t={t} />
-            </div>
+            </MemorySection>
           ) : effectiveSection === "general" ? (
             <GeneralSection t={t} />
           ) : effectiveSection === "notify" ? (
