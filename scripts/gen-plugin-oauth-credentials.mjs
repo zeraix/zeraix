@@ -71,6 +71,17 @@ const outPath = path.join(root, "electron", "plugins", "oauth-credentials.json")
 fs.writeFileSync(outPath, JSON.stringify(out, null, 2) + "\n", "utf8");
 console.log(`[gen-plugin-oauth-credentials] ${report.join(", ")} → ${outPath}`);
 if (Object.keys(out).length === 0) {
-  // Not fatal: a build with no credentials is valid, it simply cannot run a host-client provider.
+  // On CI there is no .env* to fall back on (they are gitignored), so an empty map means the secrets
+  // are missing and the installer would ship with every host-client plugin's "Connect account"
+  // broken — reported only when a user clicks it, days after a green build. Fail here instead, the
+  // same way gen-google-defaults.mjs does for the sign-in client.
+  if (process.env.CI) {
+    throw new Error(
+      "[gen-plugin-oauth-credentials] no OAuth credentials resolved in CI; set PLUGIN_OAUTH_<PROVIDER>_CLIENT_ID/_SECRET " +
+        "(or GOOGLE_OAUTH_CLIENT_ID/_SECRET, which google falls back to) as repository secrets.",
+    );
+  }
+  // Locally this is a legitimate state: a checkout with no credentials still builds and runs, it
+  // simply cannot complete a host-client provider's authorization.
   console.warn("[gen-plugin-oauth-credentials] no credentials configured; host-client plugins will report this at use");
 }
