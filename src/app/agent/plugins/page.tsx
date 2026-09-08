@@ -21,13 +21,19 @@
  * install path, lockfile and revocation, not for the user. All copy is i18n (the plugins.* keys).
  */
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AlertTriangle, Blocks, Loader2, RefreshCw, Search } from "lucide-react";
 
 import { cn } from "@/lib/utils";
 import { useT } from "@/lib/i18n";
 import CustomScrollbar, { PAGE_SCROLLBAR } from "@/components/CustomScrollbar";
-import { configurePlugins, installState, isPluginsAvailable, pluginBridge } from "@/lib/plugins/bridge";
+import {
+  configurePlugins,
+  installState,
+  isPluginsAvailable,
+  pluginBridge,
+  refreshFeedback,
+} from "@/lib/plugins/bridge";
 import type { CatalogueEntry, InstalledPlugin, ProviderAuthStatus } from "@/lib/plugins/types";
 import { OrphanCard, PluginCard } from "./PluginCard";
 import { PluginDialog } from "./PluginDialog";
@@ -55,6 +61,8 @@ export default function AgentPluginsPage() {
    *  separate store in the main process, and folding them together here would imply they move as
    *  one. A grant can lapse with nothing about the install changing. */
   const [auth, setAuth] = useState<Record<string, ProviderAuthStatus[]>>({});
+  /** Held in a ref purely so the mount effect can reach a callback declared after it. */
+  const onRefreshRef = useRef<(() => Promise<void>) | null>(null);
 
   useEffect(() => {
     if (!available) return;
@@ -67,6 +75,11 @@ export default function AgentPluginsPage() {
       if (!active) return;
       setCatalogue(cat.entries);
       setInstalled(inst);
+      // Nothing cached means this install has never had a successful fetch — most often a build with
+      // no NEXT_PUBLIC_PLUGIN_ORIGIN, whose feeds 404. Fetch once so the page can say that, instead
+      // of sitting on "nothing published yet" until someone thinks to press Refresh (and learns
+      // nothing when they do).
+      if (cat.entries.length === 0) void onRefreshRef.current?.();
     });
     // Installed state also changes in the main process — a launch-time revocation lands here
     // without the page having asked for anything.
@@ -103,15 +116,22 @@ export default function AgentPluginsPage() {
     try {
       const r = await bridge.refresh();
       setCatalogue(r.entries);
-      setOffline(r.fromCache);
       setInstalled(await bridge.installed());
-      // Feed problems are worth showing: a signature that stopped verifying is not the same thing
-      // as being offline, and only one of those is routine.
-      if (r.errors.length > 0 && !r.fromCache) setError(r.errors.join("; "));
+      // What to say about it is refreshFeedback's decision, and it is a decision rather than a line
+      // of glue: a failed fetch always reports fromCache, so "hide errors when fromCache" hid every
+      // real failure, including the one that leaves the page with nothing to show.
+      const feedback = refreshFeedback(r);
+      setOffline(feedback.offline);
+      setError(feedback.error);
     } finally {
       setRefreshing(false);
     }
   }, []);
+
+  // Filled here rather than at the declaration, which would be a ref write during render.
+  useEffect(() => {
+    onRefreshRef.current = onRefresh;
+  }, [onRefresh]);
 
   const onInstall = useCallback(
     async (id: string) => {

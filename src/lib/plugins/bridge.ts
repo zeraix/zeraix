@@ -9,8 +9,7 @@
  * surface must degrade to "not supported here" rather than erroring, the same way the MCP and
  * updater panels already do.
  */
-import { clientEnv } from "@/lib/env";
-import type { CatalogueEntry, InstalledPlugin, PluginBridge, PluginTier } from "./types";
+import type { CatalogueEntry, InstalledPlugin, PluginBridge, PluginTier, RefreshResult } from "./types";
 
 export function pluginBridge(): PluginBridge | null {
   return typeof window !== "undefined" && window.plugins ? window.plugins : null;
@@ -28,15 +27,32 @@ export function isPluginsAvailable(): boolean {
  * registry repo, and since the feeds carry no signature it is also what the catalogue is trusted
  * against. Idempotent, so calling it from a component that remounts costs nothing.
  */
+/**
+ * Where the feeds come from when nothing overrides it.
+ *
+ * The registry repo itself: the client appends /plugins/{index,killlist}.json, which resolves to
+ * dist/plugins/*.json on main — the files CI rebuilds and commits.
+ *
+ * This used to fall back to NEXT_PUBLIC_API_BASE_URL, where design doc §5.2 says the feeds are to be
+ * MIRRORED (GitHub is unreliable from mainland China, and the API origin is already a hard dependency
+ * of a working app). The mirror is not deployed: that host answers 404 for /plugins/index.json, so
+ * the fallback made every checkout without a private .env.local show an empty marketplace — and the
+ * only machines that worked were the ones with an untracked override. A default has to be a value
+ * that WORKS; an aspiration belongs in the doc, not in the code path.
+ *
+ * When the mirror ships, point this at it (or set NEXT_PUBLIC_PLUGIN_ORIGIN per build) — that is the
+ * change §5.2 is waiting for, and the cn edition needs it.
+ */
+export const DEFAULT_PLUGIN_ORIGIN = "https://raw.githubusercontent.com/zeraix/registry/main/dist";
+
 export async function configurePlugins(): Promise<boolean> {
   const bridge = pluginBridge();
   if (!bridge) return false;
-  // NEXT_PUBLIC_PLUGIN_ORIGIN points the marketplace at a different host from the rest of the API.
-  // It exists for local work against a stand-in registry: the plugin feeds and auth/wallet/LLM share
-  // one origin in production, so overriding NEXT_PUBLIC_API_BASE_URL to reach a local registry would
-  // take sign-in and the model proxy down with it. Unset — which is every shipped build — this is
-  // exactly the previous behaviour.
-  const origin = process.env.NEXT_PUBLIC_PLUGIN_ORIGIN || clientEnv.NEXT_PUBLIC_API_BASE_URL;
+  // NEXT_PUBLIC_PLUGIN_ORIGIN points the marketplace at a different host from the rest of the API —
+  // a local stand-in registry, or the mirror once it exists. The plugin feeds and auth/wallet/LLM
+  // share one origin in production, so overriding NEXT_PUBLIC_API_BASE_URL to reach a local registry
+  // would take sign-in and the model proxy down with it; this variable exists so it does not have to.
+  const origin = process.env.NEXT_PUBLIC_PLUGIN_ORIGIN || DEFAULT_PLUGIN_ORIGIN;
   const result = await bridge.configure(origin);
   return result.ok;
 }
@@ -81,4 +97,29 @@ export function installState(entry: CatalogueEntry, installed: InstalledPlugin[]
   const match = installed.find((p) => p.id === entry.id);
   if (!match) return { installed: false, outdated: false, record: null } as const;
   return { installed: true, outdated: match.version !== entry.version, record: match } as const;
+}
+
+/**
+ * What a refresh should tell the user.
+ *
+ * "A registry outage is not an error" holds only while there is a catalogue to fall back on: the page
+ * shows the last verified copy and a quiet line saying so. With an EMPTY catalogue there is nothing
+ * to fall back on, and staying quiet is how a misconfigured origin becomes a blank page that a
+ * Refresh button never fixes — the main process composes a precise diagnosis ("this origin serves no
+ * plugin registry (HTTP 404 …) — check NEXT_PUBLIC_PLUGIN_ORIGIN") and the renderer used to discard
+ * it, because a failed fetch always reports fromCache.
+ *
+ * So: errors are shown whenever they left the user with nothing, and the offline note is only for
+ * the case it describes — a real cached list, being shown instead of a fresh one.
+ */
+export function refreshFeedback(r: Pick<RefreshResult, "entries" | "fromCache" | "errors">): {
+  error: string | null;
+  offline: boolean;
+} {
+  const empty = r.entries.length === 0;
+  const failed = r.errors.length > 0;
+  return {
+    error: failed && (empty || !r.fromCache) ? r.errors.join("; ") : null,
+    offline: r.fromCache && !empty,
+  };
 }
