@@ -308,6 +308,83 @@ export function clearVisionUnsupported(id: string): AgentModel[] {
   return next;
 }
 
+/**
+ * Split a stored custom endpoint back into the two fields the add form asked for.
+ *
+ * addCustomModel resolves baseUrl + fullUrl into ONE string and keeps only that, so an edit form has
+ * to reconstruct the inputs: if the endpoint still ends in the suffix this apiFormat would append,
+ * it was base-URL mode and the suffix comes back off; otherwise it was entered whole. A full URL the
+ * user happened to type with the standard suffix reads back as base-URL mode, which resolves to the
+ * identical endpoint — the round trip is lossless in what it produces, not in how it was typed.
+ */
+export function splitCustomEndpoint(
+  endpoint: string,
+  apiFormat = "openai-chat",
+): { baseUrl: string; fullUrl: boolean } {
+  const e = str(endpoint).trim();
+  const suffix = apiFormatSuffix(apiFormat);
+  if (e.endsWith(suffix)) return { baseUrl: e.slice(0, -suffix.length), fullUrl: false };
+  return { baseUrl: e, fullUrl: true };
+}
+
+/** The fields of an added model the settings form may rewrite. Anything absent is left alone. */
+export interface ModelEdit {
+  label?: string;
+  model?: string;
+  /** Custom entries only — re-resolved against fullUrl / apiFormat into the stored endpoint. */
+  baseUrl?: string;
+  fullUrl?: boolean;
+  apiFormat?: string;
+  multimodal?: boolean;
+}
+
+/**
+ * Apply an edit to one entry — the whole decision, with no storage in it, so it can be tested.
+ *
+ * The `id` is deliberately NOT recomputed, even though an official entry's was originally built as
+ * `${providerId}::${model}` and the model string is editable here. The id is this entry's identity,
+ * not a view of its fields: the default selection, a conversation's saved modelId, and a custom
+ * entry's API-key ref all point at it, and regenerating it would silently unbind all three. Nothing
+ * reads the model back out of an id, so a fixed id costs nothing.
+ *
+ * Changing the model string does drop any learned "this model rejects images" verdict — that was a
+ * finding about the model that is no longer there, and keeping it would strip images from a model
+ * that has never refused one.
+ */
+export function applyModelEdit(current: AgentModel, patch: ModelEdit): AgentModel {
+  const label = patch.label?.trim();
+  const model = patch.model?.trim();
+  const apiFormat = patch.apiFormat ?? current.apiFormat;
+  const next: AgentModel = {
+    ...current,
+    ...(model ? { model } : {}),
+    // An emptied display name falls back to the model string, the same rule the add forms use.
+    label: label || model || current.label,
+    ...(apiFormat ? { apiFormat } : {}),
+    ...(patch.multimodal === undefined ? {} : { multimodal: patch.multimodal }),
+    // Only a custom entry owns its endpoint; an official one composes it from the provider every
+    // time it is resolved, so writing one here would freeze a value resolveModel is meant to derive.
+    ...(current.custom && patch.baseUrl !== undefined
+      ? { endpoint: resolveCustomEndpoint(patch.baseUrl, !!patch.fullUrl, apiFormat) }
+      : {}),
+  };
+  if (model && model !== current.model) {
+    next.visionUnsupported = undefined;
+    next.visionUnsupportedAt = undefined;
+  }
+  return next;
+}
+
+/** Rewrite one added model in place. Returns the updated list (unchanged when the id is gone). */
+export function updateModel(id: string, patch: ModelEdit): AgentModel[] {
+  const list = loadModelList();
+  const current = list.find((m) => m.id === id);
+  if (!current) return list;
+  const updated = list.map((m) => (m.id === id ? applyModelEdit(m, patch) : m));
+  saveModelList(updated);
+  return updated;
+}
+
 /** Remove a model; if the removed one was the current selection, select the first entry in the list instead. Returns the list after removal. */
 export function removeModel(id: string): AgentModel[] {
   const next = loadModelList().filter((m) => m.id !== id);

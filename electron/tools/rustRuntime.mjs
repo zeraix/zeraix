@@ -654,6 +654,13 @@ const RUNTIME_ONLY_TOOLS = [
   "file_info",
   "search_files",
   "search_in_files",
+  // The remaining filesystem mutators, moved out of aiToolkit.mjs so every path a tool touches is resolved by
+  // one Workspace — the one that knows about the read-only asset root.
+  "append_file",
+  "delete_file",
+  "copy_file",
+  "move_file",
+  "create_directory",
 ];
 
 /** Names the app needs and this runtime did not declare. Empty on a healthy handshake. */
@@ -901,10 +908,10 @@ async function ensureStarted() {
  * no backreferences or lookaround, so a pattern using them is valid in the JS handler and uncompilable
  * here. See the header of search_in_files.rs.
  */
-export async function tryRunTool(name, args, { signal, workdir, callId } = {}) {
+export async function tryRunTool(name, args, { signal, workdir, assetDir, callId } = {}) {
   const s = await ensureStarted();
   // `null` still means "not served here" — but only for a tool this runtime genuinely does not implement
-  // (`append_file`, an MCP tool, a plugin tool), which has a handler of its own. When the runtime is DOWN,
+  // (a state/app tool, an MCP tool, a plugin tool), which has a handler of its own. When the runtime is DOWN,
   // `s` is null and every migrated tool falls through to `runTool`'s "runtime is not running" message rather
   // than to an implementation, because there no longer is one.
   if (!s || !s.tools.has(name)) return null;
@@ -922,7 +929,10 @@ export async function tryRunTool(name, args, { signal, workdir, callId } = {}) {
     const res = await request(
       s,
       "tool.call",
-      { name, args: args ?? {}, workdir, call_id: id },
+      // `asset_dir` is the read-only second root (the media library). Sent per call for the same reason
+      // `workdir` is: it can change while the app runs — Settings → General moves the data storage
+      // location, and the library moves with it (main.mjs syncAssetRoot). An older runtime ignores it.
+      { name, args: args ?? {}, workdir, asset_dir: assetDir || null, call_id: id },
       CALL_TIMEOUT_MS,
     );
     if (!res) return null;

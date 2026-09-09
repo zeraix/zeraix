@@ -61,8 +61,9 @@ test("a capped result states how much of the whole it is showing", () => {
   const total = MAX_TOOL_OUTPUT_CHARS * 3;
   const out = capToolOutput("H".repeat(total - 1) + "T");
 
-  assert.ok(out.includes("TRUNCATED"), "the notice does not say it is truncated");
-  assert.ok(out.includes(String(total)), "the notice does not state the total character count");
+  assert.ok(out.includes('kind="truncated"'), "the notice does not say it is truncated");
+  // The sizes are attributes now rather than prose — see src/app/agent/chat/contextMarker.ts.
+  assert.ok(out.includes(`total="${total}"`), "the notice does not state the total character count");
   assert.ok(out.startsWith("H"), "the head was not preserved");
   assert.ok(out.endsWith("T"), "the tail was not preserved — the end of a command's output is where its error is");
   assert.ok(out.length < total, "nothing was actually elided");
@@ -109,14 +110,14 @@ test("the elision marker cannot shift the line numbers after it", () => {
   // `\` is the renderer's "no newline at end of file" row: it carries no line numbers. A context line would
   // have advanced both counters and mislabelled every row below it.
   const out = capToolOutput(writeResult(400));
-  const marker = out.split("\n").find((l) => l.includes("diff lines elided"));
+  const marker = out.split("\n").find((l) => l.includes('kind="diff-lines"'));
   assert.ok(marker, "no elision marker was written");
   assert.ok(marker.startsWith("\\"), `marker must be a no-line-number row, got: ${marker}`);
 });
 
 test("the elision says how much is missing", () => {
   const out = capToolOutput(writeResult(400));
-  assert.match(out, /\d+ diff lines elided/);
+  assert.match(out, /kind="diff-lines" lines="\d+"/);
 });
 
 test("both ends of a diff survive", () => {
@@ -135,6 +136,6 @@ test("a diff that already fits is returned untouched", () => {
 test("output with no diff still uses the head+tail cap", () => {
   // The diff path must not change what happens to a command's output.
   const out = capToolOutput("H".repeat(MAX_TOOL_OUTPUT_CHARS * 2) + "TAIL");
-  assert.ok(out.includes("TRUNCATED"));
+  assert.ok(out.includes('kind="truncated"'));
   assert.ok(out.endsWith("TAIL"));
 });

@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { ImageOff, Plus, Trash2 } from "lucide-react";
+import { ImageOff, Pencil, Plus, Trash2 } from "lucide-react";
 import { useLoginModalStore } from "@/store/loginModalStore";
 import {
   DEFAULT_POLL_INTERVAL_MS,
@@ -41,6 +41,8 @@ import { cn } from "@/lib/utils";
 import { ToggleSwitch } from "./ToggleSwitch";
 import { FIELD_CLS, PRIMARY_BTN } from "./styles";
 import { Group, LIST, NOTE, PANEL, Pane } from "./pane";
+import { isEditableModel, ModelEditForm } from "./ModelEditForm";
+import { EngineEditForm } from "./EngineEditForm";
 
 /** Sentinel value for the "Add model manually" option in the model dropdown (not a real model ID). */
 export const MANUAL_MODEL = "__manual__";
@@ -50,6 +52,10 @@ export function ModelsSection({ t }: { t: TFunc }) {
   const requireLogin = useLoginModalStore((s) => s.requireLogin);
   const [list, setList] = useState<AgentModel[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  /** The row whose inline edit form is open — at most one, so the list stays a list. Engines get
+   *  their own, because the two lists are independent and closing one should not close the other. */
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [editingEngineId, setEditingEngineId] = useState<string | null>(null);
   // Official catalog (excludes the custom placeholder and providers with no models).
   const officialProviders = PROVIDERS.filter((p) => !p.custom && p.models.length > 0);
   const [provId, setProvId] = useState(officialProviders[0]?.id ?? "");
@@ -246,74 +252,105 @@ export function ModelsSection({ t }: { t: TFunc }) {
         ) : (
           <div className={LIST}>
             {list.map((m) => (
-              <div key={m.id} className="flex items-center gap-3 px-4 py-3">
-                <button
-                  type="button"
-                  onClick={() => setDefault(m.id)}
-                  title={t("models.default")}
-                  aria-label={t("models.default")}
-                  className="shrink-0"
-                >
-                  <span
-                    className={cn(
-                      "flex size-4 items-center justify-center rounded-full border",
-                      selectedId === m.id ? "border-primary" : "border-line-strong",
-                    )}
-                  >
-                    {selectedId === m.id && <span className="size-2 rounded-full bg-primary" />}
-                  </span>
-                </button>
-                <div className="min-w-0 flex-1">
-                  <p className="flex items-center gap-1.5 truncate text-sm font-medium text-ink">
-                    <span className="truncate">{m.label}</span>
-                    {/* Deliberately NOT the send path's predicate: that one is optimistic and would badge
-                        every model. This shows only what is actually known about the model. */}
-                    {modelLikelyVision(m) && (
-                      <span className="shrink-0 rounded-full bg-primary/15 px-1.5 py-0.5 text-[10px] font-medium text-primary">
-                        {t("models.multimodal")}
-                      </span>
-                    )}
-                    {/* The app decided this model rejects images and is stripping them before every send. Shown
-                        because the only other evidence the user gets is the model answering "I cannot see
-                        images" — which reads as a broken model rather than an app-side verdict. */}
-                    {visionBlocked(m) && (
-                      <span
-                        title={t("models.visionBlockedHint")}
-                        className="flex shrink-0 items-center gap-1 rounded-full bg-warning/15 px-1.5 py-0.5 text-[10px] font-medium text-warning-ink"
-                      >
-                        <ImageOff className="size-3" />
-                        {t("models.visionBlocked")}
-                      </span>
-                    )}
-                  </p>
-                  <p className="truncate text-xs text-ink-subtle">
-                    {providerLabel(m)} · {m.model}
-                    {m.custom && m.endpoint ? ` · ${m.endpoint}` : ""}
-                  </p>
-                </div>
-                {/* Undo the verdict without deleting the model — which used to be the only way back, taking the
-                    API key and the default selection with it. */}
-                {visionBlocked(m) && (
+              <div key={m.id}>
+                <div className="flex items-center gap-3 px-4 py-3">
                   <button
                     type="button"
-                    onClick={() => setList(clearVisionUnsupported(m.id))}
-                    className="shrink-0 rounded-md border border-line px-2 py-1 text-[11px] text-ink-subtle transition hover:bg-surface hover:text-ink"
+                    onClick={() => setDefault(m.id)}
+                    title={t("models.default")}
+                    aria-label={t("models.default")}
+                    className="shrink-0"
                   >
-                    {t("models.visionReset")}
+                    <span
+                      className={cn(
+                        "flex size-4 items-center justify-center rounded-full border",
+                        selectedId === m.id ? "border-primary" : "border-line-strong",
+                      )}
+                    >
+                      {selectedId === m.id && <span className="size-2 rounded-full bg-primary" />}
+                    </span>
                   </button>
+                  <div className="min-w-0 flex-1">
+                    <p className="flex items-center gap-1.5 truncate text-sm font-medium text-ink">
+                      <span className="truncate">{m.label}</span>
+                      {/* Deliberately NOT the send path's predicate: that one is optimistic and would badge
+                          every model. This shows only what is actually known about the model. */}
+                      {modelLikelyVision(m) && (
+                        <span className="shrink-0 rounded-full bg-primary/15 px-1.5 py-0.5 text-[10px] font-medium text-primary">
+                          {t("models.multimodal")}
+                        </span>
+                      )}
+                      {/* The app decided this model rejects images and is stripping them before every send. Shown
+                          because the only other evidence the user gets is the model answering "I cannot see
+                          images" — which reads as a broken model rather than an app-side verdict. */}
+                      {visionBlocked(m) && (
+                        <span
+                          title={t("models.visionBlockedHint")}
+                          className="flex shrink-0 items-center gap-1 rounded-full bg-warning/15 px-1.5 py-0.5 text-[10px] font-medium text-warning-ink"
+                        >
+                          <ImageOff className="size-3" />
+                          {t("models.visionBlocked")}
+                        </span>
+                      )}
+                    </p>
+                    <p className="truncate text-xs text-ink-subtle">
+                      {providerLabel(m)} · {m.model}
+                      {m.custom && m.endpoint ? ` · ${m.endpoint}` : ""}
+                    </p>
+                  </div>
+                  {/* Undo the verdict without deleting the model — which used to be the only way back, taking the
+                      API key and the default selection with it. */}
+                  {visionBlocked(m) && (
+                    <button
+                      type="button"
+                      onClick={() => setList(clearVisionUnsupported(m.id))}
+                      className="shrink-0 rounded-md border border-line px-2 py-1 text-[11px] text-ink-subtle transition hover:bg-surface hover:text-ink"
+                    >
+                      {t("models.visionReset")}
+                    </button>
+                  )}
+                  {/* Only the entries the user typed in are editable; see isEditableModel. */}
+                  {isEditableModel(m) && (
+                    <button
+                      type="button"
+                      onClick={() => setEditingId((cur) => (cur === m.id ? null : m.id))}
+                      title={t("models.edit")}
+                      aria-label={t("models.edit")}
+                      aria-expanded={editingId === m.id}
+                      className={cn(
+                        "shrink-0 rounded-md p-1.5 transition hover:bg-surface hover:text-ink",
+                        editingId === m.id ? "bg-surface text-ink" : "text-ink-muted",
+                      )}
+                    >
+                      <Pencil className="size-4" />
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setList(removeModel(m.id)); // Update directly with the post-removal list to avoid read-back timing issues
+                      setSelectedId(getSelectedModelId());
+                    }}
+                    title={t("ctx.delete")}
+                    aria-label={t("ctx.delete")}
+                    className="shrink-0 rounded-md p-1.5 text-ink-muted transition hover:bg-surface hover:text-destructive"
+                  >
+                    <Trash2 className="size-4" />
+                  </button>
+                </div>
+                {/* The form sits under its own row rather than in a dialog: the row it is changing
+                    stays on screen above it, which is the whole reason it is legible. */}
+                {editingId === m.id && (
+                  <ModelEditForm
+                    model={m}
+                    t={t}
+                    onSaved={(next) => {
+                      setList(next);
+                      setEditingId(null);
+                    }}
+                    onCancel={() => setEditingId(null)}
+                  />
                 )}
-                <button
-                  type="button"
-                  onClick={() => {
-                    setList(removeModel(m.id)); // Update directly with the post-removal list to avoid read-back timing issues
-                    setSelectedId(getSelectedModelId());
-                  }}
-                  title={t("ctx.delete")}
-                  aria-label={t("ctx.delete")}
-                  className="shrink-0 rounded-md p-1.5 text-ink-muted transition hover:bg-surface hover:text-destructive"
-                >
-                  <Trash2 className="size-4" />
-                </button>
               </div>
             ))}
           </div>
@@ -445,25 +482,48 @@ export function ModelsSection({ t }: { t: TFunc }) {
         <Group title={t("models.engines")} anchor="models/engines" count={engines.length}>
           <div className="space-y-2">
             {engines.map((e) => (
-              <div
-                key={e.id}
-                className="flex items-center gap-3 rounded-xl border border-line bg-surface-muted/40 px-4 py-2.5"
-              >
-                <div className="min-w-0 flex-1">
-                  <p className="truncate text-sm font-medium text-ink">{e.label}</p>
-                  <p className="truncate font-mono text-[11px] text-ink-subtle">{e.endpoint}</p>
+              <div key={e.id}>
+                <div className="flex items-center gap-3 rounded-xl border border-line bg-surface-muted/40 px-4 py-2.5">
+                  <div className="min-w-0 flex-1">
+                    <p className="truncate text-sm font-medium text-ink">{e.label}</p>
+                    <p className="truncate font-mono text-[11px] text-ink-subtle">{e.endpoint}</p>
+                  </div>
+                  <span className="shrink-0 rounded-md bg-surface px-2 py-0.5 text-[11px] text-ink-muted">
+                    {t(e.capability === "video_generation" ? "models.kindVideo" : "models.kindImage")}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => setEditingEngineId((cur) => (cur === e.id ? null : e.id))}
+                    title={t("models.edit")}
+                    aria-label={t("models.edit")}
+                    aria-expanded={editingEngineId === e.id}
+                    className={cn(
+                      "shrink-0 rounded-md p-1.5 transition-colors hover:bg-surface hover:text-ink",
+                      editingEngineId === e.id ? "bg-surface text-ink" : "text-ink-subtle",
+                    )}
+                  >
+                    <Pencil className="size-3.5" />
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => dropEngine(e.id)}
+                    aria-label={t("ctx.delete")}
+                    className="shrink-0 rounded-md p-1.5 text-ink-subtle transition-colors hover:bg-destructive/10 hover:text-destructive"
+                  >
+                    <Trash2 className="size-3.5" />
+                  </button>
                 </div>
-                <span className="shrink-0 rounded-md bg-surface px-2 py-0.5 text-[11px] text-ink-muted">
-                  {t(e.capability === "video_generation" ? "models.kindVideo" : "models.kindImage")}
-                </span>
-                <button
-                  type="button"
-                  onClick={() => dropEngine(e.id)}
-                  aria-label={t("ctx.delete")}
-                  className="shrink-0 rounded-md p-1.5 text-ink-subtle transition-colors hover:bg-destructive/10 hover:text-destructive"
-                >
-                  <Trash2 className="size-3.5" />
-                </button>
+                {editingEngineId === e.id && (
+                  <EngineEditForm
+                    engine={e}
+                    t={t}
+                    onSaved={(next) => {
+                      setEngines(next);
+                      setEditingEngineId(null);
+                    }}
+                    onCancel={() => setEditingEngineId(null)}
+                  />
+                )}
               </div>
             ))}
           </div>

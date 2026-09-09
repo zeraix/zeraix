@@ -42,7 +42,6 @@ const {
   renderGoalState,
   decideNextRound,
   GOAL_CONDITION_WARN,
-  MAX_GOAL_AUTO_ROUNDS,
 } = await import("../src/app/agent/chat/goalState.ts");
 
 const NOW = 1_700_000_000_000;
@@ -435,37 +434,28 @@ test("a cleared goal stops the loop immediately", () => {
   assert.equal(decideNextRound(g, { met: false, reason: "still failing" }).action, "stop");
 });
 
-test("by default the loop is not stopped by its round count", () => {
-  // The default ceiling is gone: a goal loop now runs until the evaluator settles it or the user stops it.
-  // This asserted the opposite (exhausted at 25) until the caps came off.
-  assert.equal(MAX_GOAL_AUTO_ROUNDS, null, "the default ceiling is off");
+test("the loop is not stopped by its round count, and there is no count to configure", () => {
+  // This asserted the opposite (exhausted at 25) until the caps came off, and then asserted that an explicit
+  // `maxRounds` still worked. Both are gone: a goal loop runs until the evaluator settles it — met,
+  // impossible, or a failed check — or until the user stops it.
   let g = started("something long");
   for (let i = 0; i < 200; i++) g = recordEvaluation(g, { reason: "no", tokens: 1 });
-  assert.equal(decideNextRound(g, { met: false, reason: "no" }).action, "continue");
+  const d = decideNextRound(g, { met: false, reason: "no" });
+  assert.equal(d.action, "continue");
+  // And 200 unmet rounds still never read as an achievement.
+  assert.notEqual(g.status, "achieved");
 });
 
-test("a configured round limit stops the loop and never claims success", () => {
-  // The ceiling still exists for anyone who sets one, and reaching it must still read as unfinished rather
-  // than as done. Driven by an explicit `maxRounds`, since the default no longer supplies one -- without
-  // that this would pass by never reaching a limit at all, which is not the property being pinned.
-  let g = started("something impossible");
-  for (let i = 0; i < 25; i++) g = recordEvaluation(g, { reason: "no", tokens: 1 });
-  const d = decideNextRound(g, { met: false, reason: "no", maxRounds: 25 });
-  assert.equal(d.action, "exhausted");
+test("an unsatisfiable goal ends on the verdict, which is what replaced the ceiling", () => {
+  // The `impossible` verdict is what stands between a goal loop and running forever, now that no tally does.
+  // It ends the loop on round one rather than after spending a budget discovering what the evaluator said.
+  const g = recordEvaluation(started("something impossible"), { reason: "no", tokens: 1 });
+  const d = decideNextRound(g, { met: false, reason: "contradicts itself", impossible: true });
+  assert.equal(d.action, "impossible");
   assert.notEqual(g.status, "achieved");
   // The final round is an honest report, explicitly not a claim of completion.
-  assert.match(d.prompt, /HONEST/);
-  assert.match(d.prompt, /not reached/);
-});
-
-test("the limit is configurable and is a limit, not a completion condition", () => {
-  let g = started();
-  g = recordEvaluation(g, { reason: "no", tokens: 1 });
-  g = recordEvaluation(g, { reason: "no", tokens: 1 });
-  assert.equal(decideNextRound(g, { met: false, reason: "no", maxRounds: 5 }).action, "continue");
-  assert.equal(decideNextRound(g, { met: false, reason: "no", maxRounds: 2 }).action, "exhausted");
-  // Reaching the limit leaves the goal unmet in every case.
-  assert.notEqual(g.status, "achieved");
+  assert.match(d.prompt, /cannot be met/);
+  assert.match(d.prompt, /Do not keep working/);
 });
 
 test("a failed evaluation is recorded but never treated as a verdict", () => {

@@ -245,6 +245,12 @@ pub struct ToolCallParams {
     /// Per call, not per connection: the JS runtime's process-global `WORKDIR` is the reason two
     /// conversations cannot currently work on two projects at once.
     pub workdir: String,
+    /// The read-only asset root (the media library), if the host has one configured.
+    ///
+    /// Optional and defaulted so an older host that never sends it keeps working — it simply gets the
+    /// single-root guard this had before. See `Workspace::with_assets`.
+    #[serde(default)]
+    pub asset_dir: Option<String>,
     /// The host's handle for this call, used by `tool.cancel`. Absent means the caller never cancels.
     #[serde(default)]
     pub call_id: Option<String>,
@@ -780,20 +786,23 @@ pub struct AgentRunParams {
     pub run_id: String,
     /// The workspace tool calls are scoped to.
     pub workdir: String,
+    /// The read-only asset root (the media library), if the host has one configured.
+    ///
+    /// Optional and defaulted so an older host that never sends it keeps working — it simply gets the
+    /// single-root guard this had before. See `Workspace::with_assets`.
+    #[serde(default)]
+    pub asset_dir: Option<String>,
     pub provider: ProviderParams,
     /// The conversation so far, in the provider's message shape.
     pub messages: Vec<Value>,
     /// Tool declarations, already in the provider's shape. Empty means the run has no tools.
     #[serde(default)]
     pub tools: Vec<Value>,
-    /// Provider turns allowed in this run. Absent is unbounded.
-    #[serde(default)]
-    pub max_turns: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize)]
 pub struct AgentRunResult {
-    /// Why the run ended: `completed`, `cancelled`, `error`, `doom-loop`, `max-turns`, …
+    /// Why the run ended: `completed`, `cancelled`, `error`, `doom-loop`, `context-limit`, …
     pub stop_reason: String,
     /// Human-readable detail, when there is any.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -808,4 +817,29 @@ pub struct AgentRunResult {
     pub messages: Vec<Value>,
     pub prompt_tokens: u64,
     pub completion_tokens: u64,
+}
+
+#[cfg(test)]
+mod removed_field_compat {
+    use super::*;
+
+    /// A host still sending `max_turns` must not be rejected.
+    ///
+    /// The field was removed from `AgentRunParams` with the rest of the round ceilings. Nothing in this repo
+    /// ever sent it, but an older host binary might, and nothing in this protocol sets
+    /// `deny_unknown_fields` — so the extra key is ignored and the run parses. That is what makes dropping
+    /// the field a compatible change rather than a protocol break.
+    #[test]
+    fn a_host_that_still_sends_max_turns_is_not_rejected() {
+        let old_shape = serde_json::json!({
+            "run_id": "r1",
+            "workdir": ".",
+            "provider": { "endpoint": "http://localhost:1", "model": "m" },
+            "messages": [],
+            "max_turns": 8
+        });
+        let p: AgentRunParams =
+            serde_json::from_value(old_shape).expect("an extra max_turns must not break parsing");
+        assert_eq!(p.run_id, "r1");
+    }
 }

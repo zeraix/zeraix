@@ -79,30 +79,67 @@ export function isBlobRef(v) {
   return isPlainObject(v) && typeof v[KEY] === "string" && HASH_RE.test(v[KEY]);
 }
 
+/**
+ * The tag every context marker uses. Must match MARKER_TAG in src/app/agent/chat/contextMarker.ts and the
+ * guard in runtime/crates/agent-tools/src/edittext.rs — test/result-blobs.test.mjs pins that it does.
+ */
+const MARKER_TAG = "context-compressed";
+
 /** What stands in for a blob whose file is gone. A note the reader can understand, never an empty string. */
 export function missingBlobNote(n) {
-  return `[…… a ${Number(n).toLocaleString("en-US")}-character tool result that is no longer available on disk ……]`;
+  return (
+    `<${MARKER_TAG} kind="missing-result" chars="${Number(n)}">\n` +
+    `A ${Number(n).toLocaleString("en-US")}-character tool result was stored here, and its file is no longer ` +
+    `on disk. Call the tool again if you need it.\n` +
+    `</${MARKER_TAG}>`
+  );
 }
 
 /**
  * What stands in for a blob too large to load (INLINE_LOAD_MAX_CHARS). Carries the hash so the save path can turn
  * it back into the reference — see parseUnloadedNote — and reads as a note to the model, which is told to call
- * the tool again rather than look for the text here. Same `[…… … ……]` shape as every other marker of ours, so the
- * file tools refuse it as content.
+ * the tool again rather than look for the text here. Same `<context-compressed>` shape as every other marker of
+ * ours, so the file tools refuse it as content.
  */
 export function unloadedBlobNote(hash, n) {
-  return `[…… a ${Number(n).toLocaleString("en-US")}-character tool result from an earlier session is kept on disk (${hash}) and not loaded into the conversation; call the tool again if you need it ……]`;
+  return (
+    `<${MARKER_TAG} kind="stored-result" chars="${Number(n)}" hash="${hash}">\n` +
+    `A ${Number(n).toLocaleString("en-US")}-character tool result from an earlier session is kept on disk and ` +
+    `not loaded into this conversation. Call the tool again if you need it.\n` +
+    `</${MARKER_TAG}>`
+  );
 }
 
-const UNLOADED_RE = /^\[…… a ([\d,]+)-character tool result from an earlier session is kept on disk \(([0-9a-f]{64})\) and not loaded into the conversation; call the tool again if you need it ……\]$/;
+/** The current form: attributes on the marker tag. */
+const UNLOADED_RE = new RegExp(
+  `^<${MARKER_TAG}\\s+kind="stored-result"\\s+chars="(\\d+)"\\s+hash="([0-9a-f]{64})"\\s*>`,
+);
+
+/**
+ * The form written before the marker became a tag.
+ *
+ * Kept because it is not a style question: this note is the ONLY record of which blob a message refers to, and
+ * every conversation saved before the change carries the old spelling. Dropping the old pattern would not
+ * "modernise" those conversations, it would orphan their results — the save path would stop recognising the
+ * note and the reference behind it would be lost.
+ */
+const LEGACY_UNLOADED_RE = /^\[…… a ([\d,]+)-character tool result from an earlier session is kept on disk \(([0-9a-f]{64})\) and not loaded into the conversation; call the tool again if you need it ……\]$/;
 
 /** The `{ hash, n }` an unloaded-blob note names, or null for any other string. */
 export function parseUnloadedNote(text) {
   // The prefix test first: this runs on every string in the document, the 100 MB ones included, and a regex
   // anchored at the start still has to be reached through trim() and exec() — the prefix check is a few chars.
-  if (typeof text !== "string" || text.length > 512 || !text.trimStart().startsWith("[…… a ")) return null;
-  const m = UNLOADED_RE.exec(text.trim());
-  return m ? { hash: m[2], n: Number(m[1].replace(/,/g, "")) } : null;
+  if (typeof text !== "string" || text.length > 512) return null;
+  const head = text.trimStart();
+  if (head.startsWith(`<${MARKER_TAG}`)) {
+    const m = UNLOADED_RE.exec(text.trim());
+    return m ? { hash: m[2], n: Number(m[1]) } : null;
+  }
+  if (head.startsWith("[…… a ")) {
+    const m = LEGACY_UNLOADED_RE.exec(text.trim());
+    return m ? { hash: m[2], n: Number(m[1].replace(/,/g, "")) } : null;
+  }
+  return null;
 }
 
 /**

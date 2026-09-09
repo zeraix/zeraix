@@ -213,7 +213,11 @@ export async function runAgentLoop(deps: AgentLoopDeps): Promise<AgentLoopResult
       if (verdict.signal && onDoomSignal) onDoomSignal(verdict.signal, r, verdict);
       boundary.onEvent({ type: "tool-end", result: r });
     }
-    const roundVerdict = closeRound(doom, verdicts);
+    // `producedNothing` is what stops a host that nudges forever. The turn cap used to catch that; with the
+    // round ceilings gone, an empty forced round is counted as a stall instead — see closeRound.
+    const roundVerdict = closeRound(doom, verdicts, {
+      producedNothing: result.toolCallCount === 0 && !result.content.trim(),
+    });
     // A nudged round is not a final response: the host asked for another pass and the model has not had the
     // chance to answer it yet. Everything else about the round still counts — the tools it ran, the state it
     // moved, and every stop condition below.

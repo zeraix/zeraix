@@ -392,7 +392,8 @@ impl Server {
             token.cancel();
         }
 
-        let workspace = agent_tools::workspace::Workspace::new(&p.workdir);
+        let workspace = agent_tools::workspace::Workspace::new(&p.workdir)
+            .with_assets(p.asset_dir.clone().unwrap_or_default());
         let executor = agent_dispatch::DispatchingExecutor::new(
             Arc::clone(&self.registry),
             Arc::new(
@@ -501,7 +502,7 @@ impl Server {
                 LoopConfig {
                     model: p.provider.model,
                     tools: p.tools,
-                    stop_policy: StopPolicyConfig { max_turns: p.max_turns, ..Default::default() },
+                    stop_policy: StopPolicyConfig::default(),
                     ..Default::default()
                 },
             )
@@ -1573,6 +1574,7 @@ impl Server {
         let registry = Arc::clone(&self.registry);
         let file_cache = Arc::clone(&self.file_cache);
         let workdir = p.workdir.clone();
+        let asset_dir = p.asset_dir.clone().unwrap_or_default();
         let name = p.name.clone();
         let args = p.args.clone();
         let handle = CallId::from_host(call_id.clone());
@@ -1588,7 +1590,7 @@ impl Server {
                 move |cancel| {
                     let registry = Arc::clone(&registry);
                     let ctx = ToolContext::new(
-                        Workspace::new(&workdir),
+                        Workspace::new(&workdir).with_assets(&asset_dir),
                         cancel,
                         handle.clone(),
                         Arc::clone(&file_cache),

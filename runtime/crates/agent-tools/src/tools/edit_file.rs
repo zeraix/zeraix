@@ -19,7 +19,7 @@
 use agent_core::{Result, RuntimeError};
 use serde_json::{json, Value};
 
-use crate::edittext::{is_context_placeholder, PLACEHOLDER_REFUSED, encode, read_for_edit, to_lf, unified_diff};
+use crate::edittext::{is_context_placeholder, placeholder_refusal, encode, read_for_edit, to_lf, unified_diff};
 use crate::nodeerr::{coerce_string, fs_error, path_arg};
 use crate::tool::{ExecutionMode, RiskLevel, Tool, ToolContext, ToolMetadata, ToolOutput};
 
@@ -50,12 +50,16 @@ impl Tool for EditFile {
 
     async fn execute(&self, ctx: &ToolContext, args_v: &Value) -> Result<ToolOutput> {
         let p = path_arg(args_v, "path")?;
-        let abs = ctx.workspace.resolve(&p)?;
+        // resolve_write, not resolve: this tool mutates, and the asset root must refuse it by name.
+        let abs = ctx.workspace.resolve_write(&p)?;
 
         let old_str = to_lf(&coerce_string(args_v.get("old_string")));
         let new_str = to_lf(&coerce_string(args_v.get("new_string")));
         if is_context_placeholder(&new_str) {
-            return Err(RuntimeError::invalid("tool.placeholder_content", format!("new_string: {PLACEHOLDER_REFUSED}")));
+            return Err(RuntimeError::invalid(
+                "tool.placeholder_content",
+                placeholder_refusal("new_string", &ctx.workspace.rel(&abs)),
+            ));
         }
         if old_str.is_empty() {
             return Err(RuntimeError::invalid("tool.invalid_args", "old_string must not be empty"));

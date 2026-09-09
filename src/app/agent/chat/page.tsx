@@ -191,6 +191,7 @@ import { landUserMessage } from "./turnSetup";
 import { createTurnBuffer } from "./turnBuffer";
 import { createRoundRunner, type RoundLog } from "./turnRound";
 import { restoreDisplay, restoreWireBuffer } from "./conversationRestore";
+import type { ViewToken } from "./displayBaseline";
 
 /** Resolve once the browser has painted, so a state change made just before is actually on screen. */
 const afterPaint = () =>
@@ -288,6 +289,23 @@ function ChatAgent() {
   // A synchronous mirror of the display array: lets streaming rendering synchronously read "the display baseline before this round started" as increments arrive,
   // without waiting for a setState re-render. Every entry point that writes display updates it synchronously (pushDisplay / loadConversation / streaming rendering).
   const displayRef = useRef<DisplayMsg[]>([]);
+  /**
+   * Which transcript `displayRef` currently holds — whose it is, and which rebuild of it.
+   *
+   * `convIdRef` cannot answer that. It moves the instant the user clicks another conversation, while the
+   * transcript is rebuilt one `await` later inside swapInConversation, so between the two an in-flight round
+   * sees `active() === true` over a display that is still the previous conversation's. That window is what
+   * blanked the transcript when a background round was switched back to; see displayBaseline.ts.
+   *
+   * The epoch is bumped only where the display is REPLACED wholesale (a switch, a new conversation, a cleared
+   * one). A round appending its own rows must NOT bump it, or the baseline would be re-taken from a display
+   * that already contains those rows and grow on every delta.
+   */
+  const viewTokenRef = useRef<ViewToken>({ owner: null, epoch: 0 });
+  /** Adopt a transcript as `owner`'s: called wherever the whole display array is replaced. */
+  const adoptDisplay = (owner: string | null) => {
+    viewTokenRef.current = { owner, epoch: viewTokenRef.current.epoch + 1 };
+  };
   const [loading, setLoading] = useState(false);
   const activeConvId = useAgentChatStore((s) => s.activeConversationId);
   // Active conversation's title, selected reactively so the header dropdown reflects a rename immediately.
@@ -882,6 +900,7 @@ function ChatAgent() {
     interruptedRef.current = false; // New conversation: clear any residual "interrupt resume" flag
     displayRef.current = [];
     setDisplay([]);
+    adoptDisplay(null); // an empty transcript belongs to no conversation until one is created
     resetTranscriptView(); // New conversation: nothing to reveal, back to the tail-only window, following from the bottom
     cancelPendingSwitch(); // ...and drop any conversation still being switched in, so it cannot land on top of this
     resetConversation(convIdRef.current); // Queue panel, task list, Task Memory brief and goal
@@ -928,6 +947,7 @@ function ChatAgent() {
     useAgentChatStore.getState().truncateMessages(id, 0); // empty the messages, keep the conversation entry
     displayRef.current = [];
     setDisplay([]);
+    adoptDisplay(id); // emptied, but still this conversation's transcript
     resetTranscriptView();
     cancelPendingSwitch();
     // The goal goes with the messages it was pursued through: the evaluator judges from the transcript, and a
@@ -1054,6 +1074,9 @@ function ChatAgent() {
     const disp = restoreDisplay(conv);
     displayRef.current = disp;
     setDisplay(disp);
+    // Only HERE does the transcript become this conversation's. Anything in flight for it has been declining
+    // to render since the switch began, and re-takes its baseline from this rebuild on the next delta.
+    adoptDisplay(id);
     // A question this conversation asked while the user was looking elsewhere is still waiting on an answer.
     // Re-shown here, after the rebuild, because the rebuild is what would otherwise drop it.
     restorePendingChoices(id);
@@ -1750,6 +1773,10 @@ function ChatAgent() {
       return;
     }
     const { convId: genConvId, userWireIdx, userStoredIdx } = landed;
+    // A brand-new conversation just got its id, and the empty transcript the reset left behind is now ITS
+    // transcript. Adopted here rather than in setConvId, because setConvId is ALSO how a switch begins — and
+    // there the display still belongs to the outgoing conversation until swapInConversation rebuilds it.
+    if (viewTokenRef.current.owner === null) adoptDisplay(genConvId);
     let roundConvo = landed.roundConvo;
     const store = useAgentChatStore.getState();
 
@@ -1757,6 +1784,18 @@ function ChatAgent() {
     runsRef.current.set(genConvId, ctrl); // Register this conversation's run, for cancel (active conversation) / background concurrency
     // "Whether in the active view": apply view side effects only while active; a background conversation persists silently.
     const active = () => convIdRef.current === genConvId;
+    /**
+     * May this round write to the transcript on screen?
+     *
+     * Stricter than `active()`, and it has to be. `active()` reads convIdRef, which moves the moment the user
+     * clicks another conversation, while the transcript itself is rebuilt one await later inside
+     * swapInConversation — so there is a window where `active()` is true over a transcript that still belongs
+     * to the conversation being left. Appending there puts this conversation's rows in that one.
+     *
+     * Used only for writes to the display ARRAY. The status line, the error banner and the token ring are
+     * chrome, not transcript, and stay on `active()`.
+     */
+    const ownsView = () => viewTokenRef.current.owner === genConvId;
     // One id per generation, shared by everything this turn spends (see RunCtx.turnId).
     const turnId = `${genConvId}-${Date.now().toString(36)}`;
     /**
@@ -1823,7 +1862,7 @@ function ChatAgent() {
       // conversation, and the append fallback would then put this turn's finished call into THAT transcript.
       // The result is not lost — it is persisted under this conversation and rebuilt when it is opened again.
       replaceDisplay: (target, next) => {
-        if (active()) completeDisplay(target, next);
+        if (ownsView()) completeDisplay(target, next);
       },
     });
 
@@ -1863,7 +1902,7 @@ function ChatAgent() {
       convId: genConvId,
       turnId,
       signal: ctrl.signal,
-      push: (m) => { if (active()) pushDisplay(m); },
+      push: (m) => { if (ownsView()) pushDisplay(m); },
       // Routed through the boundary rather than calling setStatus directly: this is the §13 contract in use,
       // and it is what lets the same handlers run under a test boundary in M5.
       status: (s) => boundary.onEvent({ type: "status", text: s }),
@@ -2149,6 +2188,7 @@ function ChatAgent() {
           drainDelegations,
           drainJobEvents,
           displayRef,
+          viewTokenRef,
           setDisplay,
           setCtxTokens,
           diagRef,
@@ -2209,7 +2249,7 @@ function ChatAgent() {
         }
         roundLog.lastWire = wrapWire;
         roundLog.lastContent = wrapMsg?.content ?? "";
-        if (roundLog.lastContent && active()) pushDisplay({ kind: "assistant", content: roundLog.lastContent });
+        if (roundLog.lastContent && ownsView()) pushDisplay({ kind: "assistant", content: roundLog.lastContent });
         if (roundLog.lastContent) {
           store.appendMessage(genConvId, {
             role: "assistant",

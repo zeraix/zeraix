@@ -54,11 +54,23 @@ test("the network tools pass Stop down to the socket", () => {
 test("every disk mutator refuses to run after Stop", () => {
   // A small window — between dispatch and the write — but it is the difference between "the user cancelled and
   // nothing happened" and "the user cancelled and a file moved".
+  //
+  // These five used to be handlers here, each opening with its own `throwIfAborted(signal)`. They are served by
+  // the Rust runtime now, where the check is made ONCE for every tool in `ToolRegistry::execute` ("Cheap
+  // pre-check: if the caller already gave up, do not start work at all") — so the guarantee is no longer
+  // something each tool can forget, and the JS handlers are gone rather than silently skipping the check.
+  //
+  // What is pinned here is the routing that makes that true: the runtime must be the only thing serving them.
+  // If one reappears as a handler in this file, or drops out of RUNTIME_ONLY_TOOLS, this fires.
+  const bridge = fs.readFileSync(path.join(root, "electron/tools/rustRuntime.mjs"), "utf8");
+  const runtimeOnly = bridge.slice(bridge.indexOf("const RUNTIME_ONLY_TOOLS"), bridge.indexOf("];", bridge.indexOf("const RUNTIME_ONLY_TOOLS")));
   for (const name of ["append_file", "delete_file", "copy_file", "move_file", "create_directory"]) {
-    const body = handler(name);
-    assert.match(body, /\{ signal \} = \{\}\)/, `${name} accepts the signal`);
-    assert.match(body, /throwIfAborted\(signal\)/, `${name} checks it before touching the disk`);
+    assert.ok(runtimeOnly.includes(`"${name}"`), `${name} is served by the runtime`);
+    assert.equal(toolkit.indexOf(`  async ${name}(`), -1, `${name} has no JS handler to bypass the runtime's check`);
   }
+  // And the check the runtime makes on their behalf still exists.
+  const registry = fs.readFileSync(path.join(root, "runtime/crates/agent-tools/src/registry.rs"), "utf8");
+  assert.match(registry, /ctx\.check_cancelled\(\)\?;/, "the runtime pre-checks cancellation before any tool runs");
 });
 
 test("a stopped handler throws, so it needs no contract of its own", () => {

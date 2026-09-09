@@ -1356,8 +1356,7 @@ fn run_params(endpoint: &str, workdir: &str, run_id: &str, messages: serde_json:
         "run_id": run_id,
         "workdir": workdir,
         "provider": { "endpoint": endpoint, "model": "test-model" },
-        "messages": messages,
-        "max_turns": 8
+        "messages": messages
     })
 }
 
@@ -1427,9 +1426,13 @@ fn a_tool_call_is_executed_by_the_runtime_and_fed_back_to_the_model() {
     assert_eq!(result["prompt_tokens"], 16);
 }
 
-/// A turn stopped by its own limit is reported as stopped, not as finished.
+/// A turn cut short is reported as stopped, not as finished.
+///
+/// It used to be cut short by `max_turns`, which the host set to 3 here. The round ceilings are gone, so what
+/// ends this run is the doom-loop detector — twelve identical `file_info` calls produce no new information —
+/// and that is the point worth keeping: the run must not come back as `completed`.
 #[test]
-fn a_run_that_hits_its_turn_cap_says_so_rather_than_reporting_success() {
+fn a_run_cut_short_says_so_rather_than_reporting_success() {
     let looping: Vec<String> = (0..12)
         .map(|i| assistant_tool_call(&format!("c{i}"), "file_info", serde_json::json!({ "path": "." })))
         .collect();
@@ -1437,12 +1440,11 @@ fn a_run_that_hits_its_turn_cap_says_so_rather_than_reporting_success() {
     let mut rt = Runtime::start();
     rt.init();
 
-    let mut params = run_params(&endpoint, ".", "run-3", serde_json::json!([{ "role": "user", "content": "go" }]));
-    params["max_turns"] = serde_json::json!(3);
+    let params = run_params(&endpoint, ".", "run-3", serde_json::json!([{ "role": "user", "content": "go" }]));
     let r = rt.call("agent.run", params);
     let result = &r["result"];
     let reason = result["stop_reason"].as_str().unwrap_or("");
-    assert!(reason == "max-turns" || reason == "doom-loop", "unexpected reason: {reason} in {result}");
+    assert_eq!(reason, "doom-loop", "unexpected reason: {reason} in {result}");
     assert_ne!(reason, "completed", "a run cut short must never read as finished");
 }
 
@@ -1984,8 +1986,7 @@ fn a_streamed_run_pushes_its_tokens_as_they_arrive() {
             "run_id": "stream-1",
             "workdir": ".",
             "provider": { "endpoint": endpoint, "model": "test-model", "stream": true },
-            "messages": [{ "role": "user", "content": "hi" }],
-            "max_turns": 4
+            "messages": [{ "role": "user", "content": "hi" }]
         }),
     );
 

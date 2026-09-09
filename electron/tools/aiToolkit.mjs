@@ -498,181 +498,11 @@ function resolveInside(p, { write = false } = {}) {
   return resolvePath(p, { workdir: WORKDIR, assetDir: ASSET_DIR, write });
 }
 
-/**
- * For display: a path relative to WORKDIR (with slashes normalized).
- *
- * Relative on purpose — it is what the model passes back to the next tool call, and an absolute path in
- * that position invites it to start addressing files outside the workspace.
- *
- * But relative ALONE is what made "the AI said it wrote the file and it is not in my folder" a real
- * report: the working directory defaults to a path buried in userData, so `Wrote 6535 bytes to
- * minecraft-game/index.html` named a location the user had no way to find. Every tool that puts a file
- * somewhere therefore reports the absolute path alongside it. Reads and searches deliberately do not —
- * they return many paths, and repeating the workspace prefix on each would cost tokens to say nothing.
- */
-function rel(abs) {
-  const r = path.relative(WORKDIR, abs) || ".";
-  return r.split(path.sep).join("/");
-}
-
-// ── Encoding / line-ending preservation ──────────────────────────────────────
-// Writing every edit back as plain "utf8" silently dropped UTF-8 BOMs, flipped CRLF→LF, and turned a GBK/UTF-16
-// file into mojibake (`�`). These helpers let write_file / edit_file / append_file keep a file's original bytes
-// intact outside the actual change — the "preserve encoding / line endings / BOM" guarantees, enforced in code
-// rather than asked for in the prompt (a model cannot reliably deliver them itself).
-
-/** Dominant newline of a text: CRLF only if the file has CRLFs and they are at least as common as bare LFs. */
-function detectNewline(text) {
-  const crlf = (text.match(/\r\n/g) || []).length;
-  const lf = (text.match(/\n/g) || []).length - crlf; // bare LFs (not part of a CRLF)
-  return crlf > 0 && crlf >= lf ? "\r\n" : "\n";
-}
-
-/** Re-emit `content` (held in LF-space) with the given newline style, so an edit never introduces mixed endings. */
-function applyNewline(content, newline) {
-  return newline === "\r\n" ? content.replace(/\n/g, "\r\n") : content;
-}
-
-
-/**
- * Read a text file for editing, capturing the byte-level traits a write must preserve.
- * Returns { text (BOM stripped), hasBom, newline }. Refuses non-UTF-8 files (UTF-16 BOM, or bytes that are not
- * valid UTF-8) instead of decoding them into `�` and clobbering them — surfacing the encoding so the caller can
- * convert deliberately. A missing file propagates the original ENOENT (code preserved) so callers can treat it as new.
- */
-async function readTextForEdit(abs) {
-  const buf = await fs.readFile(abs); // ENOENT propagates with .code intact
-  // UTF-16 / UTF-32 BOM → not our encoding; decoding as UTF-8 would corrupt it.
-  if (buf.length >= 2 && ((buf[0] === 0xff && buf[1] === 0xfe) || (buf[0] === 0xfe && buf[1] === 0xff))) {
-    throw new Error(
-      `${rel(abs)} is UTF-16 encoded, not UTF-8. This tool edits UTF-8 text only; editing it here would corrupt it. ` +
-        `Convert it to UTF-8 first if you mean to work with it as text.`,
-    );
-  }
-  const hasBom = buf.length >= 3 && buf[0] === 0xef && buf[1] === 0xbb && buf[2] === 0xbf;
-  let text;
-  try {
-    text = new TextDecoder("utf-8", { fatal: true }).decode(buf); // throws on any non-UTF-8 byte
-  } catch {
-    throw new Error(
-      `${rel(abs)} is not valid UTF-8 (it may be GBK, GB2312, or another legacy encoding). Editing it as text here ` +
-        `would replace its non-ASCII characters with "�". Convert it to UTF-8 first.`,
-    );
-  }
-  // TextDecoder keeps the BOM as a leading U+FEFF; strip it so offsets/diffs/line counts see clean text, re-add on write.
-  if (hasBom && text.charCodeAt(0) === 0xfeff) text = text.slice(1);
-  return { text, hasBom, newline: detectNewline(text) };
-}
-
-
-
-// ── Unified diff (returned by write_file / edit_file, for the frontend to render + for the model to see changes) ──────
-const DIFF_MAX_LINES = 200; // diff line cap; truncated beyond this (to avoid feeding back too many tokens)
-const DIFF_MAX_INPUT = 6000; // If the combined old+new line count exceeds this, skip the line-by-line diff
-
-/** LCS-based line-by-line diff, returning a sequence of [type, line], where type is ' ' | '-' | '+'. */
-function diffLines(a, b) {
-  const n = a.length;
-  const m = b.length;
-  const dp = Array.from({ length: n + 1 }, () => new Int32Array(m + 1));
-  for (let i = n - 1; i >= 0; i--) {
-    for (let j = m - 1; j >= 0; j--) {
-      dp[i][j] = a[i] === b[j] ? dp[i + 1][j + 1] + 1 : Math.max(dp[i + 1][j], dp[i][j + 1]);
-    }
-  }
-  const ops = [];
-  let i = 0;
-  let j = 0;
-  while (i < n && j < m) {
-    if (a[i] === b[j]) {
-      ops.push([" ", a[i]]);
-      i++;
-      j++;
-    } else if (dp[i + 1][j] >= dp[i][j + 1]) {
-      ops.push(["-", a[i++]]);
-    } else {
-      ops.push(["+", b[j++]]);
-    }
-  }
-  while (i < n) ops.push(["-", a[i++]]);
-  while (j < m) ops.push(["+", b[j++]]);
-  return ops;
-}
-
-
-/**
- * Produce a unified diff (with @@ line-number headers and context), wrapped in a ```diff code block.
- * Returns an empty string if the content is identical; returns a short note for oversized files.
- */
-function makeUnifiedDiff(before, after, context = 3) {
-  if (before === after) return "";
-  const a = before.length ? before.split("\n") : [];
-  const b = after.length ? after.split("\n") : [];
-  if (a.length + b.length > DIFF_MAX_INPUT) {
-    return `\n\`\`\`diff\n@@ ${a.length} → ${b.length} lines (file too large, diff omitted) @@\n\`\`\``;
-  }
-
-  // Line-by-line diff, annotating old and new line numbers.
-  const ops = diffLines(a, b);
-  let oldLn = 1;
-  let newLn = 1;
-  const rows = ops.map(([t, line]) => {
-    const row = { t, line, oldLn: t === "+" ? null : oldLn, newLn: t === "-" ? null : newLn };
-    if (t !== "+") oldLn++;
-    if (t !== "-") newLn++;
-    return row;
-  });
-
-  // Find the changed positions and group them into hunks by context.
-  const changed = [];
-  rows.forEach((r, idx) => {
-    if (r.t !== " ") changed.push(idx);
-  });
-  if (!changed.length) return "";
-  const hunks = [];
-  let start = Math.max(0, changed[0] - context);
-  let end = Math.min(rows.length - 1, changed[0] + context);
-  for (let k = 1; k < changed.length; k++) {
-    if (changed[k] - context <= end + 1) {
-      end = Math.min(rows.length - 1, changed[k] + context);
-    } else {
-      hunks.push([start, end]);
-      start = Math.max(0, changed[k] - context);
-      end = Math.min(rows.length - 1, changed[k] + context);
-    }
-  }
-  hunks.push([start, end]);
-
-  const out = [];
-  let total = 0;
-  for (const [s, e] of hunks) {
-    let oFirst = null;
-    let nFirst = null;
-    let oCount = 0;
-    let nCount = 0;
-    for (let k = s; k <= e; k++) {
-      const r = rows[k];
-      if (r.t !== "+") {
-        if (oFirst == null) oFirst = r.oldLn;
-        oCount++;
-      }
-      if (r.t !== "-") {
-        if (nFirst == null) nFirst = r.newLn;
-        nCount++;
-      }
-    }
-    out.push(`@@ -${oFirst ?? 0},${oCount} +${nFirst ?? 0},${nCount} @@`);
-    for (let k = s; k <= e; k++) {
-      const r = rows[k];
-      out.push((r.t === "+" ? "+" : r.t === "-" ? "-" : " ") + r.line);
-      if (++total >= DIFF_MAX_LINES) {
-        out.push("... (diff truncated)");
-        return `\n\`\`\`diff\n${out.join("\n")}\n\`\`\``;
-      }
-    }
-  }
-  return `\n\`\`\`diff\n${out.join("\n")}\n\`\`\``;
-}
+// The encoding / line-ending preservation helpers and the unified-diff builder were here.
+//
+// They existed for write_file / edit_file / append_file, and every one of those is served by the Rust runtime
+// now — agent-tools keeps the same guarantees in edittext.rs (BOM, CRLF, and the refusal to rewrite a
+// non-UTF-8 file as UTF-8) and builds the diff there too. Nothing in this module edits file text any more.
 
 // ── Project verification (build / test) ───────────────────────────────────────
 const CHECK_TIMEOUT_MS = 180_000; // Per-step timeout for build / test (more lenient than a normal command)
@@ -1019,69 +849,10 @@ const handlers = {
 
 
 
-  async append_file({ path: p, content }, { signal } = {}) {
-    throwIfAborted(signal);
-    const abs = resolveInside(p, { write: true });
-    const add = String(content ?? "");
-    // Same refusal as write_file / edit_file in the Rust runtime (see placeholder.mjs).
-    if (isContextPlaceholder(add)) throw new Error(`content: ${PLACEHOLDER_REFUSED}`);
-    // Only the appended text is normalized to the file's newline style; existing bytes (and any BOM at the start)
-    // are left exactly as they are — an append must not rewrite content it isn't adding.
-    let before = "";
-    let newline = detectNewline(add);
-    try {
-      const info = await readTextForEdit(abs);
-      before = info.text;
-      newline = info.newline;
-    } catch (e) {
-      if (e.code !== "ENOENT") throw e; // non-UTF-8 file: refuse rather than corrupt it
-    }
-    const addNorm = applyNewline(add.replace(/\r\n/g, "\n"), newline);
-    await fs.mkdir(path.dirname(abs), { recursive: true });
-    await fs.appendFile(abs, addNorm, "utf8"); // appends at EOF; existing content and BOM untouched
-    const toLf = (s) => s.replace(/\r\n/g, "\n");
-    const diff = makeUnifiedDiff(toLf(before), toLf(before) + toLf(addNorm));
-    return `Appended ${Buffer.byteLength(addNorm)} bytes to ${rel(abs)} (${abs}).${diff}`;
-  },
-
-  async delete_file({ path: p }, { signal } = {}) {
-    throwIfAborted(signal);
-    const abs = resolveInside(p, { write: true });
-    await fs.unlink(abs);
-    return `Deleted ${rel(abs)}.`;
-  },
-
-  async copy_file({ source, destination }, { signal } = {}) {
-    throwIfAborted(signal);
-    // The source is only read — copying an asset INTO the workspace is the intended way to work with one.
-    const s = resolveInside(source);
-    const d = resolveInside(destination, { write: true });
-    await fs.mkdir(path.dirname(d), { recursive: true });
-    await fs.copyFile(s, d);
-    return `Copied ${rel(s)} -> ${rel(d)} (${d}).`;
-  },
-
-  async move_file({ source, destination }, { signal } = {}) {
-    throwIfAborted(signal);
-    // Both are writes: a move REMOVES the source, which is exactly what the asset folder must not permit.
-    const s = resolveInside(source, { write: true });
-    const d = resolveInside(destination, { write: true });
-    await fs.mkdir(path.dirname(d), { recursive: true });
-    await fs.rm(d, { force: true });
-    await fs.rename(s, d);
-    return `Moved ${rel(s)} -> ${rel(d)} (${d}).`;
-  },
-
-
-
-  async create_directory({ path: p }, { signal } = {}) {
-    throwIfAborted(signal);
-    const abs = resolveInside(p, { write: true });
-    await fs.mkdir(abs, { recursive: true });
-    return `Created directory ${rel(abs)} (${abs}).`;
-  },
-
-
+  // append_file / delete_file / copy_file / move_file / create_directory were here. They are served by the
+  // Rust runtime now (agent-tools: append_file.rs, fsops.rs), which is what put every path a tool touches
+  // behind one Workspace — and with it the read-only asset root these handlers enforced through
+  // resolveInside({ write: true }) and the migrated tools had lost.
 
   async run_command({ command, background, sandbox, notify }, { signal } = {}) {
     await ensureWorkdir();
@@ -1457,7 +1228,10 @@ export async function runTool(name, args = {}, { signal } = {}) {
     //
     // What is left below this line is for the tools the runtime does NOT serve — `append_file`, the ones that
     // touch app state, MCP and plugin tools — which still have handlers of their own.
-    const offloaded = await tryRunTool(name, args ?? {}, { signal, workdir: WORKDIR });
+    // ASSET_DIR travels with WORKDIR: the runtime's Workspace enforces both roots, and without this the
+    // media library is simply not reachable — which is how reads of it broke when the file tools moved
+    // into Rust and left the second root behind in resolvePath.
+    const offloaded = await tryRunTool(name, args ?? {}, { signal, workdir: WORKDIR, assetDir: ASSET_DIR });
     if (offloaded) {
       if (FILE_LIST_MUTATORS.has(name)) {
         invalidateRustFileList(WORKDIR);
@@ -1526,7 +1300,6 @@ export async function runTool(name, args = {}, { signal } = {}) {
 
 /** Corresponds one-to-one with the caller's C++ declarations. */
 import { TOOLS } from "./toolSchemas.mjs";
-import { isContextPlaceholder, PLACEHOLDER_REFUSED } from "./placeholder.mjs";
 
 /**
  * Return the tool declarations in the target LLM format:

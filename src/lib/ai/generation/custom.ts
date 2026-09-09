@@ -200,6 +200,70 @@ export function addCustomEngine(input: {
   return entry;
 }
 
+/** The fields of an added engine the settings form may rewrite. Anything absent is left alone. */
+export interface EngineEdit {
+  label?: string;
+  endpoint?: string;
+  model?: string;
+  format?: EngineFormat;
+  pollUrl?: string;
+  paths?: AsyncJobPaths;
+  pollIntervalMs?: number;
+}
+
+/**
+ * Apply an edit to one engine — the whole decision, with no storage in it, so it can be tested.
+ *
+ * Two things are deliberate. The `id` survives, because it is also the API-key ref: minting a new one
+ * would leave the key stored under an id nothing resolves any more, and pickEngine would then skip the
+ * engine as keyless. And `capability` is not editable at all — it decides which consumer resolves this
+ * entry, and turning an image engine into a video one would keep an image format on a job that polls.
+ *
+ * Emptying an optional field CLEARS it rather than being ignored: an Advanced section the user emptied
+ * means "go back to the documented defaults", and leaving the old override in place would silently
+ * refuse the correction they just made.
+ */
+export function applyEngineEdit(current: CustomEngine, patch: EngineEdit): CustomEngine {
+  const model = patch.model?.trim();
+  const label = patch.label?.trim();
+  const endpoint = patch.endpoint?.trim();
+  const format = patch.format ?? current.format;
+  const next: CustomEngine = {
+    ...current,
+    label: label || model || current.label,
+    ...(endpoint ? { endpoint } : {}),
+    ...(model ? { model } : {}),
+    format,
+  };
+  // Both of these belong to an async job. Rebuilt from the patch rather than merged, so the "cleared it"
+  // case reaches storage; dropped outright for a format that has no jobs to poll.
+  delete next.pollUrl;
+  delete next.paths;
+  delete next.pollIntervalMs;
+  if (format === "async-job") {
+    const pollUrl = (patch.pollUrl ?? current.pollUrl)?.trim();
+    if (pollUrl) next.pollUrl = pollUrl;
+    const paths = patch.paths ?? current.paths;
+    if (hasPaths(paths)) {
+      next.paths = Object.fromEntries(
+        Object.entries(paths).filter(([, v]) => !!v?.trim()).map(([k, v]) => [k, v!.trim()]),
+      );
+    }
+    const interval = patch.pollIntervalMs ?? current.pollIntervalMs;
+    if (interval) next.pollIntervalMs = clampPollInterval(interval);
+  }
+  return next;
+}
+
+/** Rewrite one engine in place. Returns the updated list (unchanged when the id is gone). */
+export function updateCustomEngine(id: string, patch: EngineEdit): CustomEngine[] {
+  const list = loadCustomEngines();
+  if (!list.some((e) => e.id === id)) return list;
+  const next = list.map((e) => (e.id === id ? applyEngineEdit(e, patch) : e));
+  saveCustomEngines(next);
+  return next;
+}
+
 /** Remove one, and its key with it — a stored key for an engine nobody can reach is only a liability. */
 export function removeCustomEngine(id: string): CustomEngine[] {
   const kept = loadCustomEngines().filter((e) => e.id !== id);

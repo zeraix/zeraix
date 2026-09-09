@@ -32,7 +32,6 @@ import {
   TerminalApprover,
   type HighRiskApprover,
 } from "./capability-broker";
-import { DEFAULT_MAX_TURNS } from "./sub-agent-runner";
 import { SUBAGENTS } from "../subagents";
 
 /**
@@ -111,20 +110,11 @@ export const MAX_CONCURRENT_SUBAGENTS: number = tighten(
 /** Grant lifetime. Tasks normally end with an explicit revoke well before this; the TTL is the backstop. */
 export const GRANT_TTL_MS: number = tighten("GRANT_TTL_MS", DEFAULT_GRANT_TTL_MS);
 
-/**
- * Model turns one sub-agent may take before the runner gives up on it. `null` = unbounded, the default.
- *
- * `tighten` cannot express this: it clamps a value DOWN to a hard limit, and there is no longer a hard limit
- * to clamp to. With no default ceiling, an env value is not a tightening but the only ceiling there is — so
- * it is taken at face value, and anything absent or nonsensical leaves the runner unbounded.
+/*
+ * MAX_TURNS_PER_SUBAGENT was here, and is gone with the other round ceilings — see lib/agent/stopPolicy.ts.
+ * It was already unbounded by default, and nothing but the env var could set it, so it capped nothing while
+ * reading as though it did.
  */
-export const MAX_TURNS_PER_SUBAGENT: number | null = (() => {
-  const raw = process.env.MAX_TURNS_PER_SUBAGENT;
-  if (raw === undefined) return DEFAULT_MAX_TURNS;
-  const parsed = Number(raw);
-  if (!Number.isFinite(parsed) || parsed <= 0) return DEFAULT_MAX_TURNS;
-  return Math.floor(parsed);
-})();
 
 /**
  * Where a file-backed audit log should be written, for hosts that use one.
@@ -145,7 +135,6 @@ export interface OrchestrationConfig {
   readonly MAX_SPAWN_DEPTH: number;
   readonly MAX_CONCURRENT_SUBAGENTS: number;
   readonly GRANT_TTL_MS: number;
-  readonly MAX_TURNS_PER_SUBAGENT: number | null;
   readonly AUDIT_LOG_PATH: string;
 }
 
@@ -155,7 +144,6 @@ export const ORCHESTRATION_CONFIG: OrchestrationConfig = Object.freeze({
   MAX_SPAWN_DEPTH,
   MAX_CONCURRENT_SUBAGENTS,
   GRANT_TTL_MS,
-  MAX_TURNS_PER_SUBAGENT,
   AUDIT_LOG_PATH,
 });
 

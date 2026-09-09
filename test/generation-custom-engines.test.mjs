@@ -22,7 +22,7 @@ import assert from "node:assert/strict";
 import { register } from "node:module";
 
 register("./helpers/srcResolve.mjs", import.meta.url);
-const { parseEngines, pickEngine, adapterFor, ENGINE_FORMATS } = await import(
+const { parseEngines, pickEngine, adapterFor, applyEngineEdit, ENGINE_FORMATS } = await import(
   "../src/lib/ai/generation/custom.ts"
 );
 const { resolveEngineSelection } = await import("../src/lib/ai/generation/registry.ts");
@@ -373,4 +373,81 @@ test("the number of checks a job gets follows from the interval and the budget",
 test("an engine's configured interval is stored clamped, so what is saved is what runs", () => {
   const slow = engine({ capability: "video_generation", format: "async-job", pollUrl: "https://x/{id}", pollIntervalMs: 15_000 });
   assert.equal(pickEngine([slow], "video_generation", always).pollIntervalMs, 15_000);
+});
+
+// ── Editing one in place ────────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Correcting an engine used to mean deleting it, and `removeCustomEngine` takes the API key with the
+ * entry — so a typo in an endpoint cost the key too. These pin what an in-place edit must not break.
+ */
+
+const job = (over = {}) =>
+  engine({
+    id: "engine::2",
+    capability: "video_generation",
+    endpoint: "https://video.example.test/v1/videos",
+    model: "my-video-model",
+    format: "async-job",
+    pollUrl: "https://video.example.test/v1/videos/{id}",
+    ...over,
+  });
+
+test("the id survives an edit, because it is also the API-key ref", () => {
+  // A new id would leave the key stored under one nothing resolves, and pickEngine would then skip
+  // this engine as keyless — a working engine silently demoted by a rename.
+  const next = applyEngineEdit(engine(), { label: "Renamed", model: "other-model" });
+  assert.equal(next.id, "engine::1");
+  assert.equal(next.model, "other-model");
+  assert.equal(next.label, "Renamed");
+});
+
+test("the capability is not editable, whatever the patch says", () => {
+  const next = applyEngineEdit(engine(), { capability: "video_generation" });
+  assert.equal(next.capability, "image_generation");
+});
+
+test("clearing the display name falls back to the model, never to blank", () => {
+  assert.equal(applyEngineEdit(engine(), { label: "  ", model: "new-model" }).label, "new-model");
+  assert.equal(applyEngineEdit(engine(), { label: "" }).label, "My images");
+});
+
+test("an emptied Advanced section clears the overrides rather than keeping the old ones", () => {
+  // The whole point of emptying it is "go back to the documented defaults"; merging would refuse the
+  // correction the user just made, and the wrong result path is the failure that costs a whole video.
+  const withPaths = job({ paths: { url: "output.results[0].url" } });
+  const cleared = applyEngineEdit(withPaths, { paths: { taskId: "", status: "", url: "" } });
+  assert.equal(cleared.paths, undefined);
+  // Only the fields actually named are stored.
+  const named = applyEngineEdit(withPaths, { paths: { taskId: " id ", status: "", url: "" } });
+  assert.deepEqual(named.paths, { taskId: "id" });
+});
+
+test("an untouched job keeps its poll configuration", () => {
+  const next = applyEngineEdit(job({ pollIntervalMs: 30_000 }), { model: "v2" });
+  assert.equal(next.pollUrl, "https://video.example.test/v1/videos/{id}");
+  assert.equal(next.pollIntervalMs, 30_000);
+});
+
+test("a poll interval under the floor is clamped on the way in, as it is on the way out", () => {
+  const next = applyEngineEdit(job(), { pollIntervalMs: 1 });
+  assert.ok(next.pollIntervalMs > 1, "a saved interval that reads back as something else is a lie");
+});
+
+test("job-only fields do not survive onto a format that has no job to poll", () => {
+  // An image engine carrying a pollUrl is not wrong so much as meaningless — and it would read back
+  // into the edit form as configuration the user never entered.
+  const next = applyEngineEdit(job(), { format: "openai-image" });
+  assert.equal(next.format, "openai-image");
+  assert.equal(next.pollUrl, undefined);
+  assert.equal(next.paths, undefined);
+  assert.equal(next.pollIntervalMs, undefined);
+});
+
+test("an edited engine still passes the check that decides whether it can run", () => {
+  const next = applyEngineEdit(job(), { endpoint: "https://moved.example.test/v1/videos" });
+  assert.equal(pickEngine([next], "video_generation", always), next);
+  // ...and one edited into a state that cannot collect its result is skipped, not selected.
+  const broken = applyEngineEdit(job(), { pollUrl: "" });
+  assert.equal(pickEngine([broken], "video_generation", always), null);
 });

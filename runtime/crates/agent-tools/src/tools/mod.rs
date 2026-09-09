@@ -9,7 +9,9 @@
 //! `write_file` and `edit_file` came later and deliberately: a tool that can overwrite a file needs a
 //! capability check to exist before it is reachable, and that arrived with `agent-dispatch`.
 
+pub mod append_file;
 pub mod edit_file;
+pub mod fsops;
 pub mod file_info;
 pub mod list_directory;
 pub mod read_file;
@@ -31,4 +33,11 @@ pub fn register_builtin(registry: &mut ToolRegistry) {
     // capability before running one.
     registry.register(Arc::new(write_file::WriteFile));
     registry.register(Arc::new(edit_file::EditFile));
+    // The remaining filesystem mutators, moved off the JS handlers so every path a tool touches is resolved
+    // by one Workspace — which is what restores the read-only asset root to the tools that lost it.
+    registry.register(Arc::new(append_file::AppendFile));
+    registry.register(Arc::new(fsops::DeleteFile));
+    registry.register(Arc::new(fsops::CopyFile));
+    registry.register(Arc::new(fsops::MoveFile));
+    registry.register(Arc::new(fsops::CreateDirectory));
 }

@@ -17,6 +17,7 @@
  * newly appended messages are always sent as-is, never rewritten retroactively, so the prefix [system, summary, …deduplicated tail] stays byte-stable throughout the turn,
  * hitting the prefix cache; stale reads produced by the previous turn are folded only at the "start of the next turn". Never rewrite history mid tool-loop.
  */
+import { marker } from "./contextMarker";
 import { foldReminders, renderSnapshot } from "./reminders";
 import type { ApiMsg, ContentPart } from "./types";
 import { countMessagesTokens, countTokens } from "@/lib/ai/tokenizer";
@@ -116,10 +117,23 @@ const normPath = (p: unknown): string =>
 
 /** Stale-read stub text (model-visible; occurs within the wire view, invisible to the user — the display view is still the full original). */
 const stubText = (path: string): string =>
-  `[…… The earlier read result for "${path}" has been omitted: a later read covered the same lines, or the file was ` +
-  `modified afterward, so rely on the later read / write result; if you still need the content at that time, call read_file again ……]`;
+  marker(
+    "stale-read",
+    `The earlier read result for "${path}" has been omitted: a later read covered the same lines, or the file ` +
+      `was modified afterward, so rely on the later read / write result. If you still need the content as it ` +
+      `was at that point, call read_file again.`,
+    { path },
+  );
 
-/** Prefix marker for the summary message (model-visible). */
+/**
+ * Prefix for the summary message (model-visible).
+ *
+ * Deliberately NOT a `<context-compressed>` marker, though it is the last bracketed thing left in here. The
+ * marker family stands in for content that is GONE and says how to get it back; this labels content that is
+ * present and meant to be used. Wrapping the summary in the same tag would tell the model the text it is
+ * looking at is unavailable, and would make the whole message match the guard that refuses markers as file
+ * content.
+ */
 const SUMMARY_PREFIX =
   "[The following is a summary of the earlier part of this conversation, used to continue the context; if details are missing, re-read the relevant files / command output]\n";
 
@@ -511,8 +525,11 @@ function describeCall(rawName: string, argsJson: string): string {
 }
 
 const releaseText = (desc: string): string =>
-  `[…… Result released: this call belongs to a task that has since completed, so its output is no longer carried in ` +
-  `context. It was: ${desc}. Run it again if you need the content ……]`;
+  marker(
+    "released-result",
+    `This call belongs to a task that has since completed, so its output is no longer carried in context. ` +
+      `It was: ${desc}. Run it again if you need the content.`,
+  );
 
 /**
  * Tool results belonging to rounds that already finished.
@@ -608,15 +625,33 @@ function releaseCallArguments(rawName: string, argsJson: string): string | null 
   for (const f of fields) {
     const v = args[f];
     if (typeof v !== "string" || v.length < MIN_STUB_CHARS) continue;
+    // A note about the context, never a value: a model that saw "content" rendered this way copied the marker
+    // verbatim as the content of its next write_file (2026-09-04), and the file on disk was the marker. The file
+    // tools refuse the marker outright (edittext.rs is_context_placeholder), but the shape here is the first line
+    // of defence — it must read as something the harness removed, never as something to send.
+    //
+    // The line count is back, and its POSITION is the whole reason that is safe. It used to sit in the prose
+    // ("[…… 26 lines elided …"), and on 2026-09-09 a model read it as a quota: it reasoned "26 lines still
+    // exceeds the limit, budget is about 20 lines", split the write into halves, and sent the marker again at
+    // 16 lines — twice, once without a `path` at all. In prose a number is an invitation to satisfy it; in an
+    // attribute on a container tag it is a property of what was removed. The body says outright that it is not
+    // a size limit, and the refusal the tools return says so again.
     const lines = v.split("\n").length;
-    // Phrased as a note about the context, not as a value: a model that saw "content" rendered this way copied the
-    // marker verbatim as the content of its next write_file (2026-09-04), and the file on disk was the marker. The
-    // file tools now refuse the marker outright (edittext.rs is_context_placeholder), but the wording here is the
-    // first line of defence — it must read as something that was removed, never as something to send.
+    const target = path || "the file";
     args[f] =
       f === "old_string"
-        ? `[…… ${lines} lines elided from your context: the text this call replaced. Not a value to reuse ……]`
-        : `[…… ${lines} lines elided from your context: the text you wrote to ${path || "the file"} (read_file it if you need it). Not a value to reuse — a new call must carry the full text ……]`;
+        ? marker(
+            "tool-argument",
+            "The text this call replaced was dropped from your context to save space. It is not a value to reuse.",
+            { lines },
+          )
+        : marker(
+            "tool-argument",
+            `The text you wrote to ${target} was dropped from your context to save space. It is not a size ` +
+              `limit and not a value to reuse: call read_file on ${target} to get it back, and send the full ` +
+              `text in any new call.`,
+            { path: path || undefined, lines },
+          );
     changed = true;
   }
   if (!changed) return null;
@@ -703,9 +738,12 @@ function summarizeEditDiff(content: string): string {
   if (!ranges.length) return content;
   return (
     `${content.slice(0, block.index)}\n` +
-    `[…… The diff has been omitted from context: its added lines are the same text you passed as new_string just above. ` +
-    `Changed lines in the file as it now stands: ${ranges.join(", ")}. Call read_file on those ranges if you need to see ` +
-    `the current text ……]`
+    marker(
+      "diff",
+      `The diff has been omitted: its added lines are the same text you passed as new_string just above. ` +
+        `Call read_file on the changed ranges if you need to see the current text.`,
+      { ranges: ranges.join(", ") },
+    )
   );
 }
 

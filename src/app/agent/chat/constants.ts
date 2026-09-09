@@ -9,8 +9,12 @@ import developmentModeMd from "./system/development.mode.md";
 // enforced limits — "MAX_TOOL_ROUNDS = 100" in particular — while the loop was in fact unbounded. A limit
 // nothing reads is worse than no limit: docs/agent-runtime-loop.md §20 rule 7 forbids competing Stop
 // Policies, and a plausible-looking dead constant is how a second one gets written by mistake. Every real
-// limit now lives in lib/agent/stopPolicy.ts. Their storage keys in constants/Agent.ts are left alone: those
-// are a persisted config surface (§16), not code.
+// limit now lives in lib/agent/stopPolicy.ts.
+//
+// Their storage keys in constants/Agent.ts used to be left alone, as a persisted config surface (§16). They
+// are gone too now, on the same argument one level up: a SETTING nothing reads promises the user a limit the
+// product does not enforce. `agent.limits.maxConsecutiveTimeouts` is the one that stayed, because it counts
+// timeouts rather than healthy rounds.
 
 /**
  * The chat's reading column.

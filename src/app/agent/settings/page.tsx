@@ -20,7 +20,7 @@ import { useT } from "@/lib/i18n";
 import { cn } from "@/lib/utils";
 import CustomScrollbar, { PAGE_SCROLLBAR } from "@/components/CustomScrollbar";
 import { TITLE_BAR_HEIGHT_PX } from "@/components/layout/agent/titleBar";
-import { type SectionId, NAV, NAV_GROUPS, SECTION_KEYS, makeMatcher } from "./components/nav";
+import { type SectionId, NAV, NAV_GROUPS, SECTION_KEYS, makeMatcher, setSettingsHash } from "./components/nav";
 import { parseSettingsHash } from "@/lib/deepLink";
 import { AccountSection } from "./components/AccountSection";
 import { ModelsSection } from "./components/ModelsSection";
@@ -89,10 +89,17 @@ export default function AgentSettingsPage() {
   const known = (id: string | null): id is SectionId => !!id && NAV.some((n) => n.id === id);
   const section: SectionId = known(hashSection) ? hashSection : known(paramSection) ? paramSection : "account";
   /** Selecting a section writes the hash, which is what re-renders this page — and leaves a URL
-   *  worth copying. Assignment rather than replaceState: only assignment fires hashchange. */
+   *  worth copying. It REPLACES the entry rather than pushing one: see setSettingsHash. */
   const selectSection = useCallback((id: SectionId) => {
-    window.location.hash = id;
+    setSettingsHash(id);
   }, []);
+  /** Leave settings for wherever it was opened from — one step, because switching sections no
+   *  longer leaves entries behind. The fallback covers a window whose first page was settings
+   *  itself (a deep link into a fresh window), where there is nothing to go back to. */
+  const goBack = useCallback(() => {
+    if (typeof window !== "undefined" && window.history.length > 1) router.back();
+    else router.push("/agent");
+  }, [router]);
   const [query, setQuery] = useState("");
 
   const name = userInfo?.username || userInfo?.name || "Username";
@@ -150,7 +157,7 @@ export default function AgentSettingsPage() {
         <div className="mb-3 mt-6 flex items-center gap-2 px-1">
           <button
             type="button"
-            onClick={() => router.back()}
+            onClick={goBack}
             aria-label={t("settings.back")}
             title={t("settings.back")}
             className="flex size-7 shrink-0 items-center justify-center rounded-md text-ink-muted transition hover:bg-surface hover:text-ink"

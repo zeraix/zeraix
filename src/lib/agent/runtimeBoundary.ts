@@ -59,11 +59,14 @@ export type RuntimeEvent =
   /** The run ended, with the Stop Policy's reason (§11). */
   | { type: "stopped"; reason: StopReason; detail?: string };
 
-/** §11's structured stop reasons. Fixed set: adding one is a deliberate change to the Stop Policy. */
+/**
+ * §11's structured stop reasons. Fixed set: adding one is a deliberate change to the Stop Policy.
+ *
+ * `max-turns` and `max-tool-calls` were here and are gone with the ceilings that produced them — every reason
+ * left names something that went wrong or finished, never a tally that ran out.
+ */
 export type StopReason =
   | "completed"
-  | "max-turns"
-  | "max-tool-calls"
   | "doom-loop"
   | "cancelled"
   | "error"

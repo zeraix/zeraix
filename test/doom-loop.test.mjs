@@ -173,6 +173,59 @@ test("a round with no tool calls leaves the streak untouched", () => {
   assert.equal(verdict.escalate, false);
 });
 
+// ── The forceContinue backstop ──────────────────────────────────────────────────────────────────────────
+//
+// A host may ask the loop for another pass (`forceContinue`) after a round that called no tools and returned
+// no text. Nothing about such a round is visible to this detector, and the turn cap used to be the only thing
+// that stopped a host nudging unconditionally — removing the round ceilings turned that into a loop that ran
+// the test runner out of memory. A round that produced NO tool calls and NO text is by definition a round
+// that produced no new information, which is the one thing this detector exists to notice.
+
+test("an empty forced round counts as a stall, but one of them never escalates", () => {
+  const g = createDoomLoopState();
+  const v = closeRound(g, [], { producedNothing: true });
+  assert.equal(v.stalledRounds, 1);
+  assert.equal(v.escalate, false, "one quiet round is not a loop");
+});
+
+test("empty forced rounds escalate on the same streak as any other stall", () => {
+  const g = createDoomLoopState();
+  let escalated = 0;
+  for (let i = 0; i < STALLED_ROUNDS_TO_ESCALATE; i++) {
+    if (closeRound(g, [], { producedNothing: true }).escalate) escalated++;
+  }
+  assert.equal(g.stalledRounds, STALLED_ROUNDS_TO_ESCALATE);
+  assert.equal(escalated, 1, "escalates exactly once, like every other stall");
+});
+
+test("a productive round resets a streak built from empty forced rounds", () => {
+  const g = createDoomLoopState();
+  closeRound(g, [], { producedNothing: true });
+  closeRound(g, [], { producedNothing: true });
+  assert.equal(g.stalledRounds, 2);
+  // A real tool call with a real result is progress, and progress clears the streak.
+  round(g, "read_file", { path: "fresh.ts" }, "NEW CONTENT");
+  assert.equal(g.stalledRounds, 0, "work done must not be held against the next quiet round");
+});
+
+test("a forced round that produced TEXT is not counted as a stall", () => {
+  // `producedNothing` is false when the model said something, so the streak is left alone rather than
+  // punished — the host nudging after a real answer is a legitimate pattern (the goal loop does it).
+  const g = createDoomLoopState();
+  closeRound(g, [], { producedNothing: true });
+  const before = g.stalledRounds;
+  const v = closeRound(g, [], { producedNothing: false });
+  assert.equal(v.stalledRounds, before);
+  assert.equal(v.escalate, false);
+});
+
+test("omitting the option keeps the old behaviour exactly", () => {
+  const g = createDoomLoopState();
+  round(g, "read_file", { path: "a.ts" }, "SAME");
+  const before = g.stalledRounds;
+  assert.equal(closeRound(g, []).stalledRounds, before);
+});
+
 test("each turn starts clean: a fresh guard shares nothing with the last one", () => {
   const first = createDoomLoopState();
   for (let i = 0; i < STALLED_ROUNDS_TO_ESCALATE + 1; i++) round(first, "read_file", { path: "a.ts" }, "SAME");

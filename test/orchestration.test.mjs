@@ -38,7 +38,7 @@ const { CEILING_TOOLS, createConfiguredBroker } = await import(
   "../src/lib/ai/orchestration/config.ts"
 );
 const { SUBAGENTS, CODER_TOOLS, READONLY_TOOLS, WEB_TOOLS } = await import("../src/lib/ai/subagents.ts");
-const { runAnonymousSubAgent, ToolUseViolationError, MaxTurnsExceededError } = await import(
+const { runAnonymousSubAgent, ToolUseViolationError } = await import(
   "../src/lib/ai/orchestration/sub-agent-runner.ts"
 );
 const { createSpawnSubAgentHandler, formatSpawnResult, SPAWN_SUB_AGENT_TOOL } = await import(
@@ -385,18 +385,21 @@ test("the risk table cannot be rewritten at runtime", () => {
   assert.equal(TOOL_RISK.get("run_command"), "high");
 });
 
-test("the runner gives up rather than looping forever", async () => {
+test("the runner keeps going until the model concludes, however many turns that takes", async () => {
+  // This asserted the opposite: `maxTurns: 4` made the runner THROW MaxTurnsExceededError, discarding four
+  // turns of paid-for work. The ceiling and the error are both gone — a delegation ends on a final answer, an
+  // out-of-grant tool call, or the wall-clock timeout, never on a tally.
   const { broker } = makeBroker();
   const grant = await broker.requestGrant(grantReq(["read_file"]));
+  // Ten tool-calling turns; the eleventh falls off the script and scriptedClient answers with the final
+  // "done" that ends the loop.
   const client = scriptedClient(
     Array.from({ length: 10 }, (_, i) => callsTool("read_file", { path: `f${i}` }, `c${i}`)),
   );
 
-  await assert.rejects(
-    () => runAnonymousSubAgent(grant, "loop", broker, { client, maxTurns: 4, ...TOOLS_OPT }),
-    MaxTurnsExceededError,
-  );
-  assert.equal(client.calls, 4);
+  const out = await runAnonymousSubAgent(grant, "loop", broker, { client, ...TOOLS_OPT });
+  assert.equal(out, "done");
+  assert.equal(client.calls, 11, "every turn ran; none was discarded for being the fifth");
 });
 
 // ── 7. TTL expiry ─────────────────────────────────────────────────────────────────────────

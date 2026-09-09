@@ -24,7 +24,6 @@
 import type { ToolDeclaration, ToolProvider } from "./capabilities";
 import { ConcurrencyLimitError, type CapabilityBroker, type Grant } from "./capability-broker";
 import {
-  MaxTurnsExceededError,
   ToolUseViolationError,
   runAnonymousSubAgent,
   type ModelClient,
@@ -139,7 +138,6 @@ export interface OrchestratorContext {
   requesterId: string;
   /** The orchestrator's grant, when it has one; children chain to it in the call tree. */
   parentGrant?: Grant | null;
-  maxTurns?: number | null;
   maxTokens?: number;
 }
 
@@ -247,7 +245,6 @@ export function createSpawnSubAgentHandler(
       const output = await runAnonymousSubAgent(grant, task, broker, {
         client,
         tools,
-        maxTurns: ctx.maxTurns,
         maxTokens: ctx.maxTokens,
       });
       return { ...base, status: "completed", output, error: null, retryable: false };
@@ -263,10 +260,7 @@ export function createSpawnSubAgentHandler(
           retryable: false,
         };
       }
-      const detail =
-        e instanceof MaxTurnsExceededError
-          ? `The sub-agent did not finish within its turn limit (${e.turns}).`
-          : `The sub-agent failed: ${e instanceof Error ? e.message : String(e)}`;
+      const detail = `The sub-agent failed: ${e instanceof Error ? e.message : String(e)}`;
       return { ...base, status: "failed", output: null, error: detail, retryable: false };
     } finally {
       // Reclaimed the moment the task ends rather than at TTL, on every path including the failures above:

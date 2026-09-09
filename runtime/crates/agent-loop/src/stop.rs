@@ -5,19 +5,22 @@
 //! `MAX_GOAL_AUTO_ROUNDS`, a per-sub-agent cap and the cancel path each ended runs independently and only one
 //! of them said why.
 //!
-//! ## Why the limits default to off
+//! ## There are no round ceilings
 //!
-//! `max_turns` and `max_tool_calls` are `None` by default, meaning unbounded, and that is not timidity. A cap
-//! that fires mid-task turns a long job into a truncated one with no way for the user to ask for the rest, and
-//! this runtime already has three mechanisms that stop a run for a *reason*: cancellation, the doom-loop
-//! detector, and consecutive failures. A turn cap is the blunt one, so it is available and off.
+//! `max_turns` and `max_tool_calls` were here, `None` by default. They are gone, along with the
+//! `agent.limits.*` settings that were their configuration surface on the host side. Nothing ever set them,
+//! so they read as enforced limits while the loop was unbounded in fact — and a limit nothing reads is worse
+//! than no limit, because it is how a second, competing Stop Policy gets written by mistake (§20 rule 7).
 //!
-//! That now holds for [`StopPolicyConfig::for_sub_agent`] too. It used to be the exception, on the reasoning
-//! that a delegation the user is not watching cannot be asked whether it wants to keep going — but the count
-//! was doing the wrong job. A sub-agent that is working reaches 120 calls on any real exploration of a large
-//! repository, and gets cut off mid-task; a sub-agent that is *stuck* is caught by the doom-loop detector
-//! long before 120, and caught by what it is doing rather than by how much of it it has done. What is left
-//! bounding an unwatched delegation is `task_timeout`, which measures the thing actually worth bounding.
+//! The judgement behind that is older than the cleanup. A cap that fires mid-task turns a long job into a
+//! truncated one with no way for the user to ask for the rest, and a count cannot tell a run that is working
+//! from one that is stuck: a sub-agent doing a real exploration of a large repository reaches 120 lookups
+//! while doing exactly what it was asked to.
+//!
+//! What stops a run instead fires on BEHAVIOUR or on WALL CLOCK, and each can say which one it was:
+//! cancellation, a provider error, the doom-loop detector, consecutive failures, a context window about to
+//! overflow, and the two timeouts. The timeouts are what still bound an unwatched delegation — see
+//! [`StopPolicyConfig::for_sub_agent`] — and they measure the thing actually worth bounding.
 
 use std::time::Duration;
 
@@ -38,8 +41,6 @@ pub enum StopReason {
     Cancelled,
     Error,
     DoomLoop,
-    MaxTurns,
-    MaxToolCalls,
     ContextLimit,
     /// The whole run ran out of wall clock.
     TaskTimeout,
@@ -58,18 +59,14 @@ impl StopReason {
 // No `Eq`: `context_limit_fraction` is a fraction, and a float has no total equality to derive.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct StopPolicyConfig {
-    /// Provider turns allowed in one user turn. `None` is unbounded.
-    pub max_turns: Option<u32>,
-    /// Tool calls allowed in one user turn. `None` is unbounded.
-    pub max_tool_calls: Option<u32>,
     /// Consecutive tool failures after which the run is not going to recover on its own.
     pub max_consecutive_failures: Option<u32>,
     /// Fraction of the context window at which to stop rather than be truncated by the provider.
     pub context_limit_fraction: Option<f64>,
     /// Wall-clock ceiling for the whole run (§9.1's Task Timeout).
     ///
-    /// `None` by default for the main agent, for the same reason the turn cap is: a deadline that fires
-    /// mid-task turns a long job into a truncated one, and the user watching it can stop it themselves.
+    /// `None` by default for the main agent, for the same reason the turn caps were removed: a deadline that
+    /// fires mid-task turns a long job into a truncated one, and the user watching it can stop it themselves.
     pub task_timeout: Option<Duration>,
     /// Wall-clock ceiling for ONE round — one model call and the tools it asked for (§9.1's Runtime Timeout).
     ///
@@ -83,8 +80,6 @@ impl Default for StopPolicyConfig {
     /// The main agent's policy: bounded only where a bound reports something real.
     fn default() -> Self {
         Self {
-            max_turns: None,
-            max_tool_calls: None,
             max_consecutive_failures: Some(6),
             context_limit_fraction: Some(0.95),
             task_timeout: None,
@@ -96,10 +91,10 @@ impl Default for StopPolicyConfig {
 impl StopPolicyConfig {
     /// A delegation's policy.
     ///
-    /// Bounded in wall clock only. The count caps this used to carry (40 turns, 120 tool calls) are gone: they
-    /// could not tell a delegation that was working from one that was stuck, and on a large repository an
-    /// exploration reaches 120 lookups while doing exactly what it was asked to. Stopping there produced a
-    /// truncated answer that read like a finished one, which is the worst of both.
+    /// Bounded in wall clock only, which is now the only kind of bound there is. The count caps this used to
+    /// carry (40 turns, 120 tool calls) could not tell a delegation that was working from one that was stuck,
+    /// and on a large repository an exploration reaches 120 lookups while doing exactly what it was asked to.
+    /// Stopping there produced a truncated answer that read like a finished one, which is the worst of both.
     ///
     /// A stuck delegation is still caught, by the mechanisms that stop a run for a *reason* — the doom-loop
     /// detector and consecutive failures — and those fire on the behaviour rather than on the tally. The
@@ -215,16 +210,6 @@ pub fn decide_stop(input: &StopInput<'_>, cfg: &StopPolicyConfig) -> StopDecisio
         return StopDecision::halt(StopReason::Completed, None);
     }
 
-    if let Some(max) = cfg.max_turns {
-        if s.round() >= max {
-            return StopDecision::halt(StopReason::MaxTurns, Some(format!("{} of {max}", s.round())));
-        }
-    }
-    if let Some(max) = cfg.max_tool_calls {
-        if s.tool_calls() >= max {
-            return StopDecision::halt(StopReason::MaxToolCalls, Some(format!("{} of {max}", s.tool_calls())));
-        }
-    }
     if let Some(max) = cfg.max_consecutive_failures {
         if s.consecutive_failures() >= max {
             return StopDecision::halt(
@@ -346,13 +331,15 @@ mod tests {
         }
     }
 
+    /// The main agent is never stopped for the SIZE of what it has done.
+    ///
+    /// There is no config to assert `None` on any more — the ceilings are gone rather than defaulted off — so
+    /// what is pinned is the behaviour they used to control: five hundred rounds and five hundred tool calls
+    /// is not, on its own, a reason to end a run.
     #[test]
-    fn the_limits_are_off_by_default_for_the_main_agent() {
-        let cfg = StopPolicyConfig::default();
-        assert_eq!(cfg.max_turns, None);
-        assert_eq!(cfg.max_tool_calls, None);
+    fn a_busy_main_agent_is_not_stopped_by_a_tally() {
         let s = state_after(500, 500);
-        assert!(!decide_stop(&input(&s), &cfg).stop);
+        assert!(!decide_stop(&input(&s), &StopPolicyConfig::default()).stop);
     }
 
     /// A delegation is not stopped for having done a lot of work.
@@ -363,10 +350,10 @@ mod tests {
     #[test]
     fn a_sub_agent_is_not_stopped_by_a_tally() {
         let cfg = StopPolicyConfig::for_sub_agent();
-        assert_eq!(cfg.max_turns, None);
-        assert_eq!(cfg.max_tool_calls, None);
         let s = state_after(500, 500);
         assert!(!decide_stop(&input(&s), &cfg).stop, "a busy delegation must not be cut off by its count");
+        // What DOES bound an unwatched delegation, and the reason removing the counts is safe.
+        assert!(cfg.task_timeout.is_some(), "a delegation nobody is watching still has a deadline");
     }
 
     #[test]
@@ -393,15 +380,18 @@ mod tests {
 
     /// A run that was going to finish anyway must never be reported as having hit a limit.
     ///
-    /// Written against an explicitly capped config rather than `for_sub_agent`, which no longer carries a
-    /// count: against an uncapped policy this would pass without exercising anything, and a test that cannot
-    /// fail is worse than no test. The first assertion pins that the cap really is live at this state, so the
-    /// second one is about precedence rather than about there being nothing to take precedence over.
+    /// The round ceilings this used to be written against are gone, so the surviving limit with a live
+    /// threshold is the consecutive-failure one. The first assertion pins that it really does fire at this
+    /// state, so the second is about PRECEDENCE rather than about there being nothing to take precedence over.
     #[test]
-    fn a_final_answer_on_the_last_allowed_round_completes_rather_than_hitting_the_cap() {
-        let cfg = StopPolicyConfig { max_turns: Some(40), ..StopPolicyConfig::default() };
-        let s = state_after(40, 0);
-        assert_eq!(decide_stop(&input(&s), &cfg).reason, Some(StopReason::MaxTurns));
+    fn a_final_answer_completes_rather_than_reporting_the_limit_it_was_about_to_hit() {
+        let cfg = StopPolicyConfig::default();
+        let mut s = ExecutionState::new();
+        s.begin_round();
+        for _ in 0..6 {
+            s.record_tool_result("run_command", false);
+        }
+        assert_eq!(decide_stop(&input(&s), &cfg).reason, Some(StopReason::Error));
         let d = decide_stop(&StopInput { final_response: true, ..input(&s) }, &cfg);
         assert_eq!(d.reason, Some(StopReason::Completed));
     }
@@ -413,8 +403,6 @@ mod tests {
             StopReason::Cancelled,
             StopReason::Error,
             StopReason::DoomLoop,
-            StopReason::MaxTurns,
-            StopReason::MaxToolCalls,
             StopReason::ContextLimit,
             StopReason::TaskTimeout,
             StopReason::RoundTimeout,

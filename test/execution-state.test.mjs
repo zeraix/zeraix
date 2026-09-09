@@ -143,10 +143,14 @@ const running = (over = {}) => ({
   ...over,
 });
 
-test("the defaults reproduce today's behaviour: nothing is capped", () => {
-  assert.equal(DEFAULT_STOP_POLICY.maxTurns, null, "a turn cap is a product decision, not a refactor");
-  assert.equal(DEFAULT_STOP_POLICY.maxToolCalls, null);
+test("nothing is capped by size: the round ceilings do not exist to be configured", () => {
+  // They were `maxTurns: null` / `maxToolCalls: null` here. Removed rather than defaulted off, because a
+  // setting nothing reads reads as an enforced limit — see the header of lib/agent/stopPolicy.ts.
+  assert.ok(!("maxTurns" in DEFAULT_STOP_POLICY), "a turn ceiling must not come back as a knob");
+  assert.ok(!("maxToolCalls" in DEFAULT_STOP_POLICY), "nor a tool-call ceiling");
   assert.equal(DEFAULT_STOP_POLICY.contextLimitFraction, null);
+  // What IS on by default, and why removing the counts is safe: runaway failure still ends a run.
+  assert.equal(DEFAULT_STOP_POLICY.maxConsecutiveFailures, 10);
 });
 
 test("a healthy long run is never stopped by default", () => {
@@ -187,25 +191,19 @@ test("a met goal completes it", () => {
 });
 
 test("limits are checked last, so a finishing run is never blamed on one", () => {
-  const d = decideStop(running({ finalResponse: true, state: { ...initExecutionState(), round: 99 } }), {
-    ...DEFAULT_STOP_POLICY,
-    maxTurns: 10,
-  });
+  // Written against the surviving limit with a live threshold: the run is one failure short of the
+  // consecutive-failure stop AND answering, and the answer must win.
+  const d = decideStop(
+    running({ finalResponse: true, state: { ...initExecutionState(), round: 99, consecutiveFailures: 10 } }),
+  );
   assert.equal(d.reason, "completed");
 });
 
-test("max turns fires when configured, and reports what it counted", () => {
-  const d = decideStop(running({ state: { ...initExecutionState(), round: 10 } }), { ...DEFAULT_STOP_POLICY, maxTurns: 10 });
-  assert.equal(d.reason, "max-turns");
-  assert.equal(d.detail, "10 of 10");
-});
-
-test("max tool calls fires when configured", () => {
-  const d = decideStop(running({ state: { ...initExecutionState(), toolCalls: 50 } }), {
-    ...DEFAULT_STOP_POLICY,
-    maxToolCalls: 50,
-  });
-  assert.equal(d.reason, "max-tool-calls");
+test("no tally ends a run, however large it gets", () => {
+  // The two tests that used to sit here configured maxTurns/maxToolCalls and asserted they fired. There is
+  // nothing to configure now, so what is pinned is the absence: a run is not stopped for its size.
+  const huge = { ...initExecutionState(), round: 10_000, toolCalls: 100_000 };
+  assert.equal(decideStop(running({ state: huge })).stop, false);
 });
 
 test("runaway failure stops the run even with every other limit off", () => {

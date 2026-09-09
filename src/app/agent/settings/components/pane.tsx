@@ -19,6 +19,7 @@
 import type React from "react";
 import { Link2 } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { setSettingsHash } from "./nav";
 
 /** The bordered surface a group's controls sit on. */
 export const PANEL = "rounded-xl border border-line bg-surface-muted/40 px-4 py-3.5";
@@ -113,9 +114,7 @@ export function Group({
             {anchor ? (
               <button
                 type="button"
-                onClick={() => {
-                  window.location.hash = anchor;
-                }}
+                onClick={() => setSettingsHash(anchor)}
                 aria-label={title}
                 className="shrink-0 rounded p-0.5 text-ink-subtle opacity-0 transition hover:text-ink-muted focus-visible:opacity-100 group-hover/heading:opacity-100"
               >

@@ -1,3 +1,4 @@
+import { marker, selfClosingMarker } from "./contextMarker";
 /**
  * Context compression: compress overly long tool results into "head + elision notice + tail", then feed them back to the model / persist them.
  *
@@ -48,7 +49,7 @@ const DIFF_BLOCK = /```diff\n([\s\S]*?)\n```/;
  * carries no line numbers — so the marker cannot shift the numbering of the rows after it. A plain context
  * line would have advanced both counters and quietly mislabelled every following line.
  */
-const diffElision = (lines: number) => `\\ […… ${lines} diff lines elided ……]`;
+const diffElision = (lines: number) => `\\ ${selfClosingMarker("diff-lines", { lines })}`;
 
 /**
  * Shorten a diff by whole lines, keeping it a valid diff.
@@ -106,11 +107,14 @@ export function capToolOutput(content: string): string {
   const elided = content.length - HEAD_CHARS - TAIL_CHARS;
   return (
     `${head}\n\n` +
-    `[…… TRUNCATED — this result is incomplete. Showing ${HEAD_CHARS} characters from the start and ` +
-    `${TAIL_CHARS} from the end of ${content.length} total; ${elided} characters elided from the middle. ` +
-    `Repeating this call unchanged returns the same truncation. To reach the elided part, call the tool again ` +
-    `with NARROWER parameters — a more specific search_in_files query, a name pattern to scope it, or a command ` +
-    `that prints less. If what you already have answers the question, use it and say the output was truncated ……]\n\n` +
-    `${tail}`
+    marker(
+      "truncated",
+      `This result is incomplete: the middle was removed. Repeating this call unchanged returns the same ` +
+        `truncation. To reach the elided part, call the tool again with NARROWER parameters — a more specific ` +
+        `search_in_files query, a name pattern to scope it, or a command that prints less. If what you already ` +
+        `have answers the question, use it and say the output was truncated.`,
+      { head: HEAD_CHARS, tail: TAIL_CHARS, total: content.length, elided },
+    ) +
+    `\n\n${tail}`
   );
 }

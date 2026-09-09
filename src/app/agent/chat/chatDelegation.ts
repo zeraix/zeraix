@@ -19,7 +19,7 @@
 import { InMemoryAuditLog } from "@/lib/ai/orchestration/audit-log";
 import { isKnownTool, type ToolDeclaration } from "@/lib/ai/orchestration/capabilities";
 import type { CapabilityBroker } from "@/lib/ai/orchestration/capability-broker";
-import { createConfiguredBroker, MAX_TURNS_PER_SUBAGENT } from "@/lib/ai/orchestration/config";
+import { createConfiguredBroker } from "@/lib/ai/orchestration/config";
 import { toChatMessages, toChatTools, toModelTurn } from "@/lib/ai/orchestration/openai-adapter";
 import {
   createSpawnSubAgentHandler,
@@ -654,7 +654,6 @@ export function createDelegationTools(deps: DelegationDeps): DelegationTools {
         broker,
         client,
         requesterId: `conv:${ctx.convId}`,
-        maxTurns: MAX_TURNS_PER_SUBAGENT,
         tools: {
           declarationFor: (name) => decls.get(name),
           execute: async (name, input, context) => {

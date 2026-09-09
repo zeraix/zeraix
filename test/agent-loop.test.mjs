@@ -217,13 +217,14 @@ test("cancellation ends the run and is never reported as anything else", async (
   assert.equal(turns.length, 0, "an already-cancelled run issues no request at all");
 });
 
-test("a configured turn cap fires, and reports what it counted", async () => {
+test("a run is never stopped for its size", async () => {
+  // This configured `maxTurns: 3` and asserted a "max-turns" stop. The round ceilings are gone; what ends a
+  // repetitive run now is the doom-loop detector, and it names the behaviour rather than the tally.
   const { stop } = await drive(FIXTURES.doomLoop, {
-    toolOutcome: () => ({ content: `unique ${Math.min(1, 1)}`, ok: true }),
-    stopPolicy: { ...DEFAULT_STOP_POLICY, maxTurns: 3 },
+    toolOutcome: () => ({ content: "the same answer every time", ok: true }),
   });
-  assert.equal(stop.reason, "max-turns");
-  assert.equal(stop.detail, "3 of 3");
+  assert.equal(stop.reason, "doom-loop");
+  assert.match(stop.detail, /consecutive rounds/);
 });
 
 test("an unmet goal keeps the loop running past the model's own ending", async () => {
@@ -292,12 +293,17 @@ test("a nudged round is not treated as the model's final answer", async () => {
 
 test("forceContinue cannot be used to bypass the stop policy", async () => {
   // A host that nudges forever must still be stopped: the loop takes the request at face value but every
-  // other condition is still evaluated. Here the turn cap catches it.
+  // other condition is still evaluated.
+  //
+  // The turn cap used to catch this, and its removal briefly made this test hang the runner until it ran out
+  // of memory — the empty forced round was invisible to every remaining condition. A round that calls no
+  // tools and returns no text now counts as a stalled round, so the doom-loop detector catches it on the
+  // same streak as any other stall.
   const { stop } = await drive(
     { turns: [{ content: "" }], onExhausted: "repeat" },
-    { roundExtras: () => ({ forceContinue: true }), stopPolicy: { ...DEFAULT_STOP_POLICY, maxTurns: 4 } },
+    { roundExtras: () => ({ forceContinue: true }) },
   );
-  assert.equal(stop.reason, "max-turns");
+  assert.equal(stop.reason, "doom-loop");
 });
 
 test("a nudged round still ends the consecutive-tool run", async () => {

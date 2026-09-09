@@ -66,21 +66,21 @@ export const AGENT_THINKING_SEND_CONTEXT_KEY = "agent.thinking.sendContext";
 /** How tool calls are approved in chat: default / trust / manual / plan. See lib/ai/approvalMode.ts. */
 export const AGENT_APPROVAL_MODE_KEY = "agent.approval.mode";
 
-/** Dot path: runtime parameters (manually adjustable in settings).
- *  - maxToolRounds: the maximum number of consecutive tool-call rounds within a single conversation turn (round cap).
- *  - maxSameToolCalls: when the same "tool + params" is called repeatedly up to this count, it's judged as no progress and aborted (infinite-loop guard).
- *  - maxConsecutiveTimeouts: when consecutive command timeouts reach this count, the current turn is aborted (infinite-loop guard). */
-export const AGENT_MAX_TOOL_ROUNDS_KEY = "agent.limits.maxToolRounds";
-export const AGENT_MAX_SAME_TOOL_CALLS_KEY = "agent.limits.maxSameToolCalls";
-export const AGENT_MAX_CONSECUTIVE_TIMEOUTS_KEY = "agent.limits.maxConsecutiveTimeouts";
-/** Dot path: the sub-agent's own tool-call round cap (corresponds to the constants.MAX_SUBAGENT_ROUNDS default). */
-export const AGENT_MAX_SUBAGENT_ROUNDS_KEY = "agent.limits.maxSubagentRounds";
-
 /**
- * Dot path: how many automatic rounds one `/goal` activation may run (constants MAX_GOAL_AUTO_ROUNDS default).
- * A safety limit on unattended spending, never a completion condition — see goalState.decideNextRound.
+ * Dot path: runtime parameters (manually adjustable in settings).
+ *  - maxConsecutiveTimeouts: when consecutive command timeouts reach this count, the current turn is aborted
+ *    (infinite-loop guard).
+ *
+ * The ROUND ceilings that used to live beside it — `maxToolRounds`, `maxSameToolCalls`, `maxSubagentRounds`
+ * and `maxGoalRounds` — are gone, along with the machinery they configured. Nothing had read any of them
+ * since the loops were made unbounded, so they were a settings surface that promised a limit the product did
+ * not enforce. See lib/agent/stopPolicy.ts for what still ends a run, and note that this one stays: it counts
+ * TIMEOUTS, which is a wall-clock fact about work that is not progressing, not a tally of healthy rounds.
+ *
+ * A config file left over from an older build may still carry the removed keys under `[limits]`. They are
+ * simply never read, the same way a stale `ui.mode` is.
  */
-export const AGENT_MAX_GOAL_ROUNDS_KEY = "agent.limits.maxGoalRounds";
+export const AGENT_MAX_CONSECUTIVE_TIMEOUTS_KEY = "agent.limits.maxConsecutiveTimeouts";
 
 /**
  * Dot path: the model id used for goal evaluation (AgentModel.id). Empty → the conversation's own model.

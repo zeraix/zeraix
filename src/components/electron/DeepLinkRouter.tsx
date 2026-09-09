@@ -9,7 +9,7 @@
  *
  * Mounted once in the agent shell so it survives navigation. Web builds have no bridge and mount a
  * no-op. Where the link only changes the fragment of the page we are already on, the hash is
- * assigned directly — router.push() to the same pathname would not re-run the page's hash effect.
+ * rewritten directly — router.push() to the same pathname would not re-run the page's hash effect.
  */
 
 import { useEffect } from "react";
@@ -33,11 +33,14 @@ export default function DeepLinkRouter() {
       if (!target) return;
       const [path, hash] = target.split("#");
       if (window.location.pathname === path) {
-        // Same page: assignment fires hashchange, which is what the page listens to. Assigning the
-        // hash it already has fires nothing, so clear it first — a link to the section you are on
-        // should still scroll you to the group it names.
-        if (hash && window.location.hash === `#${hash}`) window.location.hash = "";
-        window.location.hash = hash ?? "";
+        // Same page: rewrite the fragment in place and fire the event the page listens to.
+        // replaceState rather than assignment, so an activation leaves no history entry behind —
+        // the settings back button is meant to leave settings in one press, not walk back through
+        // every fragment that has been on screen. A link naming the fragment already showing is a
+        // no-op either way: the page reads the hash, and that hash has not moved.
+        const url = hash ? `#${hash}` : window.location.pathname + window.location.search;
+        window.history.replaceState(window.history.state, "", url);
+        window.dispatchEvent(new Event("hashchange"));
       } else {
         router.push(target);
       }

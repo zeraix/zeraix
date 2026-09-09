@@ -11,7 +11,7 @@
 use agent_core::{Result, RuntimeError};
 use serde_json::{json, Value};
 
-use crate::edittext::{is_context_placeholder, PLACEHOLDER_REFUSED, Newline, encode, read_for_edit, to_lf, unified_diff};
+use crate::edittext::{is_context_placeholder, placeholder_refusal, Newline, encode, read_for_edit, to_lf, unified_diff};
 use crate::nodeerr::{coerce_string, fs_error, path_arg};
 use crate::tool::{ExecutionMode, RiskLevel, Tool, ToolContext, ToolMetadata, ToolOutput};
 
@@ -40,10 +40,17 @@ impl Tool for WriteFile {
 
     async fn execute(&self, ctx: &ToolContext, args_v: &Value) -> Result<ToolOutput> {
         let p = path_arg(args_v, "path")?;
-        let abs = ctx.workspace.resolve(&p)?;
+        // resolve_write, not resolve: this tool mutates, and the asset root must refuse it by name.
+        let abs = ctx.workspace.resolve_write(&p)?;
         let after = to_lf(&coerce_string(args_v.get("content")));
         if is_context_placeholder(&after) {
-            return Err(RuntimeError::invalid("tool.placeholder_content", format!("content: {PLACEHOLDER_REFUSED}")));
+            // Named with the path it was about to write: the refusal tells the model to read_file, and a
+            // model in this state has already lost track of which file it meant — the second call in the
+            // 2026-09-09 transcript dropped `path` entirely.
+            return Err(RuntimeError::invalid(
+                "tool.placeholder_content",
+                placeholder_refusal("content", &ctx.workspace.rel(&abs)),
+            ));
         }
 
         // Read the existing file's traits so the rewrite keeps them. A missing file is a new file: LF, no BOM.

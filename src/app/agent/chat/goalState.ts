@@ -117,21 +117,14 @@ export interface GoalState {
  */
 export const GOAL_CONDITION_WARN = 10000;
 
-/**
- * How many automatic rounds one activation may run before the loop stops on its own. `null` = unbounded.
- *
- * This was 25, as a safety limit — never a completion condition, since reaching it produced `exhausted` rather
- * than "achieved". It is now off by default, along with every other ceiling that stopped a run for its size
- * rather than for anything going wrong.
+/*
+ * MAX_GOAL_AUTO_ROUNDS was here, and is gone with the other round ceilings.
  *
  * The reasons it existed are still real, and worth knowing: a goal the agent cannot satisfy, or one the
- * evaluator keeps reading as unmet, now loops until the user stops it. What stands between a goal loop and
- * that outcome is the evaluator's `impossible` verdict (which ends it on round one) and its `failed` path
- * (which ends the turn rather than driving blind) — both of which end a run for a reason, not for a tally.
- *
- * A user who wants the ceiling back sets `agent.limits.maxGoalRounds`; a positive value there is still honoured.
+ * evaluator keeps reading as unmet, loops until the user stops it. What stands between a goal loop and that
+ * outcome is the evaluator's `impossible` verdict (which ends it on round one) and its `failed` path (which
+ * ends the turn rather than driving blind) — both of which end a run for a reason, not for a tally.
  */
-export const MAX_GOAL_AUTO_ROUNDS: number | null = null;
 
 /**
  * How long an achieved goal stays on screen before it clears itself.
@@ -670,20 +663,6 @@ export function goalImpossiblePrompt(goal: GoalState, reason: string): string {
   );
 }
 
-/** Injected instead when the loop hits its safety cap. Not an achievement, and it must not read as one. */
-export function goalExhaustedPrompt(goal: GoalState): string {
-  return (
-    "[GOAL CHECK] This is an automatic continuation, not the user speaking.\n\n" +
-    `This goal has run for ${goal.run.turnCount} automatic rounds without being met, which is the limit, so the loop ` +
-    "stops here.\n\n" +
-    `Goal: ${goal.condition}\n` +
-    (goal.run.lastReason ? `Last evaluation: ${goal.run.lastReason}\n` : "") +
-    "\nStop working and write the final answer now — an HONEST one. Say plainly that the goal was not reached, what " +
-    "is still missing, what you tried, and what you need from the user to get past it. Do not present partial work " +
-    "as if it were the finished task."
-  );
-}
-
 // ── The loop's decision ──────────────────────────────────────────────────────────────────────────
 
 export type GoalLoopAction =
@@ -692,9 +671,7 @@ export type GoalLoopAction =
   /** Not met, and there is budget left: inject the reason and run another round automatically. */
   | "continue"
   /** The evaluator says the condition is unsatisfiable: one final round that explains why, then stop. */
-  | "impossible"
-  /** The safety cap was reached: run one final round that reports honestly, then stop. */
-  | "exhausted";
+  | "impossible";
 
 export interface GoalLoopDecision {
   action: GoalLoopAction;
@@ -705,13 +682,13 @@ export interface GoalLoopDecision {
 /**
  * Decide what happens after one turn has been evaluated — the loop's completion condition.
  *
- * Pure and total, so the most important rule in the mechanism is testable without a model. Note what is NOT a
- * completion condition here: the round count. `maxRounds` can only produce `exhausted`, which forces an honest
- * report — never a quiet "close enough, we're done".
+ * Pure and total, so the most important rule in the mechanism is testable without a model. The round count is
+ * not a completion condition and no longer exists as one: only the evaluator's verdict, its `impossible`
+ * finding, a failed check, or cancellation end the loop — never a quiet "close enough, we're done".
  */
 export function decideNextRound(
   goal: GoalState | null | undefined,
-  opts: { met: boolean; reason: string; maxRounds?: number | null; impossible?: boolean; failed?: boolean },
+  opts: { met: boolean; reason: string; impossible?: boolean; failed?: boolean },
 ): GoalLoopDecision {
   if (!isGoalActive(goal)) return { action: "stop", prompt: "" };
   if (opts.met) return { action: "stop", prompt: "" };
@@ -723,8 +700,6 @@ export function decideNextRound(
   // Recognised as unsatisfiable, which is the whole reason the verdict exists: an impossible goal should end on
   // round one, not by spending the entire budget discovering what the evaluator already said.
   if (opts.impossible) return { action: "impossible", prompt: goalImpossiblePrompt(goal!, opts.reason) };
-  // `null`/`undefined` means no ceiling: the loop ends on the verdict, on cancellation, or not at all.
-  const max = opts.maxRounds ?? MAX_GOAL_AUTO_ROUNDS;
-  if (max != null && goal!.run.turnCount >= max) return { action: "exhausted", prompt: goalExhaustedPrompt(goal!) };
+  // No ceiling: the loop ends on the verdict, on cancellation, or not at all.
   return { action: "continue", prompt: goalContinuationPrompt(goal!, opts.reason) };
 }

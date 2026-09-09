@@ -52,6 +52,11 @@ const REQUIRED = [
   "file_info",
   "search_files",
   "search_in_files",
+  "append_file",
+  "delete_file",
+  "copy_file",
+  "move_file",
+  "create_directory",
 ];
 
 /** A small fixture with the boundaries worth touching: CRLF, non-ASCII, empty, nested. */
@@ -69,7 +74,11 @@ async function buildFixture() {
   w("src/index.ts", "export const x = 1;\n// needle\n");
   w("src/deep/nested/mod.rs", "fn main() { /* needle */ }\n");
   fs.mkdirSync(path.join(root, "empty-dir"), { recursive: true });
-  return root;
+  // The read-only second root, OUTSIDE the workspace. Its whole point is that a path here is readable and
+  // never writable, and neither half of that can be checked from inside the workspace.
+  const assets = await fsp.mkdtemp(path.join(os.tmpdir(), "zeraix-smoke-assets-"));
+  fs.writeFileSync(path.join(assets, "clip.txt"), "footage the model was given\n");
+  return { root, assets };
 }
 
 /** One call per required tool, chosen so a wrong answer is visible in the result rather than only in a code. */
@@ -95,7 +104,7 @@ function cases(root) {
 }
 
 async function main() {
-  const root = await buildFixture();
+  const { root, assets } = await buildFixture();
   console.log(`workspace: ${root}\n`);
 
   let pass = 0;
@@ -129,7 +138,7 @@ async function main() {
   // 2. Each one actually runs.
   for (const [tool, args, check] of cases(root)) {
     const label = `${tool} ${JSON.stringify(args).slice(0, 60)}`;
-    const r = await rust.tryRunTool(tool, args, { workdir: root });
+    const r = await rust.tryRunTool(tool, args, { workdir: root, assetDir: assets });
     if (r === null) {
       fail++;
       failures.push(`${label} — the sidecar declined it, and nothing else implements it`);
@@ -153,7 +162,47 @@ async function main() {
     }
   }
 
-  // 3. The engine contract `run_command` depends on.
+  // 3. The asset root: readable, never writable, through the sidecar rather than in a unit test.
+  //
+  // This is the regression that shipped when the file tools moved into Rust and left the second root behind
+  // in resolvePath — reads of the media library started failing as "path escapes the working directory"
+  // while the JS test guarding the rule stayed green, because it tested a function no longer on the path.
+  // Checked here because only an end-to-end call proves the whole chain: host → asset_dir → Workspace.
+  console.log("");
+  for (const [label, tool, args, want] of [
+    ["an asset reads through the /assets alias", "read_file", { path: "/assets/clip.txt" }, (r) => r.ok && r.content.includes("footage")],
+    ["an asset reads by absolute path", "read_file", { path: path.join(assets, "clip.txt") }, (r) => r.ok && r.content.includes("footage")],
+    ["writing to an asset is refused", "write_file", { path: "/assets/clip.txt", content: "x" }, (r) => !r.ok && /read-only/.test(r.content)],
+    ["deleting an asset is refused", "delete_file", { path: "/assets/clip.txt" }, (r) => !r.ok && /read-only/.test(r.content)],
+    ["an asset can be copied INTO the workspace", "copy_file", { source: "/assets/clip.txt", destination: "media/clip.txt" }, (r) => r.ok],
+  ]) {
+    const r = await rust.tryRunTool(tool, args, { workdir: root, assetDir: assets });
+    let ok = false;
+    try {
+      ok = r !== null && Boolean(want(r));
+    } catch {
+      ok = false;
+    }
+    if (ok) {
+      pass++;
+      console.log(`  ✓ ${label}`);
+    } else {
+      fail++;
+      failures.push(`${label} → ${r === null ? "declined" : `ok=${r.ok} content=${JSON.stringify(String(r.content).slice(0, 160))}`}`);
+      console.log(`  ✗ ${label}`);
+    }
+  }
+  // The asset survived every refusal above.
+  if (fs.readFileSync(path.join(assets, "clip.txt"), "utf8").includes("footage")) {
+    pass++;
+    console.log("  ✓ the asset is intact after the refused writes");
+  } else {
+    fail++;
+    failures.push("an asset was modified despite the read-only root");
+    console.log("  ✗ the asset was modified");
+  }
+
+  // 4. The engine contract `run_command` depends on.
   console.log("");
   const cmd = process.platform === "win32" ? "echo smoke" : "echo smoke";
   const r = await native.run(cmd, { cwd: root, timeoutMs: 30_000 });

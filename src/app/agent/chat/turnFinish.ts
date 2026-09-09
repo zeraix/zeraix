@@ -1,6 +1,4 @@
 import { toast } from "sonner";
-import { getStorage } from "@zzcpt/zztool";
-import { AGENT_MAX_GOAL_ROUNDS_KEY } from "@/constants/Agent";
 import { notifyReplyComplete } from "@/lib/ai/agentNotify";
 import { isWindowAlwaysOnTop } from "@/lib/electron/windowControls";
 import { useAgentChatStore } from "@/store/agentChatStore";
@@ -13,7 +11,6 @@ import {
   recordEvaluation,
   addTurnSpend,
   decideNextRound,
-  MAX_GOAL_AUTO_ROUNDS,
   type GoalState,
 } from "./goalState";
 import type { createGoalEvaluator } from "./goalEvaluator";
@@ -139,31 +136,21 @@ export async function checkTurnGoal(deps: GoalCheckDeps): Promise<string | null>
   }
 
   setGoalFor(convId, evaluated);
-  // An explicit positive setting still caps the loop; anything else (unset, 0, junk) means unbounded, which
-  // is now the default. `|| MAX_GOAL_AUTO_ROUNDS` already collapsed 0 and NaN to the default, so the only
-  // change is what that default is.
-  const configured = Number(getStorage(AGENT_MAX_GOAL_ROUNDS_KEY));
-  const maxRounds = Number.isFinite(configured) && configured > 0 ? configured : MAX_GOAL_AUTO_ROUNDS;
+  // No round ceiling any more: the loop ends on the verdict, on `impossible`, on a failed check, or when the
+  // user stops it. See goalState.decideNextRound.
   const decision = decideNextRound(evaluated, {
     met: false,
     reason,
-    maxRounds,
     impossible: outcome.ok && outcome.verdict.impossible === true,
     failed: !outcome.ok,
   });
 
-  if (decision.action === "impossible" || decision.action === "exhausted") {
-    // Neither is an achievement, and neither may read as one. The goal is cleared FIRST so the final
-    // explaining round cannot itself be evaluated and re-trigger the same ending, then the instruction is
-    // queued. Re-issuing `/goal` is how the user asks for more.
+  if (decision.action === "impossible") {
+    // Not an achievement, and it must not read as one. The goal is cleared FIRST so the final explaining
+    // round cannot itself be evaluated and re-trigger the same ending, then the instruction is queued.
+    // Re-issuing `/goal` is how the user asks for more.
     setGoalFor(convId, clearGoal(evaluated));
-    if (active()) {
-      toast.error(
-        decision.action === "impossible"
-          ? t("goal.impossible", { reason })
-          : t("goal.stoppedAtLimit", { rounds: String(evaluated.run.turnCount) }),
-      );
-    }
+    if (active()) toast.error(t("goal.impossible", { reason }));
     allowExhaustedRound(convId);
     return decision.prompt;
   }

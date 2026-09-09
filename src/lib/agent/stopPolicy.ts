@@ -9,54 +9,35 @@
  * an `AbortController` checked in a dozen places. Rule 7 forbids competing policies, so this module is the
  * single decision and every other mechanism becomes an INPUT to it rather than a decision of its own.
  *
- * ── Defaults preserve today's behaviour, deliberately ───────────────────────────────────────────────────────
+ * ── There are no round ceilings ─────────────────────────────────────────────────────────────────────────────
  *
- * §11 asks for a maximum-turns limit and is explicit that it is "currently absent — this is a genuinely new
- * limit; make it configurable and off by default if the product intentionally wants unbounded runs, so this
- * refactor doesn't silently change today's product behavior".
+ * `maxTurns` and `maxToolCalls` used to live here, defaulting to `null`. They are gone, and so are the
+ * `agent.limits.maxToolRounds` / `maxSameToolCalls` / `maxSubagentRounds` / `maxGoalRounds` settings that were
+ * their configuration surface, the `MAX_TURNS_PER_SUBAGENT` env var, and `MAX_GOAL_AUTO_ROUNDS`.
  *
- * It does want that. M0 confirmed the absence is a recorded decision, not an oversight: the settings that
- * used to configure round limits were removed, and the comment in `page.tsx` states that interruption is the
- * user's own. So `maxTurns` and `maxToolCalls` default to `null`, meaning unbounded, and a run that hits no
- * other condition behaves exactly as it does today. Turning them on is a product decision, not a refactor.
+ * They were removed for the reason `chat/constants.ts` gives for deleting their predecessors: nothing set any
+ * of them, so they read as enforced limits while the loop was in fact unbounded — and a limit nothing reads is
+ * worse than no limit, because it is how a second, competing Stop Policy gets written by mistake (§20 rule 7).
  *
- * What is NOT off by default is doom-loop escalation, because that is not a limit on healthy work — it fires
- * only when three consecutive rounds produced no new information at all, which is the definition of a run
- * that is no longer working.
+ * The underlying judgement is older than the cleanup, and is recorded in the two loops these fed: a count
+ * cannot tell a run that is working from one that is stuck, so a ceiling lands on the runs doing the MOST work
+ * and returns a truncated answer that reads like a finished one.
  *
- * ── Existing limits are inputs, not competitors ─────────────────────────────────────────────────────────────
+ * ── What still stops a run ──────────────────────────────────────────────────────────────────────────────────
  *
- * §11 says to reuse existing limits rather than create a second one with a different value for the same
- * concept. So `MAX_GOAL_AUTO_ROUNDS` stays where it is and keeps governing the goal loop — that loop counts
- * whole user turns and this policy governs rounds inside one turn, which are genuinely different concepts,
- * and collapsing them would be the duplication the rule warns about. `MAX_TURNS_PER_SUBAGENT` likewise stays
- * with the brokered sub-agent runner; when §15 converges the sub-agent loops onto this one, it becomes this
- * policy's `maxTurns` for a sub-agent session rather than a separate mechanism.
+ * All of it is in `decideStop` below, and every one of them fires on BEHAVIOUR rather than on size, so each can
+ * say which one it was: cancellation, a provider error, a doom loop, ten consecutive tool failures, a context
+ * window about to overflow, and the model's own final answer.
  *
- * ── Both of those are now OFF by default ────────────────────────────────────────────────────────────────────
- *
- * The two named above still live where this says they live, and still govern what it says they govern — but
- * their defaults are `null`. Every ceiling that ended a run for its SIZE rather than for something going
- * wrong has been switched off, here and in the two loops above: a count cannot tell a run that is working
- * from one that is stuck, so it lands on the runs doing the most work and returns a truncated answer that
- * reads like a finished one.
- *
- * What still stops a run is unchanged and is all in `decideStop` below: cancellation, a provider error, a
- * doom loop, ten consecutive tool failures, and the model's own final answer. Each of those fires on
- * BEHAVIOUR, and each can say which one it was. A caller that wants a ceiling passes one explicitly.
+ * Timeouts are untouched and are the wall-clock backstop this leaves in place — per-tool `timeout_ms`, the
+ * command timeouts, `GRANT_TTL_MS`, the poll budget, and `agent.limits.maxConsecutiveTimeouts`. A run with no
+ * round ceiling is still not a run that can hang.
  */
 import type { StopReason } from "./runtimeBoundary";
 import type { AgentExecutionState } from "./executionState";
 import { STALLED_ROUNDS_TO_ESCALATE } from "./doomLoop";
 
 export interface StopPolicyConfig {
-  /**
-   * Provider turns allowed in one user turn. `null` = unbounded, which is today's behaviour and the default.
-   * See the header: making this a number is a product decision.
-   */
-  maxTurns: number | null;
-  /** Tool calls allowed in one user turn. `null` = unbounded, and the default, for the same reason. */
-  maxToolCalls: number | null;
   /**
    * Consecutive tool failures before the run stops.
    *
@@ -78,10 +59,8 @@ export interface StopPolicyConfig {
   contextLimitFraction: number | null;
 }
 
-/** Today's behaviour, exactly: nothing is capped except runaway failure and a detected doom loop. */
+/** Nothing is capped by size; a run ends on runaway failure, a detected doom loop, or its own answer. */
 export const DEFAULT_STOP_POLICY: StopPolicyConfig = {
-  maxTurns: null,
-  maxToolCalls: null,
   maxConsecutiveFailures: 10,
   contextLimitFraction: null,
 };
@@ -131,7 +110,9 @@ const CONTINUE: StopDecision = { stop: false };
  *     text is still a looping model and the run should be reported as such.
  *  4. **final response** — the normal exit. Gated on the goal, because a goal in force means the model does
  *     not get to declare itself finished; an unmet goal turns its "final" answer into another round.
- *  5. **the limits** — last, so a run that was going to finish anyway is never reported as having hit one.
+ *  5. **runaway failure and context exhaustion** — last, so a run that was going to finish anyway is never
+ *     reported as having hit one. Neither is a round ceiling: one fires when the same tool has failed ten
+ *     times running, the other when the next request would not fit in the window.
  */
 export function decideStop(input: StopPolicyInput, cfg: StopPolicyConfig = DEFAULT_STOP_POLICY): StopDecision {
   const { state } = input;
@@ -155,12 +136,6 @@ export function decideStop(input: StopPolicyInput, cfg: StopPolicyConfig = DEFAU
     return { stop: true, reason: "completed" };
   }
 
-  if (cfg.maxTurns !== null && state.round >= cfg.maxTurns) {
-    return { stop: true, reason: "max-turns", detail: `${state.round} of ${cfg.maxTurns}` };
-  }
-  if (cfg.maxToolCalls !== null && state.toolCalls >= cfg.maxToolCalls) {
-    return { stop: true, reason: "max-tool-calls", detail: `${state.toolCalls} of ${cfg.maxToolCalls}` };
-  }
   if (cfg.maxConsecutiveFailures !== null && state.consecutiveFailures >= cfg.maxConsecutiveFailures) {
     return {
       stop: true,

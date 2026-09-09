@@ -204,3 +204,22 @@ export function makeMatcher(query: string) {
   const q = query.trim().toLowerCase();
   return (...texts: string[]) => q === "" || texts.some((t) => t.toLowerCase().includes(q));
 }
+
+/**
+ * Move to a settings section/group by rewriting the hash IN PLACE.
+ *
+ * The address bar is this page's state (see page.tsx), but a section switch is not a navigation:
+ * pushing one meant nine clicks around the panes left nine history entries, and the back button
+ * then had to be pressed nine times to leave settings. replaceState keeps the address linkable
+ * while the page owns exactly one entry, so back returns to wherever settings was opened from.
+ *
+ * replaceState does not fire `hashchange`, so the event is dispatched by hand — that event is what
+ * page.tsx subscribes to, and without it the rewritten hash would never be read back.
+ */
+export function setSettingsHash(hash: string): void {
+  if (typeof window === "undefined") return;
+  const next = `#${hash}`;
+  if (window.location.hash === next) return;
+  window.history.replaceState(window.history.state, "", next);
+  window.dispatchEvent(new Event("hashchange"));
+}

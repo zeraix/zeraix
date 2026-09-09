@@ -63,7 +63,7 @@ test("collectBlobRefs finds every reference, and a missing blob becomes a note r
   const refs = collectBlobRefs(slim);
   assert.equal(refs.size, 2);
   const back = inlineBlobs(slim, (hash, n) => missingBlobNote(n));
-  assert.match(back.a[0].content, /no longer available/);
+  assert.match(back.a[0].content, /no longer on disk/);
   assert.match(back.a[0].content, new RegExp(BLOB_MIN_CHARS.toLocaleString("en-US")));
   assert.equal(typeof back.b.nested.content, "string");
 });
@@ -74,6 +74,7 @@ test("a blob skipped on load is a note that becomes the same reference again on 
   const note = unloadedBlobNote(hash, n);
   assert.deepEqual(parseUnloadedNote(note), { hash, n });
   assert.equal(parseUnloadedNote("[…… some other marker ……]"), null);
+  assert.equal(parseUnloadedNote('<context-compressed kind="released-result">x</context-compressed>'), null);
   assert.equal(parseUnloadedNote(missingBlobNote(n)), null, "a missing blob is gone for good, not re-referenced");
   // The note is short, so without the round-trip it would stay a string and the sweep would delete the file.
   const sink = new Map();
@@ -82,7 +83,27 @@ test("a blob skipped on load is a note that becomes the same reference again on 
   assert.equal(sink.size, 0, "nothing is rehashed or rewritten for a note");
   assert.deepEqual([...collectBlobRefs(slim)], [[hash, n]]);
   // Every marker the store writes has the shape the file tools refuse as content.
-  for (const s of [note, missingBlobNote(3)]) assert.ok(s.startsWith("[…… ") && s.endsWith(" ……]"), s);
+  for (const s of [note, missingBlobNote(3)]) {
+    assert.ok(s.startsWith("<context-compressed ") && s.endsWith("</context-compressed>"), s);
+  }
+});
+
+/**
+ * A note written before the marker became a tag must still resolve to its blob.
+ *
+ * Not a style question: this note is the only record of which blob a message refers to, so failing to parse
+ * the old spelling would not leave those conversations looking dated, it would ORPHAN their results — the save
+ * path would stop recognising the note and the reference behind it would be lost.
+ */
+test("a note from before the format change still names its blob", () => {
+  const hash = "a".repeat(64);
+  const legacy =
+    `[…… a 4,194,305-character tool result from an earlier session is kept on disk (${hash}) and not loaded ` +
+    `into the conversation; call the tool again if you need it ……]`;
+  assert.deepEqual(parseUnloadedNote(legacy), { hash, n: 4194305 });
+  // And it still round-trips back into the reference on save, which is the point of parsing it at all.
+  const slim = detachLargeStrings({ messages: [{ content: legacy }] }, () => {});
+  assert.deepEqual(slim.messages[0].content, { $blob: hash, n: 4194305 });
 });
 
 test("an object that merely looks like a reference is left alone unless the hash is well-formed", () => {

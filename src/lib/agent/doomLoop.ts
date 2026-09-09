@@ -249,11 +249,29 @@ export function observeCall(g: DoomLoopState, obs: CallObservation): CallVerdict
 /**
  * Close a round and decide whether the turn is still going anywhere.
  *
- * A round with no tool calls is not a round the detector sees (the loop exits on it), so `verdicts` is never
- * empty in practice; an empty array leaves the streak alone rather than counting as productive or stalled.
+ * A round with no tool calls normally ends the turn, so `verdicts` is usually non-empty; an empty array
+ * leaves the streak alone rather than counting as productive or stalled.
+ *
+ * `producedNothing` is the exception, and it is the backstop for `forceContinue`. A host may ask the loop for
+ * another pass after a round that called no tools and returned no text, and nothing about that round is
+ * visible here — so a host that nudges unconditionally used to spin forever, caught only by the turn cap.
+ * With the round ceilings gone that cap is gone too, and this is what replaces it: a round that produced NO
+ * tool calls and NO text is, by definition, a round that produced no new information, which is the one thing
+ * this detector exists to notice. It escalates on the same streak as any other stall, so a host that nudges
+ * once after a quiet round is not punished for it.
  */
-export function closeRound(g: DoomLoopState, verdicts: CallVerdict[]): RoundVerdict {
-  if (verdicts.length === 0) return { stalledRounds: g.stalledRounds, escalate: false };
+export function closeRound(
+  g: DoomLoopState,
+  verdicts: CallVerdict[],
+  opts: { producedNothing?: boolean } = {},
+): RoundVerdict {
+  if (verdicts.length === 0) {
+    if (!opts.producedNothing) return { stalledRounds: g.stalledRounds, escalate: false };
+    g.stalledRounds += 1;
+    const escalateEmpty = !g.escalated && g.stalledRounds >= STALLED_ROUNDS_TO_ESCALATE;
+    if (escalateEmpty) g.escalated = true;
+    return { stalledRounds: g.stalledRounds, escalate: escalateEmpty };
+  }
   const stalled = verdicts.every((v) => v.unproductive);
   g.stalledRounds = stalled ? g.stalledRounds + 1 : 0;
   const escalate = !g.escalated && g.stalledRounds >= STALLED_ROUNDS_TO_ESCALATE;

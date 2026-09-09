@@ -71,7 +71,7 @@ test("a blob whose file is gone loads as a note, not as an error or an empty str
   for (const f of await blobs("p1")) await fs.rm(path.join(blobDir("p1"), f));
   const loaded = await store.loadProject("p1");
   const content = loaded.conversations[0].messages[1].content;
-  assert.match(content, /no longer available/);
+  assert.match(content, /no longer on disk/);
   assert.match(content, new RegExp(big.length.toLocaleString("en-US")));
 });
 
@@ -101,7 +101,7 @@ test("a blob over the load cap is not read back: the conversation gets a note, a
   const loaded = await store.loadProject("p1");
   const ms = performance.now() - t0;
   const content = loaded.conversations[0].messages[1].content;
-  assert.match(content, /^\[…… a [\d,]+-character tool result from an earlier session is kept on disk \([0-9a-f]{64}\)/);
+  assert.match(content, /^<context-compressed kind="stored-result" chars="\d+" hash="[0-9a-f]{64}">/);
   assert.ok(content.includes(name.slice(0, 64)), "the note names the blob");
   assert.ok(ms < 200, `load took ${ms.toFixed(0)} ms; the blob must not have been read`);
   // The renderer saves the conversation back with the note in it: the file must still be there afterwards.

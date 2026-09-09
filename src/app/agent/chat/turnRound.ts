@@ -1,4 +1,5 @@
 import { countMessagesTokens, countTokens } from "@/lib/ai/tokenizer";
+import { baselineFor, newRoundBaseline, type ViewToken } from "./displayBaseline";
 import type { TurnCheckpoint } from "./turnState";
 import { logContextDiag, logToolCall, isUsageLogEnabledSync } from "@/lib/ai/usageLog";
 import { resolveContextWindow, type ResolvedModel } from "@/lib/ai/models";
@@ -99,6 +100,8 @@ export interface RoundRunnerDeps {
 
   // ── Host state the round reads or writes ─────────────────────────────────────────────────────────────────
   displayRef: React.RefObject<DisplayMsg[]>;
+  /** Which transcript `displayRef` holds right now. See displayBaseline.ts. */
+  viewTokenRef: React.RefObject<ViewToken>;
   setDisplay: (next: DisplayMsg[]) => void;
   setCtxTokens: (n: number) => void;
   diagRef: React.RefObject<{ messages: ApiMsg[]; tools: unknown[]; contextWindow: number }>;
@@ -130,7 +133,7 @@ export function createRoundRunner(deps: RoundRunnerDeps) {
     buf, compaction, log,
     activeModel, modelName, isLocalModel, sendReasoningContext, wireSteps, tools, requestChat, boundary, ctx,
     rendererTools, execToolCall, toolRules, drainDelegations, drainJobEvents,
-    displayRef, setDisplay, setCtxTokens, diagRef, lastArtifactRef, schedulerRef,
+    displayRef, viewTokenRef, setDisplay, setCtxTokens, diagRef, lastArtifactRef, schedulerRef,
     awaitingJobsRef, tagLastAssistantStoredIndex, goalFor, setGoalFor, setRenderDelta,
   } = deps;
   const ctrl = { signal };
@@ -222,7 +225,11 @@ export function createRoundRunner(deps: RoundRunnerDeps) {
     const wantIncremental = true;
     const showPhaseSummary = true;
     // This round's display baseline = the display array before this round started (only meaningful in the active view; a background conversation does not touch the active view).
-    const liveBase = active() ? displayRef.current : [];
+    // This round's memory of the transcript it appends to. NOT a frozen array: a round can begin while its
+    // conversation is in the background (no transcript to take a baseline from) and be switched back to
+    // mid-round, and it can be switched away from and back (the transcript is rebuilt from the archive). Both
+    // move the view out from under a captured baseline — see displayBaseline.ts for the failure that caused.
+    const baseline = newRoundBaseline();
     // Shared by finalization / increments: rebuild this round's display as [baseline, deep-thinking?, body?] (only effective in the active view).
     // asPhase: the body is "the phase summary of a tool-call round" — collected into the card as a "thinking process" timeline entry,
     // rather than a standalone final reply; a final reply with no tool calls goes to assistant (a standalone bubble + action bar).
@@ -232,11 +239,16 @@ export function createRoundRunner(deps: RoundRunnerDeps) {
     const roundStart = Date.now();
     const renderTurn = (reasoning: string, content: string, asPhase = false) => {
       if (!active()) return;
+      // `active()` is not enough on its own: it reads convIdRef, which moves the instant the user clicks
+      // another conversation, while the transcript is rebuilt one await later. baselineFor answers the
+      // question that actually matters — is the transcript on screen mine, and what must I append to?
+      const base = baselineFor(baseline, { token: viewTokenRef.current, display: displayRef.current }, genConvId);
+      if (base === null) return; // the transcript on screen is another conversation's
       const ms = Date.now() - roundStart;
       const items: DisplayMsg[] = [];
       if (reasoning) items.push({ kind: "reasoning", content: reasoning, ms });
       if (content) items.push(asPhase ? { kind: "phase", content, ms } : { kind: "assistant", content });
-      const next = [...liveBase, ...items];
+      const next = [...base, ...items];
       displayRef.current = next;
       setDisplay(next);
     };

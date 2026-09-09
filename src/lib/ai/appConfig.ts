@@ -19,10 +19,6 @@ import {
   AGENT_LOCALE_KEY,
   AGENT_GOAL_EVALUATOR_MODEL_KEY,
   AGENT_MAX_CONSECUTIVE_TIMEOUTS_KEY,
-  AGENT_MAX_GOAL_ROUNDS_KEY,
-  AGENT_MAX_SAME_TOOL_CALLS_KEY,
-  AGENT_MAX_SUBAGENT_ROUNDS_KEY,
-  AGENT_MAX_TOOL_ROUNDS_KEY,
 } from "@/constants/Agent";
 
 interface AppConfigBridge {
@@ -78,11 +74,10 @@ const STATIC: Array<[dot: string, section: string, key: string]> = [
   ["agent.llm.modelList", "llm", "model_list"],
   ["agent.llm.selectedModelId", "llm", "selected_model"],
   ["agent.llm.modelsSeeded", "llm", "models_seeded"],
-  [AGENT_MAX_TOOL_ROUNDS_KEY, "limits", "max_tool_rounds"],
-  [AGENT_MAX_SAME_TOOL_CALLS_KEY, "limits", "max_same_tool_calls"],
+  // The round ceilings that were here — max_tool_rounds, max_same_tool_calls, max_subagent_rounds and
+  // max_goal_rounds — are gone with the machinery they configured. A config file written by an older build
+  // may still carry them; unmapped keys are never read, so they simply sit there.
   [AGENT_MAX_CONSECUTIVE_TIMEOUTS_KEY, "limits", "max_consecutive_timeouts"],
-  [AGENT_MAX_SUBAGENT_ROUNDS_KEY, "limits", "max_subagent_rounds"],
-  [AGENT_MAX_GOAL_ROUNDS_KEY, "limits", "max_goal_rounds"],
   [AGENT_GOAL_EVALUATOR_MODEL_KEY, "goal", "evaluator_model"],
   // `ui.mode` is deliberately absent: daily / dev merged into one mode, so there is nothing to persist.
   // A stale `ui.mode` left in an existing config file is simply never read.

@@ -38,18 +38,14 @@ import { summarizeInput } from "./audit-log";
 import { isKnownTool, toAnthropicToolSchema, type ToolDeclaration, type ToolProvider } from "./capabilities";
 import type { CapabilityBroker, Grant } from "./capability-broker";
 
-/**
- * Turn ceiling for an orchestrated sub-agent. `null` = unbounded, which is the default.
+/*
+ * DEFAULT_MAX_TURNS was here, and is gone with the other round ceilings — see lib/agent/stopPolicy.ts.
  *
- * This was 15, as a backstop against a model that keeps calling tools instead of concluding. It was the
- * harshest ceiling in the system: reaching it did not return a partial answer, it THREW
- * `MaxTurnsExceededError`, so a delegation that had done fifteen turns of real work failed outright and
- * every one of them was paid for and discarded.
- *
- * A count cannot tell "still working" from "not concluding", and fifteen turns is ordinary for a real task.
- * A caller that wants a ceiling passes `maxTurns` and still gets one.
+ * It was 15, and was the harshest ceiling in the system: reaching it did not return a partial answer, it THREW
+ * `MaxTurnsExceededError`, so a delegation that had done fifteen turns of real work failed outright and every
+ * one of them was paid for and discarded. It had already been switched to `null`; now the loop has no turn
+ * counter at all and ends on a final answer, an error, or cancellation.
  */
-export const DEFAULT_MAX_TURNS: number | null = null;
 
 /** Output cap per turn. Conservative enough to stay under typical non-streaming HTTP timeouts. */
 export const DEFAULT_MAX_TOKENS = 16000;
@@ -145,18 +141,7 @@ export class ToolUseViolationError extends Error {
   }
 }
 
-/** The loop ran out of turns without the model concluding. */
-export class MaxTurnsExceededError extends Error {
-  readonly name = "MaxTurnsExceededError";
-  readonly grantId: string;
-  readonly turns: number;
-
-  constructor(grantId: string, turns: number) {
-    super(`Sub-agent on grant ${grantId} did not finish within ${turns} turns; execution terminated.`);
-    this.grantId = grantId;
-    this.turns = turns;
-  }
-}
+/* MaxTurnsExceededError was here. Nothing can exceed a turn limit now: there is none. */
 
 export interface RunOptions {
   client: ModelClient;
@@ -168,7 +153,6 @@ export interface RunOptions {
    * permission, never a source of one.
    */
   tools: ToolProvider;
-  maxTurns?: number | null;
   maxTokens?: number;
   /** Injectable clock, so duration logging is testable without real time passing. */
   now?: () => number;
@@ -207,9 +191,8 @@ function systemPrompt(grant: Grant): string {
 /**
  * Run one anonymous sub-agent to completion and return its final answer.
  *
- * Throws `ToolUseViolationError` on an out-of-grant tool call and `MaxTurnsExceededError` if the model never
- * concludes. Both leave the grant intact — revocation is the caller's job (see `orchestrator-tool.ts`), so
- * that a failed run is still reclaimed in a `finally`.
+ * Throws `ToolUseViolationError` on an out-of-grant tool call. That leaves the grant intact — revocation is
+ * the caller's job (see `orchestrator-tool.ts`), so that a failed run is still reclaimed in a `finally`.
  */
 export async function runAnonymousSubAgent(
   grant: Grant,
@@ -218,8 +201,6 @@ export async function runAnonymousSubAgent(
   opts: RunOptions,
 ): Promise<string> {
   const { client, tools: provider } = opts;
-  // `null` means no ceiling: the loop then ends only on a final answer, an error, or the caller's own limit.
-  const maxTurns = opts.maxTurns ?? DEFAULT_MAX_TURNS;
   const maxTokens = opts.maxTokens ?? DEFAULT_MAX_TOKENS;
   const now = opts.now ?? Date.now;
 
@@ -228,7 +209,8 @@ export async function runAnonymousSubAgent(
   const system = systemPrompt(grant);
   const messages: ConversationEntry[] = [{ role: "user", text: task }];
 
-  for (let turn = 0; maxTurns === null || turn < maxTurns; turn++) {
+  // No ceiling: the loop ends on a final answer, an error, or cancellation.
+  for (;;) {
     // A copy, not the live array. The runner keeps appending to `messages` after this call returns, so an
     // adapter that held the reference — to retry the request, to log it, to diff it against the next one —
     // would find its "previous request" had silently grown extra turns.
@@ -282,11 +264,6 @@ export async function runAnonymousSubAgent(
     }
     messages.push({ role: "tool_results", results });
   }
-
-  // Unreachable while `maxTurns` is null, which is the default; reached only for a caller that set its own
-  // ceiling and hit it. The throw is kept for that case rather than softened into a partial answer: a caller
-  // that asked for a bound wants to know the bound was what stopped it.
-  throw new MaxTurnsExceededError(grant.grantId, maxTurns ?? 0);
 }
 
 /**

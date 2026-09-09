@@ -118,27 +118,66 @@ pub fn encode(text: &str, newline: Newline, has_bom: bool) -> Vec<u8> {
     out
 }
 
-/// Whether a text IS the renderer's context-trimming placeholder rather than file content.
+/// Whether a text IS the renderer's context-compression marker rather than file content.
 ///
-/// The renderer replaces the bulky arguments of a completed write or edit in the model's context with a
-/// marker of the form `[…… N lines elided: … ……]` (contextCompress.ts, releaseCallArguments). A model that
-/// sees its own earlier writes rendered that way can imitate the shape when it writes the next file — seen
-/// 2026-09-04: a `write_file` whose entire content was "[…… 19 lines elided: this text was written to
-/// test_summary_detailed.csv; read_file it if you need it ……]", which then sat on disk as the file, and the
-/// model spent its next ten calls on shell workarounds because "write_file truncates". The write and edit
-/// tools refuse such content with a message that says what the marker is, and the model sends the real
-/// text. Matched on the marker's shape — the whole text is one `[…… … ……]` — so every marker the app writes into
-/// a conversation (elided arguments, a result kept on disk, a result no longer on disk) is covered, and the wording
-/// between the brackets is free to change.
+/// The renderer replaces things it drops from the model's context with a marker saying what went and how to
+/// get it back — an elided write argument, a stale read, a released result, a result kept on disk
+/// (src/app/agent/chat/contextMarker.ts). A model that sees its own earlier writes rendered that way can
+/// imitate the shape when it writes the next file. Seen twice:
+///
+///  - 2026-09-04: a `write_file` whose entire content was the marker, which then sat on disk AS the file, and
+///    the model spent its next ten calls on shell workarounds because "write_file truncates";
+///  - 2026-09-09: with the count in the marker's prose, a model read it as a quota ("26 lines still exceeds
+///    the limit, budget about 20 lines"), split the write in two, and sent the marker again.
+///
+/// ## Two shapes, and why the old one is still matched
+///
+/// The current marker is a tag: `<context-compressed kind="…" …>…</context-compressed>`. It replaced an
+/// ad-hoc `[…… … ……]` bracket form, which was changed precisely because it read as CONTENT — a tag is
+/// unambiguously scaffolding the harness put there, and its metadata sits in attributes where a number is a
+/// property rather than an instruction.
+///
+/// The bracket form is still recognised, and must stay recognised: every conversation saved before the change
+/// is full of them, and a model can quote one back at any time. Refusing only the new shape would reopen the
+/// 2026-09-04 bug for exactly the users who have the most history.
+///
+/// Matched on SHAPE in both cases — the whole text is one marker — so the wording inside stays free to change.
 pub fn is_context_placeholder(text: &str) -> bool {
     let t = text.trim();
+    // Current: one whole `<context-compressed …>` element, open-and-close or self-closing.
+    if t.starts_with("<context-compressed") && (t.ends_with("</context-compressed>") || t.ends_with("/>")) {
+        return true;
+    }
+    // Legacy, still on disk in older conversations.
     t.starts_with("[…… ") && t.ends_with(" ……]")
 }
 
 /// The refusal the write and edit tools return for placeholder content. Model-facing.
-pub const PLACEHOLDER_REFUSED: &str = "the text you sent is the context-trimming marker \"[…… N lines elided … ……]\", \
-not file content. That marker stands in for text of your own earlier calls that was trimmed from your context; it is \
-never valid content. Send the complete text you want in the file (read_file the current file first if you need what is there).";
+///
+/// Every clause after the first is load-bearing, and the last two were added 2026-09-09 after watching a
+/// model fail this three calls in a row. The marker used to open with a line count (`26 lines elided`), and
+/// the model read that count as a BUDGET: it reasoned "26 lines still exceeds the limit, budget is about 20
+/// lines" and tried to write the file in two halves, then sent a marker with no `path` at all. So the count
+/// is gone from the marker (contextCompress.ts) and this says outright that no size limit exists — a refusal
+/// that only says "send the complete text" is heard as "send LESS text" by a model that believes it is over
+/// a quota.
+pub const PLACEHOLDER_REFUSED: &str = "the text you sent is a <context-compressed> marker, not file content. \
+It stands in for text of your own earlier calls that was dropped from your context to save space; it is never valid \
+content, and its `lines` attribute describes what was removed rather than any budget you have to fit inside. Nothing \
+here limits how much you can write: the file was not truncated, there is no line or size limit, and splitting the \
+write into smaller parts will not help.";
+
+/// The refusal above, plus the one thing that is specific to this call — where to read the text back from.
+///
+/// Shared by `write_file`, `edit_file` and `append_file`, so a model that hits this in one tool is told the
+/// same thing in all three. `field` names the argument that was wrong, because
+/// `edit_file` has two and only `new_string` is checked.
+pub fn placeholder_refusal(field: &str, path: &str) -> String {
+    format!(
+        "{field}: {PLACEHOLDER_REFUSED} Call read_file on {path} to get its current text, then send the \
+complete text in a single call."
+    )
+}
 
 /// A unified diff of two LF-space texts, as the tool result carries it.
 ///
@@ -271,6 +310,58 @@ fn diff_ops<'a>(a: &[&'a str], b: &[&'a str]) -> Vec<Op<'a>> {
 mod tests {
     use super::*;
     use std::path::Path;
+
+    /// The regression this guards, in the words the model used for it: "26 行还是超限，预算约 20 行。拆成两段"
+    /// — "26 lines still exceeds the limit, budget about 20 lines. Split into two parts."
+    ///
+    /// It had been handed a marker opening with `26 lines elided`, read that count as a quota, and spent three
+    /// calls trying to get under it. The refusal must therefore carry no figure a model can try to satisfy, and
+    /// must deny the limit outright — "send the complete text" alone is heard as "send LESS text".
+    #[test]
+    fn the_refusal_carries_no_number_and_denies_the_size_limit() {
+        assert!(
+            !PLACEHOLDER_REFUSED.chars().any(|c| c.is_ascii_digit()),
+            "a digit in the refusal reads as a quota: {PLACEHOLDER_REFUSED}"
+        );
+        assert!(PLACEHOLDER_REFUSED.contains("not truncated"));
+        assert!(PLACEHOLDER_REFUSED.contains("no line or size limit"));
+        // The specific wrong move it made: two smaller writes.
+        assert!(PLACEHOLDER_REFUSED.contains("splitting the write into smaller parts will not help"));
+    }
+
+    #[test]
+    fn the_refusal_names_the_argument_and_where_to_read_the_text_back_from() {
+        let msg = placeholder_refusal("content", "src/core/camera.ts");
+        assert!(msg.starts_with("content: "), "{msg}");
+        // A model in this state has already lost track of which file it meant — the second call in the
+        // 2026-09-09 transcript carried no `path` at all.
+        assert!(msg.contains("src/core/camera.ts"), "{msg}");
+        assert!(msg.contains("complete text"), "{msg}");
+        assert!(placeholder_refusal("new_string", "a.ts").starts_with("new_string: "));
+    }
+
+    /// The current shape, and the one the guard exists for.
+    #[test]
+    fn a_marker_tag_is_recognised_however_it_is_spelled_inside() {
+        assert!(is_context_placeholder(
+            "<context-compressed kind=\"tool-argument\" path=\"a.ts\" lines=\"26\">\nThe text you wrote to a.ts was dropped.\n</context-compressed>"
+        ));
+        // Leading and trailing whitespace, the way a model re-emits it.
+        assert!(is_context_placeholder("  <context-compressed kind=\"stale-read\">x</context-compressed>\n"));
+        // Self-closing, which is what the in-diff marker uses.
+        assert!(is_context_placeholder("<context-compressed kind=\"diff-lines\" lines=\"40\" />"));
+    }
+
+    /// A tag mentioned inside real code is not a marker, and must still be writable.
+    #[test]
+    fn text_that_merely_contains_a_marker_is_not_one() {
+        assert!(!is_context_placeholder(
+            "<context-compressed kind=\"diff\">x</context-compressed>\nconst x = 1;"
+        ));
+        assert!(!is_context_placeholder("// see the <context-compressed> note in the docs"));
+        // An unrelated document that happens to be XML.
+        assert!(!is_context_placeholder("<svg viewBox=\"0 0 1 1\"><rect /></svg>"));
+    }
 
     #[test]
     fn the_context_placeholder_is_recognised_and_ordinary_text_is_not() {

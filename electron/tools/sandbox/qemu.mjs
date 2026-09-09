@@ -1105,8 +1105,13 @@ done | sort -un`;
  * is listening for the end and polling would be pure cost.
  */
 const watchers = new Map(); // key → interval id
-function watchGuestJob({ key, gpid, cmd, log }) {
+function watchGuestJob({ key, gpid, cmd, log, notify }) {
   if (watchers.has(key)) return;
+  // A notify job has the model waiting on it, so it is polled briskly. Everything else is polled only
+  // so the service table stops claiming a finished job is still running — nobody is blocked on that,
+  // and each poll is a process spawned inside the guest, so a dev server running for hours should not
+  // pay 3-second attention it has no use for.
+  const every = notify ? 3000 : 12_000;
   const timer = setInterval(async () => {
     if (!vm) return stopWatching(key);
     try {
@@ -1132,8 +1137,10 @@ function watchGuestJob({ key, gpid, cmd, log }) {
     } catch {
       /* log unreadable (VM restarted, /tmp cleared) — report completion without it */
     }
-    emitService({ type: "stopped", pid: key, reason: "exited", command: cmd, code: null, tail, notify: true });
-  }, 3000);
+    // `notify` decides whether this WAKES the model; the event itself is emitted either way, because the
+    // running-services panel needs to know the job is over regardless of who asked to be told.
+    emitService({ type: "stopped", pid: key, reason: "exited", command: cmd, code: null, tail, notify: !!notify });
+  }, every);
   timer.unref?.(); // a pending poll must never hold the app open at quit
   watchers.set(key, timer);
 }
@@ -1223,9 +1230,14 @@ export async function startBackground(cmd, opts = {}) {
     // hostPorts holds only the forwards that actually took, so stopping never removes one that was never added.
     procs.set(id, { id, gpid, hostPorts: forwarded, url, command: cmd, log });
     emitService({ type: "started", pid: id, url, command: cmd });
-    // `notify` jobs only: poll for the end and announce it (see watchGuestJob). Keyed by the same id the table
-    // uses, so a stop cancels the same entry the watcher would have reported.
-    if (opts.notify) watchGuestJob({ key: id, gpid, cmd, log });
+    // Every background job is watched, not just the `notify` ones. A guest job has no process object to
+    // hang an "exit" handler on — the native engine gets that for free from child.on("exit") and cleans
+    // up whether or not anyone asked to be notified — so polling is the only way to learn it ended. When
+    // this was gated on `notify`, a command that finished on its own (`sleep 60 && …`) left its entry in
+    // `procs` for the life of the VM: still listed as a running service, still offered by stop_service
+    // under a guest pid that answers to nothing, and its forwarded host ports never released.
+    // Keyed by the same id the table uses, so a stop cancels the same entry the watcher would report.
+    watchGuestJob({ key: id, gpid, cmd, log, notify: !!opts.notify });
   }
   const headline = alive
     ? `✅ Service started in the background inside the sandbox${url ? `, and forwarded to the host: ${url}` : ports.length ? ` (guest port ${ports.join(", ")}, forwarding failed)` : ""}.`
