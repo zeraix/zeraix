@@ -44,8 +44,19 @@ const echo = (text) => (isWindows ? `echo ${JSON.stringify(text)}` : `printf '%s
  * hanging silently invalidates every test here that needs a long-running child. `ping` has no such
  * restriction (N+1 pings ≈ N seconds, since the first is immediate).
  */
+/**
+ * A command that does nothing for `seconds`, in the shell each platform's runtime actually uses.
+ *
+ * Windows gets PowerShell's own `Start-Sleep`, not `ping -n … > nul`. The ping form asked a timing
+ * test to depend on three things that have nothing to do with timing: that ping.exe is on PATH, that
+ * ICMP to loopback works on the runner, and that `> nul` redirects rather than errors — and the shell
+ * runtime spawns PowerShell with `$ErrorActionPreference='Stop'`, where a native command writing to
+ * stderr is a TERMINATING error. Any of those failing ends the node in a few milliseconds, before the
+ * timeout under test can fire, and the node is then recorded FAILED instead of TIMED_OUT. That is
+ * exactly what a Windows CI runner reported while the same test passed on every local machine.
+ */
 const sleepCmd = (seconds) =>
-  isWindows ? `ping -n ${seconds + 1} 127.0.0.1 > nul` : `sleep ${seconds}`;
+  isWindows ? `Start-Sleep -Seconds ${seconds}` : `sleep ${seconds}`;
 
 function freshRoot() {
   closeDb();
@@ -336,7 +347,11 @@ test("a node timeout is recorded as TIMED_OUT, not FAILED", async () => {
   const res = await mgr.run({ workflowId: "wf-timeout" });
 
   assert.ok(!res.ok);
-  assert.equal(repo.getRun(res.runId).state, "TIMED_OUT");
+  // The recorded error rides in the message: "expected TIMED_OUT, got FAILED" is the same sentence
+  // whether the node failed after the deadline or never reached it, and only the error text tells
+  // those apart from a CI log.
+  const run = repo.getRun(res.runId);
+  assert.equal(run.state, "TIMED_OUT", `run ended ${run.state}: ${run.error ?? "(no error recorded)"}`);
 
   await mgr.shutdown();
   closeDb();
