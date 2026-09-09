@@ -64,8 +64,8 @@ Earlier model optimization results are collected in [Model Systems Notes](MODEL_
 
 | Channel | Version | Downloads |
 |---|---|---|
-| Stable | v1.12.0 | [macOS](https://github.com/zeraix/zeraix/releases/download/v1.12.0/Zeraix-intl-1.12.0.dmg) · [Windows](https://github.com/zeraix/zeraix/releases/download/v1.12.0/Zeraix-intl-1.12.0.exe) |
-| Beta | v2.0.0-beta.1 | [macOS](https://github.com/zeraix/zeraix/releases/download/v2.0.0-beta.1/Zeraix-intl-2.0.0-beta.1.dmg) · [Windows](https://github.com/zeraix/zeraix/releases/download/v2.0.0-beta.1/Zeraix-intl-2.0.0-beta.1.exe) |
+| Stable | v2.0.0 | [macOS](https://github.com/zeraix/zeraix/releases/download/v1.12.0/Zeraix-intl-1.12.0.dmg) · [Windows](https://github.com/zeraix/zeraix/releases/download/v1.12.0/Zeraix-intl-2.0.0.exe) |
+| Beta | v2.0.0-beta.2 | [macOS](https://github.com/zeraix/zeraix/releases/download/v2.0.0-beta.1/Zeraix-intl-2.0.0-beta.1.dmg) · [Windows](https://github.com/zeraix/zeraix/releases/download/v2.0.0-beta.1/Zeraix-intl-2.0.0-beta.1.exe) |
 
 Check [all releases](https://github.com/zeraix/zeraix/releases) for newer installers. Features marked **2.0 Beta** are not included in v1.12.0; the `main` branch may contain changes newer than the available installers.
 
