@@ -1,7 +1,17 @@
-import { Boxes, Brain, Info, KeyRound, Plug, ScrollText, SlidersHorizontal, User, Volume2 } from "lucide-react";
+import { Boxes, Brain, Info, KeyRound, Palette, Plug, ScrollText, SlidersHorizontal, User, Volume2 } from "lucide-react";
 
 
-export type SectionId = "account" | "models" | "keys" | "mcp" | "memory" | "notify" | "logs" | "general" | "about";
+export type SectionId =
+  | "account"
+  | "models"
+  | "keys"
+  | "mcp"
+  | "memory"
+  | "notify"
+  | "logs"
+  | "general"
+  | "appearance"
+  | "about";
 
 export interface NavItem {
   id: SectionId;
@@ -25,6 +35,7 @@ export const NAV_GROUPS: { labelKey: string; items: NavItem[] }[] = [
     items: [
       { id: "account", labelKey: "settings.account", icon: User },
       { id: "general", labelKey: "settings.general", icon: SlidersHorizontal },
+      { id: "appearance", labelKey: "settings.appearance", icon: Palette },
       { id: "notify", labelKey: "settings.notify", icon: Volume2 },
     ],
   },
@@ -138,6 +149,26 @@ export const SECTION_KEYS: Record<SectionId, string[]> = {
     "general.backgroundDesc",
     "general.backgroundEnable",
     "general.backgroundAutostart",
+  ],
+  appearance: [
+    "settings.appearance",
+    "appearance.desc",
+    "appearance.theme",
+    "appearance.theme.light",
+    "appearance.theme.dark",
+    "appearance.theme.system",
+    "appearance.skins",
+    "appearance.skin.spring",
+    "appearance.skin.summer",
+    "appearance.skin.autumn",
+    "appearance.skin.winter",
+    "appearance.accent",
+    "appearance.fontSize",
+    "appearance.fontSize.custom",
+    "appearance.store",
+    "appearance.create",
+    "appearance.import",
+    "appearance.template",
   ],
   notify: [
     "settings.notify",

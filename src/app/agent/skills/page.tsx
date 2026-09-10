@@ -371,7 +371,7 @@ export default function AgentSkillsPage() {
           <button
             type="button"
             onClick={() => fileInputRef.current?.click()}
-            className="flex shrink-0 items-center gap-1.5 rounded-lg px-3 py-2 text-sm font-semibold text-white shadow-sm transition hover:brightness-105"
+            className="flex shrink-0 items-center gap-1.5 rounded-lg px-3 py-2 text-sm font-semibold text-accent-on shadow-sm transition hover:brightness-105"
             style={{ backgroundColor: ACCENT }}
           >
             <Upload className="size-4" />
@@ -417,7 +417,7 @@ export default function AgentSkillsPage() {
               {t("skills.tab.installed")}
               {installed.length > 0 && (
                 <span
-                  className="flex size-5 items-center justify-center rounded-full text-[11px] font-semibold text-white"
+                  className="flex size-5 items-center justify-center rounded-full text-[11px] font-semibold text-accent-on"
                   style={{ backgroundColor: ACCENT }}
                 >
                   {installed.length}
@@ -666,7 +666,7 @@ export default function AgentSkillsPage() {
                     type="button"
                     onClick={() => void onDownload(detail.id)}
                     disabled={busyId === detail.id}
-                    className="rounded-lg px-3 py-1.5 text-sm font-semibold text-white shadow-sm transition hover:brightness-105 disabled:opacity-60"
+                    className="rounded-lg px-3 py-1.5 text-sm font-semibold text-accent-on shadow-sm transition hover:brightness-105 disabled:opacity-60"
                     style={{ backgroundColor: ACCENT }}
                   >
                     {busyId === detail.id
@@ -717,7 +717,7 @@ export default function AgentSkillsPage() {
             <button
               type="button"
               onClick={saveEdit}
-              className="rounded-lg px-3 py-1.5 text-sm font-semibold text-white shadow-sm transition hover:brightness-105"
+              className="rounded-lg px-3 py-1.5 text-sm font-semibold text-accent-on shadow-sm transition hover:brightness-105"
               style={{ backgroundColor: ACCENT }}
             >
               {t("skills.save")}

@@ -142,7 +142,7 @@ export default function SidebarLeaf({
       className={cn(
         "flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm transition-colors",
         active
-          ? "bg-accent font-medium text-foreground dark:bg-white/[0.06]"
+          ? "skin-nav-active bg-accent font-medium text-foreground dark:bg-white/[0.06]"
           : "text-foreground/80 hover:bg-accent dark:hover:bg-white/[0.04]",
         // An unseen reply also weights the label: the dot alone is easy to miss in a long list.
         !active && unread && "font-medium text-foreground"

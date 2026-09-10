@@ -108,7 +108,9 @@ export function ProjectMemorySection({ t }: { t: TFunc }) {
       desc={t("projmem.desc")}
       icon={FileCog}
       anchor="memory/project"
-      className="mt-7 border-t border-line pt-7"
+      // rounded-none: Group is rounded for its link-highlight flash, and a top-only border on a rounded box curves up at
+      // both ends -- it read as the lid of an empty card. Square corners keep the divider a straight rule.
+      className="mt-7 rounded-none border-t border-line pt-7"
     >
       {!available ? (
         <p className={NOTE}>{t("memory.unavailable")}</p>

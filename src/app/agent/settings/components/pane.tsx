@@ -54,12 +54,14 @@ export function Pane({
 }) {
   return (
     <div className={cn("mx-auto w-full", wide ? "max-w-4xl" : "max-w-2xl")}>
-      <header className="mb-6 flex items-start justify-between gap-3 border-b border-line pb-4">
-        <div className="min-w-0">
-          <h2 className="text-xl font-bold text-ink">{title}</h2>
+      {/* Wraps rather than squeezes: when the actions and the title cannot share a line, the actions drop below
+          it. A shrink-0 actions row used to crush the title column instead, wrapping its words and hiding its badge. */}
+      <header className="skin-rule mb-6 flex flex-wrap items-start justify-between gap-x-3 gap-y-3 border-b border-line pb-4">
+        <div className="min-w-0 flex-[1_1_16rem]">
+          <h2 className="skin-heading text-xl font-bold text-ink">{title}</h2>
           {desc ? <p className="mt-1 max-w-prose text-xs leading-relaxed text-ink-muted">{desc}</p> : null}
         </div>
-        {actions ? <div className="flex shrink-0 items-center gap-2">{actions}</div> : null}
+        {actions ? <div className="flex flex-wrap items-center gap-2">{actions}</div> : null}
       </header>
       {/* One rhythm between groups, set here rather than by each group's own margin. */}
       <div className="space-y-7">{children}</div>
@@ -104,9 +106,9 @@ export function Group({
         className,
       )}
     >
-      <div className="group/heading mb-2 flex items-start justify-between gap-3">
-        <div className="min-w-0">
-          <h3 className="flex items-center gap-1.5 text-sm font-semibold text-ink">
+      <div className="group/heading mb-2 flex flex-wrap items-start justify-between gap-x-3 gap-y-2">
+        <div className="min-w-0 flex-[1_1_14rem]">
+          <h3 className="skin-subheading flex items-center gap-1.5 text-sm font-semibold text-ink">
             {Icon ? <Icon className="size-4 shrink-0 text-ink-muted" /> : null}
             {title}
             {/* The link to this exact group. Writing the hash is the whole action: the address bar
@@ -129,7 +131,7 @@ export function Group({
           </h3>
           {desc ? <p className="mt-0.5 max-w-prose text-xs leading-relaxed text-ink-subtle">{desc}</p> : null}
         </div>
-        {actions ? <div className="flex shrink-0 items-center gap-2">{actions}</div> : null}
+        {actions ? <div className="flex flex-wrap items-center gap-2">{actions}</div> : null}
       </div>
       {children}
     </section>

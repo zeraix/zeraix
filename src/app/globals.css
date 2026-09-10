@@ -474,9 +474,46 @@
   --accent-on: #1a1509;
 }
 
+/* ----------------------------------------------------------- font scale ---
+ *
+ * UI density, as one variable. `--ui-font-scale` multiplies the root font size, so every rem-based
+ * length in the app -- type, padding, gaps, control heights -- scales with it in one step, the same
+ * way the palette moves through tokens rather than through per-component overrides.
+ *
+ * Set on <html data-font-size>, written by the Appearance settings panel. Absent means "medium",
+ * which is what an unstyled first paint and any non-Electron build get.
+ *
+ * Caveat worth knowing: utilities written as px literals (`text-[11px]` and friends, of which this
+ * codebase has plenty) are immune by definition. They hold their size while the frame around them
+ * grows. Moving those to rem is the follow-up that makes this setting uniform.
+ */
+:root {
+  --ui-font-scale: 1;
+}
+[data-font-size="sm"] {
+  --ui-font-scale: 0.875;
+}
+[data-font-size="md"] {
+  --ui-font-scale: 1;
+}
+[data-font-size="lg"] {
+  --ui-font-scale: 1.125;
+}
+[data-font-size="xl"] {
+  --ui-font-scale: 1.25;
+}
+/* data-font-size="custom" declares nothing: appearance.ts writes --ui-font-scale inline on <html> from the
+   px value the user typed, and an inline declaration outranks every rule above. */
+
+/* Skin surfaces, controls and component details live in ./skins.css (imported by the root layout). */
+
 @layer base {
   * {
     @apply border-border outline-ring/50;
+  }
+
+  html {
+    font-size: calc(16px * var(--ui-font-scale));
   }
 
   body {

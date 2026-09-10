@@ -29,6 +29,7 @@ import { McpSection } from "./components/McpSection";
 import { ProjectMemorySection } from "./components/ProjectMemorySection";
 import { MemorySection } from "./components/MemorySection";
 import { GeneralSection } from "./components/GeneralSection";
+import { AppearanceSection } from "./components/AppearanceSection";
 import { NotifySoundSection } from "./components/NotifySoundSection";
 import { LogsSection } from "./components/LogsSection";
 import { AboutSection } from "./components/AboutSection";
@@ -196,7 +197,7 @@ export default function AgentSettingsPage() {
                     onClick={() => selectSection(n.id)}
                     className={cn(
                       "flex items-center gap-2 rounded-lg px-3 py-2 text-left text-sm transition-colors",
-                      active ? "bg-accent font-medium text-ink" : "text-ink-muted hover:bg-accent",
+                      active ? "skin-nav-active bg-accent font-medium text-ink" : "text-ink-muted hover:bg-accent",
                     )}
                   >
                     <Icon className="size-4 shrink-0" />
@@ -243,6 +244,8 @@ export default function AgentSettingsPage() {
             </MemorySection>
           ) : effectiveSection === "general" ? (
             <GeneralSection t={t} />
+          ) : effectiveSection === "appearance" ? (
+            <AppearanceSection t={t} />
           ) : effectiveSection === "notify" ? (
             <NotifySoundSection t={t} />
           ) : effectiveSection === "logs" ? (

@@ -378,6 +378,58 @@ contextBridge.exposeInMainWorld("appConfig", {
   getPath: () => ipcRenderer.invoke("appconfig:get-path"),
 });
 
+// Appearance: theme mode / accent / UI font size (electron/appearance.mjs). Persisted to [ui] in
+// app.config by the main process, which also owns nativeTheme.themeSource and fans changes out to
+// every window. getSync exists for first paint -- an await would land after it, and the wrong theme
+// would be on screen for a frame.
+contextBridge.exposeInMainWorld("appearance", {
+  /** Synchronous snapshot: { appearance, resolved, windowId }. windowId is this window's webContents
+   *  id, which is what `origin` on a change broadcast is compared against. */
+  getSync: () => ipcRenderer.sendSync("appearance:get-sync"),
+  /** Full snapshot, including the resolved theme. */
+  get: () => ipcRenderer.invoke("appearance:get"),
+  /** Persist a partial change; resolves with the full new appearance. Broadcast to all windows. */
+  set: (patch) => ipcRenderer.invoke("appearance:set", patch),
+  /**
+   * Another window (or this one) changed a setting. The payload carries `origin`, the webContents id
+   * that asked, so a window that already applied the change can skip its own echo.
+   */
+  onChanged: (cb) => {
+    const h = (_e, payload) => cb(payload);
+    ipcRenderer.on("appearance:changed", h);
+    return () => ipcRenderer.off("appearance:changed", h);
+  },
+  /** The effective light/dark changed: the OS flipped while following it, or the mode was switched.
+   *  Payload { resolved }. Electron cannot report the OS preference while the app is pinned. */
+  onResolvedTheme: (cb) => {
+    const h = (_e, payload) => cb(payload);
+    ipcRenderer.on("appearance:resolved-theme", h);
+    return () => ipcRenderer.off("appearance:resolved-theme", h);
+  },
+});
+
+// Skins (electron/skins/store.mjs): store installs and the user's own skins, kept under userData by the main process.
+// listSync is for first paint -- the active skin's palette has to be known before the window draws. Every async call
+// resolves to { ok: true, ... } or { ok: false, code?, canceled? }; `code` maps to a translated message in the UI.
+contextBridge.exposeInMainWorld("skins", {
+  listSync: () => ipcRenderer.sendSync("skins:list-sync"),
+  save: (skin) => ipcRenderer.invoke("skins:save", skin),
+  install: (skin) => ipcRenderer.invoke("skins:install", skin),
+  remove: (id) => ipcRenderer.invoke("skins:remove", id),
+  /** Opens a file picker; the chosen image is stored as a draft for this skin until it is saved. */
+  pickImage: (id, slot) => ipcRenderer.invoke("skins:pick-image", id, slot),
+  /** Throw away unsaved editor images (and the folder of a skin that was never saved). */
+  discardDrafts: (id) => ipcRenderer.invoke("skins:discard-drafts", id),
+  importFile: () => ipcRenderer.invoke("skins:import"),
+  exportFile: (id) => ipcRenderer.invoke("skins:export", id),
+  downloadTemplate: () => ipcRenderer.invoke("skins:download-template"),
+  onChanged: (cb) => {
+    const h = (_e, list) => cb(list);
+    ipcRenderer.on("skins:changed", h);
+    return () => ipcRenderer.off("skins:changed", h);
+  },
+});
+
 // Token-usage log (electron/store/usageLogStore.mjs). Model invocations are recorded by the LLM proxy
 // in the main process; the renderer contributes what only it knows — which actor made a tool call, and
 // what a sub-agent was delegated. Off by default; `append` is fire-and-forget so the chat loop never

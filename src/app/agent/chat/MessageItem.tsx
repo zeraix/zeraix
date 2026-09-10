@@ -333,7 +333,7 @@ function ChoiceCard({
                       isMulti ? "rounded-md" : "rounded-full"
                     } ${
                       isChosen
-                        ? "bg-white/25 text-white"
+                        ? "bg-primary-foreground/25 text-primary-foreground"
                         : msg.submitted
                           ? "bg-surface text-ink-subtle"
                           : "bg-surface-muted text-ink-muted group-hover:bg-primary/15 group-hover:text-primary"
@@ -401,7 +401,7 @@ function ChoiceCard({
                   <span className="min-w-0 flex-1">{t("chat.choice.submit")}</span>
                   {/* The running count is the feedback a checkbox list otherwise lacks: with no single
                       highlighted row to look at, this is how the user sees the answer taking shape. */}
-                  <span className={`shrink-0 text-[11px] font-normal ${complete ? "text-white/75" : "text-ink-subtle"}`}>
+                  <span className={`shrink-0 text-[11px] font-normal ${complete ? "text-primary-foreground/75" : "text-ink-subtle"}`}>
                     {isMulti
                       ? t("chat.choice.selected", { count: String(chosen?.values?.length ?? 0) })
                       : t("chat.choice.progress", {
@@ -872,7 +872,7 @@ export const MessageItem = memo(function MessageItem({
         <div
           className={`min-w-0 text-sm text-ink ${
             isUser
-              ? "rounded-2xl rounded-tr-md bg-surface-muted px-3.5 py-2"
+              ? "skin-user-bubble rounded-2xl rounded-tr-md bg-surface-muted px-3.5 py-2"
               : "w-full px-1 py-0.5"
           }`}
         >

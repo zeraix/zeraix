@@ -10,10 +10,11 @@
  * - A detected in-site search (trigger) is only logged and no longer auto-expands; expanding is controlled
  *   by the openBrowser tool / manually.
  */
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, type MouseEvent as ReactMouseEvent } from "react";
 import {
   ArrowLeft,
   ArrowRight,
+  Code,
   Globe,
   Maximize2,
   Minimize2,
@@ -86,6 +87,11 @@ interface ConsoleEntry {
   /** "sourceId:line" when the page reports one. */
   source: string;
 }
+
+/** Smallest the chat column is allowed to get as the panel eats into it. */
+const MIN_CHAT_WIDTH = 360;
+/** Matches the panel column's min-w-[420px]; below this the toolbar starts clipping. */
+const MIN_PANEL_WIDTH = 420;
 
 /** Per-tab console ring buffer size. Deep enough for a page that logs on every frame, small enough to keep in memory. */
 const CONSOLE_CAP = 300;
@@ -207,7 +213,19 @@ export default function BrowserPanel({
   const [agentControl, setAgentControl] = useState(true);
   const [busy, setBusy] = useState(false); // whether the AI is currently operating the browser
   const [logs, setLogs] = useState<LogEntry[]>([]);
-  const [showLogs, setShowLogs] = useState(false);
+  /** Which log drawer is open. The two are separate readings: `system` is what the panel and the agent
+   *  did, `console` is what the page itself said. Mixing them buried real page errors under status noise. */
+  const [drawer, setDrawer] = useState<"system" | "console" | null>(null);
+  /** Render mirror of the active tab's console buffer (the buffer itself lives in consoleRef, which the
+   *  agent's read path needs synchronously). Only maintained while the console drawer is open -- a page
+   *  that logs every frame would otherwise re-render the panel every frame for output nobody is reading. */
+  const [consoleView, setConsoleView] = useState<ConsoleEntry[]>([]);
+  /** Unread-ish error tally for the Console button badge; reset when the drawer is opened or cleared. */
+  const [consoleErrors, setConsoleErrors] = useState(0);
+  /** Panel width in px; null = the 62% default, until the user drags the divider. */
+  const [width, setWidth] = useState<number | null>(null);
+  const [resizing, setResizing] = useState(false);
+  const panelRef = useRef<HTMLDivElement>(null);
 
   const webviewRefs = useRef<Map<string, WebviewEl>>(new Map());
   const consoleRef = useRef<Map<string, ConsoleEntry[]>>(new Map()); // tab id -> captured page console output
@@ -217,6 +235,18 @@ export default function BrowserPanel({
   tabsRef.current = tabs;
   const activeIdRef = useRef<string | null>(activeId);
   activeIdRef.current = activeId;
+  const drawerRef = useRef(drawer);
+  // Written from an effect rather than during render: onTabConsole fires from async webview events, long
+  // after paint, so it never needs a value the current render has not committed yet.
+  useEffect(() => {
+    drawerRef.current = drawer;
+  }, [drawer]);
+
+  /** Pull the active tab's buffer into the render mirror. Called wherever the console view's subject
+   *  changes -- opening the drawer, switching or closing a tab -- since the buffer lives in a ref. */
+  const syncConsoleView = useCallback((id: string | null) => {
+    setConsoleView(id ? [...(consoleRef.current.get(id) ?? [])] : []);
+  }, []);
 
   const registerRef = useCallback((id: string, el: WebviewEl | null) => {
     if (el) webviewRefs.current.set(id, el);
@@ -238,7 +268,8 @@ export default function BrowserPanel({
     setActiveId((cur) => (cur === id ? remaining[remaining.length - 1]?.id ?? null : cur));
     webviewRefs.current.delete(id);
     consoleRef.current.delete(id);
-  }, []);
+    syncConsoleView(remaining[remaining.length - 1]?.id ?? null);
+  }, [syncConsoleView]);
 
   const navigateActive = useCallback((rawUrl: string) => {
     const u = normUrl(rawUrl);
@@ -374,16 +405,16 @@ export default function BrowserPanel({
   const pushLog = (text: string, kind: LogEntry["kind"]) =>
     setLogs((l) => [...l.slice(-199), { id: ++logIdRef.current, text, kind }]);
 
-  // Page console output: every level goes into the per-tab buffer the AI reads, while warnings and errors also land in
-  // the visible log drawer, so the user sees the same thing without opening devtools.
+  // Page console output: every level goes into the per-tab buffer the AI reads. It no longer bleeds into
+  // the system log -- the console drawer is where the page speaks, and the button badge carries the error
+  // count so a silent-but-broken page is still visible without opening the drawer.
   const onTabConsole = useCallback((id: string, entry: ConsoleEntry) => {
     const buf = consoleRef.current.get(id) ?? [];
     buf.push(entry);
     if (buf.length > CONSOLE_CAP) buf.splice(0, buf.length - CONSOLE_CAP);
     consoleRef.current.set(id, buf);
-    if (entry.level === "error" || entry.level === "warn") {
-      pushLog(`${entry.level}: ${entry.text}${entry.source ? ` (${entry.source})` : ""}`, entry.level);
-    }
+    if (entry.level === "error") setConsoleErrors((n) => n + 1);
+    if (id === activeIdRef.current && drawerRef.current === "console") setConsoleView([...buf]);
   }, []);
 
   // Automation events -> logs (does not auto-expand).
@@ -453,6 +484,47 @@ export default function BrowserPanel({
   const iconBtn =
     "flex size-7 items-center justify-center rounded-md text-muted-foreground transition hover:bg-accent hover:text-foreground";
 
+  // Drag the left divider to resize (same shape as FilesPanel's terminal divider). The panel is the
+  // right-hand flex child, so its right edge is fixed for the duration of the drag and the new width
+  // is simply that edge minus the cursor.
+  const startResize = (e: ReactMouseEvent) => {
+    e.preventDefault();
+    const panel = panelRef.current;
+    const row = panel?.parentElement;
+    if (!panel || !row) return;
+    const right = panel.getBoundingClientRect().right;
+    const max = Math.max(MIN_PANEL_WIDTH, row.getBoundingClientRect().width - MIN_CHAT_WIDTH);
+    const onMove = (ev: MouseEvent) => {
+      setWidth(Math.max(MIN_PANEL_WIDTH, Math.min(right - ev.clientX, max)));
+    };
+    const onUp = () => {
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+      document.body.style.cursor = "";
+      document.body.style.userSelect = "";
+      setResizing(false);
+    };
+    document.body.style.cursor = "col-resize";
+    document.body.style.userSelect = "none";
+    setResizing(true);
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+  };
+
+  // Keep a dragged width legal when the window itself shrinks, otherwise the chat column can be
+  // squeezed to nothing by a resize the user made no choice about.
+  useEffect(() => {
+    const onResize = () => {
+      const row = panelRef.current?.parentElement;
+      if (!row) return;
+      const max = Math.max(MIN_PANEL_WIDTH, row.getBoundingClientRect().width - MIN_CHAT_WIDTH);
+      // Functional update, so the listener never has to close over the current width.
+      setWidth((w) => (w == null ? w : Math.min(w, max)));
+    };
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
+  }, []);
+
   return (
     <>
       {!open && (
@@ -466,10 +538,27 @@ export default function BrowserPanel({
       )}
 
       <div
-        className={`h-full shrink-0 overflow-hidden border-l border-line bg-surface transition-[width] duration-300 ${
-          open ? (maximized ? "w-full" : "w-[62%] min-w-[420px]") : "w-0"
-        }`}
+        ref={panelRef}
+        // The width transition is dropped mid-drag: a 300ms ease on every mousemove leaves the edge
+        // trailing the cursor instead of tracking it.
+        className={`relative h-full shrink-0 overflow-hidden border-l border-line bg-surface ${
+          resizing ? "" : "transition-[width] duration-300"
+        } ${open && !maximized ? "min-w-[420px]" : ""}`}
+        style={{ width: open ? (maximized ? "100%" : (width ?? "62%")) : 0 }}
       >
+        {/* Resize divider. Sits above the webview so the grab still lands when the panel is narrow and
+            the body is nearly all guest content; hidden while maximized, where there is nothing to drag. */}
+        {open && !maximized && (
+          <div
+            onMouseDown={startResize}
+            onDoubleClick={() => setWidth(null)}
+            title="Drag to resize (double-click to reset)"
+            className={`absolute inset-y-0 left-0 z-30 w-1.5 cursor-col-resize transition-colors ${
+              resizing ? "bg-primary/60" : "bg-transparent hover:bg-primary/50"
+            }`}
+          />
+        )}
+
         <div className="flex h-full w-full min-w-[420px] flex-col">
           {/* Top bar */}
           <div className="flex items-center gap-2 border-b border-line px-3 py-2">
@@ -493,7 +582,11 @@ export default function BrowserPanel({
               return (
                 <div
                   key={t.id}
-                  onClick={() => setActiveId(t.id)}
+                  onClick={() => {
+                    setActiveId(t.id);
+                    // The console drawer is per-tab; switching tabs has to re-point it.
+                    if (drawerRef.current === "console") syncConsoleView(t.id);
+                  }}
                   title={t.url}
                   className={`flex min-w-0 max-w-[200px] shrink-0 cursor-pointer items-center gap-1.5 rounded-t-md border border-b-0 px-2.5 py-1 text-xs ${
                     isActive ? "border-line bg-surface text-foreground" : "border-transparent text-muted-foreground hover:bg-surface/60"
@@ -543,7 +636,7 @@ export default function BrowserPanel({
           </div>
 
           {/* Each tab's webview (only the active tab is visible; the rest are hidden but keep their state) */}
-          <div className="relative min-h-0 flex-1 bg-white">
+          <div className={`relative min-h-0 flex-1 bg-white ${resizing ? "pointer-events-none" : ""}`}>
             {tabs.length === 0 ? (
               <div className="flex h-full items-center justify-center text-sm text-muted-foreground">
                 Click + to open a new tab
@@ -574,26 +667,51 @@ export default function BrowserPanel({
             )}
           </div>
 
-          {/* Console logs */}
-          {showLogs && (
+          {/* Log drawer: one panel, two sources -- the panel's own status log, or the active page's console. */}
+          {drawer && (
             <div className="h-32 shrink-0 overflow-auto border-t border-line bg-surface-muted/60 px-3 py-2 font-mono text-[11px]">
-              {logs.length === 0 ? (
-                <p className="text-muted-foreground">No logs yet</p>
+              {drawer === "system" ? (
+                logs.length === 0 ? (
+                  <p className="text-muted-foreground">No activity yet</p>
+                ) : (
+                  logs.map((l) => (
+                    <p
+                      key={l.id}
+                      className={
+                        l.kind === "error"
+                          ? "text-destructive"
+                          : l.kind === "warn"
+                            ? "text-warning-ink"
+                            : l.kind === "trigger"
+                              ? "text-primary"
+                              : "text-muted-foreground"
+                      }
+                    >
+                      {l.text}
+                    </p>
+                  ))
+                )
+              ) : consoleView.length === 0 ? (
+                <p className="text-muted-foreground">
+                  {activeTab ? "This page has logged nothing yet" : "No active tab"}
+                </p>
               ) : (
-                logs.map((l) => (
+                consoleView.map((e, i) => (
                   <p
-                    key={l.id}
-                    className={
-                      l.kind === "error"
+                    key={i}
+                    className={`flex gap-2 ${
+                      e.level === "error"
                         ? "text-destructive"
-                        : l.kind === "warn"
+                        : e.level === "warn"
                           ? "text-warning-ink"
-                          : l.kind === "trigger"
-                            ? "text-primary"
+                          : e.level === "debug"
+                            ? "text-ink-subtle"
                             : "text-muted-foreground"
-                    }
+                    }`}
                   >
-                    {l.text}
+                    <span className="shrink-0 uppercase opacity-60">{e.level}</span>
+                    <span className="min-w-0 flex-1 break-words">{e.text}</span>
+                    {e.source && <span className="shrink-0 opacity-50">{e.source}</span>}
                   </p>
                 ))
               )}
@@ -618,13 +736,58 @@ export default function BrowserPanel({
             >
               {agentControl ? "Take over" : "Return to Agent"}
             </button>
-            <button onClick={() => setShowLogs((v) => !v)} className="ml-auto flex items-center gap-1 rounded-md px-2 py-1 text-muted-foreground transition hover:bg-accent hover:text-foreground">
+            {/* Two readings, two buttons. Selecting one closes the other, so the drawer keeps its one slot. */}
+            <button
+              onClick={() => setDrawer((d) => (d === "system" ? null : "system"))}
+              title="Panel and agent activity"
+              className={`ml-auto flex items-center gap-1 rounded-md px-2 py-1 transition hover:bg-accent hover:text-foreground ${
+                drawer === "system" ? "bg-accent text-foreground" : "text-muted-foreground"
+              }`}
+            >
               <Terminal className="size-3.5" />
-              Console logs
-              {logs.length > 0 && <span className="rounded-full bg-surface-muted px-1.5 text-[10px]">{logs.length}</span>}
+              System
+              {logs.length > 0 && (
+                <span className="rounded-full bg-surface-muted px-1.5 text-[10px]">{logs.length}</span>
+              )}
             </button>
-            {showLogs && logs.length > 0 && (
+            <button
+              onClick={() => {
+                const next = drawer === "console" ? null : "console";
+                // Seeded here rather than in an effect: the buffer is a ref, and an event handler is the
+                // one place it can be read without tripping over render-time ref access.
+                if (next === "console") {
+                  syncConsoleView(activeIdRef.current);
+                  setConsoleErrors(0);
+                }
+                setDrawer(next);
+              }}
+              title="Console output from the page itself"
+              className={`flex items-center gap-1 rounded-md px-2 py-1 transition hover:bg-accent hover:text-foreground ${
+                drawer === "console" ? "bg-accent text-foreground" : "text-muted-foreground"
+              }`}
+            >
+              <Code className="size-3.5" />
+              Console
+              {consoleErrors > 0 && (
+                <span className="rounded-full bg-destructive/15 px-1.5 text-[10px] font-semibold text-destructive">
+                  {consoleErrors}
+                </span>
+              )}
+            </button>
+            {drawer === "system" && logs.length > 0 && (
               <button onClick={() => setLogs([])} className="rounded-md px-2 py-1 text-muted-foreground transition hover:bg-accent hover:text-foreground">
+                Clear
+              </button>
+            )}
+            {drawer === "console" && consoleView.length > 0 && (
+              <button
+                onClick={() => {
+                  if (activeIdRef.current) consoleRef.current.set(activeIdRef.current, []);
+                  setConsoleView([]);
+                  setConsoleErrors(0);
+                }}
+                className="rounded-md px-2 py-1 text-muted-foreground transition hover:bg-accent hover:text-foreground"
+              >
                 Clear
               </button>
             )}

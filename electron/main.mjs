@@ -43,6 +43,8 @@ import {
   ensureConfigFile,
   ensureAppConfigKeys,
 } from "./appConfig.mjs";
+import { registerAppearance } from "./appearance.mjs";
+import { registerSkins, serveSkinFile, SKINS_PREFIX } from "./skins/store.mjs";
 import {
   initIntegrity,
   encryptionStatus,
@@ -273,6 +275,8 @@ async function handleAppRequest(request) {
    * Only the BASENAME is honoured, resolved against the media folder: a stored entry is data, and data that
    * can name `../../.ssh/id_rsa` would turn the library into a file-read primitive.
    */
+  // Skin images: checked by their bytes on the way in, served by fixed name on the way out. See skins/store.mjs.
+  if (decoded.startsWith(SKINS_PREFIX)) return serveSkinFile(decoded.slice(SKINS_PREFIX.length));
   // Workspace files, for the Files panel: same origin, same boundary as the file tools. See fileServing.mjs.
   if (decoded.startsWith(WS_PREFIX)) {
     return serveWorkspaceFile(decoded.slice(WS_PREFIX.length), request, { workdir: getWorkingDir(), assetDir: getAssetDir() });
@@ -1104,6 +1108,10 @@ app.whenReady().then(async () => {
   // Initialize the encryption master key first (safeStorage needs app ready); afterward conversationStore reads/writes are transparently encrypted/decrypted.
   initIntegrity();
   registerAppConfig();
+  // After registerAppConfig (it reads [ui] from the loaded config) and before the first window is
+  // created, so nativeTheme.themeSource is already right when that window picks its background.
+  registerAppearance();
+  registerSkins();
   registerAiTools();
   // Start the Rust sidecar now rather than on the first tool call, so its state is reported once at
   // boot instead of being inferred from behaviour. Fire-and-forget and never fatal: with the flag off it

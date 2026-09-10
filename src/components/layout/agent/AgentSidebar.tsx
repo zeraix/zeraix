@@ -17,6 +17,8 @@ import {
   SunMoon,
 } from "lucide-react";
 import { useTheme } from "next-themes";
+import { useAppearance } from "@/components/theme/ThemeProvider";
+import { isThemeMode } from "@/components/theme/theme-config";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import {
   DropdownMenu,
@@ -143,7 +145,7 @@ function CollapsibleSection({
         onClick={() => setOpen((v) => !v)}
         className="flex shrink-0 items-center gap-1 px-2 text-xs text-muted-foreground transition-colors hover:text-foreground"
       >
-        <span>{title}</span>
+        <span className="skin-section-title">{title}</span>
         <ChevronDown
           className={cn("size-3 transition-transform", !open && "-rotate-90")}
         />
@@ -216,7 +218,10 @@ export default function AgentSidebar({ onToggle }: { onToggle?: () => void }) {
     setDeleteState(null);
   };
   // Theme (light / dark / system): using next-themes; show the label only after mounted, to avoid hydration mismatches.
-  const { theme, setTheme, resolvedTheme } = useTheme();
+  const { theme, resolvedTheme } = useTheme();
+  // Writes go through useAppearance, not next-themes' setTheme: a bare setTheme never reaches app.config,
+  // and app.config wins at boot -- so a theme picked here would be quietly reverted on the next launch.
+  const { setAppearance } = useAppearance();
   const [mounted, setMounted] = useState(false);
   // Dark mode uses the "sidebarD*" icon variants (sidebar1.svg -> sidebarD1.svg); before mounting, treat as light to avoid hydration mismatches.
   const isDark = mounted && resolvedTheme === "dark";
@@ -378,7 +383,7 @@ export default function AgentSidebar({ onToggle }: { onToggle?: () => void }) {
     if (await requireLogin()) router.push("/agent/wallet");
   };
   return (
-    <aside className="flex h-full w-[260px] shrink-0 flex-col border-r border-line bg-sidebar">
+    <aside data-skin-slot="sidebar" className="flex h-full w-[260px] shrink-0 flex-col border-r border-line bg-sidebar">
       {/* Top: window control dots + brand + collapse button (the whole block is the drag region of the frameless window; interactive elements are no-drag) */}
       <div className="px-4 pt-6" style={{ WebkitAppRegion: "drag" } as React.CSSProperties}>
         <TrafficLights />
@@ -465,7 +470,7 @@ export default function AgentSidebar({ onToggle }: { onToggle?: () => void }) {
                 {active && (
                   <motion.span
                     layoutId="agent-nav-active"
-                    className="absolute inset-0 rounded-lg bg-accent dark:bg-white/[0.06]"
+                    className="skin-nav-active skin-nav-mark absolute inset-0 rounded-lg bg-accent dark:bg-white/[0.06]"
                     transition={{ type: "spring", stiffness: 500, damping: 40 }}
                   />
                 )}
@@ -582,7 +587,7 @@ export default function AgentSidebar({ onToggle }: { onToggle?: () => void }) {
               </DropdownMenuSubTrigger>
               <DropdownMenuSubContent>
                 {THEME_MODES.map((m) => (
-                  <DropdownMenuItem key={m.key} onClick={() => setTheme(m.key)}>
+                  <DropdownMenuItem key={m.key} onClick={() => isThemeMode(m.key) && setAppearance({ theme: m.key })}>
                     {t(m.labelKey)}
                     {theme === m.key && <span className="ml-auto text-primary">✓</span>}
                   </DropdownMenuItem>

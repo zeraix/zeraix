@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 // import localFont from "next/font/local";
 import "@/app/globals.css";
+import "@/app/skins.css";
 import SafetyRootLayout from "./SafetyRootLayout";
 import { Toaster } from "sonner";
 import { TooltipProvider } from "@/components/ui/tooltip";

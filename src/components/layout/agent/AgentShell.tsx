@@ -10,6 +10,7 @@ import FilesSidebar from "./FilesSidebar";
 import FilesPanel from "@/app/agent/chat/FilesPanel";
 import { ChatAgentView } from "@/app/agent/chat/page";
 import MediaViewerHost from "@/components/media/MediaViewerHost";
+import SkinDecor from "@/components/theme/SkinDecor";
 import WindowControls, {
   TrafficLights,
   useTrafficLights,
@@ -77,7 +78,9 @@ export default function AgentShell({ children }: { children: React.ReactNode }) 
   return (
     <TitleBarSlotContext.Provider value={titleSlot}>
     <FilesSidebarContext.Provider value={filesSidebar}>
-    <div className="relative flex h-full w-full overflow-hidden bg-background">
+    <div data-skin-slot="shell" className="relative isolate flex h-full w-full overflow-hidden bg-background">
+      {/* `isolate` above gives SkinDecor a stacking context to sit at -z-10 in: beneath every surface, above the window. */}
+      <SkinDecor showCorner={isChatRoute} />
       {/* Global: a zeraix:// link opens the page it names, from anywhere in the shell. */}
       <DeepLinkRouter />
       {/* Global: local model ready/stopped -> sync the chat model list (persists across pages, so leaving the model-library page doesn't lose the ready event). */}
@@ -110,7 +113,7 @@ export default function AgentShell({ children }: { children: React.ReactNode }) 
         )}
       </AnimatePresence>
 
-      <main className="flex min-w-0 flex-1 flex-col overflow-hidden bg-surface">
+      <main data-skin-slot="main" data-chat-route={isChatRoute ? "" : undefined} className="flex min-w-0 flex-1 flex-col overflow-hidden bg-surface">
         {/* Top title bar: draggable, with the top-right window controls floating over the gap reserved at its end.
             On the chat route the conversation header fills the slot on the left, so the conversation title, the
             environment switch and the skills / clear buttons sit on this row instead of in a second strip below it.

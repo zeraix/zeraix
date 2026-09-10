@@ -137,7 +137,7 @@ export function GeneralSection({ t }: { t: TFunc }) {
               <button
                 onClick={() => void apply()}
                 disabled={!input.trim()}
-                className="shrink-0 rounded-lg bg-gradient-to-br from-primary to-primary/85 px-3 py-1.5 text-xs font-semibold text-white shadow-sm transition hover:brightness-105 disabled:opacity-50"
+                className="shrink-0 rounded-lg bg-gradient-to-br from-primary to-primary/85 px-3 py-1.5 text-xs font-semibold text-primary-foreground shadow-sm transition hover:brightness-105 disabled:opacity-50"
               >
                 {t("general.apply")}
               </button>
@@ -207,7 +207,7 @@ export function GeneralSection({ t }: { t: TFunc }) {
             <button
               onClick={applyBudget}
               disabled={budgetK <= 0}
-              className="shrink-0 rounded-lg bg-gradient-to-br from-primary to-primary/85 px-3 py-1.5 text-xs font-semibold text-white shadow-sm transition hover:brightness-105 disabled:cursor-not-allowed disabled:opacity-50"
+              className="shrink-0 rounded-lg bg-gradient-to-br from-primary to-primary/85 px-3 py-1.5 text-xs font-semibold text-primary-foreground shadow-sm transition hover:brightness-105 disabled:cursor-not-allowed disabled:opacity-50"
             >
               {t("general.apply")}
             </button>

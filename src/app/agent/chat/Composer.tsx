@@ -134,11 +134,12 @@ export function Composer({
   const localSelected =
     !!selected && (selected.providerId === LOCAL_PROVIDER_ID || isLocalEndpoint(selected.endpoint ?? ""));
   return (
-    <div className="border-t border-line bg-surface px-4 py-3">
+    <div data-skin-slot="composer-bar" className="border-t border-line bg-surface px-4 py-3">
       <div className={CHAT_COLUMN}>
         <div
           // `relative` anchors the slash-command menu, which is positioned against this box rather than the
           // textarea so it spans the full composer width.
+          data-skin-slot="composer"
           className="relative rounded-[20px] border border-line-strong bg-surface px-3 pb-2.5 pt-2.5 shadow-sm transition focus-within:border-ring focus-within:shadow-md focus-within:ring-4 focus-within:ring-primary/10"
           onDragOver={(e) => e.preventDefault()}
           onDrop={(e) => {

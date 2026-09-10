@@ -1,0 +1,478 @@
+/*
+ * Skins: everything a skin paints beyond its palette tokens.
+ *
+ * Split out of globals.css to keep that file under the project's 1000-line ceiling, and because every rule here
+ * answers to one system: the active skin's data attributes on <html> (data-skin, data-skin-backdrop,
+ * data-skin-buttons / -fields / -cards / -headings / -nav / -ornament), written by src/components/theme/skins/apply.ts
+ * from a sanitized skin. No attribute, no effect -- the default look is untouched.
+ *
+ * All rules are unlayered on purpose: they must beat Tailwind's utilities (in @layer utilities) whatever the
+ * specificity, so import order relative to globals.css does not matter.
+ */
+
+/* ---------------------------------------------------------- skin surfaces ---
+ *
+ * A rich skin paints layers the palette cannot: an image or glow behind the whole app, a tiled pattern, and art
+ * in the corner (SkinDecor). Those layers sit UNDER the app, so the opaque surfaces that normally cover every
+ * pixel have to let them through -- but only while a skin is actually painting something there. Hence the
+ * `data-skin-backdrop` gate: without it the default look is untouched.
+ *
+ * Surfaces are marked with `data-skin-slot` in the components rather than matched by class, so this never
+ * reaches a card or popover that merely happens to use bg-surface. These rules are unlayered on purpose: they
+ * must beat Tailwind's utilities, which live in @layer utilities, whatever the specificity.
+ */
+:root[data-skin-backdrop] [data-skin-slot="shell"],
+:root[data-skin-backdrop] [data-skin-slot="main"],
+:root[data-skin-backdrop] [data-skin-slot="chat-column"],
+:root[data-skin-backdrop] [data-skin-slot="composer-bar"] {
+  background-color: transparent;
+}
+/* Frosted rather than clear: the sidebar and composer hold dense text, so the backdrop reads through them as
+   colour and light, never as detail competing with the words. */
+:root[data-skin-backdrop] [data-skin-slot="sidebar"] {
+  background-color: color-mix(in srgb, var(--sidebar) 80%, transparent);
+  backdrop-filter: blur(14px) saturate(1.08);
+}
+:root[data-skin-backdrop] [data-skin-slot="composer"] {
+  background-color: color-mix(in srgb, var(--surface) 90%, transparent);
+  backdrop-filter: blur(10px);
+}
+/* A skin's radius reshapes every rounded-* utility through --radius; the composer is a deliberately softer
+   pill than a card, so it keeps its extra curve on top of whatever the skin chose. */
+:root[data-skin] [data-skin-slot="composer"] {
+  border-radius: calc(var(--radius) + 10px);
+}
+@media (prefers-reduced-transparency: reduce) {
+  :root[data-skin-backdrop] [data-skin-slot="sidebar"],
+  :root[data-skin-backdrop] [data-skin-slot="composer"] {
+    backdrop-filter: none;
+    background-color: var(--surface);
+  }
+}
+
+/* ---------------------------------------------------------- skin controls ---
+ *
+ * Most controls follow a skin already, because they are drawn with palette tokens. These are the pieces that are
+ * not: form controls the browser paints itself (checkboxes, radios, range sliders, progress bars), the text caret,
+ * the selection highlight, and the toaster -- which the root layout mounts straight from sonner, with sonner's own
+ * palette. Scoped to :root[data-skin], so the default look is untouched.
+ */
+:root[data-skin] {
+  accent-color: var(--primary);
+  caret-color: var(--primary);
+}
+:root[data-skin] ::selection {
+  background-color: color-mix(in srgb, var(--primary) 28%, transparent);
+  color: inherit;
+}
+/* Sonner sets these per theme at (0,2,0); this outranks it for plain toasts. The rich success / error / warning
+   variants keep their status colours on purpose: a skin must never make an error look like a success. */
+:root[data-skin] [data-sonner-toaster][data-sonner-theme] {
+  --normal-bg: var(--popover);
+  --normal-border: var(--line);
+  --normal-text: var(--ink);
+  --border-radius: calc(var(--radius) + 4px);
+}
+
+/* ----------------------------------------------------------- skin details ---
+ *
+ * Per-component finish, chosen by the active skin's `details` (DETAIL_OPTIONS in electron/skins/schema.mjs) and
+ * written onto <html> as data-skin-buttons / -fields / -cards / -headings / -nav / -ornament. Colour already follows
+ * the skin through tokens; these rules add what a palette cannot: sheen and glow on buttons, soft or underlined
+ * fields with a focus halo, lift and a small ornament on cards, a glyph before headings, the selected nav row.
+ *
+ * There is no shared Button or Card component to hang this on (about 290 buttons and 60 cards are hand-rolled), so
+ * the rules match the utilities those controls are built from: a primary button is anything clickable carrying
+ * bg-primary / from-primary, or the accent-ink fill set inline; a card is a rounded-xl|2xl box with a full border
+ * (the plain `border` utility) in border-line. A top- or bottom-only rule is a divider, not a card: Group sections
+ * add `border-t border-line` at runtime, and styling those as cards drew a stray outline across the page. Shared pieces are marked instead (skin-heading, skin-subheading, skin-rule, skin-nav-active,
+ * skin-nav-mark) or reached through the ui primitives' data-slot. --skin-ornament is a glyph drawn in code in the
+ * skin's primary colour (skins/apply.ts). Every rule is gated on a data attribute: no skin, no change.
+ */
+
+/* Buttons */
+:root[data-skin-buttons] :is(button, a, [role="button"]):is([class*="bg-primary "], [class$="bg-primary"], [class*="from-primary"], [style*="--accent-ink"]) {
+  transition: box-shadow 0.2s ease, filter 0.2s ease, transform 0.2s ease;
+}
+:root[data-skin-buttons="soft"] :is(button, a, [role="button"]):is([class*="bg-primary "], [class$="bg-primary"], [class*="from-primary"], [style*="--accent-ink"]):not(:disabled) {
+  box-shadow: inset 0 1px 0 color-mix(in srgb, white 24%, transparent), 0 1px 3px color-mix(in srgb, var(--primary) 32%, transparent);
+}
+:root[data-skin-buttons="glow"] :is(button, a, [role="button"]):is([class*="bg-primary "], [class$="bg-primary"], [class*="from-primary"], [style*="--accent-ink"]):not(:disabled) {
+  box-shadow: inset 0 1px 0 color-mix(in srgb, white 20%, transparent), 0 6px 16px -8px color-mix(in srgb, var(--primary) 78%, transparent);
+}
+:root[data-skin-buttons="glow"] :is(button, a, [role="button"]):is([class*="bg-primary "], [class$="bg-primary"], [class*="from-primary"], [style*="--accent-ink"]):hover:not(:disabled) {
+  box-shadow: inset 0 1px 0 color-mix(in srgb, white 24%, transparent), 0 10px 24px -10px color-mix(in srgb, var(--primary) 92%, transparent);
+}
+:root[data-skin-buttons="gradient"] :is(button, a, [role="button"]):is([class*="bg-primary "], [class$="bg-primary"], [class*="from-primary"], [style*="--accent-ink"]):not(:disabled) {
+  background-image: linear-gradient(135deg, color-mix(in srgb, var(--primary) 80%, white), var(--primary) 55%, color-mix(in srgb, var(--primary) 86%, black));
+  box-shadow: inset 0 1px 0 color-mix(in srgb, white 28%, transparent), 0 4px 12px -6px color-mix(in srgb, var(--primary) 62%, transparent);
+}
+:root[data-skin-buttons="flat"] :is(button, a, [role="button"]):is([class*="bg-primary "], [class$="bg-primary"], [class*="from-primary"], [style*="--accent-ink"]) {
+  box-shadow: none;
+}
+/* Outline buttons pick up the accent on hover, in every style but flat. */
+:root[data-skin-buttons]:not([data-skin-buttons="flat"]) :is(button, a)[class*="border-line-strong"]:hover:not(:disabled) {
+  border-color: color-mix(in srgb, var(--primary) 45%, var(--line-strong));
+  background-color: color-mix(in srgb, var(--primary) 7%, var(--surface));
+}
+
+/* Fields: only ones that already draw a border -- borderless inputs live inside something else's box. */
+:root[data-skin-fields] :is(input:not([type="checkbox"], [type="radio"], [type="range"], [type="color"], [type="file"], [type="hidden"]), textarea, select, [data-slot="select-trigger"])[class*="border"]:not([data-skin-slot="composer"] *) {
+  transition: background-color 0.15s ease, border-color 0.15s ease, box-shadow 0.15s ease;
+}
+:root[data-skin-fields="outline"] :is(input:not([type="checkbox"], [type="radio"], [type="range"], [type="color"], [type="file"], [type="hidden"]), textarea, select, [data-slot="select-trigger"])[class*="border"]:not([data-skin-slot="composer"] *):focus {
+  border-color: color-mix(in srgb, var(--primary) 60%, var(--line-strong));
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--primary) 15%, transparent);
+}
+:root[data-skin-fields="soft"] :is(input:not([type="checkbox"], [type="radio"], [type="range"], [type="color"], [type="file"], [type="hidden"]), textarea, select, [data-slot="select-trigger"])[class*="border"]:not([data-skin-slot="composer"] *) {
+  background-color: var(--surface-muted);
+  border-color: transparent;
+}
+:root[data-skin-fields="soft"] :is(input:not([type="checkbox"], [type="radio"], [type="range"], [type="color"], [type="file"], [type="hidden"]), textarea, select, [data-slot="select-trigger"])[class*="border"]:not([data-skin-slot="composer"] *):focus {
+  background-color: var(--surface);
+  border-color: color-mix(in srgb, var(--primary) 50%, transparent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--primary) 16%, transparent);
+}
+:root[data-skin-fields="underline"] :is(input:not([type="checkbox"], [type="radio"], [type="range"], [type="color"], [type="file"], [type="hidden"]), textarea, select, [data-slot="select-trigger"])[class*="border"]:not([data-skin-slot="composer"] *) {
+  background-color: transparent;
+  border-color: transparent;
+  border-bottom-color: var(--line-strong);
+  border-radius: 0;
+  box-shadow: none;
+}
+:root[data-skin-fields="underline"] :is(input:not([type="checkbox"], [type="radio"], [type="range"], [type="color"], [type="file"], [type="hidden"]), textarea, select, [data-slot="select-trigger"])[class*="border"]:not([data-skin-slot="composer"] *):focus {
+  border-bottom-color: var(--primary);
+  box-shadow: 0 1px 0 0 var(--primary);
+}
+
+/* The composer: a focus halo in every skin. (No glyph inside it: its first line of text runs edge to edge.) */
+:root[data-skin] [data-skin-slot="composer"]:focus-within {
+  border-color: color-mix(in srgb, var(--primary) 45%, var(--line-strong));
+  box-shadow: 0 0 0 4px color-mix(in srgb, var(--primary) 12%, transparent), 0 10px 28px -14px color-mix(in srgb, var(--primary) 45%, transparent);
+}
+
+/* Cards */
+:root[data-skin-cards="soft"] :is([class*="rounded-xl"], [class*="rounded-2xl"]):is([class^="border "], [class*=" border "], [class$=" border"]):is([class*="border-line "], [class$="border-line"], [class*="border-line/"]):not(button, a, input, textarea, [data-skin-slot]) {
+  box-shadow: 0 1px 2px color-mix(in srgb, var(--ink) 5%, transparent), 0 10px 28px -18px color-mix(in srgb, var(--primary) 42%, transparent);
+}
+:root[data-skin-cards="lifted"] :is([class*="rounded-xl"], [class*="rounded-2xl"]):is([class^="border "], [class*=" border "], [class$=" border"]):is([class*="border-line "], [class$="border-line"], [class*="border-line/"]):not(button, a, input, textarea, [data-skin-slot]) {
+  border-color: color-mix(in srgb, var(--primary) 14%, var(--line));
+  box-shadow: 0 2px 4px color-mix(in srgb, var(--ink) 6%, transparent), 0 16px 36px -18px color-mix(in srgb, var(--primary) 52%, transparent);
+}
+:root[data-skin-cards="outlined"] :is([class*="rounded-xl"], [class*="rounded-2xl"]):is([class^="border "], [class*=" border "], [class$=" border"]):is([class*="border-line "], [class$="border-line"], [class*="border-line/"]):not(button, a, input, textarea, [data-skin-slot]) {
+  border-color: color-mix(in srgb, var(--primary) 30%, var(--line));
+  /* A faint top edge in ink, not white: white read as a glowing line on dark surfaces. */
+  box-shadow: inset 0 1px 0 color-mix(in srgb, var(--ink) 7%, transparent);
+}
+:root[data-skin-cards="flat"] :is([class*="rounded-xl"], [class*="rounded-2xl"]):is([class^="border "], [class*=" border "], [class$=" border"]):is([class*="border-line "], [class$="border-line"], [class*="border-line/"]):not(button, a, input, textarea, [data-skin-slot]) {
+  box-shadow: none;
+}
+/* Card corners (details.cardCorner). Decoration never sits on content, so the pieces live only in a card's padding
+   strip, and only on cards padded enough to hold one (p-3 / py-3 and up): an 8px glyph in the bottom strip... */
+:root[data-skin-card-corner="glyph"] :is([class*="rounded-xl"], [class*="rounded-2xl"]):is([class^="border "], [class*=" border "], [class$=" border"]):is([class*="border-line "], [class$="border-line"], [class*="border-line/"]):not(button, a, input, textarea, [data-skin-slot]):is([class^="p-3"], [class*=" p-3"], [class^="p-4"], [class*=" p-4"], [class^="p-5"], [class*=" p-5"], [class^="py-3"], [class*=" py-3"], [class^="py-4"], [class*=" py-4"]) {
+  background-image: var(--skin-ornament-soft);
+  background-repeat: no-repeat;
+  background-origin: border-box;
+  background-position: right 12px bottom 2px;
+  background-size: 8px 8px;
+}
+/* ...or a lace flourish along the top strip, right-aligned, 10px tall inside at least 12px of padding. */
+:root[data-skin-card-corner="sprig"] :is([class*="rounded-xl"], [class*="rounded-2xl"]):is([class^="border "], [class*=" border "], [class$=" border"]):is([class*="border-line "], [class$="border-line"], [class*="border-line/"]):not(button, a, input, textarea, [data-skin-slot]):is([class^="p-3"], [class*=" p-3"], [class^="p-4"], [class*=" p-4"], [class^="p-5"], [class*=" p-5"], [class^="py-3"], [class*=" py-3"], [class^="py-4"], [class*=" py-4"]) {
+  background-image: var(--skin-lace);
+  background-repeat: no-repeat;
+  background-origin: border-box;
+  background-position: right 12px top 1px;
+  background-size: 34px 10px;
+}
+
+/* Headings */
+:root[data-skin-headings="ornament"][data-skin-ornament] .skin-heading::before {
+  content: "";
+  display: inline-block;
+  width: 0.7em;
+  height: 0.7em;
+  margin-inline-end: 0.42em;
+  vertical-align: 0.04em;
+  background: var(--skin-ornament) center / contain no-repeat;
+}
+:root[data-skin-headings="underline"] .skin-heading {
+  text-decoration-line: underline;
+  text-decoration-color: color-mix(in srgb, var(--primary) 50%, transparent);
+  text-decoration-thickness: 2px;
+  text-underline-offset: 0.38em;
+}
+:root[data-skin-headings]:not([data-skin-headings="plain"]) .skin-subheading > svg {
+  color: var(--accent-ink);
+}
+:root[data-skin-headings]:not([data-skin-headings="plain"]) .skin-rule {
+  border-image: linear-gradient(90deg, color-mix(in srgb, var(--primary) 55%, transparent), var(--line) 45%, transparent) 1;
+}
+
+/* Navigation: the selected row */
+:root[data-skin-nav] .skin-nav-active {
+  transition: background-color 0.2s ease, box-shadow 0.2s ease;
+}
+:root[data-skin-nav="pill"] .skin-nav-active {
+  background-color: color-mix(in srgb, var(--primary) 14%, var(--surface));
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--primary) 22%, transparent);
+}
+:root[data-skin-nav="bar"] .skin-nav-active {
+  background-color: color-mix(in srgb, var(--primary) 8%, transparent);
+  box-shadow: inset 3px 0 0 var(--primary);
+}
+:root[data-skin-nav="glow"] .skin-nav-active {
+  background-color: color-mix(in srgb, var(--primary) 12%, var(--surface));
+  box-shadow: 0 6px 16px -10px color-mix(in srgb, var(--primary) 80%, transparent);
+}
+/* Inside the row's 12px right padding, clear of the longest label. */
+:root[data-skin-ornament][data-skin-nav] .skin-nav-mark {
+  background-image: var(--skin-ornament-soft);
+  background-repeat: no-repeat;
+  background-position: right 3px center;
+  background-size: 8px 8px;
+}
+
+/* Overlays: menus, popovers, tooltips, dialogs, toggles and toasts carry the accent in every skin. */
+:root[data-skin] :is([data-slot="dropdown-menu-content"], [data-slot="dropdown-menu-sub-content"], [data-slot="select-content"], [data-slot="popover-content"]) {
+  border-color: color-mix(in srgb, var(--primary) 22%, var(--line));
+  box-shadow: 0 14px 36px -14px color-mix(in srgb, var(--primary) 38%, transparent), 0 2px 6px color-mix(in srgb, var(--ink) 8%, transparent);
+}
+:root[data-skin] :is([data-slot="dropdown-menu-item"], [data-slot="dropdown-menu-sub-trigger"], [data-slot="select-item"])[data-highlighted] {
+  background-color: color-mix(in srgb, var(--primary) 13%, transparent);
+}
+:root[data-skin] [data-slot="tooltip-content"] {
+  background-color: var(--primary);
+  color: var(--primary-foreground);
+}
+:root[data-skin] [data-slot="tooltip-content"] :is(svg, span)[class*="bg-foreground"] {
+  background-color: var(--primary);
+  fill: var(--primary);
+}
+:root[data-skin] [data-slot="dialog-content"] {
+  border-color: color-mix(in srgb, var(--primary) 20%, var(--line));
+  box-shadow: inset 0 3px 0 color-mix(in srgb, var(--primary) 55%, transparent), 0 28px 70px -24px color-mix(in srgb, var(--primary) 40%, transparent);
+}
+:root[data-skin] :is([data-slot="switch"], [data-slot="checkbox"])[data-state="checked"] {
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--primary) 16%, transparent);
+}
+:root[data-skin] [data-sonner-toast]:not([data-rich-colors="true"]) {
+  box-shadow: inset 3px 0 0 var(--primary), 0 10px 28px -14px color-mix(in srgb, var(--primary) 40%, transparent);
+}
+
+/* Sidebar section titles ("Projects"): the ornament, as for headings. */
+:root[data-skin-headings="ornament"][data-skin-ornament] .skin-section-title::before {
+  content: "";
+  display: inline-block;
+  width: 0.8em;
+  height: 0.8em;
+  margin-inline-end: 0.35em;
+  vertical-align: -0.05em;
+  background: var(--skin-ornament-soft) center / contain no-repeat;
+}
+
+/* The user's own messages: tinted toward the accent, so the conversation reads in the skin's colours. */
+:root[data-skin] .skin-user-bubble {
+  background-color: color-mix(in srgb, var(--primary) 12%, var(--surface));
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--primary) 18%, transparent);
+}
+:root[data-skin-cards="lifted"] .skin-user-bubble,
+:root[data-skin-cards="soft"] .skin-user-bubble {
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--primary) 18%, transparent), 0 6px 18px -12px color-mix(in srgb, var(--primary) 50%, transparent);
+}
+
+/* ------------------------------------------------------- component pieces ---
+ *
+ * Dedicated decorative pieces, each switched on by its own flag (DETAIL_FLAGS in electron/skins/schema.mjs) and drawn
+ * in code in the skin's colours (skins/apply.ts): a glyph beside primary button labels, a sprig resting on the
+ * composer's edge, a flourish at the foot of the sidebar, a lace edge along the top of dialogs. None of them take
+ * space or input: backgrounds and pointer-events: none pseudo-elements only.
+ */
+
+/* Buttons that carry a label (px- padding, no fixed size-): the glyph after the text, in the on-primary colour.
+   Icon-only buttons are sized with size-*, so they are left alone and stay centred. */
+:root[data-skin-button-glyph] :is(button, a)[class*="px-"]:not([class*="size-"]):is([class*="bg-primary "], [class$="bg-primary"], [class*="from-primary"])::after {
+  content: "";
+  display: inline-block;
+  flex: none;
+  width: 0.8em;
+  height: 0.8em;
+  margin-inline-start: 0.35em;
+  vertical-align: -0.08em;
+  background: var(--skin-ornament-on) center / contain no-repeat;
+  pointer-events: none;
+}
+
+/* The composer: a sprig resting just outside its left edge, never over the attach button or the text. Only on
+   windows wide enough that the margin beside the composer is empty. Both composers are `relative`. */
+@media (min-width: 1200px) {
+  :root[data-skin-composer-sprig] [data-skin-slot="composer"]::before {
+    content: "";
+    position: absolute;
+    right: calc(100% + 8px);
+    bottom: 6px;
+    width: 64px;
+    height: 27px;
+    background: var(--skin-sprig) right center / contain no-repeat;
+    pointer-events: none;
+  }
+}
+
+/* The sidebar: a flourish in a row of its own at the very foot. It is a flex item with its own height, so the list
+   above shrinks to make room -- it can never sit behind a project or chat name. */
+:root[data-skin-sidebar-flourish] [data-skin-slot="sidebar"]::after {
+  content: "";
+  flex: none;
+  height: 22px;
+  margin: 0 16px 8px;
+  background: var(--skin-sprig) center / contain no-repeat;
+  pointer-events: none;
+}
+
+/* Dialogs: a lace edge along the top, above the title. */
+:root[data-skin-dialog-lace] [data-slot="dialog-content"] {
+  background-image: var(--skin-lace);
+  background-repeat: repeat-x;
+  background-position: left top 3px;
+  background-size: 32px 10px;
+}
+
+/* ------------------------------------------------------------------ motion ---
+ *
+ * Skin movement. Particles (fall / twinkle) are rendered by SkinDecor; drift slides the pattern by exactly one tile;
+ * float bobs the illustrations. transform and opacity only, so it all runs on the compositor. Off means off: the
+ * person's switch (data-skin-motion-off) or the system's reduced-motion request removes particles outright and stops
+ * everything else -- nothing is left frozen mid-air.
+ */
+@keyframes skin-fall {
+  from {
+    transform: translate3d(0, -10vh, 0) rotate(0deg);
+  }
+  to {
+    transform: translate3d(var(--skin-sway, 40px), 110vh, 0) rotate(var(--skin-spin, 220deg));
+  }
+}
+@keyframes skin-twinkle {
+  0%,
+  100% {
+    opacity: 0;
+    transform: scale(0.6);
+  }
+  50% {
+    opacity: var(--skin-peak, 0.7);
+    transform: scale(1);
+  }
+}
+@keyframes skin-drift {
+  from {
+    transform: translate3d(0, 0, 0);
+  }
+  to {
+    transform: translate3d(-120px, -120px, 0);
+  }
+}
+@keyframes skin-float {
+  0%,
+  100% {
+    transform: translateY(0);
+  }
+  50% {
+    transform: translateY(-5px);
+  }
+}
+.skin-particle {
+  position: absolute;
+  top: 0;
+  background-position: center;
+  background-repeat: no-repeat;
+  background-size: contain;
+  will-change: transform, opacity;
+  animation-iteration-count: infinite;
+}
+.skin-particle.skin-fall {
+  animation-name: skin-fall;
+  animation-timing-function: linear;
+}
+.skin-particle.skin-twinkle {
+  animation-name: skin-twinkle;
+  animation-timing-function: ease-in-out;
+  opacity: 0;
+}
+:root[data-skin-motion]:not([data-skin-motion-off]) .skin-drift {
+  animation: skin-drift 48s linear infinite;
+}
+:root[data-skin-motion]:not([data-skin-motion-off]) .skin-float {
+  animation: skin-float 6s ease-in-out infinite;
+}
+:root[data-skin-motion-off] .skin-particles {
+  display: none;
+}
+@media (prefers-reduced-motion: reduce) {
+  .skin-particles {
+    display: none;
+  }
+  .skin-drift,
+  .skin-float {
+    animation: none !important;
+  }
+}
+
+/* Particles frame the content rather than falling through it: the reading column is masked out with soft edges, and
+   the sidebar turns near-opaque while anything moves, so no glyph passes behind a line of text. */
+.skin-particles {
+  -webkit-mask-image: linear-gradient(90deg, #000 0, #000 30%, transparent 42%, transparent 70%, #000 82%, #000 100%);
+  mask-image: linear-gradient(90deg, #000 0, #000 30%, transparent 42%, transparent 70%, #000 82%, #000 100%);
+}
+:root:is([data-skin-motion="fall"], [data-skin-motion="twinkle"]):not([data-skin-motion-off]) [data-skin-slot="sidebar"] {
+  background-color: color-mix(in srgb, var(--sidebar) 96%, transparent);
+}
+
+/* --------------------------------------------------------- skin on chat ---
+ *
+ * Appearance > "Skin on the chat screen" off (data-skin-chat-off): the conversation gets a plain reading surface. The
+ * palette stays, so the window never recolours on navigation and the sidebar keeps its look. What goes is everything
+ * drawn in or behind the conversation: an opaque surface covers the backdrop, pattern and particles again, and the
+ * pieces inside are removed or handed back to the base styles. SkinGreeting and SkinDecor drop the greeting art and
+ * the corner photo themselves.
+ *
+ * `revert-layer` hands a property back to Tailwind's layered value, so a control returns to exactly its default look.
+ * The attributes are doubled only to lift specificity above the most specific skin rule (glow on :hover).
+ */
+:root[data-skin-chat-off][data-skin-chat-off] [data-chat-route][data-chat-route],
+:root[data-skin-chat-off][data-skin-chat-off] [data-chat-route][data-chat-route] :is([data-skin-slot="chat-column"], [data-skin-slot="composer-bar"]) {
+  background-color: var(--surface);
+}
+:root[data-skin-chat-off][data-skin-chat-off] [data-chat-route][data-chat-route] [data-skin-slot="composer"] {
+  background-color: var(--surface);
+  backdrop-filter: none;
+}
+:root[data-skin-chat-off][data-skin-chat-off] [data-chat-route][data-chat-route] [data-skin-slot="composer"]:focus-within {
+  border-color: revert-layer;
+  box-shadow: revert-layer;
+}
+:root[data-skin-chat-off][data-skin-chat-off] [data-chat-route][data-chat-route] [data-skin-slot="composer"]::before,
+:root[data-skin-chat-off][data-skin-chat-off] [data-chat-route][data-chat-route] :is(button, a)[class*="px-"]:not([class*="size-"]):is([class*="bg-primary "], [class$="bg-primary"], [class*="from-primary"])::after {
+  content: none;
+}
+:root[data-skin-chat-off][data-skin-chat-off] [data-chat-route][data-chat-route] :is(button, a, [role="button"]):is([class*="bg-primary "], [class$="bg-primary"], [class*="from-primary"], [style*="--accent-ink"]) {
+  background-image: revert-layer;
+  box-shadow: revert-layer;
+}
+:root[data-skin-chat-off][data-skin-chat-off] [data-chat-route][data-chat-route] :is(button, a)[class*="border-line-strong"]:hover {
+  border-color: revert-layer;
+  background-color: revert-layer;
+}
+:root[data-skin-chat-off][data-skin-chat-off] [data-chat-route][data-chat-route] :is(input:not([type="checkbox"], [type="radio"], [type="range"], [type="color"], [type="file"], [type="hidden"]), textarea, select, [data-slot="select-trigger"])[class*="border"]:not([data-skin-slot="composer"] *) {
+  background-color: revert-layer;
+  border-color: revert-layer;
+  border-radius: revert-layer;
+  box-shadow: revert-layer;
+}
+:root[data-skin-chat-off][data-skin-chat-off] [data-chat-route][data-chat-route] :is([class*="rounded-xl"], [class*="rounded-2xl"]):is([class^="border "], [class*=" border "], [class$=" border"]):is([class*="border-line "], [class$="border-line"], [class*="border-line/"]):not(button, a, input, textarea, [data-skin-slot]) {
+  background-image: revert-layer;
+  border-color: revert-layer;
+  box-shadow: revert-layer;
+}
+:root[data-skin-chat-off][data-skin-chat-off] [data-chat-route][data-chat-route] .skin-user-bubble {
+  background-color: revert-layer;
+  box-shadow: revert-layer;
+}

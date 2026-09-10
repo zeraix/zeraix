@@ -22,6 +22,7 @@ import { ProcessGroup } from "./ProcessStream";
 import { TranscriptSkeleton } from "./TranscriptSkeleton";
 import type { ChoiceAnswer, DisplayMsg } from "./types";
 import { groupTranscript, lastAssistantIndex } from "./transcriptRows";
+import SkinGreeting from "@/components/theme/SkinGreeting";
 
 export interface ChatTranscriptProps {
   /** Mid-switch: the skeleton stands in, so the previous conversation is never left on screen. */
@@ -87,16 +88,15 @@ export function ChatTranscript({
       {switching && <TranscriptSkeleton label={t("chat.loadingConversation")} />}
 
       {!switching && display.length === 0 && (
-        <div className="mt-16 text-center">
-          <div className="mx-auto mb-3 flex h-12 w-12 items-center justify-center rounded-2xl bg-gradient-to-br from-primary to-primary/70 text-lg font-bold text-white shadow-lg shadow-primary/25">
-            AI
-          </div>
-          <p className="text-sm font-medium text-ink-muted">{t("chat.emptyTitle")}</p>
-          <p className="mt-1 text-xs text-ink-subtle">
-            {t("chat.emptyHint")}
-            {toolsReady ? t("chat.emptyHintTools") : ""}
-          </p>
-        </div>
+        <SkinGreeting
+          title={t("chat.emptyTitle")}
+          hint={
+            <>
+              {t("chat.emptyHint")}
+              {toolsReady ? t("chat.emptyHintTools") : ""}
+            </>
+          }
+        />
       )}
 
       {/* Earlier turns exist but are not mounted: the sentinel pulls in the next batch as it scrolls into view,

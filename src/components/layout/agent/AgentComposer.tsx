@@ -201,8 +201,10 @@ export default function AgentComposer({
 
   return (
     <div
+      data-skin-slot="composer"
       className={cn(
-        "rounded-2xl border border-line bg-background px-4 pb-3 pt-3 shadow-sm transition-colors focus-within:border-line-strong",
+        // `relative` anchors the skin's composer sprig (skins.css), which hangs off this box's lower-left edge.
+        "relative rounded-2xl border border-line bg-background px-4 pb-3 pt-3 shadow-sm transition-colors focus-within:border-line-strong",
         className
       )}
       onDragOver={(e) => e.preventDefault()}
@@ -415,7 +417,7 @@ export default function AgentComposer({
           disabled={!canSend}
           aria-label="Send"
           title={uploading ? t("composer.uploading") : undefined}
-          className="ml-auto flex size-9 items-center justify-center rounded-full text-white transition-opacity disabled:opacity-40"
+          className="ml-auto flex size-9 items-center justify-center rounded-full text-accent-on transition-opacity disabled:opacity-40"
           style={{ backgroundColor: ACCENT }}
         >
           <Send className="size-4 -translate-x-px translate-y-px" />

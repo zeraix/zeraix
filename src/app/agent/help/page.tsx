@@ -119,7 +119,7 @@ export default function AgentHelpPage() {
           </div>
           <button
             onClick={() => router.push("/agent/help/feedback")}
-            className="flex shrink-0 items-center gap-1.5 rounded-lg bg-gradient-to-br from-primary to-primary/85 px-3 py-1.5 text-xs font-semibold text-white shadow-sm transition hover:brightness-105"
+            className="flex shrink-0 items-center gap-1.5 rounded-lg bg-gradient-to-br from-primary to-primary/85 px-3 py-1.5 text-xs font-semibold text-primary-foreground shadow-sm transition hover:brightness-105"
           >
             {t("help.open")}
           </button>

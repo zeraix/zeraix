@@ -2526,7 +2526,7 @@ function ChatAgent() {
 
   return (
     <div className="relative flex h-full">
-    <div className="relative flex h-full minonSecureEnvChange-w-0 flex-1 flex-col overflow-hidden bg-surface text-ink">
+    <div data-skin-slot="chat-column" className="relative flex h-full min-w-0 flex-1 flex-col overflow-hidden bg-surface text-ink">
       <ChatHeader
         ref={headerRef}
         title={activeConvTitle}
@@ -2557,7 +2557,7 @@ function ChatAgent() {
         viewportRef={scrollRef}
         onScroll={onScroll}
         className="min-h-0 flex-1"
-        viewportClassName="flex flex-col bg-surface"
+        viewportClassName="flex flex-col"
         config={PAGE_SCROLLBAR}
       >
         <div className={cn(CHAT_COLUMN, "flex flex-col gap-4 px-4 py-5")}>

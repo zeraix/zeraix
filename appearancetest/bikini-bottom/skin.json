@@ -1,0 +1,72 @@
+{
+  "format": "zeraix-skin",
+  "formatVersion": 1,
+  "id": "bikini-bottom",
+  "name": "Bikini Bottom",
+  "light": {
+    "background": "#fff6cc",
+    "surface": "#fffdf3",
+    "surface-muted": "#fff1ba",
+    "surface-hover": "#ffe995",
+    "surface-active": "#ffdf6b",
+    "line": "#f0dc8c",
+    "line-strong": "#d9bd55",
+    "ink": "#2b2111",
+    "ink-muted": "#65542a",
+    "ink-subtle": "#8a7a45",
+    "primary": "#0f7ea8",
+    "primary-foreground": "#ffffff",
+    "accent-ink": "#0b6a8e",
+    "sidebar": "#fff0b3",
+    "scrollbar-thumb": "rgba(107, 78, 22, 0.28)"
+  },
+  "dark": {
+    "background": "#0a2230",
+    "surface": "#0f2c3b",
+    "surface-muted": "#143647",
+    "surface-hover": "#1a4155",
+    "surface-active": "#214d63",
+    "line": "rgba(255, 255, 255, 0.12)",
+    "line-strong": "rgba(255, 255, 255, 0.2)",
+    "ink": "#fdf6d8",
+    "ink-muted": "#cfc59c",
+    "ink-subtle": "#9c9676",
+    "primary": "#ffd83b",
+    "primary-foreground": "#2b2111",
+    "accent-ink": "#ffe27a",
+    "sidebar": "#0c2633",
+    "scrollbar-thumb": "rgba(255, 216, 59, 0.25)"
+  },
+  "description": "My SpongeBob fan skin 🍍 Sponge yellow by day, deep sea by night. Jellyfish fields on the home screen, pineapple in the corner.",
+  "author": "ZZ oo",
+  "version": "1.0.2",
+  "radius": 6,
+  "fonts": {
+    "display": "rounded"
+  },
+  "details": {
+    "ornament": "dots",
+    "buttons": "gradient",
+    "fields": "soft",
+    "cards": "lifted",
+    "headings": "underline",
+    "nav": "pill",
+    "cardCorner": "glyph",
+    "accentScrollbar": true,
+    "buttonGlyph": true,
+    "sidebarFlourish": true
+  },
+  "greeting": {
+    "title": "I'm ready! What are we building today?",
+    "subtitle": "Grab a Krabby Patty and type below. Jellyfishing can wait."
+  },
+  "decor": {
+    "pattern": "petals",
+    "patternOpacity": 0.14,
+    "motif": "waves",
+    "glow": true,
+    "motion": "drift",
+    "veil": 0.66,
+    "cornerFrame": "polaroid"
+  }
+}

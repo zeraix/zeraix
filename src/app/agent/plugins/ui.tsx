@@ -21,7 +21,7 @@ export type CardAction = "install" | "remove" | "connect";
 export type Busy = { id: string; action: CardAction } | null;
 
 export const PRIMARY_BTN =
-  "flex shrink-0 items-center gap-1 rounded-lg bg-gradient-to-br from-primary to-primary/85 px-2.5 py-1 text-[11px] font-semibold text-white shadow-sm transition hover:brightness-105 disabled:opacity-50";
+  "flex shrink-0 items-center gap-1 rounded-lg bg-gradient-to-br from-primary to-primary/85 px-2.5 py-1 text-[11px] font-semibold text-primary-foreground shadow-sm transition hover:brightness-105 disabled:opacity-50";
 
 /** Every action button is this wide, so a card's footer is a row of columns and not a ragged edge. */
 export const RAIL_BTN = "min-w-[88px] justify-center";

@@ -10,6 +10,9 @@ import { useAgentChatStore } from "@/store/agentChatStore";
 import type { Attachment } from "@/lib/ai/attachments";
 import { useT } from "@/lib/i18n";
 import { useThemedLogo } from "@/hooks/useThemedLogo";
+import { useTheme } from "next-themes";
+import { emblemSrc, useActiveSkin } from "@/components/theme/skins";
+import { safeImage } from "@/components/theme/skins/visual";
 
 /** Return the i18n key for the greeting based on the current time. */
 function greetingKey(): string {
@@ -48,6 +51,14 @@ export default function AgentHomePage() {
   // Bumped on every send attempt made while blocked; WorkdirSelector replays its attention animation on each bump.
   const [nudge, setNudge] = useState(0);
   const logoSrc = useThemedLogo();
+  // The active skin's art for this screen: its banner picture above the greeting, or an emblem in the logo's place.
+  // An emblem, not the wide greeting motif: a scene squeezed into a 64px slot beside two lines of text read as a strip
+  // clipped from a bigger picture (snowbanks and waves ran off both edges).
+  const skin = useActiveSkin();
+  const { resolvedTheme } = useTheme();
+  const hero = safeImage(skin?.decor?.images?.hero);
+  const emblem =
+    !hero && skin?.decor?.motif ? emblemSrc(skin.decor.motif, (resolvedTheme === "dark" ? skin.dark : skin.light).primary) : null;
 
   /**
    * Pull the current user from the server.
@@ -102,19 +113,29 @@ export default function AgentHomePage() {
   return (
     <div className="flex h-full flex-col items-center justify-center px-6">
       <div className="w-full max-w-3xl">
+        {/* eslint-disable @next/next/no-img-element */}
+        {hero ? (
+          <img src={hero} alt="" draggable={false} className="mb-6 max-h-48 w-full select-none rounded-2xl object-cover shadow-sm" />
+        ) : null}
         {/* Greeting */}
         <div className="mb-5 flex items-center gap-4">
-          <Image
-            src={logoSrc}
-            alt="Zeraix"
-            width={64}
-            height={51}
-            className="shrink-0"
-          />
-          <h2 className="text-[22px] font-bold leading-snug text-foreground">
+          {emblem ? (
+            <img src={emblem} alt="" aria-hidden draggable={false} className="skin-float size-16 shrink-0 select-none" />
+          ) : (
+            <Image
+              src={logoSrc}
+              alt="Zeraix"
+              width={64}
+              height={51}
+              className="shrink-0"
+            />
+          )}
+          {/* eslint-enable @next/next/no-img-element */}
+          {/* skin-display only takes effect under a skin that sets a display face; the default look is untouched. */}
+          <h2 className="skin-display text-[22px] font-bold leading-snug text-foreground">
             {t(greeting)} {name}
             <br />
-            {t("home.welcome")}
+            {skin?.greeting?.title ?? t("home.welcome")}
           </h2>
         </div>
 
