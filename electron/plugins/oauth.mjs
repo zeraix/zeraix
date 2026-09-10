@@ -168,10 +168,102 @@ function hostCredentials(provider) {
 
 /* ------------------------------------------------------------------ loopback listener */
 
-/** Shown in the browser tab the user is left staring at. Deliberately inert: no script, no styling hooks. */
-const CLOSE_PAGE = (msg) =>
-  `<!doctype html><meta charset="utf-8"><title>${msg}</title>` +
-  `<body style="font:16px system-ui;padding:3rem;text-align:center">${msg}<br><br>You can close this tab.</body>`;
+/**
+ * The three ways an attempt ends, as the user reads them. Keyed rather than passed as a string so the
+ * page never interpolates a caller's text -- this markup is served from a localhost origin, and the one
+ * hole worth pre-closing there is a message that could ever carry markup into it.
+ *
+ * Icons are lucide paths inlined as markup, matching the set the app UI draws from. Declined is
+ * deliberately neutral, not red: the user meant to do it.
+ */
+const CLOSE_PAGE_OUTCOMES = {
+  ok: {
+    tone: "ok",
+    title: "Authorized",
+    body: "The connection is complete. You can return to Zeraix.",
+    icon: '<path d="M20 6 9 17l-5-5"/>',
+  },
+  declined: {
+    tone: "declined",
+    title: "Authorization declined",
+    body: "Access was not granted, and nothing was connected.",
+    icon: '<path d="M18 6 6 18"/><path d="m6 6 12 12"/>',
+  },
+  failed: {
+    tone: "failed",
+    title: "Authorization failed",
+    body: "Something went wrong before access was granted. Try connecting again from Zeraix.",
+    icon: '<path d="M12 9v4"/><path d="M12 17h.01"/><path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3"/>',
+  },
+};
+
+/** The app's warm-graphite palette (src/app/globals.css), inlined -- this page renders in the user's
+ *  browser, so it reaches no stylesheet of ours and gets its theme from `prefers-color-scheme` alone. */
+const CLOSE_PAGE_STYLE = `
+  :root {
+    color-scheme: light dark;
+    --bg: #f2f0ea; --surface: #fdfcfa; --line: #dcd7cc;
+    --ink: #171614; --ink-muted: #5f5c55; --ink-subtle: #8b877e;
+    --shadow: 0 10px 30px rgba(23, 22, 20, 0.08);
+  }
+  .ok { --tone: #0e7a4a; --tint: rgba(23, 166, 103, 0.14); }
+  .declined { --tone: #5f5c55; --tint: rgba(95, 92, 85, 0.12); }
+  .failed { --tone: #b42222; --tint: rgba(220, 43, 43, 0.12); }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #121215; --surface: #1a1a1e; --line: rgba(255, 255, 255, 0.13);
+      --ink: #f0eeeb; --ink-muted: #9c9992; --ink-subtle: #7a7772;
+      --shadow: 0 10px 30px rgba(0, 0, 0, 0.4);
+    }
+    .ok { --tone: #4ed8a0; --tint: rgba(43, 196, 138, 0.16); }
+    .declined { --tone: #9c9992; --tint: rgba(255, 255, 255, 0.09); }
+    .failed { --tone: #ff8078; --tint: rgba(240, 87, 79, 0.16); }
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    display: flex; align-items: center; justify-content: center; padding: 24px;
+    background: var(--bg); color: var(--ink);
+    font: 14px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, "PingFang SC", "Microsoft YaHei", "Hiragino Sans", "Noto Sans CJK SC", sans-serif;
+  }
+  .card {
+    width: 420px; max-width: 100%; text-align: center;
+    background: var(--surface); border: 1px solid var(--line); border-radius: 16px;
+    padding: 32px 32px 26px; box-shadow: var(--shadow);
+    animation: rise 160ms ease-out both;
+  }
+  @keyframes rise { from { opacity: 0; transform: translateY(6px); } }
+  @media (prefers-reduced-motion: reduce) { .card { animation: none; } }
+  .brand {
+    margin: 0 0 20px; font-size: 11px; font-weight: 600;
+    letter-spacing: 0.14em; text-transform: uppercase; color: var(--ink-subtle);
+  }
+  .badge {
+    width: 44px; height: 44px; margin: 0 auto 16px; border-radius: 999px;
+    display: flex; align-items: center; justify-content: center;
+    background: var(--tint); color: var(--tone);
+  }
+  .badge svg { width: 22px; height: 22px; }
+  h1 { margin: 0 0 8px; font-size: 18px; font-weight: 700; letter-spacing: -0.01em; }
+  p { margin: 0; color: var(--ink-muted); }
+  .hint { margin-top: 20px; padding-top: 16px; border-top: 1px solid var(--line); color: var(--ink-subtle); font-size: 13px; }
+`;
+
+/** Shown in the browser tab the user is left staring at. Deliberately inert: no script, no network. */
+const CLOSE_PAGE = (outcome) => {
+  const { tone, title, body, icon } = CLOSE_PAGE_OUTCOMES[outcome] ?? CLOSE_PAGE_OUTCOMES.failed;
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'">
+<title>${title} &middot; Zeraix</title><style>${CLOSE_PAGE_STYLE}</style></head>
+<body><main class="card ${tone}">
+<p class="brand">Zeraix</p>
+<div class="badge" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${icon}</svg></div>
+<h1>${title}</h1>
+<p>${body}</p>
+<p class="hint">You can close this tab.</p>
+</main></body></html>`;
+};
 
 /**
  * Bind an ephemeral loopback port and resolve with the callback query.
@@ -199,7 +291,7 @@ export function startLoopbackListener({ timeoutMs = AUTH_TIMEOUT_MS, signal } = 
       const params = Object.fromEntries(url.searchParams);
       const denied = params.error === "access_denied";
       res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
-      res.end(CLOSE_PAGE(params.error ? (denied ? "Authorization declined." : "Authorization failed.") : "Authorized."));
+      res.end(CLOSE_PAGE(params.error ? (denied ? "declined" : "failed") : "ok"));
       settle.res(params);
     });
 
