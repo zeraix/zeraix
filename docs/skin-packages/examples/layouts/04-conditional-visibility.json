@@ -1,0 +1,18 @@
+{
+  "version": 1,
+  "regions": {
+    "greeting": {
+      "type": "container", "direction": "column", "align": "center", "gap": 10,
+      "children": [
+        { "type": "component", "ref": "primitive:icon", "props": { "name": "moon-star", "size": 40, "color": "var(--primary)" }, "visibleWhen": "state.theme === 'dark'" },
+        { "type": "component", "ref": "primitive:icon", "props": { "name": "sun", "size": 40, "color": "var(--primary)" }, "visibleWhen": "state.theme !== 'dark'" },
+        { "type": "component", "ref": "app:greetingTitle" },
+        { "type": "component", "ref": "app:greetingHint" },
+        { "type": "component", "ref": "primitive:badge", "props": { "text": "Tools ready", "variant": "success" }, "visibleWhen": "state.toolsReady" },
+        { "type": "component", "ref": "primitive:badge", "props": { "text": "Tools loading", "variant": "warning" }, "visibleWhen": "!state.toolsReady" },
+        { "type": "component", "ref": "primitive:text", "props": { "content": "Desktop app", "fontSize": 11, "color": "var(--ink-subtle)" }, "visibleWhen": "state.desktop == true" },
+        { "type": "component", "ref": "primitive:text", "props": { "content": "国内版", "fontSize": 11, "color": "var(--ink-subtle)" }, "visibleWhen": "state.edition === 'cn'" }
+      ]
+    }
+  }
+}

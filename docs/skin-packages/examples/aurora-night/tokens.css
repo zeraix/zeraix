@@ -1,0 +1,39 @@
+/* Aurora Night: the app's palette variables, overridden while this package is active.
+   `[data-skin-package]` outranks the app's own :root block; `.dark` is the colour mode next-themes sets. */
+
+:root[data-skin-package] {
+  --background: #0f1c1f;
+  --surface: #14252a;
+  --surface-muted: #1a2f35;
+  --surface-hover: #223b42;
+  --surface-active: #2b4850;
+  --line: rgba(160, 230, 220, 0.14);
+  --line-strong: rgba(160, 230, 220, 0.26);
+  --ink: #e6f5f2;
+  --ink-muted: #9fc3bd;
+  --ink-subtle: #6f9a94;
+  --primary: #3fe0b8;
+  --primary-foreground: #04110f;
+  --accent-ink: #3fe0b8;
+  --sidebar: #0b1517;
+  --scrollbar-thumb: rgba(160, 230, 220, 0.28);
+  --popover: #1a2f35;
+  --input: rgba(160, 230, 220, 0.26);
+  --radius: 0.75rem;
+}
+
+:root[data-skin-package].dark {
+  --background: #08100f;
+  --surface: #0d1a1c;
+  --surface-muted: #122325;
+  --surface-hover: #1a2f32;
+  --surface-active: #233c40;
+  --sidebar: #060c0c;
+}
+
+/* A decoration the stylesheet may add: an asset from the package itself, and nothing from anywhere else. */
+:root[data-skin-package] [data-skin-slot="shell"] {
+  background-image: url(assets/glow.svg);
+  background-repeat: no-repeat;
+  background-position: right -120px top -160px;
+}

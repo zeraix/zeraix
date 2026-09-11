@@ -1,0 +1,47 @@
+{
+  "version": 1,
+  "regions": {
+    "greeting": {
+      "type": "container", "direction": "column", "align": "center", "gap": 16,
+      "children": [
+        { "type": "component", "ref": "app:brandMark", "props": { "size": 48 } },
+        { "type": "component", "ref": "app:greetingTitle", "props": { "size": "lg" } },
+        { "type": "container", "direction": "grid", "gridTemplate": "repeat(3, minmax(0, 1fr))", "gap": 10,
+          "children": [
+            { "type": "component", "ref": "primitive:box", "props": { "padding": 12, "borderRadius": 12, "background": "var(--surface)", "borderWidth": 1, "borderColor": "var(--line)" },
+              "children": [
+                { "type": "container", "direction": "column", "gap": 6, "align": "center",
+                  "children": [
+                    { "type": "component", "ref": "primitive:icon", "props": { "name": "file-text", "size": 20, "color": "var(--primary)" } },
+                    { "type": "component", "ref": "primitive:text", "props": { "content": "Documents", "fontSize": 12, "fontWeight": 500 } }
+                  ]
+                }
+              ]
+            },
+            { "type": "component", "ref": "primitive:box", "props": { "padding": 12, "borderRadius": 12, "background": "var(--surface)", "borderWidth": 1, "borderColor": "var(--line)" },
+              "children": [
+                { "type": "container", "direction": "column", "gap": 6, "align": "center",
+                  "children": [
+                    { "type": "component", "ref": "primitive:icon", "props": { "name": "code", "size": 20, "color": "var(--primary)" } },
+                    { "type": "component", "ref": "primitive:text", "props": { "content": "Code", "fontSize": 12, "fontWeight": 500 } }
+                  ]
+                }
+              ]
+            },
+            { "type": "component", "ref": "primitive:box", "props": { "padding": 12, "borderRadius": 12, "background": "var(--surface)", "borderWidth": 1, "borderColor": "var(--line)" },
+              "children": [
+                { "type": "container", "direction": "column", "gap": 6, "align": "center",
+                  "children": [
+                    { "type": "component", "ref": "primitive:icon", "props": { "name": "image", "size": 20, "color": "var(--primary)" } },
+                    { "type": "component", "ref": "primitive:text", "props": { "content": "Images", "fontSize": 12, "fontWeight": 500 } }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+        { "type": "component", "ref": "app:greetingHint" }
+      ]
+    }
+  }
+}

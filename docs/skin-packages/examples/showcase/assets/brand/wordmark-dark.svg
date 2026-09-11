@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 132 28" width="132" height="28">
+  <defs>
+    <linearGradient id="g" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#c4b5ff"/>
+      <stop offset="1" stop-color="#a48bff"/>
+    </linearGradient>
+  </defs>
+  <rect x="1" y="2" width="24" height="24" rx="7" fill="url(#g)"/>
+  <polygon points="13,6.5 15.3,11.8 21,12.2 16.6,15.9 18,21.5 13,18.4 8,21.5 9.4,15.9 5,12.2 10.7,11.8" fill="#150e2c"/>
+  <text x="32" y="20" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="16" font-weight="700" letter-spacing="0.4" fill="#efeaff">Showcase</text>
+</svg>

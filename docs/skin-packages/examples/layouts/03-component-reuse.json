@@ -1,0 +1,27 @@
+{
+  "version": 1,
+  "regions": {
+    "greeting": {
+      "type": "container", "direction": "column", "align": "center", "gap": 10,
+      "children": [
+        { "type": "component", "ref": "primitive:progressRing", "props": { "value": 72, "size": 64, "thickness": 6, "showValue": true } },
+        { "type": "component", "ref": "app:greetingTitle" },
+        { "type": "container", "direction": "row", "gap": 8, "justify": "center",
+          "children": [
+            { "type": "component", "ref": "primitive:progressRing", "props": { "value": 30, "size": 28, "thickness": 4 } },
+            { "type": "component", "ref": "primitive:progressRing", "props": { "value": 60, "size": 28, "thickness": 4 } },
+            { "type": "component", "ref": "primitive:progressRing", "props": { "value": 90, "size": 28, "thickness": 4 } }
+          ]
+        },
+        { "type": "component", "ref": "app:greetingHint" }
+      ]
+    },
+    "sidebarFooter": {
+      "type": "container", "direction": "row", "align": "center", "gap": 8,
+      "children": [
+        { "type": "component", "ref": "primitive:progressRing", "props": { "value": 72, "size": 20, "thickness": 3 } },
+        { "type": "component", "ref": "app:today", "props": { "format": "short", "align": "left" } }
+      ]
+    }
+  }
+}

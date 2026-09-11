@@ -1,0 +1,74 @@
+{
+  "version": 1,
+  "brand": {
+    "logo": "assets/brand/wordmark.svg",
+    "logoDark": "assets/brand/wordmark-dark.svg",
+    "mark": "assets/brand/mark.svg",
+    "markDark": "assets/brand/mark-dark.svg",
+    "height": 22
+  },
+  "nav": {
+    "order": ["new-chat", "library", "skills", "automation", "models", "plugins"],
+    "items": {
+      "new-chat": {
+        "icon": "assets/nav/chat.svg",
+        "activeIcon": "assets/nav/chat-active.svg",
+        "iconDark": "assets/nav/chat-dark.svg",
+        "activeIconDark": "assets/nav/chat-active-dark.svg",
+        "label": {
+          "default": "New session",
+          "zh": "新会话",
+          "zh-TW": "新對話",
+          "ja": "新しいセッション",
+          "ko": "새 세션",
+          "de": "Neue Sitzung",
+          "fr": "Nouvelle session",
+          "es": "Nueva sesión",
+          "it": "Nuova sessione",
+          "pt": "Nova sessão"
+        }
+      },
+      "library": {
+        "icon": "assets/nav/library.svg",
+        "activeIcon": "assets/nav/library-active.svg",
+        "label": { "en": "Gallery", "en-GB": "Gallery", "zh": "作品库", "zh-TW": "作品庫", "ja": "ギャラリー" }
+      },
+      "skills": { "icon": "icon:wand-sparkles", "activeIcon": "icon:sparkles" },
+      "automation": { "icon": "icon:refresh-cw", "activeIcon": "icon:zap" },
+      "models": { "icon": "icon:cpu", "activeIcon": "icon:brain" },
+      "plugins": { "icon": "icon:layers", "activeIcon": "icon:grid-3x3", "hidden": false }
+    }
+  },
+  "sections": {
+    "projects": {
+      "label": {
+        "default": "Workspaces",
+        "zh": "工作区",
+        "zh-TW": "工作區",
+        "ja": "ワークスペース",
+        "ko": "작업 공간",
+        "de": "Arbeitsbereiche",
+        "fr": "Espaces de travail",
+        "es": "Espacios de trabajo",
+        "it": "Aree di lavoro",
+        "pt": "Espaços de trabalho"
+      }
+    }
+  },
+  "tree": { "folderIcon": "icon:bookmark", "folderOpenIcon": "icon:folder" },
+  "controls": {
+    "collapse": { "icon": "icon:grid-3x3", "label": { "default": "Hide sidebar", "zh": "隐藏侧边栏", "zh-TW": "隱藏側邊欄" } },
+    "expand": { "icon": "icon:compass", "label": { "default": "Show sidebar", "zh": "显示侧边栏", "zh-TW": "顯示側邊欄" } },
+    "pin": { "icon": "icon:star" },
+    "userMenu": { "icon": "icon:settings" }
+  },
+  "menu": {
+    "settings": { "icon": "icon:palette", "label": { "default": "Preferences", "zh": "偏好设置", "zh-TW": "偏好設定", "ja": "環境設定" } },
+    "help": { "icon": "icon:lightbulb" },
+    "language": { "icon": "icon:globe" },
+    "theme": { "icon": "icon:moon-star" },
+    "wallet": { "icon": "icon:gift" },
+    "logout": { "icon": "icon:arrow-right" },
+    "signIn": { "icon": "icon:key" }
+  }
+}

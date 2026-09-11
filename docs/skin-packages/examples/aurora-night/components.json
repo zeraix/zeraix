@@ -1,0 +1,43 @@
+{
+  "energyCard": {
+    "params": ["title", "value", "icon"],
+    "template": {
+      "type": "component",
+      "ref": "primitive:box",
+      "props": { "padding": 12, "borderRadius": 14, "background": "var(--surface)", "borderWidth": 1, "borderColor": "var(--line)", "shadow": "sm" },
+      "children": [
+        {
+          "type": "container",
+          "direction": "row",
+          "align": "center",
+          "gap": 10,
+          "children": [
+            { "type": "component", "ref": "primitive:icon", "props": { "name": "{{icon}}", "size": 20, "color": "var(--primary)" } },
+            {
+              "type": "container",
+              "direction": "column",
+              "gap": 4,
+              "children": [
+                { "type": "component", "ref": "primitive:text", "props": { "content": "{{title}}", "fontSize": 13, "fontWeight": 600 } },
+                { "type": "component", "ref": "primitive:progressBar", "props": { "value": "{{value}}", "thickness": 6 }, "size": { "width": "150px" } }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  },
+  "statRow": {
+    "params": ["a", "av", "b", "bv"],
+    "template": {
+      "type": "container",
+      "direction": "row",
+      "gap": 10,
+      "justify": "center",
+      "children": [
+        { "type": "component", "ref": "custom:energyCard", "props": { "title": "{{a}}", "value": "{{av}}", "icon": "zap" } },
+        { "type": "component", "ref": "custom:energyCard", "props": { "title": "{{b}}", "value": "{{bv}}", "icon": "sparkles" } }
+      ]
+    }
+  }
+}

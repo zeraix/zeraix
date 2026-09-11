@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "regions": {
+    "greeting": {
+      "type": "container", "direction": "column", "align": "center", "gap": 12,
+      "children": [
+        { "type": "component", "ref": "custom:avatarLine", "props": { "initials": "AI", "label": "Assistant" } },
+        { "type": "component", "ref": "app:greetingTitle" },
+        { "type": "component", "ref": "custom:twoStats", "props": { "left": "Focus", "leftValue": 72, "right": "Energy", "rightValue": 45 } },
+        { "type": "component", "ref": "app:greetingHint" }
+      ]
+    },
+    "sidebarFooter": {
+      "type": "component", "ref": "custom:avatarLine", "props": { "initials": "Z", "label": "Zeraix" }
+    }
+  }
+}

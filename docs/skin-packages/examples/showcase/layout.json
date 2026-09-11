@@ -1,0 +1,136 @@
+{
+  "version": 1,
+  "regions": {
+    "greeting": {
+      "type": "container", "direction": "column", "align": "center", "gap": 14,
+      "children": [
+        {
+          "type": "container", "direction": "stack",
+          "children": [
+            { "type": "component", "ref": "primitive:gradient", "props": { "type": "radial", "width": 128, "height": 128, "borderRadius": 64, "stops": "var(--primary) 0%, transparent 72%" } },
+            {
+              "type": "container", "direction": "column", "align": "center", "justify": "center",
+              "children": [
+                { "type": "component", "ref": "primitive:image", "props": { "src": "assets/hero.svg", "width": 72, "height": 72, "fit": "contain", "borderRadius": 20, "alt": "Showcase" } }
+              ]
+            }
+          ]
+        },
+        { "type": "component", "ref": "app:greetingTitle", "props": { "size": "xl" } },
+        { "type": "component", "ref": "app:greetingHint" },
+
+        { "type": "component", "ref": "custom:sectionTitle", "props": { "text": "STATUS" }, "size": { "width": "440px" } },
+        {
+          "type": "component", "ref": "primitive:box",
+          "props": { "padding": 12, "borderRadius": 18, "background": "linear-gradient(135deg, var(--surface-muted) 0%, var(--surface) 100%)", "borderWidth": 1, "borderColor": "var(--line)", "backdropBlur": 6, "shadow": "md" },
+          "size": { "width": "440px" },
+          "children": [
+            {
+              "type": "container", "direction": "column", "gap": 12,
+              "children": [
+                { "type": "component", "ref": "custom:metricPair", "props": { "a": "Focus", "av": 72, "b": "Energy", "bv": 45 } },
+                {
+                  "type": "container", "direction": "row", "justify": "space-evenly", "align": "start", "gap": 12,
+                  "children": [
+                    { "type": "component", "ref": "custom:ringStat", "props": { "label": "Design", "value": 88 } },
+                    { "type": "component", "ref": "custom:ringStat", "props": { "label": "Build", "value": 64 } },
+                    { "type": "component", "ref": "custom:ringStat", "props": { "label": "Ship", "value": 32 } },
+                    { "type": "component", "ref": "custom:ringStat", "props": { "label": "Polish", "value": 12 } }
+                  ]
+                }
+              ]
+            }
+          ]
+        },
+
+        { "type": "component", "ref": "custom:sectionTitle", "props": { "text": "CONDITIONS" }, "size": { "width": "440px" } },
+        {
+          "type": "container", "direction": "row", "justify": "center", "align": "center", "gap": 6,
+          "children": [
+            { "type": "component", "ref": "primitive:badge", "props": { "text": "Dark mode", "variant": "primary" }, "visibleWhen": "state.theme === 'dark'" },
+            { "type": "component", "ref": "primitive:badge", "props": { "text": "Light mode", "variant": "info" }, "visibleWhen": "state.theme !== 'dark'" },
+            { "type": "component", "ref": "primitive:badge", "props": { "text": "Desktop", "variant": "neutral" }, "visibleWhen": "state.desktop" },
+            { "type": "component", "ref": "primitive:badge", "props": { "text": "Web", "variant": "neutral" }, "visibleWhen": "!state.desktop" },
+            { "type": "component", "ref": "primitive:badge", "props": { "text": "Windows", "variant": "neutral" }, "visibleWhen": "state.platform === 'win32'" },
+            { "type": "component", "ref": "primitive:badge", "props": { "text": "macOS", "variant": "neutral" }, "visibleWhen": "state.platform === 'darwin'" },
+            { "type": "component", "ref": "primitive:badge", "props": { "text": "国内版", "variant": "warning" }, "visibleWhen": "state.edition === 'cn'" },
+            { "type": "component", "ref": "primitive:badge", "props": { "text": "English UI", "variant": "neutral" }, "visibleWhen": "state.locale == 'en'" },
+            { "type": "component", "ref": "primitive:badge", "props": { "text": "Home screen", "variant": "success" }, "visibleWhen": "state.toolsReady == null" },
+            { "type": "component", "ref": "primitive:badge", "props": { "text": "Tools ready", "variant": "success" }, "visibleWhen": "state.toolsReady === true" },
+            { "type": "component", "ref": "primitive:badge", "props": { "text": "Tools loading", "variant": "danger" }, "visibleWhen": "state.toolsReady === false" }
+          ]
+        },
+
+        { "type": "component", "ref": "custom:sectionTitle", "props": { "text": "PRIMITIVES" }, "size": { "width": "440px" } },
+        {
+          "type": "container", "direction": "row", "justify": "center", "align": "center", "gap": 14,
+          "children": [
+            { "type": "component", "ref": "custom:shapeTrio" },
+            { "type": "component", "ref": "primitive:divider", "props": { "orientation": "vertical", "length": 28, "fill": false, "thickness": 2 } },
+            { "type": "component", "ref": "custom:profile", "props": { "name": "Ada", "role": "Skin author" } },
+            { "type": "component", "ref": "primitive:divider", "props": { "orientation": "vertical", "length": 28, "fill": false, "thickness": 2 } },
+            {
+              "type": "container", "direction": "column", "gap": 3,
+              "children": [
+                { "type": "component", "ref": "primitive:text", "props": { "content": "A clamped line of text that keeps going past the width the layout gives it, and is cut after two lines.", "fontSize": 11, "lineClamp": 2, "italic": true, "color": "var(--ink-muted)" }, "size": { "width": "150px" } },
+                { "type": "component", "ref": "primitive:text", "props": { "content": "MONO 2.0", "fontSize": 11, "family": "mono", "letterSpacing": 2, "fontWeight": 700, "color": "var(--accent-ink)" } },
+                { "type": "component", "ref": "primitive:avatar", "props": { "initials": "ZX", "size": 22, "shape": "square" } }
+              ]
+            }
+          ]
+        },
+
+        { "type": "component", "ref": "primitive:spacer", "props": { "size": 2 } },
+        {
+          "type": "container", "direction": "row", "justify": "space-between", "align": "center", "gap": 8,
+          "children": [
+            { "type": "component", "ref": "app:today", "props": { "format": "long", "align": "left" } },
+            { "type": "component", "ref": "app:appVersion", "props": { "prefix": "Zeraix v", "align": "right" } }
+          ]
+        }
+      ]
+    },
+    "sidebarHeader": {
+      "type": "component", "ref": "primitive:box",
+      "props": { "padding": 10, "borderRadius": 12, "background": "linear-gradient(135deg, var(--surface) 0%, var(--surface-muted) 100%)", "borderWidth": 1, "borderColor": "var(--line)" },
+      "children": [
+        {
+          "type": "container", "direction": "row", "align": "center", "gap": 10,
+          "children": [
+            { "type": "component", "ref": "primitive:progressRing", "props": { "value": 72, "size": 32, "thickness": 4 } },
+            {
+              "type": "container", "direction": "column", "gap": 2,
+              "children": [
+                { "type": "component", "ref": "primitive:text", "props": { "content": "Weekly focus", "fontSize": 12, "fontWeight": 600 } },
+                { "type": "component", "ref": "primitive:text", "props": { "content": "72% of goal", "fontSize": 11, "color": "var(--ink-muted)" } }
+              ]
+            },
+            { "type": "component", "ref": "primitive:spacer", "props": { "flex": 1 } },
+            { "type": "component", "ref": "primitive:badge", "props": { "text": "Pro", "variant": "primary", "size": "sm" } }
+          ]
+        }
+      ]
+    },
+    "sidebarFooter": {
+      "type": "container", "direction": "column", "gap": 6,
+      "children": [
+        {
+          "type": "container", "direction": "row", "align": "center", "gap": 8,
+          "children": [
+            { "type": "component", "ref": "app:brandMark", "props": { "size": 22 } },
+            { "type": "component", "ref": "primitive:text", "props": { "content": "Showcase skin", "fontSize": 11, "fontWeight": 600 } },
+            { "type": "component", "ref": "primitive:spacer", "props": { "flex": 1 } },
+            { "type": "component", "ref": "primitive:progressRing", "props": { "value": 72, "size": 20, "thickness": 3 } }
+          ]
+        },
+        {
+          "type": "container", "direction": "row", "justify": "space-between", "align": "center", "gap": 8,
+          "children": [
+            { "type": "component", "ref": "app:today", "props": { "format": "short", "align": "left" } },
+            { "type": "component", "ref": "app:appVersion", "props": { "align": "right" } }
+          ]
+        }
+      ]
+    }
+  }
+}

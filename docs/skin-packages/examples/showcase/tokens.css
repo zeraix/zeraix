@@ -1,0 +1,69 @@
+/* Showcase: violet on porcelain in light mode, violet on ink in dark mode.
+   `[data-skin-package]` outranks the app's own :root block; `.dark` is the class next-themes sets. */
+
+:root[data-skin-package] {
+  --background: #f3f0fa;
+  --surface: #fbfaff;
+  --surface-muted: #ece7f7;
+  --surface-hover: #e1dbf1;
+  --surface-active: #d4cceb;
+  --line: #ddd5ee;
+  --line-strong: #c4b8e2;
+  --ink: #1b1530;
+  --ink-muted: #5c5378;
+  --ink-subtle: #8a81a6;
+  --primary: #6d4de6;
+  --primary-foreground: #fbfaff;
+  --accent-ink: #5a3bd1;
+  --sidebar: #ede8f8;
+  --scrollbar-thumb: rgba(27, 21, 48, 0.24);
+  --popover: #fbfaff;
+  --radius: 0.875rem;
+}
+
+:root[data-skin-package].dark {
+  --background: #0f0b1e;
+  --surface: #171130;
+  --surface-muted: #1f1840;
+  --surface-hover: #2a2152;
+  --surface-active: #352b64;
+  --line: rgba(190, 170, 255, 0.14);
+  --line-strong: rgba(190, 170, 255, 0.26);
+  --ink: #efeaff;
+  --ink-muted: #b0a6d6;
+  --ink-subtle: #7f75a8;
+  --primary: #a48bff;
+  --primary-foreground: #150e2c;
+  --accent-ink: #a48bff;
+  --sidebar: #0b081a;
+  --scrollbar-thumb: rgba(190, 170, 255, 0.28);
+  --popover: #1f1840;
+  --input: rgba(190, 170, 255, 0.26);
+}
+
+/* Package assets from the stylesheet: a dotted tile behind the sidebar and a glow in the corner of the shell.
+   Only url(assets/...) is accepted; anything else rejects the package. */
+:root[data-skin-package] [data-skin-slot="sidebar"] {
+  background-image: url(assets/pattern.svg);
+  background-repeat: repeat;
+}
+:root[data-skin-package] [data-skin-slot="shell"] {
+  background-image: url(assets/glow.svg);
+  background-repeat: no-repeat;
+  background-position: right -180px top -200px;
+}
+
+/* The sidebar's CSS hooks (data-sidebar-part / data-nav-id / data-active): the current page's nav item in the
+   accent colour with a bar on its left, the section title spaced out, and a hairline above the account row. */
+:root[data-skin-package] [data-sidebar-part="nav-item"][data-active] {
+  color: var(--accent-ink);
+  box-shadow: inset 3px 0 0 var(--primary);
+}
+:root[data-skin-package] [data-sidebar-part="section"] .skin-section-title {
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  font-weight: 600;
+}
+:root[data-skin-package] [data-sidebar-part="user"] {
+  border-top-color: var(--line-strong);
+}

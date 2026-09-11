@@ -1,0 +1,11 @@
+{
+  "id": "showcase",
+  "name": "Showcase",
+  "description": "Every feature of the skin package format in one package: full light and dark tokens, a redrawn sidebar (brand, nav order, icons, localized labels, tree, controls, account menu), all three layout regions, all twelve primitives, all six app components, nested composites and conditional visibility.",
+  "author": "Zeraix",
+  "version": "1.1.0",
+  "min_app_version": "2.0.0",
+  "max_app_version": "3.0.0",
+  "preview": "assets/preview.svg",
+  "created_at": "2026-09-11T12:00:00Z"
+}

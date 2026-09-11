@@ -1,0 +1,44 @@
+{
+  "version": 1,
+  "regions": {
+    "greeting": {
+      "type": "container", "direction": "column", "align": "center", "gap": 8,
+      "children": [
+        { "type": "component", "ref": "primitive:box", "props": { "padding": 16, "borderRadius": 20, "background": "var(--surface)", "borderWidth": 1, "borderColor": "var(--line)" },
+          "children": [
+            { "type": "container", "direction": "row", "gap": 12, "align": "center",
+              "children": [
+                { "type": "component", "ref": "primitive:box", "props": { "padding": 10, "borderRadius": 30, "background": "var(--surface-muted)" },
+                  "children": [
+                    { "type": "container", "direction": "stack",
+                      "children": [
+                        { "type": "component", "ref": "primitive:shape", "props": { "kind": "hexagon", "size": 40, "fill": "var(--primary)" } },
+                        { "type": "container", "direction": "column", "align": "center", "justify": "center",
+                          "children": [
+                            { "type": "component", "ref": "primitive:icon", "props": { "name": "sparkles", "size": 18, "color": "var(--primary-foreground)" } }
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                },
+                { "type": "container", "direction": "column", "gap": 4,
+                  "children": [
+                    { "type": "component", "ref": "app:greetingTitle", "props": { "align": "left", "size": "md" } },
+                    { "type": "container", "direction": "row", "gap": 6, "align": "center",
+                      "children": [
+                        { "type": "component", "ref": "primitive:badge", "props": { "text": "nested", "variant": "neutral", "size": "sm" } },
+                        { "type": "component", "ref": "primitive:divider", "props": { "orientation": "vertical", "length": 12 } },
+                        { "type": "component", "ref": "app:greetingHint", "props": { "align": "left" } }
+                      ]
+                    }
+                  ]
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  }
+}

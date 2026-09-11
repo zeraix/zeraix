@@ -1,0 +1,37 @@
+{
+  "avatarLine": {
+    "params": ["initials", "label"],
+    "template": {
+      "type": "container", "direction": "row", "align": "center", "gap": 8,
+      "children": [
+        { "type": "component", "ref": "primitive:avatar", "props": { "initials": "{{initials}}", "size": 28, "shape": "circle" } },
+        { "type": "component", "ref": "primitive:text", "props": { "content": "{{label}}", "fontSize": 12, "fontWeight": 500 } }
+      ]
+    }
+  },
+  "statCard": {
+    "params": ["title", "value"],
+    "template": {
+      "type": "component", "ref": "primitive:box",
+      "props": { "padding": 10, "borderRadius": 12, "background": "var(--surface)", "borderWidth": 1, "borderColor": "var(--line)" },
+      "children": [
+        { "type": "container", "direction": "column", "gap": 4,
+          "children": [
+            { "type": "component", "ref": "primitive:text", "props": { "content": "{{title}}", "fontSize": 12, "color": "var(--ink-muted)" } },
+            { "type": "component", "ref": "primitive:progressBar", "props": { "value": "{{value}}", "thickness": 5 }, "size": { "width": "120px" } }
+          ]
+        }
+      ]
+    }
+  },
+  "twoStats": {
+    "params": ["left", "leftValue", "right", "rightValue"],
+    "template": {
+      "type": "container", "direction": "row", "gap": 8, "justify": "center",
+      "children": [
+        { "type": "component", "ref": "custom:statCard", "props": { "title": "{{left}}", "value": "{{leftValue}}" } },
+        { "type": "component", "ref": "custom:statCard", "props": { "title": "{{right}}", "value": "{{rightValue}}" } }
+      ]
+    }
+  }
+}

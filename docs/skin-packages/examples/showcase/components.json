@@ -1,0 +1,87 @@
+{
+  "statCard": {
+    "params": ["title", "value", "icon", "tone"],
+    "template": {
+      "type": "component",
+      "ref": "primitive:box",
+      "props": { "padding": 12, "borderRadius": 14, "background": "var(--surface)", "borderWidth": 1, "borderColor": "var(--line)", "shadow": "sm" },
+      "children": [
+        {
+          "type": "container", "direction": "column", "gap": 8,
+          "children": [
+            {
+              "type": "container", "direction": "row", "align": "center", "gap": 8,
+              "children": [
+                { "type": "component", "ref": "primitive:icon", "props": { "name": "{{icon}}", "size": 18, "color": "var(--primary)", "strokeWidth": 2.2 } },
+                { "type": "component", "ref": "primitive:text", "props": { "content": "{{title}}", "fontSize": 13, "fontWeight": 600 } },
+                { "type": "component", "ref": "primitive:spacer", "props": { "flex": 1 } },
+                { "type": "component", "ref": "primitive:badge", "props": { "text": "{{value}}%", "variant": "{{tone}}", "size": "sm" } }
+              ]
+            },
+            { "type": "component", "ref": "primitive:progressBar", "props": { "value": "{{value}}", "thickness": 6, "borderRadius": 6 } }
+          ]
+        }
+      ]
+    }
+  },
+  "ringStat": {
+    "params": ["label", "value"],
+    "template": {
+      "type": "container", "direction": "column", "align": "center", "gap": 4,
+      "children": [
+        { "type": "component", "ref": "primitive:progressRing", "props": { "value": "{{value}}", "size": 46, "thickness": 5, "showValue": true } },
+        { "type": "component", "ref": "primitive:text", "props": { "content": "{{label}}", "fontSize": 11, "color": "var(--ink-subtle)", "align": "center" } }
+      ]
+    }
+  },
+  "sectionTitle": {
+    "params": ["text"],
+    "template": {
+      "type": "container", "direction": "row", "align": "center", "gap": 10,
+      "children": [
+        { "type": "component", "ref": "primitive:divider", "props": { "dashArray": "4 4", "color": "var(--line-strong)" }, "size": { "flex": 1 } },
+        { "type": "component", "ref": "primitive:text", "props": { "content": "{{text}}", "fontSize": 10, "fontWeight": 700, "letterSpacing": 1.6, "color": "var(--ink-subtle)", "family": "mono" } },
+        { "type": "component", "ref": "primitive:divider", "props": { "dashArray": "4 4", "color": "var(--line-strong)" }, "size": { "flex": 1 } }
+      ]
+    }
+  },
+  "metricPair": {
+    "params": ["a", "av", "b", "bv"],
+    "template": {
+      "type": "container", "direction": "grid", "gridTemplate": "repeat(2, minmax(0, 1fr))", "gap": 10,
+      "children": [
+        { "type": "component", "ref": "custom:statCard", "props": { "title": "{{a}}", "value": "{{av}}", "icon": "zap", "tone": "success" } },
+        { "type": "component", "ref": "custom:statCard", "props": { "title": "{{b}}", "value": "{{bv}}", "icon": "flame", "tone": "warning" } }
+      ]
+    }
+  },
+  "profile": {
+    "params": ["name", "role"],
+    "template": {
+      "type": "container", "direction": "row", "align": "center", "gap": 10,
+      "children": [
+        { "type": "component", "ref": "primitive:avatar", "props": { "src": "assets/avatar.svg", "size": 40, "shape": "circle", "alt": "{{name}}" } },
+        {
+          "type": "container", "direction": "column", "gap": 2,
+          "children": [
+            { "type": "component", "ref": "primitive:text", "props": { "content": "{{name}}", "fontSize": 13, "fontWeight": 600 } },
+            { "type": "component", "ref": "primitive:text", "props": { "content": "{{role}}", "fontSize": 11, "color": "var(--ink-muted)" } }
+          ]
+        }
+      ]
+    }
+  },
+  "shapeTrio": {
+    "params": [],
+    "template": {
+      "type": "container", "direction": "row", "align": "center", "gap": 8,
+      "children": [
+        { "type": "component", "ref": "primitive:shape", "props": { "kind": "circle", "size": 22, "fill": "var(--primary)" } },
+        { "type": "component", "ref": "primitive:shape", "props": { "kind": "hexagon", "size": 24, "fill": "transparent", "stroke": "var(--accent-ink)", "strokeWidth": 2, "rotate": 30 } },
+        { "type": "component", "ref": "primitive:shape", "props": { "kind": "star", "size": 24, "fill": "var(--warning)" } },
+        { "type": "component", "ref": "primitive:shape", "props": { "kind": "triangle", "size": 20, "fill": "var(--success)", "rotate": 180 } },
+        { "type": "component", "ref": "primitive:shape", "props": { "kind": "rect", "size": 18, "fill": "var(--info)" } }
+      ]
+    }
+  }
+}

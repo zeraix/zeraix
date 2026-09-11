@@ -1,0 +1,44 @@
+{
+  "version": 1,
+  "regions": {
+    "greeting": {
+      "type": "container",
+      "direction": "column",
+      "align": "center",
+      "gap": 14,
+      "children": [
+        {
+          "type": "container",
+          "direction": "stack",
+          "children": [
+            { "type": "component", "ref": "primitive:gradient", "props": { "type": "radial", "borderRadius": 48, "width": 96, "height": 96, "stops": "var(--primary) 0%, transparent 100%" } },
+            {
+              "type": "container",
+              "direction": "column",
+              "align": "center",
+              "justify": "center",
+              "children": [{ "type": "component", "ref": "app:brandMark", "props": { "size": 56 } }]
+            }
+          ]
+        },
+        { "type": "component", "ref": "app:greetingTitle", "props": { "size": "lg" } },
+        { "type": "component", "ref": "app:greetingHint" },
+        { "type": "component", "ref": "primitive:spacer", "props": { "size": 4 } },
+        { "type": "component", "ref": "custom:statRow", "props": { "a": "Focus", "av": 72, "b": "Energy", "bv": 45 } },
+        { "type": "component", "ref": "primitive:badge", "props": { "text": "Tools ready", "variant": "success" }, "visibleWhen": "state.toolsReady === true" },
+        { "type": "component", "ref": "primitive:badge", "props": { "text": "Night mode", "variant": "primary" }, "visibleWhen": "state.theme === 'dark'" }
+      ]
+    },
+    "sidebarFooter": {
+      "type": "container",
+      "direction": "row",
+      "align": "center",
+      "justify": "space-between",
+      "gap": 8,
+      "children": [
+        { "type": "component", "ref": "app:today", "props": { "format": "medium" } },
+        { "type": "component", "ref": "app:appVersion" }
+      ]
+    }
+  }
+}
