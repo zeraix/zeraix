@@ -80,7 +80,10 @@ test("a recorded process that is still running is killed", async (t) => {
     [child.pid],
     "the orphan should have been reported as killed",
   );
-  await delay(300);
+  // Polled against a deadline rather than one fixed sleep: termination is asynchronous on every OS, and a
+  // busy Windows runner can take longer than any single number picked here. It must still actually die.
+  const deadline = Date.now() + 5000;
+  while (alive(child.pid) && Date.now() < deadline) await delay(50);
   assert.equal(alive(child.pid), false, "the orphan should actually be gone");
 });
 

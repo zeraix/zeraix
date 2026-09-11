@@ -204,21 +204,63 @@ async function startedAt(pid) {
   return Number.isFinite(ms) ? ms : null;
 }
 
-/** Kill the whole tree under `pid`, the same way `killTree` does for a live child. */
+/** How long taskkill may take before the kill is counted as failed. It normally exits in a few hundred ms. */
+const TASKKILL_TIMEOUT_MS = 10_000;
+/** How long to wait, after taskkill reports success, for the process to actually disappear. */
+const GONE_TIMEOUT_MS = 2_000;
+
+/** Poll until `pid` is gone or `ms` pass. */
+async function waitGone(pid, ms) {
+  const deadline = Date.now() + ms;
+  while (alive(pid) && Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, 50));
+  }
+}
+
+/**
+ * Kill the whole tree under `pid`, the same way `killTree` does for a live child. Resolves `true` when the
+ * kill took place, so the caller reports only kills that happened.
+ *
+ * On Windows the kill is another process: taskkill takes a few hundred milliseconds to start and finish, and
+ * TerminateProcess returns before the target is gone. This used to be fired and forgotten, so the reaper
+ * reported a kill before it had happened -- and would have reported one that failed (access denied, say).
+ * Now it waits for taskkill's exit code, then briefly for the process to disappear.
+ */
 function killTreeByPid(pid) {
-  try {
-    if (process.platform === "win32") {
-      spawn("taskkill", ["/pid", String(pid), "/T", "/F"], { windowsHide: true });
-    } else {
-      // The group, because these were spawned detached into their own — see killTree in native.mjs.
+  if (process.platform === "win32") {
+    return new Promise((resolve) => {
+      let settled = false;
+      let timer = null;
+      const done = (ok) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolve(ok);
+      };
+      timer = setTimeout(() => done(false), TASKKILL_TIMEOUT_MS);
       try {
-        process.kill(-pid, "SIGKILL");
+        const tk = spawn("taskkill", ["/pid", String(pid), "/T", "/F"], { windowsHide: true, stdio: "ignore" });
+        tk.on("error", () => done(false));
+        tk.on("exit", (code) => {
+          if (code !== 0) return done(false);
+          void waitGone(pid, GONE_TIMEOUT_MS).then(() => done(true));
+        });
       } catch {
-        process.kill(pid, "SIGKILL");
+        done(false);
       }
+    });
+  }
+  try {
+    // The group, because these were spawned detached into their own — see killTree in native.mjs.
+    try {
+      process.kill(-pid, "SIGKILL");
+    } catch {
+      process.kill(pid, "SIGKILL");
     }
+    return Promise.resolve(true);
   } catch {
     /* already gone, or not ours any more — either way there is nothing to do */
+    return Promise.resolve(false);
   }
 }
 
@@ -259,8 +301,8 @@ export async function reapOrphans() {
     // Unverifiable, or verifiably a different process wearing the same number. Leave it alone.
     if (actual === null || Math.abs(actual - recorded) > START_TOLERANCE_MS) continue;
 
-    killTreeByPid(pid);
-    killed.push({ pid, command: String(row?.command ?? "") });
+    // Awaited: a kill that did not take place must not be reported as one.
+    if (await killTreeByPid(pid)) killed.push({ pid, command: String(row?.command ?? "") });
   }
   return killed;
 }
