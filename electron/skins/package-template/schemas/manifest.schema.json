@@ -1,0 +1,83 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Zeraix skin package manifest",
+  "type": "object",
+  "required": [
+    "id",
+    "name",
+    "description",
+    "author",
+    "version",
+    "created_at"
+  ],
+  "properties": {
+    "id": {
+      "type": "string",
+      "minLength": 2,
+      "maxLength": 40,
+      "pattern": "^[a-z0-9]+(-[a-z0-9]+)*$",
+      "not": {
+        "anyOf": [
+          {
+            "enum": [
+              "default",
+              "current",
+              "none",
+              "light",
+              "dark",
+              "system"
+            ]
+          },
+          {
+            "pattern": "^builtin-"
+          }
+        ]
+      },
+      "description": "Unique id: lowercase letters, digits and single hyphens. Installing a package with the same id replaces it."
+    },
+    "name": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 60,
+      "pattern": "\\S",
+      "description": "Shown in the skin gallery."
+    },
+    "description": {
+      "type": "string",
+      "maxLength": 400
+    },
+    "author": {
+      "type": "string",
+      "maxLength": 80
+    },
+    "version": {
+      "type": "string",
+      "pattern": "^(0|[1-9]\\d*)\\.(0|[1-9]\\d*)\\.(0|[1-9]\\d*)(?:-((?:0|[1-9]\\d*|\\d*[a-zA-Z-][0-9a-zA-Z-]*)(?:\\.(?:0|[1-9]\\d*|\\d*[a-zA-Z-][0-9a-zA-Z-]*))*))?(?:\\+([0-9a-zA-Z-]+(?:\\.[0-9a-zA-Z-]+)*))?$",
+      "description": "Semantic version, e.g. 1.0.0."
+    },
+    "min_app_version": {
+      "type": "string",
+      "pattern": "^(0|[1-9]\\d*)\\.(0|[1-9]\\d*)\\.(0|[1-9]\\d*)(?:-((?:0|[1-9]\\d*|\\d*[a-zA-Z-][0-9a-zA-Z-]*)(?:\\.(?:0|[1-9]\\d*|\\d*[a-zA-Z-][0-9a-zA-Z-]*))*))?(?:\\+([0-9a-zA-Z-]+(?:\\.[0-9a-zA-Z-]+)*))?$",
+      "description": "The oldest Zeraix version this skin works with."
+    },
+    "max_app_version": {
+      "type": "string",
+      "pattern": "^(0|[1-9]\\d*)\\.(0|[1-9]\\d*)\\.(0|[1-9]\\d*)(?:-((?:0|[1-9]\\d*|\\d*[a-zA-Z-][0-9a-zA-Z-]*)(?:\\.(?:0|[1-9]\\d*|\\d*[a-zA-Z-][0-9a-zA-Z-]*))*))?(?:\\+([0-9a-zA-Z-]+(?:\\.[0-9a-zA-Z-]+)*))?$",
+      "description": "The newest Zeraix version this skin works with."
+    },
+    "preview": {
+      "type": "string",
+      "maxLength": 255,
+      "pattern": "^[A-Za-z0-9_\\-./]+\\.(?:[pP][nN][gG]|[jJ][pP][gG]|[jJ][pP][eE][gG]|[wW][eE][bB][pP]|[gG][iI][fF]|[sS][vV][gG])$",
+      "not": {
+        "pattern": "(^|/)\\.\\.?(/|$)|^/|//"
+      },
+      "description": "A picture of the skin for the gallery, e.g. assets/preview.png."
+    },
+    "created_at": {
+      "type": "string",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}(T\\d{2}:\\d{2}(:\\d{2}(\\.\\d+)?)?(Z|[+-]\\d{2}:\\d{2})?)?$",
+      "description": "ISO 8601 date, e.g. 2026-09-11 or 2026-09-11T10:00:00Z."
+    }
+  }
+}

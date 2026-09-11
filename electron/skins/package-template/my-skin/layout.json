@@ -1,0 +1,33 @@
+{
+  "version": 1,
+  "regions": {
+    "greeting": {
+      "type": "container",
+      "direction": "column",
+      "align": "center",
+      "gap": 10,
+      "children": [
+        { "type": "component", "ref": "app:brandMark", "props": { "size": 56 } },
+        { "type": "component", "ref": "app:greetingTitle", "props": { "size": "lg" } },
+        { "type": "component", "ref": "app:greetingHint" },
+        {
+          "type": "component",
+          "ref": "custom:welcomeCard",
+          "props": { "title": "My Skin", "text": "Edit layout.json to rearrange this screen.", "icon": "sparkles" },
+          "size": { "width": "360px" }
+        }
+      ]
+    },
+    "sidebarFooter": {
+      "type": "container",
+      "direction": "row",
+      "align": "center",
+      "justify": "space-between",
+      "gap": 8,
+      "children": [
+        { "type": "component", "ref": "app:today", "props": { "format": "medium", "align": "left" } },
+        { "type": "component", "ref": "app:appVersion", "props": { "align": "right" } }
+      ]
+    }
+  }
+}

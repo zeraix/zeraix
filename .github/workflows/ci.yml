@@ -75,7 +75,9 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
         with:
-          workspaces: runtime
+          workspaces: |
+            runtime
+            native/skin-engine
           key: checks
 
       - name: Build the sidecar (debug)
@@ -92,6 +94,22 @@ jobs:
           RUST_BACKTRACE: "1"
         run: cargo test --locked
 
+      # The skin-engine addon (native/skin-engine): the trust boundary for .skinpkg skin packages.
+      # Its suite includes tests/security.rs -- zip slip, executables, zip bombs, layout depth /
+      # node-count / cycle / expansion attacks -- and a cap on how long the expansion check may take,
+      # so a validator that expands before it counts fails here rather than hanging a user's install.
+      - name: Skin engine tests
+        working-directory: native/skin-engine
+        timeout-minutes: 10
+        env:
+          RUST_BACKTRACE: "1"
+        run: cargo test --locked
+
+      # Built so test/skin-engine.test.mjs drives the real addon from Node (it skips without one, and
+      # ZERAIX_REQUIRE_SKIN_ENGINE below turns that skip into a failure).
+      - name: Build the skin engine addon
+        run: npm run build:skin-engine
+
       - name: Tests
         # Capped too: these drive the real sidecar, so they can hang for the same reasons.
         timeout-minutes: 15
@@ -99,6 +117,7 @@ jobs:
         # above — or moving cargo's output path — cannot quietly delete that coverage again.
         env:
           ZERAIX_REQUIRE_SIDECAR: "1"
+          ZERAIX_REQUIRE_SKIN_ENGINE: "1"
         run: npm run test:ci
 
       - name: Typecheck
@@ -156,7 +175,9 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
         with:
-          workspaces: runtime
+          workspaces: |
+            runtime
+            native/skin-engine
           key: ${{ matrix.name }}
 
       - uses: pnpm/action-setup@v4
@@ -197,6 +218,18 @@ jobs:
 
       - name: Verify the staged binary
         run: npm run check:runtime
+
+      # The skin-engine addon on the platforms that ship it: the crate's tests (path handling and
+      # atomic renames are OS behaviour), then a release build of the .node and a load + ping() check.
+      - name: Skin engine tests
+        working-directory: native/skin-engine
+        timeout-minutes: 10
+        env:
+          RUST_BACKTRACE: "1"
+        run: cargo test --locked
+
+      - name: Build and verify the skin engine addon
+        run: npm run build:skin-engine && npm run check:skin-engine
 
       # The gate. Runs the REAL JS handlers (via the electron stub hook) and the REAL sidecar over its
       # real protocol against one shared tree, and diffs every byte. Non-zero exit on any divergence.

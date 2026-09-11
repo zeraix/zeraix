@@ -1,0 +1,9 @@
+{
+  "name": "@zeraix/skin-engine",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Rust (napi-rs) engine for Zeraix skin packages: validation, secure extraction, storage.",
+  "main": "index.js",
+  "types": "index.d.ts",
+  "license": "Apache-2.0"
+}

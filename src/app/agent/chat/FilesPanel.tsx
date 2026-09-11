@@ -298,8 +298,10 @@ export default function FilesPanel() {
 
   return (
     // The outer layer only animates and clips the width (0 <-> 520 <-> full width); the inner layer keeps a fixed width and slides smoothly in/out as the outer layer reveals/collapses.
+    // z-[6] lifts the panel over the skin's corner photo (SkinDecor, z-[5] in the shell's bottom-right), which belongs to
+    // the conversation: without it the photo floated over the editor, half covered by Monaco's own minimap layer.
     <div
-      className={`h-full shrink-0 overflow-hidden transition-[width] duration-300 ${
+      className={`z-[6] h-full shrink-0 overflow-hidden transition-[width] duration-300 ${
         open ? (maximized ? "w-full" : "w-[520px]") : "w-0"
       }`}
     >

@@ -99,8 +99,10 @@ export function ContextUsageRing(props: {
           Painted in the app's own surface / ink tokens rather than the tooltip default, which inverts to
           foreground-on-background and read as a white card pasted onto a dark UI. --tooltip-bg is the hook the
           shared tooltip leaves for exactly this: the arrow reads it, so it follows the panel instead of staying
-          inverted. */}
+          inverted. data-tooltip-panel keeps skins from inverting it onto the accent (skins.css), which would leave
+          this ink on the accent colour. */}
       <TooltipContent
+        data-tooltip-panel=""
         side="top"
         align="end"
         style={{ ["--tooltip-bg" as string]: "var(--color-surface)" }}

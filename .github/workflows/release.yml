@@ -144,6 +144,12 @@ jobs:
       - name: Build the sidecar
         run: npm run build:runtime
 
+      # The skin-engine addon (native/skin-engine) ships inside the asar (electron-builder.yml lists
+      # native/skin-engine/*.node); dist:* builds it too, but a crate that cannot compile on this runner
+      # should fail here, before the Next build. check:skin-engine loads the .node and calls ping().
+      - name: Build the skin engine addon
+        run: npm run build:skin-engine && npm run check:skin-engine
+
       # The JS side, gated here because NOTHING ELSE GATES IT ON A TAG.
       #
       # ci.yml triggers on `push: branches-ignore`, which matches branch pushes only — a tag push runs

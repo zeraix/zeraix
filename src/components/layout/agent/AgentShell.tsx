@@ -11,6 +11,7 @@ import FilesPanel from "@/app/agent/chat/FilesPanel";
 import { ChatAgentView } from "@/app/agent/chat/page";
 import MediaViewerHost from "@/components/media/MediaViewerHost";
 import SkinDecor from "@/components/theme/SkinDecor";
+import { SkinSlotIcon, useSkinLabel } from "@/components/theme/skinpkg/sidebar";
 import WindowControls, {
   TrafficLights,
   useTrafficLights,
@@ -58,6 +59,8 @@ export default function AgentShell({ children }: { children: React.ReactNode }) 
   // but not unmounted -- so its generation loop, message queue and "stop" control keep working across page switches.
   // See ChatAgentView / page.tsx.
   const isChatRoute = pathname === "/agent/chat";
+  // A skin package may re-icon / relabel the expand button that stands in for the folded-away sidebar (sidebar.json controls.expand).
+  const skinLabel = useSkinLabel();
 
   const openFiles = useCallback(() => {
     setFilesOpen(true);
@@ -86,11 +89,19 @@ export default function AgentShell({ children }: { children: React.ReactNode }) 
       {/* Global: local model ready/stopped -> sync the chat model list (persists across pages, so leaving the model-library page doesn't lose the ready event). */}
       <LocalModelSync />
       <TrayLabelSync />
-      {/* Outer layer only animates width and clips; the inner aside stays 260 wide so text isn't squeezed while collapsing */}
+      {/* Outer layer only animates width and clips; the inner aside stays 260 wide so text isn't squeezed while collapsing.
+          Once collapsed it is also hidden, not just clipped. Electron builds the window's drag region from element
+          geometry, ignoring overflow clipping, so the clipped sidebar's 260px drag header kept swallowing clicks on
+          whatever took its place -- on Windows, the first rows of the Files tree. Hidden boxes add no region.
+          The hiding is a CSS visibility transition rather than framer's transitionEnd. The browser keeps the box visible
+          for the whole of a visible->hidden transition, shows it on the first frame of hidden->visible, and simply
+          reverses when toggled mid-slide -- so the slide looks exactly as before on every platform, and reopening the
+          sidebar quickly can never have a stale "hidden" land after it and leave a blank rail. */}
       {!hideSidebar && (
         <motion.div
           initial={false}
           animate={{ width: collapsed ? 0 : SIDEBAR_WIDTH }}
+          style={{ visibility: collapsed ? "hidden" : "visible", transition: "visibility 0.28s" }}
           transition={{ duration: 0.28, ease: EASE }}
           className="h-full shrink-0 overflow-hidden"
         >
@@ -171,12 +182,13 @@ export default function AgentShell({ children }: { children: React.ReactNode }) 
             <TrafficLights />
             <button
               type="button"
-              aria-label="Expand sidebar"
+              aria-label={skinLabel("controls", "expand", "Expand sidebar")}
+              title={skinLabel("controls", "expand", "Expand sidebar")}
               onClick={() => setCollapsed(false)}
               style={{ WebkitAppRegion: "no-drag" } as React.CSSProperties}
               className="flex size-8 items-center justify-center rounded-lg border border-line bg-surface text-foreground/70 shadow-sm transition-colors hover:bg-accent hover:text-foreground"
             >
-              <PanelLeft className="size-4" />
+              <SkinSlotIcon group="controls" id="expand" className="size-4" fallback={<PanelLeft className="size-4" />} />
             </button>
           </motion.div>
         )}

@@ -233,20 +233,21 @@
 }
 
 /* Overlays: menus, popovers, tooltips, dialogs, toggles and toasts carry the accent in every skin. */
-:root[data-skin] :is([data-slot="dropdown-menu-content"], [data-slot="dropdown-menu-sub-content"], [data-slot="select-content"], [data-slot="popover-content"]) {
+:root[data-skin] :is([data-slot="dropdown-menu-content"], [data-slot="dropdown-menu-sub-content"], [data-slot="select-content"], [data-slot="popover-content"], [data-tooltip-panel]) {
   border-color: color-mix(in srgb, var(--primary) 22%, var(--line));
   box-shadow: 0 14px 36px -14px color-mix(in srgb, var(--primary) 38%, transparent), 0 2px 6px color-mix(in srgb, var(--ink) 8%, transparent);
 }
 :root[data-skin] :is([data-slot="dropdown-menu-item"], [data-slot="dropdown-menu-sub-trigger"], [data-slot="select-item"])[data-highlighted] {
   background-color: color-mix(in srgb, var(--primary) 13%, transparent);
 }
-:root[data-skin] [data-slot="tooltip-content"] {
+/* A plain tooltip is one line of text, so it can be inverted onto the accent. A panel tooltip (data-tooltip-panel)
+   is a small popover drawn with surface / ink tokens -- labels, bars, buttons -- and painting only its box primary
+   leaves that ink on the accent, unreadable. It keeps its own surface and gets the popover treatment above.
+   The arrow reads --tooltip-bg (components/ui/tooltip.tsx), so setting it here keeps the arrow on the body. */
+:root[data-skin] [data-slot="tooltip-content"]:not([data-tooltip-panel]) {
+  --tooltip-bg: var(--primary);
   background-color: var(--primary);
   color: var(--primary-foreground);
-}
-:root[data-skin] [data-slot="tooltip-content"] :is(svg, span)[class*="bg-foreground"] {
-  background-color: var(--primary);
-  fill: var(--primary);
 }
 :root[data-skin] [data-slot="dialog-content"] {
   border-color: color-mix(in srgb, var(--primary) 20%, var(--line));

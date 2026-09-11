@@ -9,7 +9,7 @@
  */
 import { useState, useSyncExternalStore } from "react";
 import { useTheme } from "next-themes";
-import { Check, Droplet, Monitor, Moon, Palette, Store, Sun, SunMoon, Type } from "lucide-react";
+import { Check, Droplet, Monitor, Moon, Package, Palette, Store, Sun, SunMoon, Type } from "lucide-react";
 import { type TFunc } from "@/lib/i18n";
 import { cn } from "@/lib/utils";
 import { useAppearance } from "@/components/theme/ThemeProvider";
@@ -24,6 +24,9 @@ import { Segmented } from "./appearance/Segmented";
 import { SkinEditor } from "./appearance/SkinEditor";
 import { SkinGallery } from "./appearance/SkinGallery";
 import { SkinStoreActions, SkinStoreList } from "./appearance/SkinStore";
+import { LayoutExport } from "./appearance/packages/LayoutExport";
+import { PackageGallery } from "./appearance/packages/PackageGallery";
+import { PackageAvailabilityNote, PackageImportActions } from "./appearance/packages/PackageImport";
 
 const noopSubscribe = () => () => {};
 
@@ -91,6 +94,22 @@ export function AppearanceSection({ t }: { t: TFunc }) {
               aria-label={t("appearance.motion")}
             />
           </Row>
+        </div>
+      </Group>
+
+      {/* Skin packages (v2): Rust-validated .skinpkg archives and built-in presets. One skin at a time across
+          this group and the one above -- ThemeProvider's SkinPackageSync resets the other when either changes. */}
+      <Group
+        title={t("skinpkg.title")}
+        desc={t("skinpkg.desc")}
+        icon={Package}
+        anchor="appearance/packages"
+        actions={<PackageImportActions t={t} />}
+      >
+        <div className="space-y-3">
+          <PackageAvailabilityNote t={t} />
+          <PackageGallery t={t} />
+          <LayoutExport t={t} />
         </div>
       </Group>
 

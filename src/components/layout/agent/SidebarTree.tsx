@@ -2,6 +2,7 @@
 
 import { useMemo, useRef, useState } from "react";
 import { Folder, FolderOpen } from "lucide-react";
+import { SkinTreeIcon } from "@/components/theme/skinpkg/sidebar";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import type { Conversation, Project } from "@/lib/ai/conversation";
 import { useT } from "@/lib/i18n";
@@ -259,7 +260,14 @@ function ProjectRow({
     <SidebarLeaf
       label={project.name}
       active={active}
-      icon={expanded ? <FolderOpen className="size-[15px]" /> : <Folder className="size-[15px]" />}
+      icon={
+        // A skin package may replace the folder icons (sidebar.json tree.folderIcon / tree.folderOpenIcon).
+        <SkinTreeIcon
+          expanded={expanded}
+          className="size-[15px]"
+          fallback={expanded ? <FolderOpen className="size-[15px]" /> : <Folder className="size-[15px]" />}
+        />
+      }
       generating={rollup.generating}
       pendingConsent={rollup.consent}
       pendingQuestion={rollup.question}

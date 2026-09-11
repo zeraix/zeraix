@@ -79,3 +79,8 @@ electron/plugins/oauth-credentials.json
 # belong in the repo.
 /runtime/target
 __pycache__/
+
+# skin-engine addon (native/skin-engine, Rust + napi-rs): the compiled .node is staged beside its
+# loader by scripts/build-skin-engine.mjs and never committed; only sources and Cargo.lock are.
+/native/skin-engine/target
+/native/skin-engine/*.node

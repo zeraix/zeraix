@@ -45,6 +45,7 @@ import {
 } from "./appConfig.mjs";
 import { registerAppearance } from "./appearance.mjs";
 import { registerSkins, serveSkinFile, SKINS_PREFIX } from "./skins/store.mjs";
+import { SKIN_SCHEME_PRIVILEGES, registerSkinPackages, registerSkinProtocol } from "./skins/engine.mjs";
 import {
   initIntegrity,
   encryptionStatus,
@@ -255,6 +256,9 @@ protocol.registerSchemesAsPrivileged([
     scheme: APP_SCHEME,
     privileges: { standard: true, secure: true, supportFetchAPI: true },
   },
+  // skin://current/tokens.css and friends: the active skin package's files (electron/skins/protocol.mjs).
+  // Registered here because this call may run only once, before app.whenReady.
+  SKIN_SCHEME_PRIVILEGES,
 ]);
 
 /**
@@ -1105,6 +1109,9 @@ app.whenReady().then(async () => {
   // The splash screen has been removed: the app loads the entry (`/`) directly, and the entry page routes to /agent or /login based on login state.
   // The main window shows as soon as the first content frame is ready (ready-to-show); with no splash, dismissSplash is equivalent to directly showing the main window.
   protocol.handle(APP_SCHEME, handleAppRequest);
+  // Skin packages: the Rust engine's IPC surface and the skin:// file protocol (electron/skins/engine.mjs).
+  registerSkinPackages();
+  registerSkinProtocol();
   // Initialize the encryption master key first (safeStorage needs app ready); afterward conversationStore reads/writes are transparently encrypted/decrypted.
   initIntegrity();
   registerAppConfig();

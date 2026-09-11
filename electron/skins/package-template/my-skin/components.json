@@ -1,0 +1,30 @@
+{
+  "welcomeCard": {
+    "params": ["title", "text", "icon"],
+    "template": {
+      "type": "component",
+      "ref": "primitive:box",
+      "props": { "padding": 14, "borderRadius": 14, "background": "var(--surface)", "borderWidth": 1, "borderColor": "var(--line)", "shadow": "sm" },
+      "children": [
+        {
+          "type": "container",
+          "direction": "row",
+          "align": "center",
+          "gap": 12,
+          "children": [
+            { "type": "component", "ref": "primitive:icon", "props": { "name": "{{icon}}", "size": 22, "color": "var(--primary)" } },
+            {
+              "type": "container",
+              "direction": "column",
+              "gap": 2,
+              "children": [
+                { "type": "component", "ref": "primitive:text", "props": { "content": "{{title}}", "fontSize": 14, "fontWeight": 600 } },
+                { "type": "component", "ref": "primitive:text", "props": { "content": "{{text}}", "fontSize": 12, "color": "var(--ink-muted)", "lineClamp": 2 } }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  }
+}

@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
-import { motion, AnimatePresence } from "framer-motion";
+import { motion } from "framer-motion";
 import Image from "next/image";
 import { usePathname, useRouter } from "next/navigation";
 import {
@@ -65,6 +65,15 @@ import {
 import STORAGE_KEY from "@/constants/Storage";
 import SidebarTree from "./SidebarTree";
 import { TrafficLights, useTrafficLights } from "./WindowControls";
+import { LayoutSlot } from "@/components/theme/layout/LayoutSlot";
+import {
+  SkinNavIcon,
+  SkinSlotIcon,
+  useSkinBrand,
+  useSkinLabel,
+  useSkinNav,
+  useSkinSectionHidden,
+} from "@/components/theme/skinpkg/sidebar";
 /**
  * New Agent sidebar (independent of the legacy `sidebar.tsx`).
  * Fixed width 260px: window control dots + brand + main nav + project/conversation groups + bottom user.
@@ -129,17 +138,20 @@ const NAV_ITEM_VARIANTS = {
  * inside it needs the scrolling element.
  */
 function CollapsibleSection({
+  sectionId,
   title,
   children,
   className,
 }: {
+  /** For tokens.css: `[data-sidebar-part="section"][data-section-id="projects"]`. */
+  sectionId?: string;
   title: string;
   children: React.ReactNode;
   className?: string;
 }) {
   const [open, setOpen] = useState(true);
   return (
-    <div className={cn(className, "flex min-h-0 flex-col")}>
+    <div data-sidebar-part="section" data-section-id={sectionId} className={cn(className, "flex min-h-0 flex-col")}>
       <button
         type="button"
         onClick={() => setOpen((v) => !v)}
@@ -231,6 +243,12 @@ export default function AgentSidebar({ onToggle }: { onToggle?: () => void }) {
   const locale = useLocaleStore((s) => s.locale);
   const setLocale = useLocaleStore((s) => s.setLocale);
   const themeLabel = mounted ? t(THEME_MODES.find((m) => m.key === theme)?.labelKey ?? "theme.system") : "";
+  // A skin package may reorder, relabel, re-icon or hide what this sidebar draws (sidebar.json; see
+  // docs/skin-packages/README.md). Every call falls back to the built-in look when no package says otherwise.
+  const skinLabel = useSkinLabel();
+  const skinBrand = useSkinBrand(isDark);
+  const navItems = useSkinNav(NAV_ITEMS);
+  const projectsHidden = useSkinSectionHidden("projects");
 
   // Load records on first mount.
   useEffect(() => {
@@ -385,18 +403,25 @@ export default function AgentSidebar({ onToggle }: { onToggle?: () => void }) {
   return (
     <aside data-skin-slot="sidebar" className="flex h-full w-[260px] shrink-0 flex-col border-r border-line bg-sidebar">
       {/* Top: window control dots + brand + collapse button (the whole block is the drag region of the frameless window; interactive elements are no-drag) */}
-      <div className="px-4 pt-6" style={{ WebkitAppRegion: "drag" } as React.CSSProperties}>
+      <div data-sidebar-part="header" className="px-4 pt-6" style={{ WebkitAppRegion: "drag" } as React.CSSProperties}>
         <TrafficLights />
         {/* The gap under the lights belongs to the lights: on Windows and Linux nothing is drawn up here, and
             reserving macOS's inset anyway left a band of dead space above the brand. */}
         <div className={cn("flex items-center justify-between", lights.show && "mt-4")}>
-          {/* eslint-disable-next-line @next/next/no-img-element */}
-          <img
-            src={`${isDark ? "/image/agent/sidebar/DZeraix.svg" : "/image/agent/sidebar/Zeraix.svg"}`}
-            alt="Zeraix"
-            className="h-4 w-auto select-none"
-            draggable={false}
-          />
+          {skinBrand.hidden ? (
+            // Keeps the buttons on the right when a skin removes the wordmark.
+            <span aria-hidden />
+          ) : (
+            // eslint-disable-next-line @next/next/no-img-element
+            <img
+              data-sidebar-part="brand"
+              src={skinBrand.logo ?? (isDark ? "/image/agent/sidebar/DZeraix.svg" : "/image/agent/sidebar/Zeraix.svg")}
+              alt="Zeraix"
+              className={cn("w-auto max-w-[180px] select-none object-contain", skinBrand.height === null && "h-4")}
+              style={skinBrand.height === null ? undefined : { height: skinBrand.height }}
+              draggable={false}
+            />
+          )}
           <div
             className="flex items-center gap-1"
             style={{ WebkitAppRegion: "no-drag" } as React.CSSProperties}
@@ -414,20 +439,28 @@ export default function AgentSidebar({ onToggle }: { onToggle?: () => void }) {
                   pinned ? "text-primary" : "text-muted-foreground hover:text-foreground"
                 )}
               >
-                <Pin className={cn("size-[16px]", pinned && "fill-current")} />
+                <SkinSlotIcon
+                  group="controls" id="pin"
+                  className={cn("size-[16px]", pinned && "fill-current")}
+                  fallback={<Pin className={cn("size-[16px]", pinned && "fill-current")} />}
+                />
               </button>
             )}
             <button
               type="button"
-              aria-label="Collapse sidebar"
+              aria-label={skinLabel("controls", "collapse", "Collapse sidebar")}
+              title={skinLabel("controls", "collapse", "Collapse sidebar")}
               onClick={onToggle}
               className="flex size-7 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground dark:hover:bg-white/[0.04]"
             >
-              <PanelLeftClose className="size-[18px]" />
+              <SkinSlotIcon group="controls" id="collapse" className="size-[18px]" fallback={<PanelLeftClose className="size-[18px]" />} />
             </button>
           </div>
         </div>
       </div>
+
+      {/* A skin package may place something between the brand and the nav (layout.json region "sidebarHeader"); nothing otherwise. */}
+      <LayoutSlot name="sidebarHeader" fallback={null} className="px-3 pt-3" />
 
       {/* The daily / dev mode switch used to sit here. Both tags merged into "Developer Mode", so there is nothing to
           choose; what the toggle really controlled — sandbox or host execution — is now a per-session switch in the chat
@@ -435,12 +468,13 @@ export default function AgentSidebar({ onToggle }: { onToggle?: () => void }) {
 
       {/* Main nav */}
       <motion.nav
+        data-sidebar-part="nav"
         className="mt-4 space-y-0.5 px-3"
         variants={NAV_LIST_VARIANTS}
         initial="hidden"
         animate="show"
       >
-        {NAV_ITEMS.map((item) => {
+        {navItems.map((item) => {
           const active = isActive(item.href);
           return (
             <motion.div
@@ -461,6 +495,9 @@ export default function AgentSidebar({ onToggle }: { onToggle?: () => void }) {
                     router.push(item.href)
                   }
                 }
+                data-sidebar-part="nav-item"
+                data-nav-id={item.id}
+                data-active={active ? "" : undefined}
                 className={cn(
                   "relative block rounded-lg px-3 py-2 w-full text-sm text-foreground",
                   active ? "font-medium" : "hover:bg-accent/60 dark:hover:bg-white/[0.04]"
@@ -475,24 +512,9 @@ export default function AgentSidebar({ onToggle }: { onToggle?: () => void }) {
                   />
                 )}
                 <span className="relative z-10 flex items-center gap-3">
-                  {/* Icon: cross-fades between selected / unselected */}
-                  <span className="relative size-[18px] shrink-0">
-                    <AnimatePresence initial={false}>
-                      <motion.img
-                        key={`${active ? "on" : "off"}-${isDark ? "d" : "l"}`}
-                        src={iconFor(active ? item.activeIcon : item.icon)}
-                        alt=""
-                        aria-hidden
-                        draggable={false}
-                        initial={{ opacity: 0, scale: 0.7 }}
-                        animate={{ opacity: 1, scale: 1 }}
-                        exit={{ opacity: 0, scale: 0.7 }}
-                        transition={{ duration: 0.15 }}
-                        className="absolute inset-0 size-[18px] object-contain"
-                      />
-                    </AnimatePresence>
-                  </span>
-                  <span>{t(item.labelKey)}</span>
+                  {/* Icon: cross-fades between selected / unselected, and to a skin's own icon when one is set */}
+                  <SkinNavIcon id={item.id} active={active} dark={isDark} defaultSrc={iconFor(active ? item.activeIcon : item.icon)} />
+                  <span>{skinLabel("nav", item.id, t(item.labelKey))}</span>
                 </span>
               </button>
             </motion.div>
@@ -502,7 +524,15 @@ export default function AgentSidebar({ onToggle }: { onToggle?: () => void }) {
 
       {/* Projects + their chats, as one tree: clicking a project expands its chats underneath. Fills the remaining
           space (pushing the user area to the bottom) and scrolls internally when the tree gets long. */}
-      <CollapsibleSection title={t("section.projects")} className="mt-7 min-h-0 flex-1 px-3">
+      {projectsHidden ? (
+        // A skin hid the tree: keep the account row at the bottom.
+        <div className="min-h-0 flex-1" aria-hidden />
+      ) : (
+      <CollapsibleSection
+        sectionId="projects"
+        title={skinLabel("sections", "projects", t("section.projects"))}
+        className="mt-7 min-h-0 flex-1 px-3"
+      >
         <SidebarTree
           projects={projects}
           conversationsByProject={conversationsByProject}
@@ -523,9 +553,13 @@ export default function AgentSidebar({ onToggle }: { onToggle?: () => void }) {
           onDelete={(kind, id, name) => setDeleteState({ kind, id, name })}
         />
       </CollapsibleSection>
+      )}
+
+      {/* A skin package may place something above the user block (layout.json region "sidebarFooter"); nothing otherwise. */}
+      <LayoutSlot name="sidebarFooter" fallback={null} className="px-3 pb-2" />
 
       {/* Bottom user */}
-      <div className="border-t border-line p-3">
+      <div data-sidebar-part="user" className="border-t border-line p-3">
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
             <button
@@ -541,28 +575,32 @@ export default function AgentSidebar({ onToggle }: { onToggle?: () => void }) {
               <span className="flex-1 truncate text-sm font-medium text-foreground">
                 {name}
               </span>
-              <ChevronsUpDown className="size-4 shrink-0 text-muted-foreground" />
+              <SkinSlotIcon
+                group="controls" id="userMenu"
+                className="size-4 shrink-0 text-muted-foreground"
+                fallback={<ChevronsUpDown className="size-4 shrink-0 text-muted-foreground" />}
+              />
             </button>
           </DropdownMenuTrigger>
           <DropdownMenuContent align="start" side="top" className="w-[252px] p-1.5">
             {/* Settings */}
             <DropdownMenuItem onClick={() => router.push("/agent/settings")}>
-              <Settings />
-              {t("menu.settings")}
+              <SkinSlotIcon group="menu" id="settings" fallback={<Settings />} />
+              {skinLabel("menu", "settings", t("menu.settings"))}
             </DropdownMenuItem>
 
             {/* Help & feedback */}
             <DropdownMenuItem onClick={() => router.push("/agent/help")}>
-              <CircleHelp />
-              {t("menu.help")}
+              <SkinSlotIcon group="menu" id="help" fallback={<CircleHelp />} />
+              {skinLabel("menu", "help", t("menu.help"))}
             </DropdownMenuItem>
 
             {/* Language (multi-language submenu) */}
             <DropdownMenuSub>
               <DropdownMenuSubTrigger>
-                <Languages />
+                <SkinSlotIcon group="menu" id="language" fallback={<Languages />} />
                 <span className="flex flex-1 items-center">
-                  {t("menu.language")}
+                  {skinLabel("menu", "language", t("menu.language"))}
                   <span className="ml-auto text-xs text-muted-foreground">{t("lang.current")}</span>
                 </span>
               </DropdownMenuSubTrigger>
@@ -579,9 +617,9 @@ export default function AgentSidebar({ onToggle }: { onToggle?: () => void }) {
             {/* Theme (light / dark / system, submenu) */}
             <DropdownMenuSub>
               <DropdownMenuSubTrigger>
-                <SunMoon />
+                <SkinSlotIcon group="menu" id="theme" fallback={<SunMoon />} />
                 <span className="flex flex-1 items-center">
-                  {t("menu.theme")}
+                  {skinLabel("menu", "theme", t("menu.theme"))}
                   <span className="ml-auto text-xs text-muted-foreground">{themeLabel}</span>
                 </span>
               </DropdownMenuSubTrigger>
@@ -598,8 +636,8 @@ export default function AgentSidebar({ onToggle }: { onToggle?: () => void }) {
             {/* Wallet: domestic edition = credits balance, international edition = US dollar balance. Highlighted card + recharge now */}
             <div className="my-1.5 rounded-xl border border-primary/40 bg-primary/[0.05] px-3 py-2.5">
               <div className="flex items-center gap-1.5 text-xs font-medium text-primary">
-                <Coins className="size-3.5" />
-                {isCnEdition ? t("menu.credits") : t("menu.balance")}
+                <SkinSlotIcon group="menu" id="wallet" className="size-3.5" fallback={<Coins className="size-3.5" />} />
+                {skinLabel("menu", "wallet", isCnEdition ? t("menu.credits") : t("menu.balance"))}
               </div>
               <div className="mt-1.5 flex items-center justify-between gap-2">
                 <span className="text-xl font-bold tabular-nums text-foreground">
@@ -618,13 +656,13 @@ export default function AgentSidebar({ onToggle }: { onToggle?: () => void }) {
             {/* Log out (signed in) / Sign in (guest). */}
             {isLoggedIn ? (
               <DropdownMenuItem onClick={() => logout()}>
-                <Power />
-                {t("menu.logout")}
+                <SkinSlotIcon group="menu" id="logout" fallback={<Power />} />
+                {skinLabel("menu", "logout", t("menu.logout"))}
               </DropdownMenuItem>
             ) : (
               <DropdownMenuItem onClick={() => signIn()}>
-                <Power />
-                {t("auth.signIn")}
+                <SkinSlotIcon group="menu" id="signIn" fallback={<Power />} />
+                {skinLabel("menu", "signIn", t("auth.signIn"))}
               </DropdownMenuItem>
             )}
           </DropdownMenuContent>

@@ -42,6 +42,12 @@ files:
   # PTY backend for the built-in terminal (native module): Bundled with the main process; its .node binary must be extracted via asarUnpack (see below).
   # electron-builder defaults to npmRebuild=true, which recompiles node-pty against the Electron ABI for the target platform.
   - node_modules/node-pty/**/*
+  # The skin-engine addon (native/skin-engine, Rust + napi-rs): the loader and the platform .node that
+  # scripts/build-skin-engine.mjs stages beside it (dist:* runs build:skin-engine first). N-API like
+  # node-pty, so it needs no rebuild against Electron's ABI; the .node is unpacked below to be dlopen-able.
+  - native/skin-engine/index.js
+  - native/skin-engine/package.json
+  - native/skin-engine/*.node
   # Auto-update: electron/services/updater.mjs imports electron-updater in the main process.
   # Unlike openai above it is NOT dependency-free, and "!node_modules" excludes everything by
   # default, so its entire transitive runtime closure must be listed by hand — miss one and the
@@ -85,6 +91,7 @@ asar: true
 # node-pty serves as the PTY backend for the built-in terminal and must be unpacked in order to load.
 asarUnpack:
   - node_modules/node-pty/**/*
+  - native/skin-engine/*.node
 
 # Custom Protocol (Deep Link): The "Open Zeraix" button on the Google login callback page points to `zeraix://…`,
 # bringing the running application to the foreground. Based on this, electron-builder configures the macOS `Info.plist` (`CFBundleURLTypes`)

@@ -1,0 +1,166 @@
+/*
+ * tokens.css: the colours of your skin.
+ *
+ * Every colour the app paints with is listed below, set to the app's own defaults, except the
+ * accent (START HERE), which is blue so you can see the package working as soon as it is installed.
+ * Change any value. Delete a line to keep the app's default for it.
+ *
+ * The first block is light mode, the second dark mode. Keep both selectors as they are: the
+ * [data-skin-package] attribute is what makes your values win over the app's own palette.
+ *
+ * Any selector and any property is allowed. The installer rejects a stylesheet that uses @import,
+ * a url(...) pointing anywhere except this package's assets folder, expression(...), behavior,
+ * or -moz-binding.
+ */
+
+:root[data-skin-package] {
+  /* START HERE: the accent (buttons, links, the selected nav item, focus rings). */
+  --primary: #2e5fd6;
+  --primary-foreground: #ffffff; /* text on the accent */
+  --accent-ink: #2e5fd6; /* accent-coloured text */
+  --accent-ink-strong: #234ba8;
+  --accent-on: #ffffff;
+
+  /* Surfaces, from the window background up to a pressed control. */
+  --background: #f2f0ea;
+  --surface: #fdfcfa;
+  --surface-muted: #eeece5;
+  --surface-hover: #e5e2d9;
+  --surface-active: #dad6cb;
+  --popover: #fdfcfa; /* menus and popovers */
+
+  /* Text. */
+  --ink: #171614;
+  --ink-muted: #5f5c55;
+  --ink-subtle: #8b877e;
+
+  /* Borders and inputs. */
+  --line: #dcd7cc;
+  --line-strong: #c8c2b5;
+  --input: #c8c2b5;
+
+  /* Sidebar. */
+  --sidebar: #f2f0ea;
+  --sidebar-accent: #e6e2d9; /* the selected row */
+
+  /* Scrollbars. */
+  --scrollbar-thumb: rgba(23, 22, 20, 0.26);
+  --scrollbar-thumb-hover: rgba(23, 22, 20, 0.42);
+
+  /* Corner radius of cards and controls. */
+  --radius: 0.625rem;
+
+  /* Status colours: the fill, text in that colour, and text on the fill. */
+  --success: #17a667;
+  --success-ink: #0e7a4a;
+  --success-on: #05231a;
+  --warning: #d08700;
+  --warning-ink: #9a6200;
+  --warning-on: #251900;
+  --danger: #dc2b2b;
+  --danger-ink: #b42222;
+  --danger-on: #ffffff;
+  --info: #2f6fcf;
+  --info-ink: #1f55a8;
+  --info-on: #ffffff;
+
+  /* Code blocks and diffs. */
+  --code-surface: #f0eee7;
+  --code-ink: #201f1c;
+  --code-line: #dcd7cc;
+  --diff-add: #cfeeda;
+  --diff-add-ink: #0e6b3f;
+  --diff-del: #f8dcdc;
+  --diff-del-ink: #a32020;
+  --diff-hunk: #e4e6ec;
+  --diff-hunk-ink: #1f55a8;
+
+  /* Tints for tags, avatars and charts. */
+  --tint-1: #2f6fcf;
+  --tint-1-ink: #1f55a8;
+  --tint-2: #17a667;
+  --tint-2-ink: #0e7a4a;
+  --tint-3: #d08700;
+  --tint-3-ink: #9a6200;
+  --tint-4: #8a5cc4;
+  --tint-4-ink: #6d4aa8;
+  --tint-5: #c4553d;
+  --tint-5-ink: #a3402c;
+  --tint-6: #1a8f95;
+  --tint-6-ink: #0f6f74;
+}
+
+:root[data-skin-package].dark {
+  /* START HERE: the accent in dark mode. */
+  --primary: #7fa6f0;
+  --primary-foreground: #0f1626;
+  --accent-ink: #7fa6f0;
+  --accent-ink-strong: #a6c0f7;
+  --accent-on: #0f1626;
+
+  --background: #121215;
+  --surface: #1a1a1e;
+  --surface-muted: #222227;
+  --surface-hover: #2c2c32;
+  --surface-active: #37373e;
+  --popover: #222227;
+
+  --ink: #f0eeeb;
+  --ink-muted: #9c9992;
+  --ink-subtle: #7a7772;
+
+  --line: rgba(255, 255, 255, 0.13);
+  --line-strong: rgba(255, 255, 255, 0.22);
+  --input: rgba(255, 255, 255, 0.14);
+
+  --sidebar: #121215;
+  --sidebar-accent: #26262c;
+
+  --scrollbar-thumb: rgba(255, 255, 255, 0.24);
+  --scrollbar-thumb-hover: rgba(255, 255, 255, 0.4);
+
+  --success: #2bc48a;
+  --success-ink: #4ed8a0;
+  --success-on: #05231a;
+  --warning: #e0a93a;
+  --warning-ink: #f0c46a;
+  --warning-on: #251900;
+  --danger: #f0574f;
+  --danger-ink: #ff8078;
+  --danger-on: #2a0a08;
+  --info: #5b9bef;
+  --info-ink: #8cbaf5;
+  --info-on: #081426;
+
+  --code-surface: #131316;
+  --code-ink: #e6e4e1;
+  --code-line: rgba(255, 255, 255, 0.11);
+  --diff-add: #14382a;
+  --diff-add-ink: #6fdca8;
+  --diff-del: #401c1c;
+  --diff-del-ink: #ff9a94;
+  --diff-hunk: rgba(255, 255, 255, 0.07);
+  --diff-hunk-ink: #8cbaf5;
+
+  --tint-1: #5b9bef;
+  --tint-1-ink: #8cbaf5;
+  --tint-2: #2bc48a;
+  --tint-2-ink: #4ed8a0;
+  --tint-3: #e0a93a;
+  --tint-3-ink: #f0c46a;
+  --tint-4: #b08ce8;
+  --tint-4-ink: #c4a8f0;
+  --tint-5: #e8806a;
+  --tint-5-ink: #f0a08c;
+  --tint-6: #35b8be;
+  --tint-6-ink: #6fd4d8;
+}
+
+/*
+ * Going further. The sidebar's parts carry attributes you can select, for example:
+ *
+ *   :root[data-skin-package] [data-sidebar-part="nav-item"][data-active] { color: var(--accent-ink); }
+ *   :root[data-skin-package] [data-sidebar-part="user"] { border-top-color: var(--line-strong); }
+ *
+ * Images from this package: background-image: url(assets/your-image.svg);
+ */

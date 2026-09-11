@@ -12,6 +12,7 @@ import { useT } from "@/lib/i18n";
 import { useThemedLogo } from "@/hooks/useThemedLogo";
 import { useTheme } from "next-themes";
 import { emblemSrc, useActiveSkin } from "@/components/theme/skins";
+import { LayoutSlot } from "@/components/theme/layout/LayoutSlot";
 import { safeImage } from "@/components/theme/skins/visual";
 
 /** Return the i18n key for the greeting based on the current time. */
@@ -117,27 +118,35 @@ export default function AgentHomePage() {
         {hero ? (
           <img src={hero} alt="" draggable={false} className="mb-6 max-h-48 w-full select-none rounded-2xl object-cover shadow-sm" />
         ) : null}
-        {/* Greeting */}
-        <div className="mb-5 flex items-center gap-4">
-          {emblem ? (
-            <img src={emblem} alt="" aria-hidden draggable={false} className="skin-float size-16 shrink-0 select-none" />
-          ) : (
-            <Image
-              src={logoSrc}
-              alt="Zeraix"
-              width={64}
-              height={51}
-              className="shrink-0"
-            />
-          )}
-          {/* eslint-enable @next/next/no-img-element */}
-          {/* skin-display only takes effect under a skin that sets a display face; the default look is untouched. */}
-          <h2 className="skin-display text-[22px] font-bold leading-snug text-foreground">
-            {t(greeting)} {name}
-            <br />
-            {skin?.greeting?.title ?? t("home.welcome")}
-          </h2>
-        </div>
+        {/* Greeting. A layout region: a skin package's layout.json may rebuild it from the app's pieces and
+            primitives (src/components/theme/layout); the hardcoded block below is what renders otherwise. */}
+        <LayoutSlot
+          name="greeting"
+          values={{ title: `${t(greeting)} ${name}`, hint: skin?.greeting?.title ?? t("home.welcome") }}
+          className="mb-5"
+          fallback={
+            <div className="mb-5 flex items-center gap-4">
+              {emblem ? (
+                <img src={emblem} alt="" aria-hidden draggable={false} className="skin-float size-16 shrink-0 select-none" />
+              ) : (
+                <Image
+                  src={logoSrc}
+                  alt="Zeraix"
+                  width={64}
+                  height={51}
+                  className="shrink-0 object-contain"
+                />
+              )}
+              {/* skin-display only takes effect under a skin that sets a display face; the default look is untouched. */}
+              <h2 className="skin-display text-[22px] font-bold leading-snug text-foreground">
+                {t(greeting)} {name}
+                <br />
+                {skin?.greeting?.title ?? t("home.welcome")}
+              </h2>
+            </div>
+          }
+        />
+        {/* eslint-enable @next/next/no-img-element */}
 
         {/* Task input box + working directory selection (chosen before entering the conversation) */}
         <AgentComposer

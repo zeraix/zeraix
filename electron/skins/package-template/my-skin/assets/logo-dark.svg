@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 28" width="120" height="28">
+  <rect x="1" y="2" width="24" height="24" rx="7" fill="#7fa6f0"/>
+  <path d="M8 19V9l5 6 5-6v10" fill="none" stroke="#0f1626" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>
+  <text x="32" y="20" font-family="Segoe UI, Helvetica, Arial, sans-serif" font-size="16" font-weight="700" fill="#f0eeeb">My Skin</text>
+</svg>

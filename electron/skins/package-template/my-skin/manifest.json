@@ -1,0 +1,10 @@
+{
+  "id": "my-skin",
+  "name": "My Skin",
+  "description": "Describe your skin in one sentence.",
+  "author": "Your name",
+  "version": "1.0.0",
+  "min_app_version": "2.0.0",
+  "preview": "assets/preview.svg",
+  "created_at": "2026-09-11"
+}

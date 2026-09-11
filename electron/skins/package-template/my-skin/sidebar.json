@@ -1,0 +1,26 @@
+{
+  "version": 1,
+  "brand": {
+    "logo": "assets/logo.svg",
+    "logoDark": "assets/logo-dark.svg",
+    "mark": "assets/mark.svg",
+    "height": 20
+  },
+  "nav": {
+    "order": ["new-chat", "skills", "automation", "models", "plugins", "library"],
+    "items": {
+      "new-chat": { "icon": "assets/nav/new-chat.svg", "activeIcon": "assets/nav/new-chat-active.svg" },
+      "skills": { "icon": "icon:wand-sparkles", "activeIcon": "icon:sparkles" }
+    }
+  },
+  "sections": {
+    "projects": { "label": { "en": "Projects" } }
+  },
+  "tree": { "folderIcon": "icon:folder" },
+  "controls": {
+    "userMenu": { "icon": "icon:settings" }
+  },
+  "menu": {
+    "settings": { "icon": "icon:settings" }
+  }
+}

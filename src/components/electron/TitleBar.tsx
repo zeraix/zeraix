@@ -48,7 +48,7 @@ export default function TitleBar() {
       }`}
     >
       {/* eslint-disable-next-line @next/next/no-img-element */}
-      <img src={logoSrc} alt="" className="h-4 w-4" draggable={false} />
+      <img src={logoSrc} alt="" className="h-4 w-4 object-contain" draggable={false} />
       <span>Zeraix</span>
 
       {/* Windows / Linux: custom-drawn window control buttons (macOS uses native traffic lights, no custom drawing needed) */}

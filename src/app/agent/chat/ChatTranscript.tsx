@@ -23,6 +23,7 @@ import { TranscriptSkeleton } from "./TranscriptSkeleton";
 import type { ChoiceAnswer, DisplayMsg } from "./types";
 import { groupTranscript, lastAssistantIndex } from "./transcriptRows";
 import SkinGreeting from "@/components/theme/SkinGreeting";
+import { LayoutSlot } from "@/components/theme/layout/LayoutSlot";
 
 export interface ChatTranscriptProps {
   /** Mid-switch: the skeleton stands in, so the previous conversation is never left on screen. */
@@ -87,14 +88,23 @@ export function ChatTranscript({
           messages are not left on screen (or the "start a conversation" placeholder flashed) mid-swap. */}
       {switching && <TranscriptSkeleton label={t("chat.loadingConversation")} />}
 
+      {/* The greeting is a layout region: a skin package's layout.json may rearrange it (see
+          src/components/theme/layout). With no such layout the v1 SkinGreeting renders as before. */}
       {!switching && display.length === 0 && (
-        <SkinGreeting
-          title={t("chat.emptyTitle")}
-          hint={
-            <>
-              {t("chat.emptyHint")}
-              {toolsReady ? t("chat.emptyHintTools") : ""}
-            </>
+        <LayoutSlot
+          name="greeting"
+          values={{ title: t("chat.emptyTitle"), hint: `${t("chat.emptyHint")}${toolsReady ? t("chat.emptyHintTools") : ""}`, toolsReady }}
+          className="mt-10 px-4"
+          fallback={
+            <SkinGreeting
+              title={t("chat.emptyTitle")}
+              hint={
+                <>
+                  {t("chat.emptyHint")}
+                  {toolsReady ? t("chat.emptyHintTools") : ""}
+                </>
+              }
+            />
           }
         />
       )}

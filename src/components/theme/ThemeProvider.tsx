@@ -11,6 +11,8 @@
  */
 import { useCallback, useEffect, useRef, useSyncExternalStore } from "react";
 import { ThemeProvider as NextThemesProvider, useTheme } from "next-themes";
+import { useT } from "@/lib/i18n";
+import { Toast } from "@/lib/toast";
 import {
   appearanceBridge,
   applyAttributes,
@@ -18,6 +20,19 @@ import {
   readAppearance,
   seedFromConfig,
 } from "./appearance";
+import { NO_SKIN } from "./skins";
+import {
+  DEFAULT_SKIN_ID,
+  SKIN_ERROR_EVENT,
+  applySkin as applySkinPackage,
+  followActiveFromMain,
+  initSkinPackages,
+  subscribeActiveFromMain,
+  packageErrorTitle,
+  useSkinState,
+  type SkinApplyError,
+} from "./skinpkg";
+
 import {
   ACCENT_STORAGE_KEY,
   DEFAULT_APPEARANCE,
@@ -32,7 +47,12 @@ import {
 
 // Module scope on purpose: this must happen before React renders, and therefore before next-themes
 // initialises. Guarded internally against running twice and against the server.
-if (typeof window !== "undefined") seedFromConfig();
+if (typeof window !== "undefined") {
+  seedFromConfig();
+  // Skin packages (v2): the active preset's variables or the package's <link> go in now, for the
+  // same reason -- a package applied a frame late is a frame of the default palette.
+  initSkinPackages();
+}
 
 /* ---- Appearance as an external store, so reads stay consistent and no setState hides in an effect ---- */
 
@@ -156,10 +176,58 @@ function AppearanceSync({ children }: { children: React.ReactNode }) {
   return <>{children}</>;
 }
 
+/**
+ * Skin packages (v2) alongside the v1 data skins: one of them at a time.
+ *
+ * A v1 skin's stylesheet and a package's tokens.css set the same variables, and which wins would
+ * be an accident of specificity. So the rule is explicit: activating a package resets the v1 skin
+ * to Default, choosing a v1 skin resets the package to Default, and at boot -- if a hand-edited
+ * config has both on -- the v1 skin (app.config) wins. Which side changed is tracked, not inferred.
+ *
+ * Also here: following the main process when another window (or a delete) changes the active
+ * package, and turning a failed stylesheet load into a toast.
+ */
+function SkinPackageSync() {
+  const t = useT();
+  const { appearance, setAppearance } = useAppearance();
+  const { currentSkinId, isApplying } = useSkinState();
+  const prev = useRef({ v1: appearance.skin, v2: currentSkinId });
+
+  useEffect(() => {
+    // Mid-apply the package id is optimistic; a persist or stylesheet failure rolls it back. Decide
+    // once the apply has settled, so a failed switch does not cost the v1 skin.
+    if (isApplying) return;
+    const v1On = appearance.skin !== NO_SKIN;
+    const v2On = currentSkinId !== DEFAULT_SKIN_ID;
+    const v1Changed = prev.current.v1 !== appearance.skin;
+    const v2Changed = prev.current.v2 !== currentSkinId;
+    prev.current = { v1: appearance.skin, v2: currentSkinId };
+    if (!(v1On && v2On)) return;
+    if (v2Changed && !v1Changed) setAppearance({ skin: NO_SKIN });
+    else void applySkinPackage(DEFAULT_SKIN_ID);
+  }, [appearance.skin, currentSkinId, isApplying, setAppearance]);
+
+  useEffect(() => subscribeActiveFromMain(followActiveFromMain), []);
+
+  useEffect(() => {
+    const onError = (e: Event) => {
+      const detail = (e as CustomEvent<SkinApplyError>).detail;
+      Toast.error(packageErrorTitle(t, detail.code), detail.detail ?? detail.skinId);
+    };
+    window.addEventListener(SKIN_ERROR_EVENT, onError);
+    return () => window.removeEventListener(SKIN_ERROR_EVENT, onError);
+  }, [t]);
+
+  return null;
+}
+
 export default function ThemeProvider({ children }: { children: React.ReactNode }) {
   return (
     <NextThemesProvider attribute="class" defaultTheme="system" enableSystem disableTransitionOnChange>
-      <AppearanceSync>{children}</AppearanceSync>
+      <AppearanceSync>
+        <SkinPackageSync />
+        {children}
+      </AppearanceSync>
     </NextThemesProvider>
   );
 }

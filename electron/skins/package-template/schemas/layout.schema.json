@@ -1,0 +1,2058 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Zeraix skin layout (layout.json)",
+  "type": "object",
+  "required": [
+    "regions"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "version": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "regions": {
+      "type": "object",
+      "description": "One layout tree per region. A region the package does not define keeps the app's own look.",
+      "maxProperties": 32,
+      "propertyNames": {
+        "pattern": "^[A-Za-z0-9_-]{1,64}$",
+        "not": {
+          "enum": [
+            "__proto__",
+            "constructor",
+            "prototype"
+          ]
+        }
+      },
+      "properties": {
+        "greeting": {
+          "$ref": "#/definitions/node",
+          "description": "The home screen's hero and the empty-chat screen."
+        },
+        "sidebarHeader": {
+          "$ref": "#/definitions/node",
+          "description": "Between the sidebar's brand row and its nav."
+        },
+        "sidebarFooter": {
+          "$ref": "#/definitions/node",
+          "description": "The strip above the account row at the bottom of the sidebar."
+        }
+      },
+      "additionalProperties": {
+        "$ref": "#/definitions/node"
+      }
+    }
+  },
+  "definitions": {
+    "node": {
+      "description": "A layout node: a container of other nodes, or a component.",
+      "oneOf": [
+        {
+          "$ref": "#/definitions/container"
+        },
+        {
+          "$ref": "#/definitions/component"
+        }
+      ]
+    },
+    "container": {
+      "type": "object",
+      "description": "Lays its children out in a row, a column, a grid, or stacked on top of each other.",
+      "required": [
+        "type",
+        "direction"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "const": "container"
+        },
+        "direction": {
+          "enum": [
+            "row",
+            "column",
+            "grid",
+            "stack"
+          ],
+          "description": "stack puts every child in the same cell, layered."
+        },
+        "gap": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 200,
+          "description": "Space between children, px."
+        },
+        "align": {
+          "enum": [
+            "start",
+            "center",
+            "end",
+            "stretch",
+            "baseline"
+          ],
+          "description": "Cross-axis alignment."
+        },
+        "justify": {
+          "enum": [
+            "start",
+            "center",
+            "end",
+            "space-between",
+            "space-around",
+            "space-evenly"
+          ],
+          "description": "Main-axis distribution."
+        },
+        "gridTemplate": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200,
+          "pattern": "^[A-Za-z0-9 %.,\\-/()+*]+$",
+          "not": {
+            "pattern": "[uU][rR][lL]\\(|[eE][xX][pP][rR][eE][sS][sS][iI][oO][nN]\\("
+          },
+          "description": "grid-template-columns, e.g. \"repeat(3, minmax(0, 1fr))\". Only with direction: grid."
+        },
+        "children": {
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/node"
+          }
+        }
+      }
+    },
+    "component": {
+      "type": "object",
+      "description": "Places a component: app:<key> (the app's own), primitive:<key> (building blocks) or custom:<name> (from components.json).",
+      "required": [
+        "type",
+        "ref"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "const": "component"
+        },
+        "ref": {
+          "anyOf": [
+            {
+              "const": "app:greeting",
+              "description": "The built-in greeting block: brand mark, title and hint."
+            },
+            {
+              "const": "app:greetingTitle",
+              "description": "The greeting title (\"Good morning, …\" on the home screen)."
+            },
+            {
+              "const": "app:greetingHint",
+              "description": "The line under the greeting title."
+            },
+            {
+              "const": "app:brandMark",
+              "description": "The app's brand mark (or the skin's brand.mark from sidebar.json)."
+            },
+            {
+              "const": "app:appVersion",
+              "description": "The running app version."
+            },
+            {
+              "const": "app:today",
+              "description": "Today's date in the UI language."
+            },
+            {
+              "const": "primitive:box"
+            },
+            {
+              "const": "primitive:text"
+            },
+            {
+              "const": "primitive:icon"
+            },
+            {
+              "const": "primitive:image"
+            },
+            {
+              "const": "primitive:gradient"
+            },
+            {
+              "const": "primitive:progressBar"
+            },
+            {
+              "const": "primitive:progressRing"
+            },
+            {
+              "const": "primitive:divider"
+            },
+            {
+              "const": "primitive:badge"
+            },
+            {
+              "const": "primitive:avatar"
+            },
+            {
+              "const": "primitive:shape"
+            },
+            {
+              "const": "primitive:spacer"
+            },
+            {
+              "type": "string",
+              "pattern": "^custom:[A-Za-z0-9_-]{1,64}$",
+              "description": "A composite defined in components.json."
+            }
+          ]
+        },
+        "props": {
+          "type": "object",
+          "description": "Text, numbers and true/false only. Keys that name a handler or a sink (on…, style, href, …) are refused.",
+          "maxProperties": 32,
+          "propertyNames": {
+            "pattern": "^[A-Za-z0-9_-]{1,64}$",
+            "not": {
+              "anyOf": [
+                {
+                  "pattern": "^[oO][nN](?:$|[A-Za-z])"
+                },
+                {
+                  "enum": [
+                    "eval",
+                    "script",
+                    "function",
+                    "callback",
+                    "handler",
+                    "__proto__",
+                    "constructor",
+                    "prototype",
+                    "dangerouslySetInnerHTML",
+                    "innerHTML",
+                    "outerHTML",
+                    "href",
+                    "action",
+                    "formAction",
+                    "srcdoc",
+                    "style",
+                    "class",
+                    "className",
+                    "ref",
+                    "key",
+                    "children",
+                    "is",
+                    "as",
+                    "html"
+                  ]
+                }
+              ]
+            }
+          },
+          "additionalProperties": {
+            "type": [
+              "string",
+              "number",
+              "boolean"
+            ],
+            "maxLength": 2000
+          }
+        },
+        "visibleWhen": {
+          "type": "string",
+          "maxLength": 120,
+          "pattern": "^\\s*(?:!\\s*state(?:\\.[A-Za-z_][A-Za-z0-9_]{0,31}){1,6}|state(?:\\.[A-Za-z_][A-Za-z0-9_]{0,31}){1,6}(?:\\s*(?:===|!==|==|!=|>=|<=|>|<)\\s*(?:'[^'\"\\\\]*'|\"[^'\"\\\\]*\"|[-+]?(?:\\d+\\.?\\d*|\\.\\d+)(?:[eE][-+]?\\d+)?|true|false|null))?)\\s*$",
+          "description": "One comparison: state.theme === 'dark', state.count > 3, state.desktop, !state.toolsReady. No &&, ||, or calls."
+        },
+        "size": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "flex": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 100,
+              "description": "flex-grow within a row or column."
+            },
+            "width": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 64,
+              "pattern": "^[A-Za-z0-9 %.,\\-/()+*]+$",
+              "not": {
+                "pattern": "[uU][rR][lL]\\(|[eE][xX][pP][rR][eE][sS][sS][iI][oO][nN]\\("
+              },
+              "description": "A CSS length, e.g. \"240px\" or \"50%\"."
+            },
+            "height": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 64,
+              "pattern": "^[A-Za-z0-9 %.,\\-/()+*]+$",
+              "not": {
+                "pattern": "[uU][rR][lL]\\(|[eE][xX][pP][rR][eE][sS][sS][iI][oO][nN]\\("
+              },
+              "description": "A CSS length, e.g. \"120px\"."
+            }
+          }
+        },
+        "children": {
+          "type": "array",
+          "description": "Rendered by primitive:box only.",
+          "items": {
+            "$ref": "#/definitions/node"
+          }
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "ref": {
+                "const": "primitive:box"
+              }
+            },
+            "required": [
+              "ref"
+            ]
+          },
+          "then": {
+            "properties": {
+              "props": {
+                "type": "object",
+                "description": "Props of primitive:box.",
+                "properties": {
+                  "background": {
+                    "anyOf": [
+                      {
+                        "default": "transparent",
+                        "type": "string",
+                        "maxLength": 400
+                      },
+                      {
+                        "type": "string",
+                        "pattern": "^\\{\\{\\s*[A-Za-z_][A-Za-z0-9_]{0,31}\\s*\\}\\}$",
+                        "description": "In components.json, {{param}} is replaced by the argument a placement passes."
+                      }
+                    ]
+                  },
+                  "borderRadius": {
+                    "anyOf": [
+                      {
+                        "default": 12,
+                        "type": "number",
+                        "minimum": 0,
+                        "maximum": 64
+                      },
+                      {
+                        "type": "string",
+                        "pattern": "^\\{\\{\\s*[A-Za-z_][A-Za-z0-9_]{0,31}\\s*\\}\\}$",
+                        "description": "In components.json, {{param}} is replaced by the argument a placement passes."
+                      }
+                    ]
+                  },
+                  "borderWidth": {
+                    "anyOf": [
+                      {
+                        "default": 0,
+                        "type": "number",
+                        "minimum": 0,
+                        "maximum": 8
+                      },
+                      {
+                        "type": "string",
+                        "pattern": "^\\{\\{\\s*[A-Za-z_][A-Za-z0-9_]{0,31}\\s*\\}\\}$",
+                        "description": "In components.json, {{param}} is replaced by the argument a placement passes."
+                      }
+                    ]
+                  },
+                  "borderColor": {
+                    "anyOf": [
+                      {
+                        "default": "var(--line)",
+                        "type": "string",
+                        "maxLength": 64
+                      },
+                      {
+                        "type": "string",
+                        "pattern": "^\\{\\{\\s*[A-Za-z_][A-Za-z0-9_]{0,31}\\s*\\}\\}$",
+                        "description": "In components.json, {{param}} is replaced by the argument a placement passes."
+                      }
+                    ]
+                  },
+                  "padding": {
+                    "anyOf": [
+                      {
+                        "default": 0,
+                        "type": "number",
+                        "minimum": 0,
+                        "maximum": 64
+                      },
+                      {
+                        "type": "string",
+                        "pattern": "^\\{\\{\\s*[A-Za-z_][A-Za-z0-9_]{0,31}\\s*\\}\\}$",
+                        "description": "In components.json, {{param}} is replaced by the argument a placement passes."
+                      }
+                    ]
+                  },
+                  "shadow": {
+                    "anyOf": [
+                      {
+                        "default": "none",
+                        "type": "string",
+                        "enum": [
+                          "none",
+                          "sm",
+                          "md",
+                          "lg",
+                          "glow"
+                        ]
+                      },
+                      {
+                        "type": "string",
+                        "pattern": "^\\{\\{\\s*[A-Za-z_][A-Za-z0-9_]{0,31}\\s*\\}\\}$",
+                        "description": "In components.json, {{param}} is replaced by the argument a placement passes."
+                      }
+                    ]
+                  },
+                  "backdropBlur": {
+                    "anyOf": [
+                      {
+                        "default": 0,
+                        "type": "number",
+                        "minimum": 0,
+                        "maximum": 20
+                      },
+                      {
+                        "type": "string",
+                        "pattern": "^\\{\\{\\s*[A-Za-z_][A-Za-z0-9_]{0,31}\\s*\\}\\}$",
+                        "description": "In components.json, {{param}} is replaced by the argument a placement passes."
+                      }
+                    ]
+                  },
+                  "opacity": {
+                    "anyOf": [
+                      {
+                        "default": 1,
+                        "type": "number",
+                        "minimum": 0,
+                        "maximum": 1
+                      },
+                      {
+                        "type": "string",
+                        "pattern": "^\\{\\{\\s*[A-Za-z_][A-Za-z0-9_]{0,31}\\s*\\}\\}$",
+                        "description": "In components.json, {{param}} is replaced by the argument a placement passes."
+                      }
+                    ]
+                  }
+                },
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "ref": {
+                "const": "primitive:text"
+              }
+            },
+            "required": [
+              "ref"
+            ]
+          },
+          "then": {
+            "properties": {
+              "props": {
+                "type": "object",
+                "description": "Props of primitive:text.",
+                "properties": {
+                  "content": {
+                    "anyOf": [
+                      {
+                        "default": "",
+                        "type": "string",
+                        "maxLength": 2000
+                      },
+                      {
+                        "type": "string",
+                        "pattern": "^\\{\\{\\s*[A-Za-z_][A-Za-z0-9_]{0,31}\\s*\\}\\}$",
+                        "description": "In components.json, {{param}} is replaced by the argument a placement passes."
+                      }
+                    ]
+                  },
+                  "fontSize": {
+                    "anyOf": [
+                      {
+                        "default": 14,
+                        "type": "number",
+                        "minimum": 8,
+                        "maximum": 96
+                      },
+                      {
+                        "type": "string",
+                        "pattern": "^\\{\\{\\s*[A-Za-z_][A-Za-z0-9_]{0,31}\\s*\\}\\}$",
+                        "description": "In components.json, {{param}} is replaced by the argument a placement passes."
+                      }
+                    ]
+                  },
+                  "fontWeight": {
+                    "anyOf": [
+                      {
+                        "default": 400,
+                        "type": "integer",
+                        "minimum": 100,
+                        "maximum": 900,
+                        "multipleOf": 100
+                      },
+                      {
+                        "type": "string",
+                        "pattern": "^\\{\\{\\s*[A-Za-z_][A-Za-z0-9_]{0,31}\\s*\\}\\}$",
+                        "description": "In components.json, {{param}} is replaced by the argument a placement passes."
+                      }
+                    ]
+                  },
+                  "color": {
+                    "anyOf": [
+                      {
+                        "default": "var(--ink)",
+                        "type": "string",
+                        "maxLength": 64
+                      },
+                      {
+                        "type": "string",
+                        "pattern": "^\\{\\{\\s*[A-Za-z_][A-Za-z0-9_]{0,31}\\s*\\}\\}$",
+                        "description": "In components.json, {{param}} is replaced by the argument a placement passes."
+                      }
+                    ]
+                  },
+                  "align": {
+                    "anyOf": [
+                      {
+                        "default": "left",
+                        "type": "string",
+                        "enum": [
+                          "left",
+                          "center",
+                          "right"
+                        ]
+                      },
+                      {
+                        "type": "string",
+                        "pattern": "^\\{\\{\\s*[A-Za-z_][A-Za-z0-9_]{0,31}\\s*\\}\\}$",
+                        "description": "In components.json, {{param}} is replaced by the argument a placement passes."
+                      }
+                    ]
+                  },
+                  "lineClamp": {
+                    "anyOf": [
+                      {
+                        "default": 0,
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 20
+                      },
+                      {
+                        "type": "string",
+                        "pattern": "^\\{\\{\\s*[A-Za-z_][A-Za-z0-9_]{0,31}\\s*\\}\\}$",
+                        "description": "In components.json, {{param}} is replaced by the argument a placement passes."
+                      }
+                    ]
+                  },
+                  "letterSpacing": {
+                    "anyOf": [
+                      {
+                        "default": 0,
+                        "type": "number",
+                        "minimum": -2,
+                        "maximum": 8
+                      },
+                      {
+                        "type": "string",
+                        "pattern": "^\\{\\{\\s*[A-Za-z_][A-Za-z0-9_]{0,31}\\s*\\}\\}$",
+                        "description": "In components.json, {{param}} is replaced by the argument a placement passes."
+                      }
+                    ]
+                  },
+                  "italic": {
+                    "anyOf": [
+                      {
+                        "default": false,
+                        "type": "boolean"
+                      },
+                      {
+                        "type": "string",
+                        "pattern": "^\\{\\{\\s*[A-Za-z_][A-Za-z0-9_]{0,31}\\s*\\}\\}$",
+                        "description": "In components.json, {{param}} is replaced by the argument a placement passes."
+                      }
+                    ]
+                  },
+                  "family": {
+                    "anyOf": [
+                      {
+                        "default": "body",
+                        "type": "string",
+                        "enum": [
+                          "display",
+                          "body",
+                          "mono"
+                        ]
+                      },
+                      {
+                        "type": "string",
+                        "pattern": "^\\{\\{\\s*[A-Za-z_][A-Za-z0-9_]{0,31}\\s*\\}\\}$",
+                        "description": "In components.json, {{param}} is replaced by the argument a placement passes."
+                      }
+                    ]
+                  },
+                  "block": {
+                    "anyOf": [
+                      {
+                        "default": false,
+                        "type": "boolean"
+                      },
+                      {
+                        "type": "string",
+                        "pattern": "^\\{\\{\\s*[A-Za-z_][A-Za-z0-9_]{0,31}\\s*\\}\\}$",
+                        "description": "In components.json, {{param}} is replaced by the argument a placement passes."
+                      }
+                    ]
+                  }
+                },
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "ref": {
+                "const": "primitive:icon"
+              }
+            },
+            "required": [
+              "ref"
+            ]
+          },
+          "then": {
+            "properties": {
+              "props": {
+                "type": "object",
+                "description": "Props of primitive:icon.",
+                "properties": {
+                  "name": {
+                    "anyOf": [
+                      {
+                        "default": "sparkles",
+                        "type": "string",
+                        "enum": [
+                          "sun",
+                          "moon",
+                          "sun-moon",
+                          "moon-star",
+                          "zap",
+                          "battery",
+                          "battery-charging",
+                          "cloud",
+                          "cloud-sun",
+                          "sparkles",
+                          "heart",
+                          "star",
+                          "leaf",
+                          "snowflake",
+                          "flame",
+                          "droplet",
+                          "wind",
+                          "umbrella",
+                          "thermometer",
+                          "bot",
+                          "brain",
+                          "message-square",
+                          "folder",
+                          "file-text",
+                          "check",
+                          "x",
+                          "plus",
+                          "arrow-right",
+                          "calendar",
+                          "clock",
+                          "settings",
+                          "user",
+                          "users",
+                          "house",
+                          "search",
+                          "bell",
+                          "shield",
+                          "lock",
+                          "key",
+                          "globe",
+                          "map-pin",
+                          "compass",
+                          "image",
+                          "music",
+                          "coffee",
+                          "gift",
+                          "rocket",
+                          "trophy",
+                          "flag",
+                          "bookmark",
+                          "tag",
+                          "layers",
+                          "grid-3x3",
+                          "cpu",
+                          "terminal",
+                          "code",
+                          "wand-sparkles",
+                          "palette",
+                          "activity",
+                          "trending-up",
+                          "chart-pie",
+                          "chart-bar",
+                          "smile",
+                          "ghost",
+                          "cat",
+                          "dog",
+                          "bird",
+                          "fish",
+                          "flower",
+                          "flower-2",
+                          "trees",
+                          "mountain",
+                          "waves",
+                          "anchor",
+                          "plane",
+                          "car",
+                          "bike",
+                          "gamepad-2",
+                          "headphones",
+                          "camera",
+                          "mic",
+                          "video",
+                          "lightbulb",
+                          "mail",
+                          "phone",
+                          "link",
+                          "external-link",
+                          "download",
+                          "upload",
+                          "refresh-cw",
+                          "loader",
+                          "info",
+                          "triangle-alert",
+                          "circle-question-mark",
+                          "wifi",
+                          "bluetooth",
+                          "volume-2"
+                        ]
+                      },
+                      {
+                        "type": "string",
+                        "pattern": "^\\{\\{\\s*[A-Za-z_][A-Za-z0-9_]{0,31}\\s*\\}\\}$",
+                        "description": "In components.json, {{param}} is replaced by the argument a placement passes."
+                      }
+                    ]
+                  },
+                  "size": {
+                    "anyOf": [
+                      {
+                        "default": 20,
+                        "type": "number",
+                        "minimum": 8,
+                        "maximum": 128
+                      },
+                      {
+                        "type": "string",
+                        "pattern": "^\\{\\{\\s*[A-Za-z_][A-Za-z0-9_]{0,31}\\s*\\}\\}$",
+                        "description": "In components.json, {{param}} is replaced by the argument a placement passes."
+                      }
+                    ]
+                  },
+                  "color": {
+                    "anyOf": [
+                      {
+                        "default": "currentColor",
+                        "type": "string",
+                        "maxLength": 64
+                      },
+                      {
+                        "type": "string",
+                        "pattern": "^\\{\\{\\s*[A-Za-z_][A-Za-z0-9_]{0,31}\\s*\\}\\}$",
+                        "description": "In components.json, {{param}} is replaced by the argument a placement passes."
+                      }
+                    ]
+                  },
+                  "strokeWidth": {
+                    "anyOf": [
+                      {
+                        "default": 2,
+                        "type": "number",
+                        "minimum": 0.5,
+                        "maximum": 4
+                      },
+                      {
+                        "type": "string",
+                        "pattern": "^\\{\\{\\s*[A-Za-z_][A-Za-z0-9_]{0,31}\\s*\\}\\}$",
+                        "description": "In components.json, {{param}} is replaced by the argument a placement passes."
+                      }
+                    ]
+                  }
+                },
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "ref": {
+                "const": "primitive:image"
+              }
+            },
+            "required": [
+              "ref"
+            ]
+          },
+          "then": {
+            "properties": {
+              "props": {
+                "type": "object",
+                "description": "Props of primitive:image.",
+                "properties": {
+                  "src": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "maxLength": 200,
+                        "pattern": "^assets\\/[A-Za-z0-9_\\-./]+\\.(?:png|jpe?g|webp|gif|svg)$"
+                      },
+                      {
+                        "type": "string",
+                        "pattern": "^\\{\\{\\s*[A-Za-z_][A-Za-z0-9_]{0,31}\\s*\\}\\}$",
+                        "description": "In components.json, {{param}} is replaced by the argument a placement passes."
+                      }
+                    ]
+                  },
+                  "fit": {
+                    "anyOf": [
+                      {
+                        "default": "cover",
+                        "type": "string",
+                        "enum": [
+                          "cover",
+                          "contain"
+                        ]
+                      },
+                      {
+                        "type": "string",
+                        "pattern": "^\\{\\{\\s*[A-Za-z_][A-Za-z0-9_]{0,31}\\s*\\}\\}$",
+                        "description": "In components.json, {{param}} is replaced by the argument a placement passes."
+                      }
+                    ]
+                  },
+                  "borderRadius": {
+                    "anyOf": [
+                      {
+                        "default": 0,
+                        "type": "number",
+                        "minimum": 0,
+                        "maximum": 64
+                      },
+                      {
+                        "type": "string",
+                        "pattern": "^\\{\\{\\s*[A-Za-z_][A-Za-z0-9_]{0,31}\\s*\\}\\}$",
+                        "description": "In components.json, {{param}} is replaced by the argument a placement passes."
+                      }
+                    ]
+                  },
+                  "width": {
+                    "anyOf": [
+                      {
+                        "type": "number",
+                        "minimum": 0,
+                        "maximum": 2000
+                      },
+                      {
+                        "type": "string",
+                        "pattern": "^\\{\\{\\s*[A-Za-z_][A-Za-z0-9_]{0,31}\\s*\\}\\}$",
+                        "description": "In components.json, {{param}} is replaced by the argument a placement passes."
+                      }
+                    ]
+                  },
+                  "height": {
+                    "anyOf": [
+                      {
+                        "type": "number",
+                        "minimum": 0,
+                        "maximum": 2000
+                      },
+                      {
+                        "type": "string",
+                        "pattern": "^\\{\\{\\s*[A-Za-z_][A-Za-z0-9_]{0,31}\\s*\\}\\}$",
+                        "description": "In components.json, {{param}} is replaced by the argument a placement passes."
+                      }
+                    ]
+                  },
+                  "alt": {
+                    "anyOf": [
+                      {
+                        "default": "",
+                        "type": "string",
+                        "maxLength": 200
+                      },
+                      {
+                        "type": "string",
+                        "pattern": "^\\{\\{\\s*[A-Za-z_][A-Za-z0-9_]{0,31}\\s*\\}\\}$",
+                        "description": "In components.json, {{param}} is replaced by the argument a placement passes."
+                      }
+                    ]
+                  },
+                  "opacity": {
+                    "anyOf": [
+                      {
+                        "default": 1,
+                        "type": "number",
+                        "minimum": 0,
+                        "maximum": 1
+                      },
+                      {
+                        "type": "string",
+                        "pattern": "^\\{\\{\\s*[A-Za-z_][A-Za-z0-9_]{0,31}\\s*\\}\\}$",
+                        "description": "In components.json, {{param}} is replaced by the argument a placement passes."
+                      }
+                    ]
+                  }
+                },
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "ref": {
+                "const": "primitive:gradient"
+              }
+            },
+            "required": [
+              "ref"
+            ]
+          },
+          "then": {
+            "properties": {
+              "props": {
+                "type": "object",
+                "description": "Props of primitive:gradient.",
+                "properties": {
+                  "type": {
+                    "anyOf": [
+                      {
+                        "default": "linear",
+                        "type": "string",
+                        "enum": [
+                          "linear",
+                          "radial"
+                        ]
+                      },
+                      {
+                        "type": "string",
+                        "pattern": "^\\{\\{\\s*[A-Za-z_][A-Za-z0-9_]{0,31}\\s*\\}\\}$",
+                        "description": "In components.json, {{param}} is replaced by the argument a placement passes."
+                      }
+                    ]
+                  },
+                  "angle": {
+                    "anyOf": [
+                      {
+                        "default": 180,
+                        "type": "number",
+                        "minimum": 0,
+                        "maximum": 360
+                      },
+                      {
+                        "type": "string",
+                        "pattern": "^\\{\\{\\s*[A-Za-z_][A-Za-z0-9_]{0,31}\\s*\\}\\}$",
+                        "description": "In components.json, {{param}} is replaced by the argument a placement passes."
+                      }
+                    ]
+                  },
+                  "stops": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "maxLength": 400,
+                        "description": "Colour stops as one string, 2 to 6 of them: \"var(--primary) 0%, transparent 100%\"."
+                      },
+                      {
+                        "type": "string",
+                        "pattern": "^\\{\\{\\s*[A-Za-z_][A-Za-z0-9_]{0,31}\\s*\\}\\}$",
+                        "description": "In components.json, {{param}} is replaced by the argument a placement passes."
+                      }
+                    ]
+                  },
+                  "borderRadius": {
+                    "anyOf": [
+                      {
+                        "default": 0,
+                        "type": "number",
+                        "minimum": 0,
+                        "maximum": 64
+                      },
+                      {
+                        "type": "string",
+                        "pattern": "^\\{\\{\\s*[A-Za-z_][A-Za-z0-9_]{0,31}\\s*\\}\\}$",
+                        "description": "In components.json, {{param}} is replaced by the argument a placement passes."
+                      }
+                    ]
+                  },
+                  "width": {
+                    "anyOf": [
+                      {
+                        "default": 96,
+                        "type": "number",
+                        "minimum": 0,
+                        "maximum": 2000
+                      },
+                      {
+                        "type": "string",
+                        "pattern": "^\\{\\{\\s*[A-Za-z_][A-Za-z0-9_]{0,31}\\s*\\}\\}$",
+                        "description": "In components.json, {{param}} is replaced by the argument a placement passes."
+                      }
+                    ]
+                  },
+                  "height": {
+                    "anyOf": [
+                      {
+                        "default": 96,
+                        "type": "number",
+                        "minimum": 0,
+                        "maximum": 2000
+                      },
+                      {
+                        "type": "string",
+                        "pattern": "^\\{\\{\\s*[A-Za-z_][A-Za-z0-9_]{0,31}\\s*\\}\\}$",
+                        "description": "In components.json, {{param}} is replaced by the argument a placement passes."
+                      }
+                    ]
+                  },
+                  "fill": {
+                    "anyOf": [
+                      {
+                        "default": false,
+                        "type": "boolean"
+                      },
+                      {
+                        "type": "string",
+                        "pattern": "^\\{\\{\\s*[A-Za-z_][A-Za-z0-9_]{0,31}\\s*\\}\\}$",
+                        "description": "In components.json, {{param}} is replaced by the argument a placement passes."
+                      }
+                    ]
+                  }
+                },
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "ref": {
+                "const": "primitive:progressBar"
+              }
+            },
+            "required": [
+              "ref"
+            ]
+          },
+          "then": {
+            "properties": {
+              "props": {
+                "type": "object",
+                "description": "Props of primitive:progressBar.",
+                "properties": {
+                  "value": {
+                    "anyOf": [
+                      {
+                        "default": 0,
+                        "type": "number",
+                        "minimum": 0,
+                        "maximum": 100
+                      },
+                      {
+                        "type": "string",
+                        "pattern": "^\\{\\{\\s*[A-Za-z_][A-Za-z0-9_]{0,31}\\s*\\}\\}$",
+                        "description": "In components.json, {{param}} is replaced by the argument a placement passes."
+                      }
+                    ]
+                  },
+                  "color": {
+                    "anyOf": [
+                      {
+                        "default": "var(--primary)",
+                        "type": "string",
+                        "maxLength": 64
+                      },
+                      {
+                        "type": "string",
+                        "pattern": "^\\{\\{\\s*[A-Za-z_][A-Za-z0-9_]{0,31}\\s*\\}\\}$",
+                        "description": "In components.json, {{param}} is replaced by the argument a placement passes."
+                      }
+                    ]
+                  },
+                  "trackColor": {
+                    "anyOf": [
+                      {
+                        "default": "var(--surface-muted)",
+                        "type": "string",
+                        "maxLength": 64
+                      },
+                      {
+                        "type": "string",
+                        "pattern": "^\\{\\{\\s*[A-Za-z_][A-Za-z0-9_]{0,31}\\s*\\}\\}$",
+                        "description": "In components.json, {{param}} is replaced by the argument a placement passes."
+                      }
+                    ]
+                  },
+                  "thickness": {
+                    "anyOf": [
+                      {
+                        "default": 6,
+                        "type": "number",
+                        "minimum": 2,
+                        "maximum": 32
+                      },
+                      {
+                        "type": "string",
+                        "pattern": "^\\{\\{\\s*[A-Za-z_][A-Za-z0-9_]{0,31}\\s*\\}\\}$",
+                        "description": "In components.json, {{param}} is replaced by the argument a placement passes."
+                      }
+                    ]
+                  },
+                  "borderRadius": {
+                    "anyOf": [
+                      {
+                        "default": 16,
+                        "type": "number",
+                        "minimum": 0,
+                        "maximum": 64
+                      },
+                      {
+                        "type": "string",
+                        "pattern": "^\\{\\{\\s*[A-Za-z_][A-Za-z0-9_]{0,31}\\s*\\}\\}$",
+                        "description": "In components.json, {{param}} is replaced by the argument a placement passes."
+                      }
+                    ]
+                  },
+                  "width": {
+                    "anyOf": [
+                      {
+                        "default": 160,
+                        "type": "number",
+                        "minimum": 0,
+                        "maximum": 2000
+                      },
+                      {
+                        "type": "string",
+                        "pattern": "^\\{\\{\\s*[A-Za-z_][A-Za-z0-9_]{0,31}\\s*\\}\\}$",
+                        "description": "In components.json, {{param}} is replaced by the argument a placement passes."
+                      }
+                    ]
+                  },
+                  "fill": {
+                    "anyOf": [
+                      {
+                        "default": true,
+                        "type": "boolean"
+                      },
+                      {
+                        "type": "string",
+                        "pattern": "^\\{\\{\\s*[A-Za-z_][A-Za-z0-9_]{0,31}\\s*\\}\\}$",
+                        "description": "In components.json, {{param}} is replaced by the argument a placement passes."
+                      }
+                    ]
+                  }
+                },
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "ref": {
+                "const": "primitive:progressRing"
+              }
+            },
+            "required": [
+              "ref"
+            ]
+          },
+          "then": {
+            "properties": {
+              "props": {
+                "type": "object",
+                "description": "Props of primitive:progressRing.",
+                "properties": {
+                  "value": {
+                    "anyOf": [
+                      {
+                        "default": 0,
+                        "type": "number",
+                        "minimum": 0,
+                        "maximum": 100
+                      },
+                      {
+                        "type": "string",
+                        "pattern": "^\\{\\{\\s*[A-Za-z_][A-Za-z0-9_]{0,31}\\s*\\}\\}$",
+                        "description": "In components.json, {{param}} is replaced by the argument a placement passes."
+                      }
+                    ]
+                  },
+                  "color": {
+                    "anyOf": [
+                      {
+                        "default": "var(--primary)",
+                        "type": "string",
+                        "maxLength": 64
+                      },
+                      {
+                        "type": "string",
+                        "pattern": "^\\{\\{\\s*[A-Za-z_][A-Za-z0-9_]{0,31}\\s*\\}\\}$",
+                        "description": "In components.json, {{param}} is replaced by the argument a placement passes."
+                      }
+                    ]
+                  },
+                  "trackColor": {
+                    "anyOf": [
+                      {
+                        "default": "var(--surface-muted)",
+                        "type": "string",
+                        "maxLength": 64
+                      },
+                      {
+                        "type": "string",
+                        "pattern": "^\\{\\{\\s*[A-Za-z_][A-Za-z0-9_]{0,31}\\s*\\}\\}$",
+                        "description": "In components.json, {{param}} is replaced by the argument a placement passes."
+                      }
+                    ]
+                  },
+                  "size": {
+                    "anyOf": [
+                      {
+                        "default": 48,
+                        "type": "number",
+                        "minimum": 16,
+                        "maximum": 256
+                      },
+                      {
+                        "type": "string",
+                        "pattern": "^\\{\\{\\s*[A-Za-z_][A-Za-z0-9_]{0,31}\\s*\\}\\}$",
+                        "description": "In components.json, {{param}} is replaced by the argument a placement passes."
+                      }
+                    ]
+                  },
+                  "thickness": {
+                    "anyOf": [
+                      {
+                        "default": 4,
+                        "type": "number",
+                        "minimum": 1,
+                        "maximum": 24
+                      },
+                      {
+                        "type": "string",
+                        "pattern": "^\\{\\{\\s*[A-Za-z_][A-Za-z0-9_]{0,31}\\s*\\}\\}$",
+                        "description": "In components.json, {{param}} is replaced by the argument a placement passes."
+                      }
+                    ]
+                  },
+                  "showValue": {
+                    "anyOf": [
+                      {
+                        "default": false,
+                        "type": "boolean"
+                      },
+                      {
+                        "type": "string",
+                        "pattern": "^\\{\\{\\s*[A-Za-z_][A-Za-z0-9_]{0,31}\\s*\\}\\}$",
+                        "description": "In components.json, {{param}} is replaced by the argument a placement passes."
+                      }
+                    ]
+                  }
+                },
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "ref": {
+                "const": "primitive:divider"
+              }
+            },
+            "required": [
+              "ref"
+            ]
+          },
+          "then": {
+            "properties": {
+              "props": {
+                "type": "object",
+                "description": "Props of primitive:divider.",
+                "properties": {
+                  "orientation": {
+                    "anyOf": [
+                      {
+                        "default": "horizontal",
+                        "type": "string",
+                        "enum": [
+                          "horizontal",
+                          "vertical"
+                        ]
+                      },
+                      {
+                        "type": "string",
+                        "pattern": "^\\{\\{\\s*[A-Za-z_][A-Za-z0-9_]{0,31}\\s*\\}\\}$",
+                        "description": "In components.json, {{param}} is replaced by the argument a placement passes."
+                      }
+                    ]
+                  },
+                  "thickness": {
+                    "anyOf": [
+                      {
+                        "default": 1,
+                        "type": "number",
+                        "minimum": 1,
+                        "maximum": 8
+                      },
+                      {
+                        "type": "string",
+                        "pattern": "^\\{\\{\\s*[A-Za-z_][A-Za-z0-9_]{0,31}\\s*\\}\\}$",
+                        "description": "In components.json, {{param}} is replaced by the argument a placement passes."
+                      }
+                    ]
+                  },
+                  "color": {
+                    "anyOf": [
+                      {
+                        "default": "var(--line)",
+                        "type": "string",
+                        "maxLength": 64
+                      },
+                      {
+                        "type": "string",
+                        "pattern": "^\\{\\{\\s*[A-Za-z_][A-Za-z0-9_]{0,31}\\s*\\}\\}$",
+                        "description": "In components.json, {{param}} is replaced by the argument a placement passes."
+                      }
+                    ]
+                  },
+                  "dashArray": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "maxLength": 32,
+                        "pattern": "^\\d+(\\s+\\d+)*$"
+                      },
+                      {
+                        "type": "string",
+                        "pattern": "^\\{\\{\\s*[A-Za-z_][A-Za-z0-9_]{0,31}\\s*\\}\\}$",
+                        "description": "In components.json, {{param}} is replaced by the argument a placement passes."
+                      }
+                    ]
+                  },
+                  "length": {
+                    "anyOf": [
+                      {
+                        "default": 100,
+                        "type": "number",
+                        "minimum": 0,
+                        "maximum": 2000
+                      },
+                      {
+                        "type": "string",
+                        "pattern": "^\\{\\{\\s*[A-Za-z_][A-Za-z0-9_]{0,31}\\s*\\}\\}$",
+                        "description": "In components.json, {{param}} is replaced by the argument a placement passes."
+                      }
+                    ]
+                  },
+                  "fill": {
+                    "anyOf": [
+                      {
+                        "default": true,
+                        "type": "boolean"
+                      },
+                      {
+                        "type": "string",
+                        "pattern": "^\\{\\{\\s*[A-Za-z_][A-Za-z0-9_]{0,31}\\s*\\}\\}$",
+                        "description": "In components.json, {{param}} is replaced by the argument a placement passes."
+                      }
+                    ]
+                  }
+                },
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "ref": {
+                "const": "primitive:badge"
+              }
+            },
+            "required": [
+              "ref"
+            ]
+          },
+          "then": {
+            "properties": {
+              "props": {
+                "type": "object",
+                "description": "Props of primitive:badge.",
+                "properties": {
+                  "text": {
+                    "anyOf": [
+                      {
+                        "default": "",
+                        "type": "string",
+                        "maxLength": 60
+                      },
+                      {
+                        "type": "string",
+                        "pattern": "^\\{\\{\\s*[A-Za-z_][A-Za-z0-9_]{0,31}\\s*\\}\\}$",
+                        "description": "In components.json, {{param}} is replaced by the argument a placement passes."
+                      }
+                    ]
+                  },
+                  "variant": {
+                    "anyOf": [
+                      {
+                        "default": "neutral",
+                        "type": "string",
+                        "enum": [
+                          "neutral",
+                          "primary",
+                          "success",
+                          "warning",
+                          "danger",
+                          "info"
+                        ]
+                      },
+                      {
+                        "type": "string",
+                        "pattern": "^\\{\\{\\s*[A-Za-z_][A-Za-z0-9_]{0,31}\\s*\\}\\}$",
+                        "description": "In components.json, {{param}} is replaced by the argument a placement passes."
+                      }
+                    ]
+                  },
+                  "size": {
+                    "anyOf": [
+                      {
+                        "default": "md",
+                        "type": "string",
+                        "enum": [
+                          "sm",
+                          "md"
+                        ]
+                      },
+                      {
+                        "type": "string",
+                        "pattern": "^\\{\\{\\s*[A-Za-z_][A-Za-z0-9_]{0,31}\\s*\\}\\}$",
+                        "description": "In components.json, {{param}} is replaced by the argument a placement passes."
+                      }
+                    ]
+                  }
+                },
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "ref": {
+                "const": "primitive:avatar"
+              }
+            },
+            "required": [
+              "ref"
+            ]
+          },
+          "then": {
+            "properties": {
+              "props": {
+                "type": "object",
+                "description": "Props of primitive:avatar.",
+                "properties": {
+                  "src": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "maxLength": 200,
+                        "pattern": "^assets\\/[A-Za-z0-9_\\-./]+\\.(?:png|jpe?g|webp|gif|svg)$"
+                      },
+                      {
+                        "type": "string",
+                        "pattern": "^\\{\\{\\s*[A-Za-z_][A-Za-z0-9_]{0,31}\\s*\\}\\}$",
+                        "description": "In components.json, {{param}} is replaced by the argument a placement passes."
+                      }
+                    ]
+                  },
+                  "initials": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 3
+                      },
+                      {
+                        "type": "string",
+                        "pattern": "^\\{\\{\\s*[A-Za-z_][A-Za-z0-9_]{0,31}\\s*\\}\\}$",
+                        "description": "In components.json, {{param}} is replaced by the argument a placement passes."
+                      }
+                    ]
+                  },
+                  "size": {
+                    "anyOf": [
+                      {
+                        "default": 40,
+                        "type": "number",
+                        "minimum": 16,
+                        "maximum": 256
+                      },
+                      {
+                        "type": "string",
+                        "pattern": "^\\{\\{\\s*[A-Za-z_][A-Za-z0-9_]{0,31}\\s*\\}\\}$",
+                        "description": "In components.json, {{param}} is replaced by the argument a placement passes."
+                      }
+                    ]
+                  },
+                  "shape": {
+                    "anyOf": [
+                      {
+                        "default": "circle",
+                        "type": "string",
+                        "enum": [
+                          "circle",
+                          "square"
+                        ]
+                      },
+                      {
+                        "type": "string",
+                        "pattern": "^\\{\\{\\s*[A-Za-z_][A-Za-z0-9_]{0,31}\\s*\\}\\}$",
+                        "description": "In components.json, {{param}} is replaced by the argument a placement passes."
+                      }
+                    ]
+                  },
+                  "background": {
+                    "anyOf": [
+                      {
+                        "default": "var(--primary)",
+                        "type": "string",
+                        "maxLength": 64
+                      },
+                      {
+                        "type": "string",
+                        "pattern": "^\\{\\{\\s*[A-Za-z_][A-Za-z0-9_]{0,31}\\s*\\}\\}$",
+                        "description": "In components.json, {{param}} is replaced by the argument a placement passes."
+                      }
+                    ]
+                  },
+                  "color": {
+                    "anyOf": [
+                      {
+                        "default": "var(--primary-foreground)",
+                        "type": "string",
+                        "maxLength": 64
+                      },
+                      {
+                        "type": "string",
+                        "pattern": "^\\{\\{\\s*[A-Za-z_][A-Za-z0-9_]{0,31}\\s*\\}\\}$",
+                        "description": "In components.json, {{param}} is replaced by the argument a placement passes."
+                      }
+                    ]
+                  },
+                  "alt": {
+                    "anyOf": [
+                      {
+                        "default": "",
+                        "type": "string",
+                        "maxLength": 200
+                      },
+                      {
+                        "type": "string",
+                        "pattern": "^\\{\\{\\s*[A-Za-z_][A-Za-z0-9_]{0,31}\\s*\\}\\}$",
+                        "description": "In components.json, {{param}} is replaced by the argument a placement passes."
+                      }
+                    ]
+                  }
+                },
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "ref": {
+                "const": "primitive:shape"
+              }
+            },
+            "required": [
+              "ref"
+            ]
+          },
+          "then": {
+            "properties": {
+              "props": {
+                "type": "object",
+                "description": "Props of primitive:shape.",
+                "properties": {
+                  "kind": {
+                    "anyOf": [
+                      {
+                        "default": "circle",
+                        "type": "string",
+                        "enum": [
+                          "circle",
+                          "rect",
+                          "triangle",
+                          "hexagon",
+                          "star"
+                        ]
+                      },
+                      {
+                        "type": "string",
+                        "pattern": "^\\{\\{\\s*[A-Za-z_][A-Za-z0-9_]{0,31}\\s*\\}\\}$",
+                        "description": "In components.json, {{param}} is replaced by the argument a placement passes."
+                      }
+                    ]
+                  },
+                  "fill": {
+                    "anyOf": [
+                      {
+                        "default": "var(--primary)",
+                        "type": "string",
+                        "maxLength": 64
+                      },
+                      {
+                        "type": "string",
+                        "pattern": "^\\{\\{\\s*[A-Za-z_][A-Za-z0-9_]{0,31}\\s*\\}\\}$",
+                        "description": "In components.json, {{param}} is replaced by the argument a placement passes."
+                      }
+                    ]
+                  },
+                  "stroke": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "maxLength": 64
+                      },
+                      {
+                        "type": "string",
+                        "pattern": "^\\{\\{\\s*[A-Za-z_][A-Za-z0-9_]{0,31}\\s*\\}\\}$",
+                        "description": "In components.json, {{param}} is replaced by the argument a placement passes."
+                      }
+                    ]
+                  },
+                  "strokeWidth": {
+                    "anyOf": [
+                      {
+                        "default": 0,
+                        "type": "number",
+                        "minimum": 0,
+                        "maximum": 16
+                      },
+                      {
+                        "type": "string",
+                        "pattern": "^\\{\\{\\s*[A-Za-z_][A-Za-z0-9_]{0,31}\\s*\\}\\}$",
+                        "description": "In components.json, {{param}} is replaced by the argument a placement passes."
+                      }
+                    ]
+                  },
+                  "size": {
+                    "anyOf": [
+                      {
+                        "default": 48,
+                        "type": "number",
+                        "minimum": 8,
+                        "maximum": 512
+                      },
+                      {
+                        "type": "string",
+                        "pattern": "^\\{\\{\\s*[A-Za-z_][A-Za-z0-9_]{0,31}\\s*\\}\\}$",
+                        "description": "In components.json, {{param}} is replaced by the argument a placement passes."
+                      }
+                    ]
+                  },
+                  "rotate": {
+                    "anyOf": [
+                      {
+                        "default": 0,
+                        "type": "number",
+                        "minimum": 0,
+                        "maximum": 360
+                      },
+                      {
+                        "type": "string",
+                        "pattern": "^\\{\\{\\s*[A-Za-z_][A-Za-z0-9_]{0,31}\\s*\\}\\}$",
+                        "description": "In components.json, {{param}} is replaced by the argument a placement passes."
+                      }
+                    ]
+                  }
+                },
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "ref": {
+                "const": "primitive:spacer"
+              }
+            },
+            "required": [
+              "ref"
+            ]
+          },
+          "then": {
+            "properties": {
+              "props": {
+                "type": "object",
+                "description": "Props of primitive:spacer.",
+                "properties": {
+                  "size": {
+                    "anyOf": [
+                      {
+                        "default": 8,
+                        "type": "number",
+                        "minimum": 0,
+                        "maximum": 512
+                      },
+                      {
+                        "type": "string",
+                        "pattern": "^\\{\\{\\s*[A-Za-z_][A-Za-z0-9_]{0,31}\\s*\\}\\}$",
+                        "description": "In components.json, {{param}} is replaced by the argument a placement passes."
+                      }
+                    ]
+                  },
+                  "flex": {
+                    "anyOf": [
+                      {
+                        "type": "number",
+                        "minimum": 0,
+                        "maximum": 100
+                      },
+                      {
+                        "type": "string",
+                        "pattern": "^\\{\\{\\s*[A-Za-z_][A-Za-z0-9_]{0,31}\\s*\\}\\}$",
+                        "description": "In components.json, {{param}} is replaced by the argument a placement passes."
+                      }
+                    ]
+                  }
+                },
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "ref": {
+                "const": "app:greeting"
+              }
+            },
+            "required": [
+              "ref"
+            ]
+          },
+          "then": {
+            "properties": {
+              "props": {
+                "type": "object",
+                "description": "Props of app:greeting.",
+                "properties": {
+                  "align": {
+                    "anyOf": [
+                      {
+                        "enum": [
+                          "left",
+                          "center",
+                          "right"
+                        ],
+                        "description": "Text alignment."
+                      },
+                      {
+                        "type": "string",
+                        "pattern": "^\\{\\{\\s*[A-Za-z_][A-Za-z0-9_]{0,31}\\s*\\}\\}$",
+                        "description": "In components.json, {{param}} is replaced by the argument a placement passes."
+                      }
+                    ]
+                  }
+                },
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "ref": {
+                "const": "app:greetingTitle"
+              }
+            },
+            "required": [
+              "ref"
+            ]
+          },
+          "then": {
+            "properties": {
+              "props": {
+                "type": "object",
+                "description": "Props of app:greetingTitle.",
+                "properties": {
+                  "align": {
+                    "anyOf": [
+                      {
+                        "enum": [
+                          "left",
+                          "center",
+                          "right"
+                        ],
+                        "description": "Text alignment."
+                      },
+                      {
+                        "type": "string",
+                        "pattern": "^\\{\\{\\s*[A-Za-z_][A-Za-z0-9_]{0,31}\\s*\\}\\}$",
+                        "description": "In components.json, {{param}} is replaced by the argument a placement passes."
+                      }
+                    ]
+                  },
+                  "size": {
+                    "anyOf": [
+                      {
+                        "enum": [
+                          "sm",
+                          "md",
+                          "lg",
+                          "xl"
+                        ],
+                        "description": "Title size."
+                      },
+                      {
+                        "type": "string",
+                        "pattern": "^\\{\\{\\s*[A-Za-z_][A-Za-z0-9_]{0,31}\\s*\\}\\}$",
+                        "description": "In components.json, {{param}} is replaced by the argument a placement passes."
+                      }
+                    ]
+                  }
+                },
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "ref": {
+                "const": "app:greetingHint"
+              }
+            },
+            "required": [
+              "ref"
+            ]
+          },
+          "then": {
+            "properties": {
+              "props": {
+                "type": "object",
+                "description": "Props of app:greetingHint.",
+                "properties": {
+                  "align": {
+                    "anyOf": [
+                      {
+                        "enum": [
+                          "left",
+                          "center",
+                          "right"
+                        ],
+                        "description": "Text alignment."
+                      },
+                      {
+                        "type": "string",
+                        "pattern": "^\\{\\{\\s*[A-Za-z_][A-Za-z0-9_]{0,31}\\s*\\}\\}$",
+                        "description": "In components.json, {{param}} is replaced by the argument a placement passes."
+                      }
+                    ]
+                  }
+                },
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "ref": {
+                "const": "app:brandMark"
+              }
+            },
+            "required": [
+              "ref"
+            ]
+          },
+          "then": {
+            "properties": {
+              "props": {
+                "type": "object",
+                "description": "Props of app:brandMark.",
+                "properties": {
+                  "size": {
+                    "anyOf": [
+                      {
+                        "type": "number",
+                        "minimum": 16,
+                        "maximum": 160,
+                        "description": "Width and height in px."
+                      },
+                      {
+                        "type": "string",
+                        "pattern": "^\\{\\{\\s*[A-Za-z_][A-Za-z0-9_]{0,31}\\s*\\}\\}$",
+                        "description": "In components.json, {{param}} is replaced by the argument a placement passes."
+                      }
+                    ]
+                  }
+                },
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "ref": {
+                "const": "app:appVersion"
+              }
+            },
+            "required": [
+              "ref"
+            ]
+          },
+          "then": {
+            "properties": {
+              "props": {
+                "type": "object",
+                "description": "Props of app:appVersion.",
+                "properties": {
+                  "prefix": {
+                    "anyOf": [
+                      {
+                        "type": "string",
+                        "maxLength": 20,
+                        "description": "Text before the version number, e.g. \"v\"."
+                      },
+                      {
+                        "type": "string",
+                        "pattern": "^\\{\\{\\s*[A-Za-z_][A-Za-z0-9_]{0,31}\\s*\\}\\}$",
+                        "description": "In components.json, {{param}} is replaced by the argument a placement passes."
+                      }
+                    ]
+                  },
+                  "align": {
+                    "anyOf": [
+                      {
+                        "enum": [
+                          "left",
+                          "center",
+                          "right"
+                        ],
+                        "description": "Text alignment."
+                      },
+                      {
+                        "type": "string",
+                        "pattern": "^\\{\\{\\s*[A-Za-z_][A-Za-z0-9_]{0,31}\\s*\\}\\}$",
+                        "description": "In components.json, {{param}} is replaced by the argument a placement passes."
+                      }
+                    ]
+                  }
+                },
+                "additionalProperties": false
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "ref": {
+                "const": "app:today"
+              }
+            },
+            "required": [
+              "ref"
+            ]
+          },
+          "then": {
+            "properties": {
+              "props": {
+                "type": "object",
+                "description": "Props of app:today.",
+                "properties": {
+                  "format": {
+                    "anyOf": [
+                      {
+                        "enum": [
+                          "short",
+                          "medium",
+                          "long",
+                          "full"
+                        ],
+                        "description": "Date style, in the UI language."
+                      },
+                      {
+                        "type": "string",
+                        "pattern": "^\\{\\{\\s*[A-Za-z_][A-Za-z0-9_]{0,31}\\s*\\}\\}$",
+                        "description": "In components.json, {{param}} is replaced by the argument a placement passes."
+                      }
+                    ]
+                  },
+                  "align": {
+                    "anyOf": [
+                      {
+                        "enum": [
+                          "left",
+                          "center",
+                          "right"
+                        ],
+                        "description": "Text alignment."
+                      },
+                      {
+                        "type": "string",
+                        "pattern": "^\\{\\{\\s*[A-Za-z_][A-Za-z0-9_]{0,31}\\s*\\}\\}$",
+                        "description": "In components.json, {{param}} is replaced by the argument a placement passes."
+                      }
+                    ]
+                  }
+                },
+                "additionalProperties": false
+              }
+            }
+          }
+        }
+      ]
+    }
+  }
+}

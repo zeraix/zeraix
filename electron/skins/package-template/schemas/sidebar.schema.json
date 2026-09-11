@@ -1,0 +1,386 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Zeraix skin sidebar (sidebar.json)",
+  "type": "object",
+  "additionalProperties": false,
+  "definitions": {
+    "icon": {
+      "description": "icon:<name> (a built-in icon in the current text colour) or an image in the package under assets/.",
+      "anyOf": [
+        {
+          "enum": [
+            "icon:sun",
+            "icon:moon",
+            "icon:sun-moon",
+            "icon:moon-star",
+            "icon:zap",
+            "icon:battery",
+            "icon:battery-charging",
+            "icon:cloud",
+            "icon:cloud-sun",
+            "icon:sparkles",
+            "icon:heart",
+            "icon:star",
+            "icon:leaf",
+            "icon:snowflake",
+            "icon:flame",
+            "icon:droplet",
+            "icon:wind",
+            "icon:umbrella",
+            "icon:thermometer",
+            "icon:bot",
+            "icon:brain",
+            "icon:message-square",
+            "icon:folder",
+            "icon:file-text",
+            "icon:check",
+            "icon:x",
+            "icon:plus",
+            "icon:arrow-right",
+            "icon:calendar",
+            "icon:clock",
+            "icon:settings",
+            "icon:user",
+            "icon:users",
+            "icon:house",
+            "icon:search",
+            "icon:bell",
+            "icon:shield",
+            "icon:lock",
+            "icon:key",
+            "icon:globe",
+            "icon:map-pin",
+            "icon:compass",
+            "icon:image",
+            "icon:music",
+            "icon:coffee",
+            "icon:gift",
+            "icon:rocket",
+            "icon:trophy",
+            "icon:flag",
+            "icon:bookmark",
+            "icon:tag",
+            "icon:layers",
+            "icon:grid-3x3",
+            "icon:cpu",
+            "icon:terminal",
+            "icon:code",
+            "icon:wand-sparkles",
+            "icon:palette",
+            "icon:activity",
+            "icon:trending-up",
+            "icon:chart-pie",
+            "icon:chart-bar",
+            "icon:smile",
+            "icon:ghost",
+            "icon:cat",
+            "icon:dog",
+            "icon:bird",
+            "icon:fish",
+            "icon:flower",
+            "icon:flower-2",
+            "icon:trees",
+            "icon:mountain",
+            "icon:waves",
+            "icon:anchor",
+            "icon:plane",
+            "icon:car",
+            "icon:bike",
+            "icon:gamepad-2",
+            "icon:headphones",
+            "icon:camera",
+            "icon:mic",
+            "icon:video",
+            "icon:lightbulb",
+            "icon:mail",
+            "icon:phone",
+            "icon:link",
+            "icon:external-link",
+            "icon:download",
+            "icon:upload",
+            "icon:refresh-cw",
+            "icon:loader",
+            "icon:info",
+            "icon:triangle-alert",
+            "icon:circle-question-mark",
+            "icon:wifi",
+            "icon:bluetooth",
+            "icon:volume-2"
+          ]
+        },
+        {
+          "type": "string",
+          "maxLength": 200,
+          "pattern": "^assets/[A-Za-z0-9_\\-./]+\\.(?:[pP][nN][gG]|[jJ][pP][gG]|[jJ][pP][eE][gG]|[wW][eE][bB][pP]|[gG][iI][fF]|[sS][vV][gG])$",
+          "not": {
+            "pattern": "\\.\\.|//"
+          },
+          "description": "An image in the package: assets/<path>.png, .jpg, .jpeg, .webp, .gif or .svg."
+        }
+      ]
+    },
+    "labelText": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 40,
+      "pattern": "\\S"
+    },
+    "label": {
+      "description": "Plain text, or text per locale with an optional default: { \"default\": \"Chat\", \"zh\": \"对话\" }.",
+      "anyOf": [
+        {
+          "$ref": "#/definitions/labelText"
+        },
+        {
+          "type": "object",
+          "minProperties": 1,
+          "maxProperties": 16,
+          "propertyNames": {
+            "pattern": "^(default|[a-z]{2}(-[A-Z]{2})?)$"
+          },
+          "additionalProperties": {
+            "$ref": "#/definitions/labelText"
+          }
+        }
+      ]
+    },
+    "navItem": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "icon": {
+          "$ref": "#/definitions/icon"
+        },
+        "iconDark": {
+          "$ref": "#/definitions/icon",
+          "description": "Used in dark mode; falls back to icon."
+        },
+        "activeIcon": {
+          "$ref": "#/definitions/icon",
+          "description": "Used while this item's page is open; falls back to icon."
+        },
+        "activeIconDark": {
+          "$ref": "#/definitions/icon",
+          "description": "Active, in dark mode; falls back to activeIcon, then iconDark, then icon."
+        },
+        "label": {
+          "$ref": "#/definitions/label"
+        },
+        "hidden": {
+          "type": "boolean"
+        }
+      }
+    },
+    "sectionItem": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "icon": {
+          "$ref": "#/definitions/icon"
+        },
+        "iconDark": {
+          "$ref": "#/definitions/icon",
+          "description": "Used in dark mode; falls back to icon."
+        },
+        "label": {
+          "$ref": "#/definitions/label"
+        },
+        "hidden": {
+          "type": "boolean"
+        }
+      }
+    },
+    "fixedItem": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "icon": {
+          "$ref": "#/definitions/icon"
+        },
+        "iconDark": {
+          "$ref": "#/definitions/icon",
+          "description": "Used in dark mode; falls back to icon."
+        },
+        "label": {
+          "$ref": "#/definitions/label"
+        }
+      }
+    }
+  },
+  "properties": {
+    "version": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "brand": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "logo": {
+          "type": "string",
+          "maxLength": 200,
+          "pattern": "^assets/[A-Za-z0-9_\\-./]+\\.(?:[pP][nN][gG]|[jJ][pP][gG]|[jJ][pP][eE][gG]|[wW][eE][bB][pP]|[gG][iI][fF]|[sS][vV][gG])$",
+          "not": {
+            "pattern": "\\.\\.|//"
+          },
+          "description": "The wordmark at the top of the sidebar."
+        },
+        "logoDark": {
+          "type": "string",
+          "maxLength": 200,
+          "pattern": "^assets/[A-Za-z0-9_\\-./]+\\.(?:[pP][nN][gG]|[jJ][pP][gG]|[jJ][pP][eE][gG]|[wW][eE][bB][pP]|[gG][iI][fF]|[sS][vV][gG])$",
+          "not": {
+            "pattern": "\\.\\.|//"
+          },
+          "description": "The wordmark in dark mode; falls back to logo."
+        },
+        "mark": {
+          "type": "string",
+          "maxLength": 200,
+          "pattern": "^assets/[A-Za-z0-9_\\-./]+\\.(?:[pP][nN][gG]|[jJ][pP][gG]|[jJ][pP][eE][gG]|[wW][eE][bB][pP]|[gG][iI][fF]|[sS][vV][gG])$",
+          "not": {
+            "pattern": "\\.\\.|//"
+          },
+          "description": "The square app logo: home screen, title bar, sign-in dialog."
+        },
+        "markDark": {
+          "type": "string",
+          "maxLength": 200,
+          "pattern": "^assets/[A-Za-z0-9_\\-./]+\\.(?:[pP][nN][gG]|[jJ][pP][gG]|[jJ][pP][eE][gG]|[wW][eE][bB][pP]|[gG][iI][fF]|[sS][vV][gG])$",
+          "not": {
+            "pattern": "\\.\\.|//"
+          },
+          "description": "The app logo in dark mode; falls back to mark."
+        },
+        "height": {
+          "type": "number",
+          "minimum": 12,
+          "maximum": 40,
+          "description": "Wordmark height, px."
+        },
+        "hidden": {
+          "type": "boolean",
+          "description": "Remove the wordmark."
+        }
+      }
+    },
+    "nav": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "order": {
+          "type": "array",
+          "uniqueItems": true,
+          "maxItems": 6,
+          "items": {
+            "enum": [
+              "new-chat",
+              "skills",
+              "automation",
+              "models",
+              "plugins",
+              "library"
+            ]
+          },
+          "description": "Listed items first, in this order; the rest follow in the built-in order."
+        },
+        "items": {
+          "type": "object",
+          "description": "Per nav item: icons, label, hidden.",
+          "additionalProperties": false,
+          "properties": {
+            "new-chat": {
+              "$ref": "#/definitions/navItem"
+            },
+            "skills": {
+              "$ref": "#/definitions/navItem"
+            },
+            "automation": {
+              "$ref": "#/definitions/navItem"
+            },
+            "models": {
+              "$ref": "#/definitions/navItem"
+            },
+            "plugins": {
+              "$ref": "#/definitions/navItem"
+            },
+            "library": {
+              "$ref": "#/definitions/navItem"
+            }
+          }
+        }
+      }
+    },
+    "sections": {
+      "type": "object",
+      "description": "The project tree: its title, or hide it.",
+      "additionalProperties": false,
+      "properties": {
+        "projects": {
+          "$ref": "#/definitions/sectionItem"
+        }
+      }
+    },
+    "tree": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "folderIcon": {
+          "$ref": "#/definitions/icon",
+          "description": "A project row's icon."
+        },
+        "folderOpenIcon": {
+          "$ref": "#/definitions/icon",
+          "description": "An expanded project row's icon; falls back to folderIcon."
+        }
+      }
+    },
+    "controls": {
+      "type": "object",
+      "description": "The sidebar's buttons: icon and tooltip. They cannot be hidden.",
+      "additionalProperties": false,
+      "properties": {
+        "collapse": {
+          "$ref": "#/definitions/fixedItem"
+        },
+        "expand": {
+          "$ref": "#/definitions/fixedItem"
+        },
+        "pin": {
+          "$ref": "#/definitions/fixedItem"
+        },
+        "userMenu": {
+          "$ref": "#/definitions/fixedItem"
+        }
+      }
+    },
+    "menu": {
+      "type": "object",
+      "description": "The account menu: icon and label. Entries cannot be hidden, so Settings stays reachable.",
+      "additionalProperties": false,
+      "properties": {
+        "settings": {
+          "$ref": "#/definitions/fixedItem"
+        },
+        "help": {
+          "$ref": "#/definitions/fixedItem"
+        },
+        "language": {
+          "$ref": "#/definitions/fixedItem"
+        },
+        "theme": {
+          "$ref": "#/definitions/fixedItem"
+        },
+        "wallet": {
+          "$ref": "#/definitions/fixedItem"
+        },
+        "logout": {
+          "$ref": "#/definitions/fixedItem"
+        },
+        "signIn": {
+          "$ref": "#/definitions/fixedItem"
+        }
+      }
+    }
+  }
+}

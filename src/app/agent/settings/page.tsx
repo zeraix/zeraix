@@ -20,6 +20,7 @@ import { useT } from "@/lib/i18n";
 import { cn } from "@/lib/utils";
 import CustomScrollbar, { PAGE_SCROLLBAR } from "@/components/CustomScrollbar";
 import { TITLE_BAR_HEIGHT_PX } from "@/components/layout/agent/titleBar";
+import { useTrafficLights } from "@/components/layout/agent/WindowControls";
 import { type SectionId, NAV, NAV_GROUPS, SECTION_KEYS, makeMatcher, setSettingsHash } from "./components/nav";
 import { parseSettingsHash } from "@/lib/deepLink";
 import { AccountSection } from "./components/AccountSection";
@@ -35,11 +36,10 @@ import { LogsSection } from "./components/LogsSection";
 import { AboutSection } from "./components/AboutSection";
 
 /**
- * The top band, drawn per column because this route is registered in AGENT_SELF_TITLED_PATHS
- * and so gets no title bar from the shell. Over the rail it is rail-toned, which is the whole
- * point -- the rail reaches the window's top edge instead of hanging under a full-width strip
- * of content tone. It also carries the window drag region the shell's row used to provide, and
- * leaves macOS's traffic lights somewhere to sit.
+ * The content column's top band, needed because this route is registered in AGENT_SELF_TITLED_PATHS
+ * and so gets no title bar from the shell. It carries the window drag region the shell's row used
+ * to provide and keeps the sections clear of the Windows / Linux window buttons. The rail does not
+ * use it: a full band there left the rail's header hanging ~74px down (see the rail's top block).
  */
 function TitleBand() {
   return (
@@ -73,6 +73,7 @@ const FLASH_MS = 1400;
 
 export default function AgentSettingsPage() {
   const t = useT();
+  const lights = useTrafficLights();
   const router = useRouter();
   const { userInfo, isLoggedIn, logOut } = useAuthStore();
   const requireLogin = useLoginModalStore((s) => s.requireLogin);
@@ -153,11 +154,19 @@ export default function AgentSettingsPage() {
     <div className="flex h-full min-h-0 w-full">
       {/* Secondary left column: search + section navigation */}
       <aside className="flex w-[260px] shrink-0 flex-col border-r border-line bg-sidebar px-3 pb-4">
-        <TitleBand />
-        {/* The full-screen page has no main sidebar, so provide a back entry here */}
-        <div className="mb-3 mt-6 flex items-center gap-2 px-1">
+        {/* Top block, laid out like the main sidebar's (AgentSidebar) so the header lands where its brand row does:
+            24px from the window's top edge, not under a whole title-bar band. On macOS Electron the native traffic
+            lights sit in that corner here (unmounting the main sidebar restores them), so the header drops below them
+            by the same 12px row + 16px gap the sidebar keeps for its own lights. `active`, not `show`: a browser draws
+            no lights on this page, so it reserves nothing. The block is the rail's drag region; the back button opts out.
+            The full-screen page has no main sidebar, so the back entry lives here. */}
+        <div
+          className={cn("mb-3 flex shrink-0 items-center gap-2 px-1 pt-6", lights.active && "pt-[52px]")}
+          style={{ WebkitAppRegion: "drag" } as React.CSSProperties}
+        >
           <button
             type="button"
+            style={{ WebkitAppRegion: "no-drag" } as React.CSSProperties}
             onClick={goBack}
             aria-label={t("settings.back")}
             title={t("settings.back")}

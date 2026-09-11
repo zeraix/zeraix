@@ -1,0 +1,49 @@
+# skin-engine: the trust boundary of the theming feature (docs/theming-feature-prompt-set-v2-rust-en.md).
+#
+# Everything a skin package can do to the filesystem happens here: reading the archive, validating
+# every entry before a byte is written, extracting into a temp directory that is swapped into place
+# atomically, and keeping the active-skin state file. The Electron main process only forwards calls
+# (electron/skins/engine.mjs) and the renderer only applies CSS variables. Keeping the whole security
+# check in one place means a new UI entry point never has to re-implement it.
+#
+# Node-API bindings are behind the `node` feature so that `cargo test` links without a Node host:
+# a test binary has nobody to resolve `napi_*` symbols against, so the glue must not be compiled into
+# it. scripts/build-skin-engine.mjs passes `--features node`; nothing else needs to.
+[package]
+name = "skin-engine"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+license = "Apache-2.0"
+publish = false
+
+[lib]
+# cdylib is the .node addon; rlib lets tests/security.rs and unit tests link the same code.
+crate-type = ["cdylib", "rlib"]
+
+[features]
+default = []
+node = ["dep:napi", "dep:napi-derive"]
+
+[dependencies]
+napi = { version = "3", optional = true }
+napi-derive = { version = "3", optional = true }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+semver = "1"
+thiserror = "2"
+# deflate only: every skin package tool writes deflate or stored entries; bzip2/zstd/lzma would add
+# native decoders that no package needs and that widen the surface a crafted archive can reach.
+zip = { version = "8", default-features = false, features = ["deflate-flate2-zlib-rs"] }
+
+[build-dependencies]
+napi-build = "2"
+
+[dev-dependencies]
+tempfile = "3"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = true

@@ -541,7 +541,8 @@ export default function BrowserPanel({
         ref={panelRef}
         // The width transition is dropped mid-drag: a 300ms ease on every mousemove leaves the edge
         // trailing the cursor instead of tracking it.
-        className={`relative h-full shrink-0 overflow-hidden border-l border-line bg-surface ${
+        // z-[6]: above the skin's corner photo (SkinDecor, z-[5]), which decorates the conversation, not the page shown here.
+        className={`relative z-[6] h-full shrink-0 overflow-hidden border-l border-line bg-surface ${
           resizing ? "" : "transition-[width] duration-300"
         } ${open && !maximized ? "min-w-[420px]" : ""}`}
         style={{ width: open ? (maximized ? "100%" : (width ?? "62%")) : 0 }}

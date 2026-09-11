@@ -114,7 +114,9 @@ export default function SkinDecor({ showCorner }: { showCorner: boolean }) {
       ) : null}
 
       {/* Wide windows only: on a narrow one the chat column reaches the corner and the photo would sit on text. */}
-      {/* The corner photo sits over the conversation, so "skin on the chat screen" off removes it. */}
+      {/* The corner photo sits over the conversation, so "skin on the chat screen" off removes it. It is z-[5] in the
+          shell's bottom-right, where the Files and Browser panels open: they sit at z-[6] so it goes under them rather
+          than over an editor or web page. Any new panel docked on the right needs the same. */}
       {showCorner && appearance.skinOnChat && corner ? (
         <div aria-hidden className="pointer-events-none absolute bottom-32 right-8 z-[5] hidden select-none xl:block">
           {/* eslint-disable-next-line @next/next/no-img-element */}

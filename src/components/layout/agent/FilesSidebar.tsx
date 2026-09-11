@@ -41,8 +41,12 @@ export default function FilesSidebar() {
         <TrafficLights />
       </div>
 
-      {/* File tree: the whole block scrolls */}
-      <div className="min-h-0 flex-1 overflow-y-auto px-2 pb-3">
+      {/* File tree: the whole block scrolls. no-drag because on Windows the strip above is 8px, so the first rows sit
+          inside the title-bar band, where a drag region laid down earlier in the DOM would take their clicks. */}
+      <div
+        className="min-h-0 flex-1 overflow-y-auto px-2 pb-3"
+        style={{ WebkitAppRegion: "no-drag" } as React.CSSProperties}
+      >
         <FilesTree />
       </div>
     </aside>

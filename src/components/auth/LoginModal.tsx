@@ -77,7 +77,7 @@ export default function LoginModal() {
     <Dialog open={open} onOpenChange={(o) => !o && resolveLogin(false)}>
       <DialogContent className="sm:max-w-[380px]">
         <DialogHeader className="items-center text-center">
-          <Image src={logoSrc} alt="Zeraix" width={44} height={40} priority className="mb-1" />
+          <Image src={logoSrc} alt="Zeraix" width={44} height={40} priority className="mb-1 object-contain" />
           <DialogTitle className="text-lg">{t("auth.loginRequired")}</DialogTitle>
           <DialogDescription>{t("auth.loginRequiredDesc")}</DialogDescription>
         </DialogHeader>

@@ -430,6 +430,40 @@ contextBridge.exposeInMainWorld("skins", {
   },
 });
 
+// Skin packages (electron/skins/engine.mjs -> native/skin-engine): .skinpkg archives validated, extracted and stored by
+// the Rust engine. Every async call resolves to { ok: true, ... } or { ok: false, error: { code, message, detail } } --
+// `code` maps to a translated message in the UI, `detail` names the offending file or value. getActiveSync is for first
+// paint, like skins.listSync above. Namespaced skinpkg: because skins: belongs to the v1 data skins.
+contextBridge.exposeInMainWorld("skinAPI", {
+  getActiveSync: () => ipcRenderer.sendSync("skinpkg:get-active-sync"),
+  available: () => ipcRenderer.invoke("skinpkg:available"),
+  list: () => ipcRenderer.invoke("skinpkg:list"),
+  getActive: () => ipcRenderer.invoke("skinpkg:get-active"),
+  setActive: (id) => ipcRenderer.invoke("skinpkg:set-active", id),
+  delete: (id) => ipcRenderer.invoke("skinpkg:delete", id),
+  /** Install a package by host path (a dropped file's path via aiTools.getPathForFile, say). */
+  install: (filePath) => ipcRenderer.invoke("skinpkg:install", filePath),
+  /** Validate a package by host path without installing it. */
+  inspect: (filePath) => ipcRenderer.invoke("skinpkg:inspect", filePath),
+  /** Native file picker restricted to .skinpkg, then install; { ok: false, canceled: true } when dismissed. */
+  pick: () => ipcRenderer.invoke("skinpkg:pick"),
+  /** A .json / .css file of an installed package (the active one when `id` is omitted): { ok, text } with text null
+   *  when the package has no such file. The renderer cannot fetch() these from skin:// (cross-origin custom schemes
+   *  are refused by Chromium), so they travel over IPC. */
+  readText: (rel, id) => ipcRenderer.invoke("skinpkg:read-text", rel, id),
+  /** Check a layout.json (and optional components.json) exactly as the installer would. */
+  validateLayout: (layout, components) => ipcRenderer.invoke("skinpkg:validate-layout", layout, components),
+  /** Save dialog + write: { defaultName, text } -> { ok: true, path } | { ok: false, canceled } | failure. */
+  exportText: (payload) => ipcRenderer.invoke("skinpkg:export-text", payload),
+  /** Save dialog + write the official package template zip: { ok: true, path } | { ok: false, canceled } | failure. */
+  downloadTemplate: () => ipcRenderer.invoke("skinpkg:download-template"),
+  onChanged: (cb) => {
+    const h = (_e, payload) => cb(payload);
+    ipcRenderer.on("skinpkg:changed", h);
+    return () => ipcRenderer.off("skinpkg:changed", h);
+  },
+});
+
 // Token-usage log (electron/store/usageLogStore.mjs). Model invocations are recorded by the LLM proxy
 // in the main process; the renderer contributes what only it knows — which actor made a tool call, and
 // what a sub-agent was delegated. Off by default; `append` is fire-and-forget so the chat loop never
