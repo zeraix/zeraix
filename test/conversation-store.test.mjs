@@ -3,8 +3,7 @@
  *
  * Pins the property the change exists for: a result above BLOB_MIN_CHARS is written once, as its own file,
  * and the project document stays small however many times the project is saved afterwards. Runs against the
- * real module through the Electron stub, so the encryption envelope (plain-key mode, no keychain) is on the
- * path too.
+ * real module through the Electron stub.
  */
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -40,7 +39,7 @@ test("a large result is stored out of line, the document stays small, and load p
   assert.ok(doc.size < 64 * 1024, `document is ${doc.size} bytes; the 4 MB result must not be in it`);
   const files = await blobs("p1");
   assert.equal(files.length, 1, `one blob file, got ${files}`);
-  assert.match(files[0], /^[0-9a-f]{64}\.(txt|enc)$/);
+  assert.match(files[0], /^[0-9a-f]{64}\.txt$/);
 
   const loaded = await store.loadProject("p1");
   assert.deepEqual(loaded.conversations, [conv(big)]);

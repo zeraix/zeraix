@@ -20,7 +20,6 @@ import "./electron-stub-hook.mjs";
 
 register("../test/helpers/srcResolve.mjs", import.meta.url);
 const store = await import("../electron/store/conversationStore.mjs");
-const { encryptionStatus } = await import("../electron/integrity/integrityStore.mjs");
 const { buildWireContext, indexCalls, resultCeilingTokens, withholdOversizedResults } = await import(
   "../src/app/agent/chat/contextCompress.ts"
 );
@@ -70,11 +69,10 @@ check("store: document size", doc.size / 1024, "KB", "≤ 64", doc.size <= 64 * 
 const blobFiles = await fs.readdir(path.join(dir, "conversations", "p1.blobs"));
 check("store: blob files", blobFiles.length, "", "= 1", blobFiles.length === 1);
 // Over INLINE_LOAD_MAX_CHARS the blob is not read at all: the document comes back with a note in its place and the
-// process holds no copy of the result. Reading it — decrypt, stringify, clone to the renderer — used to be the whole
+// process holds no copy of the result. Reading it — stringify, clone to the renderer — used to be the whole
 // cost of opening the app (1.4 GB resident for a 200 MB result, 2026-09-04), so the target here is "did not read it".
-const encrypted = encryptionStatus().enabled;
 const load = await timed(() => store.loadProject("p1"));
-check(`store: load (${encrypted ? "encrypted" : "plaintext"})`, load.ms, "ms", "≤ 100", load.ms <= 100);
+check("store: load", load.ms, "ms", "≤ 100", load.ms <= 100);
 check("store: heap after load", load.heapDelta, "MB", "≤ 16", load.heapDelta <= 16);
 const loadedContent = load.v.conversations[0].messages[1].content;
 const asNote = /^\[…… a [\d,]+-character tool result from an earlier session is kept on disk/.test(loadedContent);

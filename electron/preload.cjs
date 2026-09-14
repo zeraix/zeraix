@@ -313,13 +313,10 @@ contextBridge.exposeInMainWorld("agentStore", {
   choosePath: () => ipcRenderer.invoke("agent-store:choose-path"),
 });
 
-// Chat integrity: device identifier, encryption status, and reading/writing of the per-session integrity metadata sidecar.
-// Encryption is transparent to the renderer (body encryption/decryption happens automatically in the main process as it is written to disk); only metadata and identifiers are exposed here.
+// Chat integrity: device identifier and reading/writing of the per-session integrity metadata sidecar.
 contextBridge.exposeInMainWorld("chatIntegrity", {
   /** Get the stable local deviceId (generated and persisted on first use). */
   getDeviceId: () => ipcRenderer.invoke("integrity:get-device-id"),
-  /** Encryption status { enabled, mode: "keychain" | "plain" | "disabled" }. */
-  encryptionStatus: () => ipcRenderer.invoke("integrity:encryption-status"),
   /** Read the integrity metadata of a session (returns null if it does not exist). */
   loadMeta: (chatId) => ipcRenderer.invoke("integrity:load-meta", chatId),
   /** Overwrite the integrity metadata of a session. */

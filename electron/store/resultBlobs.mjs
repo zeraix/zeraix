@@ -11,8 +11,8 @@
  * addressing is what makes the write happen once: the same text saved again hashes to a file that already exists.
  * On load the references are resolved and the text put back, so nothing outside the store ever sees one.
  *
- * This module is the pure half — the walk, the hash, the reference shape. Where the files live, how they are
- * encrypted, and when orphans are swept is conversationStore's business.
+ * This module is the pure half — the walk, the hash, the reference shape. Where the files live and when orphans
+ * are swept is conversationStore's business.
  */
 import { createHash } from "node:crypto";
 

@@ -47,8 +47,6 @@ import { registerAppearance } from "./appearance.mjs";
 import { registerSkins, serveSkinFile, SKINS_PREFIX } from "./skins/store.mjs";
 import { SKIN_SCHEME_PRIVILEGES, registerSkinPackages, registerSkinProtocol } from "./skins/engine.mjs";
 import {
-  initIntegrity,
-  encryptionStatus,
   getDeviceId,
   loadMeta,
   saveMeta,
@@ -875,13 +873,11 @@ function registerAgentStore() {
 }
 
 /**
- * Chat integrity IPC: renderer window.chatIntegrity.* -> main process manages the deviceId, encryption status,
+ * Chat integrity IPC: renderer window.chatIntegrity.* -> main process manages the deviceId
  * and each conversation's integrity metadata sidecar (version/hash/signature, pure metadata, no body).
- * Encryption itself is transparent to the renderer (conversationStore encrypts/decrypts automatically on disk I/O).
  */
 function registerIntegrity() {
   ipcMain.handle("integrity:get-device-id", () => getDeviceId());
-  ipcMain.handle("integrity:encryption-status", () => encryptionStatus());
   ipcMain.handle("integrity:load-meta", (_e, chatId) => loadMeta(chatId));
   ipcMain.handle("integrity:save-meta", (_e, { chatId, meta }) => saveMeta(chatId, meta));
   ipcMain.handle("integrity:delete-meta", (_e, chatId) => deleteMeta(chatId));
@@ -1112,8 +1108,6 @@ app.whenReady().then(async () => {
   // Skin packages: the Rust engine's IPC surface and the skin:// file protocol (electron/skins/engine.mjs).
   registerSkinPackages();
   registerSkinProtocol();
-  // Initialize the encryption master key first (safeStorage needs app ready); afterward conversationStore reads/writes are transparently encrypted/decrypted.
-  initIntegrity();
   registerAppConfig();
   // After registerAppConfig (it reads [ui] from the loaded config) and before the first window is
   // created, so nativeTheme.themeSource is already right when that window picks its background.

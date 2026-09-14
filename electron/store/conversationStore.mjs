@@ -4,14 +4,15 @@
  * Layout (under the "storage directory" STORE_DIR, default userData/agent):
  *   index.json                            -- array of project metadata { projects: [...] }
  *   conversations/<projectId>.json        -- a single project's conversations { conversations: [...] }
- *   conversations/<projectId>.blobs/<sha256>.txt|.enc
+ *   conversations/<projectId>.blobs/<sha256>.txt
  *                                         -- the large strings of that project's conversations, one file each,
- *                                            referenced from the JSON (see resultBlobs.mjs); .enc when encrypted
- *                                            (raw AES-GCM bytes, not the JSON envelope: see encryptBytes)
+ *                                            referenced from the JSON (see resultBlobs.mjs)
  * The user can change the storage directory in settings; the chosen directory is recorded in userData/agent/store-config.json (a fixed location).
  *
  * Compatibility: if index.json is absent but the legacy single-file conversations.json exists, migrate it into the new
  * layout by regrouping on "working directory + mode" (the old file is not deleted, kept as a backup). A read failure always falls back to empty and does not throw.
+ * Releases up to v2.1.0 encrypted the project file and wrote blobs as <sha256>.enc: both are still read (legacyDecrypt.mjs),
+ * and the next save of that project replaces them with plaintext.
  */
 import { app } from "electron";
 import fs from "node:fs/promises";
@@ -19,14 +20,7 @@ import fssync from "node:fs";
 import path from "node:path";
 import { recordRecovery } from "./recoveryLog.mjs";
 import { randomUUID } from "node:crypto";
-import {
-  encryptJson,
-  decryptEnvelope,
-  isEnvelope,
-  isEncryptionEnabled,
-  encryptBytes,
-  decryptBytes,
-} from "../integrity/integrityStore.mjs";
+import { decryptLegacyBytes, decryptLegacyEnvelope, isLegacyEnvelope } from "./legacyDecrypt.mjs";
 import {
   collectBlobRefs,
   detachLargeStrings,
@@ -50,7 +44,9 @@ const convDir = () => path.join(STORE_DIR, "conversations");
 const safeId = (id) => String(id ?? "").replace(/[^a-zA-Z0-9_-]/g, "");
 const convFile = (id) => path.join(convDir(), `${safeId(id)}.json`);
 const blobDir = (id) => path.join(convDir(), `${safeId(id)}.blobs`);
-const blobFile = (id, hash, encrypted) => path.join(blobDir(id), `${hash}.${encrypted ? "enc" : "txt"}`);
+const blobFile = (id, hash) => path.join(blobDir(id), `${hash}.txt`);
+/** The same blob as an earlier release wrote it, encrypted (legacyDecrypt.mjs). */
+const legacyBlobFile = (id, hash) => path.join(blobDir(id), `${hash}.enc`);
 
 function existsSync(p) {
   try {
@@ -187,8 +183,8 @@ export function isProjectUnreadable(projectId) {
  *
  * Only for a JSON parse failure: those bytes are structurally not a document, so preserving them under another name
  * is strictly better than leaving them where the next save would land. A *decryption* failure is deliberately not
- * quarantined — the ciphertext may be perfectly good and only the key missing, and renaming a user's intact data
- * because their keychain was locked would be the worse error.
+ * quarantined — the ciphertext of a file an earlier release encrypted may be perfectly good and only the key missing,
+ * and renaming a user's intact data because their keychain was locked would be the worse error.
  */
 async function quarantine(file, projectId, reason) {
   const target = `${file}.corrupt-${Date.now()}`;
@@ -207,8 +203,8 @@ export async function loadProject(projectId) {
   ensureInit();
   try {
     const raw = JSON.parse(await fs.readFile(convFile(projectId), "utf8"));
-    // Encrypted envelope -> decrypt to retrieve { conversations }; legacy plaintext -> read as-is (lazy migration: the next write encrypts it).
-    const data = isEnvelope(raw) ? decryptEnvelope(raw) : raw;
+    // A file an earlier release encrypted is decrypted here; the next save writes it back as plaintext.
+    const data = isLegacyEnvelope(raw) ? decryptLegacyEnvelope(raw) : raw;
     unreadable.delete(projectId); // read cleanly: whatever was wrong before is not wrong now
     return { conversations: Array.isArray(data?.conversations) ? await withBlobsInlined(projectId, data.conversations) : [] };
   } catch (e) {
@@ -297,12 +293,7 @@ async function writeProject(projectId, conversations) {
     const blobs = new Map();
     const payload = detachLargeStrings({ conversations: safe }, (hash, text) => blobs.set(hash, text));
     for (const [hash, text] of blobs) await writeBlob(projectId, hash, text);
-    // If encryption is available, write a ciphertext envelope; otherwise plaintext (degraded / uninitialized). The read path supports both.
-    const envelope = isEncryptionEnabled() ? encryptJson(payload) : null;
-    const body = envelope
-      ? JSON.stringify(envelope)
-      : JSON.stringify(payload, null, 2);
-    await writeAtomic(convFile(projectId), body);
+    await writeAtomic(convFile(projectId), JSON.stringify(payload, null, 2));
     await sweepBlobs(projectId, collectBlobRefs(payload));
     return true;
   } catch (e) {
@@ -329,7 +320,7 @@ async function writeAtomic(file, body) {
   let handle;
   try {
     handle = await fs.open(tmp, "w");
-    await handle.writeFile(body, Buffer.isBuffer(body) ? undefined : "utf8");
+    await handle.writeFile(body, "utf8");
     await handle.sync(); // the bytes are on the disk before anything points at them
   } finally {
     await handle?.close().catch(() => {});
@@ -351,35 +342,36 @@ async function syncDir(dir) {
   }
 }
 
-/**
- * Write one blob unless it is already there. Encrypted when the store is, as raw bytes (encryptBytes — the
- * JSON envelope would cost three copies of a 100 MB string); a plaintext copy left from before encryption
- * was turned on is replaced, the same lazy migration the document gets.
- */
+/** Write one blob unless it is already there. An encrypted copy an earlier release left is removed by the sweep. */
 async function writeBlob(projectId, hash, text) {
-  const encrypted = isEncryptionEnabled();
-  const target = blobFile(projectId, hash, encrypted);
+  const target = blobFile(projectId, hash);
   if (existsSync(target)) return;
   await fs.mkdir(blobDir(projectId), { recursive: true });
-  await writeAtomic(target, encrypted ? encryptBytes(Buffer.from(text, "utf8")) : text);
-  if (encrypted) await fs.rm(blobFile(projectId, hash, false), { force: true });
+  await writeAtomic(target, text);
 }
 
-/** The text of one blob, or null when it is unreadable — the caller substitutes a note, never throws. */
-async function readBlob(projectId, hash) {
+/**
+ * What goes where one blob's reference was, never throwing: its text, or the "missing" note when no copy is left.
+ *
+ * An encrypted copy from an earlier release that cannot be decrypted gets the "not loaded" note instead. The
+ * ciphertext may be intact with only the key unavailable, and that note — unlike the "missing" one — becomes the
+ * reference again on the next save, so the sweep keeps the file rather than deleting it.
+ */
+async function readBlob(projectId, hash, n) {
   try {
-    return decryptBytes(await fs.readFile(blobFile(projectId, hash, true))).toString("utf8");
+    return await fs.readFile(blobFile(projectId, hash), "utf8");
   } catch (e) {
     if (e?.code !== "ENOENT") {
       console.error("readBlob failed:", e);
-      return null;
+      return missingBlobNote(n);
     }
   }
   try {
-    return await fs.readFile(blobFile(projectId, hash, false), "utf8");
+    return decryptLegacyBytes(await fs.readFile(legacyBlobFile(projectId, hash))).toString("utf8");
   } catch (e) {
-    if (e?.code !== "ENOENT") console.error("readBlob failed:", e);
-    return null;
+    if (e?.code === "ENOENT") return missingBlobNote(n);
+    console.error("readBlob failed:", e);
+    return unloadedBlobNote(hash, n);
   }
 }
 
@@ -387,21 +379,22 @@ async function readBlob(projectId, hash) {
  * Resolve the references in a loaded document: the text for blobs worth loading, a note for the rest.
  *
  * A blob over the per-blob cap, or past the project's total budget (resultBlobs.selectBlobsToLoad), is not read
- * — not decrypted, not stringified, not sent to the renderer. Its note names it, and the save path turns the note
- * back into the reference (detachLargeStrings), so the file is kept for as long as the conversation is.
+ * — not stringified, not sent to the renderer. Its note names it, and the save path turns the note back into the
+ * reference (detachLargeStrings), so the file is kept for as long as the conversation is.
  */
 async function withBlobsInlined(projectId, conversations) {
   const refs = collectBlobRefs(conversations);
   if (refs.size === 0) return conversations;
   const chosen = selectBlobsToLoad(refs);
   const texts = new Map();
-  for (const hash of chosen) texts.set(hash, await readBlob(projectId, hash));
-  return inlineBlobs(conversations, (hash, n) =>
-    chosen.has(hash) ? (texts.get(hash) ?? missingBlobNote(n)) : unloadedBlobNote(hash, n),
-  );
+  for (const hash of chosen) texts.set(hash, await readBlob(projectId, hash, refs.get(hash)));
+  return inlineBlobs(conversations, (hash, n) => (chosen.has(hash) ? texts.get(hash) : unloadedBlobNote(hash, n)));
 }
 
-/** Delete the blob files the document no longer references — a deleted conversation's results, a stray temp file. */
+/**
+ * Delete the blob files the document no longer needs: a deleted conversation's results, a stray temp file, and an
+ * .enc an earlier release encrypted once its .txt exists. While the .enc is the only copy, it stays.
+ */
 async function sweepBlobs(projectId, referenced) {
   let names;
   try {
@@ -409,9 +402,10 @@ async function sweepBlobs(projectId, referenced) {
   } catch {
     return; // no blob directory: nothing to sweep
   }
+  const present = new Set(names);
   for (const name of names) {
     const hash = name.slice(0, name.indexOf("."));
-    const keep = referenced.has(hash) && (name.endsWith(".txt") || name.endsWith(".enc"));
+    const keep = referenced.has(hash) && (name.endsWith(".txt") || (name.endsWith(".enc") && !present.has(`${hash}.txt`)));
     if (!keep) await fs.rm(path.join(blobDir(projectId), name), { force: true });
   }
 }
