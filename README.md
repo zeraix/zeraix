@@ -51,11 +51,12 @@ Local inference and local tools can work offline after setup. Web search, remote
 
 ## News
 
-- **[2026-09-09 · v2.0.0 — Stable]** Zeraix 2.0 brings the beta-cycle features into a stable release: Rust-based core tool execution, sub-agent inspection and cancellation, tool-approval modes, recovery notices, built-in document Skills, media management, and configurable generation services. It also completes the built-in file-tool migration to Rust, adds in-place model/engine editing, and improves large-result handling, sandbox job tracking, and Windows startup behavior. [Release notes](https://github.com/zeraix/zeraix/releases/tag/v2.0.0)
+- **[2026-09-11 · v2.1.0]** Zeraix 2.1 focuses on customization: a new Appearance section (theme, accent color, text size), four seasonal skins plus a skin editor, installable skin packages (`.zip`) that can restyle the app and redesign the sidebar/home greeting, an official package template with a build guide, and a native security-checking engine that validates packages before install. [Release notes](https://github.com/zeraix/zeraix/releases/tag/v2.1.0)
 
 <details>
 <summary>Earlier updates</summary>
-
+  
+- **[2026-09-09 · v2.0.0 — Stable]** Zeraix 2.0 brings the beta-cycle features into a stable release: Rust-based core tool execution, sub-agent inspection and cancellation, tool-approval modes, recovery notices, built-in document Skills, media management, and configurable generation services. It also completes the built-in file-tool migration to Rust, adds in-place model/engine editing, and improves large-result handling, sandbox job tracking, and Windows startup behavior. [Release notes](https://github.com/zeraix/zeraix/releases/tag/v2.0.0)
 - **[2026-09-08 · v2.0.0-beta.2]** Added built-in document Skills, crash-recovery infrastructure, a plugin catalogue with detail views, reorganized settings, and tool-approval modes. [Release notes](https://github.com/zeraix/zeraix/releases/tag/v2.0.0-beta.2)
 - **[2026-09-04 · v2.0.0-beta.1]** Added individual sub-agent cancellation and improved large-file handling, conversation storage, context budgeting, and sandbox startup feedback. [Release notes](https://github.com/zeraix/zeraix/releases/tag/v2.0.0-beta.1)
 - **[2026-09-03 · v2.0.0-beta.0]** Moved core tool execution into the Rust Agent Runtime, added the sub-agent Execution Inspector, and introduced unified media previews. [Release notes](https://github.com/zeraix/zeraix/releases/tag/v2.0.0-beta.0)
@@ -72,7 +73,7 @@ Earlier model optimization results are collected in [Model Systems Notes](MODEL_
 
 | Channel | Version | Downloads |
 |---|---|---|
-| Stable | v2.0.0 | [macOS](https://github.com/zeraix/zeraix/releases/download/v2.0.0/Zeraix-intl-2.0.0.dmg) · [Windows](https://github.com/zeraix/zeraix/releases/download/v2.0.0/Zeraix-intl-2.0.0.exe) |
+| Stable | v2.1.0 | [macOS](https://github.com/zeraix/zeraix/releases/download/v2.1.0/Zeraix-intl-2.1.0.dmg) · [Windows](https://github.com/zeraix/zeraix/releases/download/v2.1.0/Zeraix-intl-2.1.0.exe) |
 
 **2.0 is the current stable release**, including the features introduced during the 2.0 beta cycle. See [all releases](https://github.com/zeraix/zeraix/releases) for release notes, older builds, and future previews. The `main` branch may contain changes newer than the available installers.
 
