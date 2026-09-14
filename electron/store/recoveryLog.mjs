@@ -8,7 +8,7 @@
  *
  * Deliberately synchronous and tiny. A recovery event is rare and usually adjacent to a crash, so it has to be
  * on disk by the time the call returns; buffering it the way the usage log does would lose exactly the entries
- * this file exists for. No electron import: main.mjs hands the folder in, and a plain node test can do the same.
+ * this file exists for. No electron import: main/startupRecovery.mjs hands the folder in, and a plain node test can do the same.
  *
  * Layout: <dir>/recovery.jsonl, rotated once to recovery.1.jsonl past MAX_BYTES. Never throws.
  */

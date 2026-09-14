@@ -931,7 +931,7 @@ export async function tryRunTool(name, args, { signal, workdir, assetDir, callId
       "tool.call",
       // `asset_dir` is the read-only second root (the media library). Sent per call for the same reason
       // `workdir` is: it can change while the app runs — Settings → General moves the data storage
-      // location, and the library moves with it (main.mjs syncAssetRoot). An older runtime ignores it.
+      // location, and the library moves with it (main/assetRoot.mjs syncAssetRoot). An older runtime ignores it.
       { name, args: args ?? {}, workdir, asset_dir: assetDir || null, call_id: id },
       CALL_TIMEOUT_MS,
     );

@@ -12,7 +12,7 @@ import { register } from "node:module";
 register("./helpers/srcResolve.mjs", import.meta.url);
 const { resolveDeepLink, parseSettingsHash } = await import("../src/lib/deepLink.ts");
 
-/** What main.mjs sends: the URL, already parsed. */
+/** What main/deepLinks.mjs sends: the URL, already parsed. */
 const link = (url) => {
   const u = new URL(url);
   return { url, host: u.host, pathname: u.pathname, params: Object.fromEntries(u.searchParams) };

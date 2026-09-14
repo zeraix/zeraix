@@ -102,7 +102,7 @@ test("every kind of child this app spawns is recorded for the sweep", () => {
     ["electron/tools/sandbox/native.mjs", /recordChild\(/, "commands and background services"],
     ["electron/mcp/client.mjs", /recordChild\(e\.pid, `mcp server:/, "MCP stdio servers"],
     ["electron/tools/terminal.mjs", /recordChild\(pty\.pid, `terminal:/, "terminal shells"],
-    ["electron/main.mjs", /recordChild\(automationChild\.pid, "automation: cdpAgent"\)/, "the automation child"],
+    ["electron/ipc/browserAutomationIpc.mjs", /recordChild\(automationChild\.pid, "automation: cdpAgent"\)/, "the automation child"],
   ];
   for (const [file, pattern, what] of cases) {
     assert.match(read(file), pattern, `${what} are recorded (${file})`);
@@ -113,13 +113,13 @@ test("each new record is paired with a forget, so the file never names a dead pi
   // An unpaired record is not harmless: the next launch would try to kill a pid that has since been reused.
   assert.match(read("electron/mcp/client.mjs"), /if \(e\.pid\) forgetChild\(e\.pid\);/);
   assert.match(read("electron/tools/terminal.mjs"), /forgetChild\(pty\.pid\);/);
-  assert.match(read("electron/main.mjs"), /if \(automationChild\?\.pid\) forgetChild\(automationChild\.pid\);/);
+  assert.match(read("electron/ipc/browserAutomationIpc.mjs"), /if \(automationChild\?\.pid\) forgetChild\(automationChild\.pid\);/);
 });
 
 test("the sweep runs before anything else writes to those directories", () => {
-  const main = read("electron/main.mjs");
-  const sweep = main.indexOf("sweepAndRecord([");
-  const orphans = main.indexOf("void reapOrphans()");
+  const recovery = read("electron/main/startupRecovery.mjs");
+  const sweep = recovery.indexOf("sweepAndRecord([");
+  const orphans = recovery.indexOf("void reapOrphans()");
   assert.ok(sweep !== -1 && orphans !== -1);
   assert.ok(sweep < orphans, "the temp sweep is part of the same startup recovery pass");
 });

@@ -18,7 +18,7 @@ import { fileURLToPath } from "node:url";
 const root = fileURLToPath(new URL("../", import.meta.url));
 const qemu = fs.readFileSync(path.join(root, "electron/tools/sandbox/qemu.mjs"), "utf8");
 const control = fs.readFileSync(path.join(root, "electron/tools/sandbox/control.mjs"), "utf8");
-const main = fs.readFileSync(path.join(root, "electron/main.mjs"), "utf8");
+const recovery = fs.readFileSync(path.join(root, "electron/main/startupRecovery.mjs"), "utf8");
 
 function block(src, start, end) {
   const a = src.indexOf(start);
@@ -67,7 +67,7 @@ test("waking from sleep is treated as a partial crash", () => {
   assert.match(probe, /vm\.guest\.exec\("\/bin\/true", \[\]\)/, "a probe, not a real command");
   assert.match(probe, /await restartAfterDeath\(/);
   assert.match(probe, /recordRecovery\("sandbox", "unresponsive-after-resume"/);
-  assert.match(main, /powerMonitor\.on\("resume"/, "and the host actually subscribes to it");
+  assert.match(recovery, /powerMonitor\.on\("resume"/, "and the host actually subscribes to it");
 });
 
 test("the probe stands down while a real command is in flight", () => {

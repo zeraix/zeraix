@@ -3,7 +3,7 @@
  *
  * Channel prefix is `wf:` and the preload surface is `window.workflows` -- deliberately NOT
  * `automation:` / `window.automation`, which are already taken by the <webview> CDP browser panel
- * (electron/main.mjs registerAutomation). Its `automation:event` channel is broadcast to every
+ * (electron/ipc/browserAutomationIpc.mjs). Its `automation:event` channel is broadcast to every
  * window, so reusing the name would deliver workflow events to the browser panel's handler and vice
  * versa.
  *

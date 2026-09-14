@@ -7,7 +7,7 @@
  * id_token inside the app, so the deep link's only job is to "bring the user back from the
  * browser to the app" — it does not carry any token.
  *
- * Platform differences (main.mjs consumes this module's parse result):
+ * Platform differences (main/deepLinks.mjs consumes this module's parse result):
  *   - macOS: the system fires an `open-url` event and hands the URL over directly;
  *   - Windows/Linux: the system launches it as a "new process + URL in argv", relying on the
  *     single-instance lock to hand it back to the first instance, then extracts the URL from

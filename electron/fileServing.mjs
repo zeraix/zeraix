@@ -4,7 +4,7 @@
  * The renderer cannot show a disk path — `<img src="C:\\…">` renders nothing — and refuses `file://`
  * cross-origin. So anything the UI wants to display from disk is served from `app://localhost/`, the same
  * origin as the UI itself, and becomes an ordinary <img>, <video> or <iframe>. Two folders are served this
- * way: the media library (by basename, see handleAppRequest in main.mjs) and, here, the WORKING DIRECTORY,
+ * way: the media library (by basename, see handleAppRequest in main/appProtocol.mjs) and, here, the WORKING DIRECTORY,
  * so the Files panel can show a picture or a PDF the tree was clicked on.
  *
  * The workspace route resolves through the same boundary as the file tools (tools/paths.mjs): a path is

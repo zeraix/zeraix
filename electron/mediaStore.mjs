@@ -24,7 +24,7 @@ import fsSync from "node:fs";
 import path from "node:path";
 import { shell } from "electron";
 
-/** Resolved by the caller (main.mjs owns the store path); "" until it is set. */
+/** Resolved by the caller (main/assetRoot.mjs derives it from the store path); "" until it is set. */
 let MEDIA_DIR = "";
 
 export function setMediaDir(dir) {

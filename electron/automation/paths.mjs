@@ -31,7 +31,7 @@ let notifier = null;
 let expiryTimer = null;
 let scheduler = null;
 
-/** Inject the notification service (created in main.mjs, which owns the window accessors). */
+/** Inject the notification service (created in main.mjs from main/window.mjs's window accessors). */
 export function setAutomationNotifier(service) {
   notifier = service;
 }
@@ -79,7 +79,7 @@ export function initAutomation(dir) {
           type: "warning",
           priority: "high",
           // Clicking routes into the app, creating a window first if none exists (see
-          // ensureMainWindow in main.mjs) -- otherwise a click in tray mode would do nothing.
+          // ensureMainWindow in main/window.mjs) -- otherwise a click in tray mode would do nothing.
           route: `/agent/automation?run=${encodeURIComponent(runId)}`,
         });
       } catch (e) {

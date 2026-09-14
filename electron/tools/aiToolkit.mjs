@@ -35,7 +35,7 @@ import { ensureProjectMemory, summarise as summariseMemory } from "./projectMemo
 import { rememberProject } from "./projectMemory/remember.mjs";
 import { noteFileRead, resetObservations } from "./projectMemory/observations.mjs";
 import { noteUserMessage, resetConversationCapture } from "./projectMemory/conversation.mjs";
-// MCP tools join the registry here rather than at each call site: the chat IPC (main.mjs), the agent
+// MCP tools join the registry here rather than at each call site: the chat IPC (ipc/aiToolsIpc.mjs), the agent
 // loop (agent/turn.mjs) and the automation dispatcher (automation/paths.mjs) all already go through
 // listTools/runTool, so one merge lights MCP up in all three. See docs/mcp-integration.md.
 import { callMcpTool, isMcpTool, listMcpTools } from "../mcp/client.mjs";
@@ -61,7 +61,7 @@ import { capturePageConsole } from "./pageConsole.mjs";
 // Command execution is abstracted into a pluggable engine (native = run directly on the host
 // (legacy behavior); qemu = hardware-isolated VM, see the probing/selection in
 // ./sandbox/engine.mjs). Here we re-export the engine layer's public interface unchanged, so
-// main.mjs's existing imports (setServiceEventHandler / stopProcess / listProcesses /
+// existing imports in ipc/aiToolsIpc.mjs and main/shutdown.mjs (setServiceEventHandler / stopProcess / listProcesses /
 // stopBackgroundProcs) keep working.
 export {
   setServiceEventHandler,
@@ -1204,7 +1204,7 @@ const FILE_LIST_MUTATORS = new Set([
 
 /**
  * `signal` is the caller's cancellation (the renderer's Stop button, relayed over IPC — see
- * ai-tools:cancel in main.mjs). It is handed to the handler as a second argument rather than folded into
+ * ai-tools:cancel in ipc/aiToolsIpc.mjs). It is handed to the handler as a second argument rather than folded into
  * `args`, because `args` is the model's own JSON and nothing from the model may be mistaken for a
  * cancellation. Handlers that cannot be interrupted simply ignore it; today only run_command reads it,
  * since it is the only one that can block for minutes.

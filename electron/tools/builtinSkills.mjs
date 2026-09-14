@@ -11,7 +11,7 @@
  *   - host:    the folder itself. Packaged, electron-builder's extraResources lays it at <resources>/skills;
  *     in dev it is the repo's resources/skills.
  *
- * Pure node on purpose (no electron import): qemu.mjs and main.mjs pass the app facts in, and the tests can
+ * Pure node on purpose (no electron import): qemu.mjs and ipc/aiToolsIpc.mjs pass the app facts in, and the tests can
  * exercise the resolution without an Electron runtime.
  */
 import fs from "node:fs";

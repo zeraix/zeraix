@@ -355,7 +355,7 @@ function qemuBin() {
   const archDir = `${process.platform}-${process.arch}`;
   // Packaged: extraResources lays resources/bin at the root of process.resourcesPath -> <arch>/qemu/.
   // dev (`electron .`): process.resourcesPath points to Electron's own resources (none of our binaries),
-  //   so read from the repo's resources/bin/<arch>/qemu instead -- app.getAppPath()=repo root, same source as main.mjs's WEB_ROOT.
+  //   so read from the repo's resources/bin/<arch>/qemu instead -- app.getAppPath()=repo root, same source as main/appProtocol.mjs's WEB_ROOT.
   // On a hit, return the full path: qemu-system spawn, the derived qemu-img, and the -L share firmware directory are all fixed up together.
   const candidates = [
     process.resourcesPath && path.join(process.resourcesPath, archDir, "qemu", sys),
