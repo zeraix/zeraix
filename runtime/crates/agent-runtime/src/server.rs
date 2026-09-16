@@ -15,7 +15,7 @@
 use agent_core::{CallId, CancellationToken, ErrorClass, RuntimeError};
 use agent_ipc::protocol::{
     is_compatible, CancelParams, ErrorBody, InitializeParams, InitializeResult, InvalidateParams,
-    McpCallParams, McpCallResult, McpConnectParams, McpServerParams, McpServerStatus, McpStatusResult,
+    McpCallParams, McpCallResult, McpConnectParams, McpServerParams, McpServerStatus, McpSetApprovedParams, McpStatusResult,
     McpToolDescriptor, Notification, PeekResult, PidParams, ProcessExitedEvent, ProcessRunParams,
     ProcessRunResult, Request, Response, ServiceDescriptor, ServiceListResult, StartBackgroundParams,
     StartBackgroundResult, StoppedResult, ToolCallParams, ToolCallResult, ToolDescriptor,
@@ -33,7 +33,8 @@ use agent_events::EventBus;
 use agent_resource::{Limits, ResourceClass, ResourceManager};
 use agent_scheduler::{Outcome, Priority, Scheduler, TaskSpec};
 use agent_journal::{Journal, RecoveryPlan};
-use agent_permission::{Grant, PermissionRuntime, Policy, Principal};
+use agent_permission::{Grant, PermissionRuntime, Principal};
+use crate::session_policy::SessionPermissions;
 use agent_subagents::{JoinMode, SubAgentSupervisor, JOIN_MAX_TIMEOUT};
 use agent_ipc::transport::{StdioSender, StdioTransport, Transport};
 use agent_tools::registry::to_legacy_content;
@@ -117,22 +118,12 @@ pub struct Server {
     /// `PARALLEL_SAFE_TOOLS` batching is per round, in one renderer. This is the first thing in the
     /// system that can say "sixteen tool calls at a time, across everything".
     scheduler: Arc<Scheduler>,
-    /// The capability ceiling for this session, set at `runtime.initialize` from the roots the host says the
-    /// user approved.
-    ///
-    /// Behind a `OnceLock` because it is not knowable until the handshake: only the host knows which
-    /// directories the user has consented to. Until it is set — and for a host that never sends any — the
-    /// ceiling grants nothing, which is the safe default rather than a permissive one.
-    permissions: Arc<OnceLock<Arc<PermissionRuntime>>>,
+    /// The capability ceiling for this session: set at `runtime.initialize`, MCP approvals amended by
+    /// `mcp.set_approved`. See `session_policy`.
+    permissions: Arc<SessionPermissions>,
     /// Derived metrics (TODO §11). Subscribed to the bus in `run`, so nothing has to be instrumented at its
     /// call site — see `agent-audit`'s header for why that is the right shape.
     metrics: Arc<agent_audit::MetricsCollector>,
-    /// Whether the host declared a permission policy at the handshake.
-    ///
-    /// Read only by the SANDBOX now: MCP enforcement became unconditional (§0.2 F7), but confining a command
-    /// to an empty allowlist would stop it exec'ing a shell at all, which is a different failure from denying
-    /// it — so an undeclared policy means "unconfined", not "confined to nothing".
-    policy_declared: Arc<std::sync::atomic::AtomicBool>,
     /// What a previous run left unfinished, read once at startup.
     ///
     /// Reported to the host at handshake rather than acted on here. Whether an interrupted task may be run
@@ -212,8 +203,7 @@ impl Server {
                 journal,
             )),
             metrics: Arc::new(agent_audit::MetricsCollector::new()),
-            permissions: Arc::new(OnceLock::new()),
-            policy_declared: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            permissions: Arc::new(SessionPermissions::default()),
             recovered: Arc::new(recovered),
         }
     }
@@ -394,17 +384,12 @@ impl Server {
 
         let workspace = agent_tools::workspace::Workspace::new(&p.workdir)
             .with_assets(p.asset_dir.clone().unwrap_or_default());
+        // Read once: the policy can be replaced mid-session, and the executor and its principal must agree.
+        let policy = self.permissions.current().policy().clone();
         let executor = agent_dispatch::DispatchingExecutor::new(
             Arc::clone(&self.registry),
-            Arc::new(
-                PermissionRuntime::new(self.permission_runtime().policy().clone())
-                    .with_approver(self.host_approver()),
-            ),
-            agent_dispatch::root_principal(
-                task,
-                agent_core::AgentId::from_host("main"),
-                self.permission_runtime().policy().ceiling.clone(),
-            ),
+            Arc::new(PermissionRuntime::new(policy.clone()).with_approver(self.host_approver())),
+            agent_dispatch::root_principal(task, agent_core::AgentId::from_host("main"), policy.ceiling),
             agent_tools::tool::ToolContext::new(
                 workspace,
                 token.clone(),
@@ -548,23 +533,6 @@ impl Server {
         })
     }
 
-    /// The session's permission runtime, or a deny-everything one if the handshake set none.
-    ///
-    /// Never `None` at a call site: a missing ceiling must fail closed, and returning an `Option` here would
-    /// invite a caller to treat "not configured" as "unrestricted".
-    fn permission_runtime(&self) -> Arc<PermissionRuntime> {
-        self.permissions
-            .get()
-            .cloned()
-            .unwrap_or_else(|| {
-                Arc::new(PermissionRuntime::new(Policy {
-                    ceiling: Grant::empty(),
-                    approval_required: Vec::new(),
-                    max_depth: agent_permission::DEFAULT_MAX_DEPTH,
-                }))
-            })
-    }
-
     /// The filesystem policy a command should run under, or `None` when the host declared none.
     ///
     /// Built on [`FilesystemPolicy::workspace`], which already knows the part that is easy to get wrong: a
@@ -577,21 +545,7 @@ impl Server {
     /// its own tree, and a policy allowing the roots but not the cwd would break every command run from a
     /// subdirectory.
     fn sandbox_policy(&self, cwd: Option<&str>) -> Option<agent_sandbox::SandboxPolicy> {
-        if !self.policy_declared.load(std::sync::atomic::Ordering::SeqCst) {
-            return None;
-        }
-        let permissions = self.permissions.get()?;
-        let mut roots: Vec<std::path::PathBuf> = permissions
-            .policy()
-            .ceiling
-            .capabilities()
-            .iter()
-            .filter_map(|c| match &c.scope {
-                agent_permission::Scope::Paths(paths) => Some(paths.clone()),
-                _ => None,
-            })
-            .flatten()
-            .collect();
+        let mut roots = self.permissions.declared_roots()?;
         if let Some(cwd) = cwd {
             roots.push(std::path::PathBuf::from(cwd));
         }
@@ -807,57 +761,8 @@ impl Server {
                     .into());
                 }
                 self.initialized.store(true, Ordering::SeqCst);
-                let roots: Vec<std::path::PathBuf> =
-                    p.workspace_roots.iter().map(std::path::PathBuf::from).collect();
-                // Did the host declare a policy at all? The distinction matters more than the contents.
-                let declared = !roots.is_empty() || !p.approved_mcp_servers.is_empty();
-                self.policy_declared.store(declared, Ordering::SeqCst);
-
-                let mut capabilities = Vec::new();
-                if !roots.is_empty() {
-                    // Read AND write. An approved root is a directory the user has told the agent to work in,
-                    // and a grant that allowed reading but not writing would deny `write_file` inside the very
-                    // workspace the sandbox already lets a command write to — two layers disagreeing about the
-                    // same directory.
-                    for kind in [
-                        agent_permission::CapabilityKind::FilesystemRead,
-                        agent_permission::CapabilityKind::FilesystemWrite,
-                    ] {
-                        capabilities.push(agent_permission::Capability::paths(kind, roots.clone()));
-                    }
-                }
-                if !p.approved_mcp_servers.is_empty() {
-                    capabilities.push(agent_permission::Capability::new(
-                        agent_permission::CapabilityKind::McpInvoke,
-                        agent_permission::Scope::Names(p.approved_mcp_servers.clone()),
-                    ));
-                }
-                let policy = Policy {
-                    ceiling: Grant::of(capabilities),
-                    approval_required: if p.require_approval_for_mutations {
-                        vec![
-                            agent_permission::CapabilityKind::FilesystemWrite,
-                            agent_permission::CapabilityKind::FilesystemDelete,
-                            agent_permission::CapabilityKind::ProcessSpawn,
-                        ]
-                    } else {
-                        Vec::new()
-                    },
-                    max_depth: agent_permission::DEFAULT_MAX_DEPTH,
-                };
-                let _ = self.permissions.set(Arc::new(PermissionRuntime::new(policy)));
-                if !declared {
-                    tracing::warn!(
-                        "the host declared no permission policy; MCP calls run unchecked for compatibility \
-                         with hosts that predate `workspace_roots` / `approved_mcp_servers`"
-                    );
-                }
-                tracing::info!(
-                    client = ?p.client,
-                    roots = roots.len(),
-                    mcp_servers = p.approved_mcp_servers.len(),
-                    "initialized"
-                );
+                self.permissions.initialize(&p);
+                tracing::info!(client = ?p.client, "initialized");
                 Ok(json!(InitializeResult {
                     protocol_version: PROTOCOL_VERSION,
                     runtime_version: RUNTIME_VERSION,
@@ -1005,11 +910,11 @@ impl Server {
                 // lost MCP entirely. That gate is gone: §12's "MCP must not bypass Runtime Permission" is not
                 // a property that can hold for some hosts and not others.
                 //
-                // The consequence is deliberate and worth stating plainly: a host that does not send
-                // `approved_mcp_servers` at the handshake has no MCP tools. That is the same shape as the
-                // filesystem ceiling, and the same shape as fail-open's removal — the runtime no longer has a
-                // permissive mode to fall into.
-                let permissions = self.permission_runtime();
+                // The consequence is deliberate and worth stating plainly: a server the host has not approved —
+                // at the handshake or through `mcp.set_approved` — has no MCP tools. That is the same shape as
+                // the filesystem ceiling, and the same shape as fail-open's removal — the runtime no longer has
+                // a permissive mode to fall into.
+                let permissions = self.permissions.current();
                 let decision = permissions
                     .decide(
                         &Principal {
@@ -1108,6 +1013,12 @@ impl Server {
                     }
                     None => Ok(json!({ "disconnected": false })),
                 }
+            }
+
+            // The user approved or withdrew a server after the handshake. See `session_policy`.
+            "mcp.set_approved" => {
+                let p: McpSetApprovedParams = parse(req.params)?;
+                Ok(json!({ "applied": self.permissions.set_approved_mcp_servers(p.servers) }))
             }
 
             "mcp.status" => Ok(json!(McpStatusResult {

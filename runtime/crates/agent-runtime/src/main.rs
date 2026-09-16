@@ -8,6 +8,7 @@
 //! **stdout belongs to the protocol.** All diagnostics go to stderr.
 
 mod server;
+mod session_policy;
 
 use agent_ipc::transport::StdioTransport;
 use std::sync::Arc;

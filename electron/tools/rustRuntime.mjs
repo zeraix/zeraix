@@ -54,7 +54,7 @@ import process from "node:process";
 const PROTOCOL_VERSION = "1.0";
 
 /** A call the sidecar has not answered in this long is not going to help the turn it belongs to. */
-const CALL_TIMEOUT_MS = 180_000;
+export const CALL_TIMEOUT_MS = 180_000;
 /** Handshake budget. Generous: a cold binary on a slow disk still has to be paged in. */
 const INIT_TIMEOUT_MS = 10_000;
 
@@ -445,7 +445,7 @@ function onData(s, chunk) {
  * flat 180-second call timeout would abandon a download that was working — and abandoning it is not
  * free, because the caller would then fall back and run it a second time.
  */
-function request(s, method, params, timeoutMs) {
+export function request(s, method, params, timeoutMs) {
   return new Promise((resolve, reject) => {
     const id = ++s.nextId;
     const timer = timeoutMs
@@ -471,7 +471,7 @@ function request(s, method, params, timeoutMs) {
 }
 
 /** Fire-and-forget notification (no id, no reply). Used for cancel and cache invalidation. */
-function notify(s, method, params) {
+export function notify(s, method, params) {
   try {
     s.child.stdin.write(`${JSON.stringify({ method, params })}\n`);
   } catch {
@@ -782,7 +782,7 @@ function noteFailure(why) {
 }
 
 /** Spawn and handshake. Returns the live state, or null if the runtime is unavailable for any reason. */
-async function ensureStarted() {
+export async function ensureStarted() {
   if (disabled || flagState() === "off") return null;
   if (state?.ready) return state;
   if (state) return null; // a start is already in flight; this call uses the JS handler
@@ -1146,77 +1146,9 @@ export async function hasFeature(name) {
   return Boolean(s?.features.has(name));
 }
 
-/**
- * Hand one stdio MCP server to the runtime to own.
- *
- * Returns true once the supervisor is running — NOT once the server is ready. Readiness, failure and
- * every later transition arrive as `mcp.state` events, which is the only arrangement compatible with
- * `listMcpTools()` staying synchronous.
- *
- * `env` is the child's complete environment and the host's responsibility: it is built from the MCP
- * SDK's allowlist precisely to keep `ELECTRON_RUN_AS_NODE` and `NODE_OPTIONS` out of a node-based
- * server, and the sidecar carries both.
- */
-export async function mcpConnect({ id, command, args, cwd, env, url, headers }) {
-  const s = await ensureStarted();
-  // A local program and a remote endpoint are separate capabilities: a runtime that serves one may not
-  // serve the other, and routing on the wrong one is how a server silently stops connecting.
-  const needed = url ? "mcp.http" : "mcp.stdio";
-  if (!s || !s.features.has(needed)) return false;
-  try {
-    await request(
-      s,
-      "mcp.connect",
-      url
-        ? { id, url, headers: Object.entries(headers ?? {}) }
-        : { id, command, args: args ?? [], cwd: cwd ?? null, env: Object.entries(env ?? {}) },
-      CALL_TIMEOUT_MS,
-    );
-    return true;
-  } catch (e) {
-    console.warn(`[rust-runtime] mcp.connect(${id}) failed:`, e?.message ?? e);
-    return false;
-  }
-}
-
-/**
- * Call one tool on a runtime-owned server.
- *
- * Returns the server's reply **untouched** (`{ delivered, raw }`), or null if the runtime could not be
- * reached at all. The caller converts: the `[server]` description prefix, the schema normalisation and
- * the content flattening are all its own, and keeping them there is what stops the declarations and
- * results a model sees from shifting under this migration.
- */
-export async function mcpCall(server, tool, args, { signal } = {}) {
-  const s = await ensureStarted();
-  if (!s || !s.features.has("mcp.stdio")) return null;
-
-  const id = `m${++callSeq}`;
-  const onAbort = () => notify(s, "call.cancel", { call_id: id });
-  if (signal?.aborted) return { delivered: false, error: "the user stopped this operation" };
-  signal?.addEventListener("abort", onAbort, { once: true });
-  try {
-    const r = await request(s, "mcp.call", { server, tool, args: args ?? {}, call_id: id }, CALL_TIMEOUT_MS);
-    return r ?? null;
-  } catch (e) {
-    // Unlike a command, an MCP call has no "it may already have run" hazard worth protecting: the
-    // caller's fallback is its own SDK connection, which this server does not have. Report it.
-    return { delivered: false, error: e?.message ?? String(e) };
-  } finally {
-    signal?.removeEventListener("abort", onAbort);
-  }
-}
-
-/** Stop supervising one server. */
-export async function mcpDisconnect(id) {
-  const s = state;
-  if (!s?.ready || !s.features.has("mcp.stdio")) return false;
-  try {
-    const r = await request(s, "mcp.disconnect", { id }, 10_000);
-    return Boolean(r?.disconnected);
-  } catch {
-    return false;
-  }
+/** The live state if the runtime is up right now — without starting it, unlike `ensureStarted`. */
+export function readyState() {
+  return state?.ready ? state : null;
 }
 
 /**

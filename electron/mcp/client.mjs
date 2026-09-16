@@ -18,14 +18,8 @@
 import { CONNECT_TIMEOUT_DOWNLOAD_MS, CONNECT_TIMEOUT_MS, getServer, listServers, usesPackageRunner } from "./config.mjs";
 import { recordChild, forgetChild } from "../tools/sandbox/orphans.mjs";
 import { pluginAuthHeaders } from "../plugins/auth.mjs";
-import {
-  EVENT_RUNTIME_DISCONNECTED,
-  hasFeature,
-  mcpCall,
-  mcpConnect,
-  mcpDisconnect,
-  onEvent,
-} from "../tools/rustRuntime.mjs";
+import { EVENT_RUNTIME_DISCONNECTED, hasFeature, onEvent } from "../tools/rustRuntime.mjs";
+import { mcpCall, mcpConnect, mcpDisconnect, mcpSetApproved } from "../tools/runtimeMcp.mjs";
 
 /**
  * The SDK is loaded on first connect, not at import time. aiToolkit imports this module, and
@@ -271,6 +265,11 @@ function reindex() {
 // Everything a model or a user sees stays here regardless. The runtime sends raw MCP values; `mapTools`
 // and `flattenContent` convert them, exactly as they do for the SDK path.
 
+/** Send the runtime the servers the user has approved and not disabled. See runtimeMcp.mcpSetApproved. */
+function syncApprovals() {
+  return mcpSetApproved(listServers().filter((c) => c.approved && !c.disabled).map((c) => c.id));
+}
+
 /** Servers whose readiness a caller is waiting on. id -> resolve. */
 const runtimeWaiters = new Map();
 
@@ -280,6 +279,10 @@ const runtimeWaiters = new Map();
  * Both kinds now, which is the point of Stage 3c: a local program over stdio, and a remote or
  * cloud-hosted endpoint over Streamable HTTP.
  *
+ * Only a runtime that can be told what the user approved (`mcp.approval`). An older one refuses every call
+ * to a server it was not told about at its handshake — which is every server — so connecting through it
+ * would give the user a server that shows as connected and fails every tool call.
+ *
  * The one exception is a server backed by a plugin's OAuth grant. `pluginAuthedFetch` resolves its
  * token PER REQUEST on purpose — one fixed at connect time works until the first refresh and then 401s
  * for the rest of the session — and token storage and refresh live here, not in the runtime. Those stay
@@ -287,6 +290,7 @@ const runtimeWaiters = new Map();
  */
 async function runtimeOwns(cfg) {
   if (!cfg) return false;
+  if (!(await hasFeature("mcp.approval"))) return false;
   if (cfg.kind === "http") {
     if (cfg.auth) return false; // per-request OAuth; see above
     return hasFeature("mcp.http");
@@ -364,6 +368,10 @@ onEvent(EVENT_RUNTIME_DISCONNECTED, () => {
  * same ceilings the SDK path uses.
  */
 async function connectViaRuntime(cfg, e) {
+  // The runtime decides every call against the approved list, so it has to have the current one before a
+  // server it owns can serve anything. Sent on every connect: that covers a server approved a moment ago
+  // and a sidecar that restarted and forgot. Not delivered means not owned; the SDK path takes it instead.
+  if (!(await syncApprovals())) return false;
   // Marked BEFORE the call, not after. The runtime can report `ready` in the same stdout chunk as the
   // reply to this request, and the bridge handles both synchronously -- so an event that arrived while
   // this was still awaiting would be dropped by the `!e.remote` guard in the handler, and the server
@@ -567,7 +575,12 @@ export async function disconnectServer(id) {
   reindex();
   emit();
   try {
-    if (remote) await mcpDisconnect(id);
+    // Re-sent after a runtime-owned disconnect so a withdrawn approval is withdrawn in the runtime too,
+    // not merely unreachable until something connects the server again.
+    if (remote) {
+      await mcpDisconnect(id);
+      await syncApprovals();
+    }
     // Closing the client closes the transport, which kills a stdio child process.
     else await client?.close();
   } catch {

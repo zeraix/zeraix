@@ -21,7 +21,7 @@ pub const PROTOCOL_VERSION: &str = "1.1";
 /// exactly the case that matters: `ZERAIX_RUST_RUNTIME_BIN` pointing at an older binary, or a
 /// development tree whose sidecar was built before the host code that calls it.
 pub const FEATURES: &[&str] =
-    &["process.run", "process.background", "mcp.stdio", "mcp.http", "subagent.scheduler", "runtime.events", "task.pause", "agent.stream"];
+    &["process.run", "process.background", "mcp.stdio", "mcp.http", "mcp.approval", "subagent.scheduler", "runtime.events", "task.pause", "agent.stream"];
 
 /// Parse a `major.minor` version string.
 fn parse_version(v: &str) -> Option<(u32, u32)> {
@@ -441,6 +441,15 @@ pub struct McpCallResult {
 #[derive(Debug, Clone, Deserialize)]
 pub struct McpServerParams {
     pub id: String,
+}
+
+/// `mcp.set_approved`: the MCP servers the user has approved, by id — the complete list, replacing the last one.
+///
+/// The handshake's `approved_mcp_servers` cannot cover a server approved while the app runs, which is how a user
+/// usually approves one. Feature-detected as `mcp.approval`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct McpSetApprovedParams {
+    pub servers: Vec<String>,
 }
 
 /// One tool a server exposes, exactly as the server described it.
