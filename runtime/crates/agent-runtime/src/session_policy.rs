@@ -19,6 +19,21 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 
+/// The filesystem roots a session declared, by what may be done to them.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DeclaredRoots {
+    /// Read and written: the project.
+    pub writable: Vec<PathBuf>,
+    /// Read only: the media library.
+    pub readonly: Vec<PathBuf>,
+}
+
+impl DeclaredRoots {
+    pub fn is_empty(&self) -> bool {
+        self.writable.is_empty() && self.readonly.is_empty()
+    }
+}
+
 #[derive(Default)]
 pub struct SessionPermissions {
     /// `None` until the handshake — and until then the ceiling grants nothing, which is the safe default
@@ -26,6 +41,13 @@ pub struct SessionPermissions {
     ///
     /// Replaced whole, never edited in place: a decision already under way keeps the policy it started with.
     runtime: RwLock<Option<Arc<PermissionRuntime>>>,
+    /// The roots the sandbox confines to, as declared.
+    ///
+    /// Held here rather than re-derived from the ceiling. It used to be read back out of the capabilities,
+    /// which worked only while read and write carried exactly the same paths — the moment they stop (a
+    /// read-only media root), a flat list of "every path mentioned anywhere" cannot say which is which, and
+    /// the difference is whether a command may overwrite the user's library.
+    roots: RwLock<DeclaredRoots>,
     /// Whether the host declared a policy at the handshake.
     ///
     /// Read only by the SANDBOX now: MCP enforcement became unconditional (§0.2 F7), but confining a command
@@ -39,18 +61,24 @@ impl SessionPermissions {
     /// Build the ceiling from the handshake. The first handshake's policy stands, as it always has.
     pub fn initialize(&self, p: &InitializeParams) {
         let roots: Vec<PathBuf> = p.workspace_roots.iter().map(PathBuf::from).collect();
+        let readonly: Vec<PathBuf> = p.readonly_roots.iter().map(PathBuf::from).collect();
         // Did the host declare a policy at all? The distinction matters more than the contents.
-        let declared = !roots.is_empty() || !p.approved_mcp_servers.is_empty();
+        let declared = !roots.is_empty() || !readonly.is_empty() || !p.approved_mcp_servers.is_empty();
         self.declared.store(declared, Ordering::SeqCst);
+        *self.roots.write().unwrap_or_else(|e| e.into_inner()) =
+            DeclaredRoots { writable: roots.clone(), readonly: readonly.clone() };
 
         let mut capabilities = Vec::new();
+        // Read covers both kinds; write covers only the workspace. That asymmetry IS the read-only root: a
+        // ceiling that granted write over everything named would let `write_file` into the media library,
+        // which the host's own path refuses — two layers disagreeing about the same directory, in the
+        // direction that loses data.
+        let readable: Vec<PathBuf> = roots.iter().chain(readonly.iter()).cloned().collect();
+        if !readable.is_empty() {
+            capabilities.push(Capability::paths(CapabilityKind::FilesystemRead, readable));
+        }
         if !roots.is_empty() {
-            // Read AND write. An approved root is a directory the user has told the agent to work in, and a
-            // grant that allowed reading but not writing would deny `write_file` inside the very workspace the
-            // sandbox already lets a command write to — two layers disagreeing about the same directory.
-            for kind in [CapabilityKind::FilesystemRead, CapabilityKind::FilesystemWrite] {
-                capabilities.push(Capability::paths(kind, roots.clone()));
-            }
+            capabilities.push(Capability::paths(CapabilityKind::FilesystemWrite, roots.clone()));
         }
         capabilities.extend(mcp_capability(p.approved_mcp_servers.clone()));
         let policy = Policy {
@@ -121,25 +149,12 @@ impl SessionPermissions {
         })
     }
 
-    /// The filesystem roots the ceiling approves, or `None` when the host declared no policy (see `declared`).
-    pub fn declared_roots(&self) -> Option<Vec<PathBuf>> {
+    /// The filesystem roots the host declared, or `None` when it declared no policy (see `declared`).
+    pub fn declared_roots(&self) -> Option<DeclaredRoots> {
         if !self.declared.load(Ordering::SeqCst) {
             return None;
         }
-        let permissions = self.get()?;
-        let mut roots: Vec<PathBuf> = Vec::new();
-        // Read and write each carry the same roots; keep the first of each, in order, since the first root is
-        // the one the sandbox builds its workspace around.
-        for c in permissions.policy().ceiling.capabilities() {
-            if let Scope::Paths(paths) = &c.scope {
-                for p in paths {
-                    if !roots.contains(p) {
-                        roots.push(p.clone());
-                    }
-                }
-            }
-        }
-        Some(roots)
+        Some(self.roots.read().unwrap_or_else(|e| e.into_inner()).clone())
     }
 }
 
@@ -154,9 +169,14 @@ mod tests {
     use agent_permission::Resource;
 
     fn handshake(roots: &[&str], servers: &[&str]) -> SessionPermissions {
+        handshake_with(roots, &[], servers)
+    }
+
+    fn handshake_with(roots: &[&str], readonly: &[&str], servers: &[&str]) -> SessionPermissions {
         let params: InitializeParams = serde_json::from_value(serde_json::json!({
             "protocol_version": "1.1",
             "workspace_roots": roots,
+            "readonly_roots": readonly,
             "approved_mcp_servers": servers,
             "require_approval_for_mutations": true,
         }))
@@ -198,7 +218,10 @@ mod tests {
         assert!(policy.ceiling.allows(CapabilityKind::FilesystemWrite, &Resource::Path("/work/a".into())));
         assert!(!policy.ceiling.allows(CapabilityKind::FilesystemWrite, &Resource::Path("/etc/a".into())));
         assert_eq!(policy.approval_required.len(), 3);
-        assert_eq!(session.declared_roots(), Some(vec![PathBuf::from("/work")]));
+        assert_eq!(
+            session.declared_roots(),
+            Some(DeclaredRoots { writable: vec![PathBuf::from("/work")], readonly: Vec::new() })
+        );
     }
 
     /// An approved server is not a sandbox policy: a host that declared nothing stays unconfined.
@@ -207,6 +230,39 @@ mod tests {
         let session = handshake(&[], &[]);
         session.set_approved_mcp_servers(vec!["x".into()]);
         assert_eq!(session.declared_roots(), None);
+    }
+
+    /// The media library: looked at, never overwritten.
+    ///
+    /// Declared in `workspace_roots` it was writable, because one flat list cannot say which roots are which.
+    /// The ceiling has to agree with the host's own file tools, which refuse to write there.
+    #[test]
+    fn a_readonly_root_is_readable_and_not_writable() {
+        let session = handshake_with(&["/work"], &["/media"], &[]);
+        let permissions = session.current();
+        let policy = permissions.policy();
+        assert!(policy.ceiling.allows(CapabilityKind::FilesystemRead, &Resource::Path("/media/a.png".into())));
+        assert!(!policy.ceiling.allows(CapabilityKind::FilesystemWrite, &Resource::Path("/media/a.png".into())));
+        // The workspace keeps both.
+        assert!(policy.ceiling.allows(CapabilityKind::FilesystemRead, &Resource::Path("/work/a".into())));
+        assert!(policy.ceiling.allows(CapabilityKind::FilesystemWrite, &Resource::Path("/work/a".into())));
+        assert_eq!(
+            session.declared_roots(),
+            Some(DeclaredRoots {
+                writable: vec![PathBuf::from("/work")],
+                readonly: vec![PathBuf::from("/media")],
+            })
+        );
+    }
+
+    /// A read-only root is still a declared policy: naming only one must arm confinement, not skip it.
+    #[test]
+    fn a_readonly_root_alone_still_counts_as_a_declared_policy() {
+        let session = handshake_with(&[], &["/media"], &[]);
+        assert_eq!(
+            session.declared_roots(),
+            Some(DeclaredRoots { writable: Vec::new(), readonly: vec![PathBuf::from("/media")] })
+        );
     }
 
     #[test]

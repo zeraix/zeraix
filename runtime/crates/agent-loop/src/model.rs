@@ -61,17 +61,93 @@ impl Default for ModelCapabilities {
 /// `arguments` stays a string, unparsed, because that is what arrives on the wire and because reading it is a
 /// decision with its own rules — a truncated payload must report that nothing ran rather than run with `{}`.
 /// The loop hands the raw string to whoever owns those rules.
+///
+/// ## On the wire it is the OpenAI shape, both ways
+///
+/// `{ id, type: "function", function: { name, arguments } }`. A flat derive used to serialise this struct as
+/// `{ id, name, arguments }`, so every request after a run's first tool call replayed its assistant turn in a
+/// shape no OpenAI-compatible provider accepts, and a history the host sent with a tool call in it could not be
+/// read at all ("missing field `name`"). The fake providers in the tests accepted anything, so neither showed.
+/// Reading still accepts the flat shape, for anything written by a runtime from before the fix.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(into = "WireToolCall", from = "AnyToolCall")]
 pub struct ToolCall {
     pub id: String,
     pub name: String,
     pub arguments: String,
 }
 
+/// [`ToolCall`] as it is written.
+#[derive(Serialize)]
+struct WireToolCall {
+    id: String,
+    #[serde(rename = "type")]
+    kind: &'static str,
+    function: WireFunction,
+}
+
+#[derive(Serialize, Deserialize)]
+struct WireFunction {
+    name: String,
+    /// Normally a JSON string. Some providers send an object, and a missing one means no arguments.
+    #[serde(default)]
+    arguments: serde_json::Value,
+}
+
+/// [`ToolCall`] as it may be read: the OpenAI shape, or the flat one older runtimes wrote.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum AnyToolCall {
+    OpenAi {
+        #[serde(default)]
+        id: String,
+        function: WireFunction,
+    },
+    Flat {
+        #[serde(default)]
+        id: String,
+        name: String,
+        #[serde(default)]
+        arguments: serde_json::Value,
+    },
+}
+
+impl From<ToolCall> for WireToolCall {
+    fn from(c: ToolCall) -> Self {
+        Self { id: c.id, kind: "function", function: WireFunction { name: c.name, arguments: c.arguments.into() } }
+    }
+}
+
+impl From<AnyToolCall> for ToolCall {
+    fn from(any: AnyToolCall) -> Self {
+        // A string stays exactly as sent — replaying it byte for byte is what keeps a provider's prefix cache.
+        let text = |v: serde_json::Value| match v {
+            serde_json::Value::String(s) => s,
+            serde_json::Value::Null => String::new(),
+            other => other.to_string(),
+        };
+        match any {
+            AnyToolCall::OpenAi { id, function } => Self { id, name: function.name, arguments: text(function.arguments) },
+            AnyToolCall::Flat { id, name, arguments } => Self { id, name, arguments: text(arguments) },
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Usage {
     pub prompt_tokens: u64,
     pub completion_tokens: u64,
+    /// Of `prompt_tokens`, how many the provider served from its prefix cache. What the context ring shows as
+    /// the cache effect and what the usage log records beside the total; zero when a provider does not say.
+    #[serde(default)]
+    pub cached_tokens: u64,
+    /// The provider sent no usage block and these figures are an estimate from the text.
+    ///
+    /// Carried rather than dropped: zero is what an absent usage block used to become, and a turn that reports
+    /// zero tokens reads as free — to the context ring, the usage log and a spending guard alike. The
+    /// TypeScript path estimates and says so; this says so too.
+    #[serde(default)]
+    pub estimated: bool,
 }
 
 /// One provider response, reduced to what the loop acts on.
@@ -317,6 +393,36 @@ pub fn call(id: &str, name: &str, arguments: serde_json::Value) -> ToolCall {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn a_tool_call_is_written_in_the_shape_providers_accept() {
+        let call = ToolCall { id: "c1".into(), name: "read_file".into(), arguments: r#"{"path":"a"}"#.into() };
+        assert_eq!(
+            serde_json::to_value(Message::assistant_calls("", vec![call.clone()])).unwrap()["tool_calls"],
+            json!([{ "id": "c1", "type": "function", "function": { "name": "read_file", "arguments": "{\"path\":\"a\"}" } }])
+        );
+        // And read back as it was written, arguments byte for byte.
+        let back: ToolCall = serde_json::from_value(serde_json::to_value(&call).unwrap()).unwrap();
+        assert_eq!(back, call);
+    }
+
+    #[test]
+    fn a_tool_call_is_read_in_either_shape() {
+        let open_ai: ToolCall = serde_json::from_value(json!({
+            "id": "c1", "type": "function", "function": { "name": "grep", "arguments": "{ \"q\": 1 }" }
+        }))
+        .unwrap();
+        // Unusual spacing survives: rewriting it would change the replayed prefix for nothing.
+        assert_eq!(open_ai.arguments, "{ \"q\": 1 }");
+        let flat: ToolCall = serde_json::from_value(json!({ "id": "c2", "name": "grep", "arguments": "{}" })).unwrap();
+        assert_eq!((flat.id.as_str(), flat.name.as_str()), ("c2", "grep"));
+        // An object where a string belongs, and no arguments at all: both readable.
+        let object: ToolCall =
+            serde_json::from_value(json!({ "id": "c3", "function": { "name": "grep", "arguments": { "q": 1 } } })).unwrap();
+        assert_eq!(object.arguments, r#"{"q":1}"#);
+        let bare: ToolCall = serde_json::from_value(json!({ "id": "c4", "function": { "name": "grep" } })).unwrap();
+        assert_eq!(bare.arguments, "");
+    }
 
     #[tokio::test]
     async fn a_scripted_model_answers_in_order_and_records_what_it_was_asked() {

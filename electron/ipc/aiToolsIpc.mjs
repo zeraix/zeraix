@@ -10,6 +10,7 @@ import path from "node:path";
 import {
   listTools,
   runTool,
+  getAssetDir,
   getWorkingDir,
   setWorkingDir,
   saveAttachment,
@@ -25,6 +26,8 @@ import {
 import { GUEST_SKILLS_DIR, resolveSkillsHostDir } from "../tools/builtinSkills.mjs";
 // Sub-agent scheduling in the runtime (Stage 4b). Opt-in; see subagentBridge.mjs.
 import { initSubagentBridge } from "../agent/subagentBridge.mjs";
+import { initRuntimeTurnBridge } from "../agent/runtimeTurnBridge.mjs";
+import { appendEntry as appendUsageEntry } from "../store/usageLogStore.mjs";
 import { installTransferBridge, onTransfer } from "../transferBridge.mjs";
 
 /**
@@ -50,6 +53,9 @@ export function registerAiTools() {
     }
   });
   initSubagentBridge();
+  // Chat turns in the Rust runtime (on unless ZERAIX_RUST_CHAT_LOOP=off). The workspace comes from here, the same
+  // place the file tools read it — never from the renderer that asked for the turn.
+  initRuntimeTurnBridge({ getWorkdir: getWorkingDir, getAssetDir, logUsage: appendUsageEntry });
 
   // One-way, like llm:chat:abort: the renderer is telling us to stop, not asking for a result. Aborting an
   // id that has already finished is a no-op, which is what makes the race harmless — the call can complete

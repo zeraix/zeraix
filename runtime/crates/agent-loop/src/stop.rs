@@ -47,6 +47,12 @@ pub enum StopReason {
     /// One round did. Distinct from `TaskTimeout` because the fix is different: a run that took an hour was
     /// probably too big, while a single round that took an hour was stuck.
     RoundTimeout,
+    /// The host declined to let another round start.
+    ///
+    /// Not a failure of the run and not a policy of this crate's: the caller knows things the loop cannot —
+    /// a spending limit, a workflow node's round budget, a user who revoked something mid-turn. Distinct from
+    /// `Cancelled` because nobody pressed Stop: the work was stopped by a rule, and the detail says which.
+    HostStopped,
 }
 
 impl StopReason {

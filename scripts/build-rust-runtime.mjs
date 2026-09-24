@@ -15,6 +15,17 @@
  * arrangement available. If an x64 mac build ever comes back, this script gains a `--target` flag rather
  * than a cross-compilation toolchain.
  *
+ * ## Exit codes
+ *
+ * Distinct, so `ensure-runtime.mjs` can give advice that matches the failure instead of one message for all
+ * of them. It used to answer every failure with "install a Rust toolchain" — including a compile error on a
+ * machine with a working toolchain, and a binary the running app had open.
+ *
+ *   0    built and staged
+ *   75   the binary is in use by a running process (Windows) — nothing was built
+ *   127  cargo is not installed
+ *   1    anything else, most often a compile error (cargo's own output says which)
+ *
  * Usage:
  *   node scripts/build-rust-runtime.mjs            # build + stage
  *   node scripts/build-rust-runtime.mjs --check     # verify a staged binary exists and runs
@@ -28,10 +39,15 @@ import { fileURLToPath } from "node:url";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const exe = process.platform === "win32" ? "zeraix-agent-runtime.exe" : "zeraix-agent-runtime";
-/** Must match binaryPath() in electron/tools/rustRuntime.mjs: resourcesPath/runtime/<exe>. */
+/** Must match runtimeBinaryPath() in electron/tools/runtimeBinary.mjs: resourcesPath/runtime/<exe>. */
 const stagedDir = path.join(root, "resources", "runtime");
 const staged = path.join(stagedDir, exe);
 const built = path.join(root, "runtime", "target", "release", exe);
+
+// Not exported: this module builds on import, so anything that imported a constant from it would start a
+// cargo build. ensure-runtime.mjs spawns the script and reads the exit status instead.
+const EXIT_IN_USE = 75;
+const EXIT_NO_CARGO = 127;
 
 const args = process.argv.slice(2);
 const has = (f) => args.includes(f);
@@ -54,12 +70,75 @@ if (has("--check")) {
   process.exit(0);
 }
 
+/**
+ * Running processes started from one of `paths`: `[{ pid, path }]`. Windows only; empty elsewhere.
+ *
+ * Why this exists: on Windows a running executable cannot be deleted, so cargo fails to replace
+ * `target/release/zeraix-agent-runtime.exe` while the dev app's sidecar is running — two minutes into the
+ * build, as `failed to remove file … (os error 5)`, which reads like a build failure. On POSIX the old inode
+ * lives on under the running process and the replace succeeds, so there is nothing to check.
+ *
+ * Asked of the process table, not the file. Opening the image for writing SUCCEEDS on Windows while it is
+ * running — the mapped section blocks deletion, not opening — so every file-based probe says "free". Measured
+ * against a live sidecar on 2026-09-23 rather than assumed. A process started from the path is exactly the
+ * condition cargo trips on.
+ *
+ * Any failure to ask answers "none": this is advice, and a check that cannot run must not stop a build.
+ */
+function holdersOf(paths) {
+  if (process.platform !== "win32") return [];
+  let out = "";
+  try {
+    out = execFileSync(
+      "powershell.exe",
+      [
+        "-NoProfile",
+        "-NonInteractive",
+        "-Command",
+        "Get-Process -Name zeraix-agent-runtime -ErrorAction SilentlyContinue | ForEach-Object { '{0}|{1}' -f $_.Id, $_.Path }",
+      ],
+      { encoding: "utf8", windowsHide: true, timeout: 15_000 },
+    );
+  } catch {
+    return [];
+  }
+  // Windows paths are case-insensitive, and Get-Process does not promise the case path.join produced.
+  const wanted = new Set(paths.map((p) => path.resolve(p).toLowerCase()));
+  return out
+    .split(/\r?\n/)
+    .filter(Boolean)
+    .map((line) => {
+      const i = line.indexOf("|");
+      return { pid: line.slice(0, i), path: line.slice(i + 1) };
+    })
+    .filter((h) => h.path && wanted.has(path.resolve(h.path).toLowerCase()));
+}
+
+// Before building, not after: the build is minutes, and it would fail at the very last step.
+const holders = holdersOf([built, staged]);
+if (holders.length) {
+  console.error("[rust-runtime] cannot rebuild — the runtime binary is in use:");
+  for (const h of holders) console.error(`[rust-runtime]   pid ${h.pid}  ${h.path}`);
+  console.error("[rust-runtime] Quit the running app (or stop that process) and run this again.");
+  process.exit(EXIT_IN_USE);
+}
+
 if (!has("--skip-build")) {
   console.log("[rust-runtime] cargo build --release");
-  execFileSync("cargo", ["build", "--release", "--locked"], {
-    cwd: path.join(root, "runtime"),
-    stdio: "inherit",
-  });
+  try {
+    execFileSync("cargo", ["build", "--release", "--locked"], {
+      cwd: path.join(root, "runtime"),
+      stdio: "inherit",
+    });
+  } catch (e) {
+    if (e?.code === "ENOENT") {
+      console.error("[rust-runtime] cargo is not installed — see https://rustup.rs");
+      process.exit(EXIT_NO_CARGO);
+    }
+    // cargo already printed why. Exiting non-zero without a Node stack trace on top of it: the trace
+    // names this script's line, which is the one thing about the failure that is not interesting.
+    process.exit(1);
+  }
 }
 
 const { size, version } = verify(built);

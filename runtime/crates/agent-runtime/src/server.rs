@@ -11,6 +11,15 @@
 //! from a panicking task becomes an `Internal` error on that one call. Spec §17 bans `unwrap`/`panic!`
 //! on the execution path, and this is the belt to that braces: if one slips through, one tool call
 //! fails instead of every conversation dying at once.
+//!
+//! The method families with most code behind them live in child modules, each adding an `impl Server` block:
+//! `agent_run` (a whole turn and its host bridges), `mcp`, `processes` and `subagents`. `handle` routes to them
+//! by prefix; everything shared — the request loop, scheduling, cancellation, the host channel — stays here.
+
+mod agent_run;
+mod mcp;
+mod processes;
+mod subagents;
 
 use agent_core::{CallId, CancellationToken, ErrorClass, RuntimeError};
 use agent_ipc::protocol::{
@@ -20,8 +29,8 @@ use agent_ipc::protocol::{
     ProcessRunResult, Request, Response, ServiceDescriptor, ServiceListResult, StartBackgroundParams,
     StartBackgroundResult, StoppedResult, ToolCallParams, ToolCallResult, ToolDescriptor,
     AgentRunParams, AgentRunResult, EVENT_AGENT_DELTA, EVENT_MCP_STATE, EVENT_PROCESS_EXITED,
-    EVENT_AGENT_TOOL, EVENT_AGENT_TURN, EVENT_RUNTIME, FEATURES, HOST_REQUEST_ASK,
-    HOST_REQUEST_CONSENT,
+    EVENT_AGENT_RETRY, EVENT_AGENT_TOOL, EVENT_AGENT_TURN, EVENT_RUNTIME, FEATURES, HOST_REQUEST_ASK,
+    HOST_REQUEST_CONSENT, HOST_REQUEST_ROUND, HOST_REQUEST_TOOL,
     PROTOCOL_VERSION,
 };
 use agent_ipc::protocol::{
@@ -33,7 +42,7 @@ use agent_events::EventBus;
 use agent_resource::{Limits, ResourceClass, ResourceManager};
 use agent_scheduler::{Outcome, Priority, Scheduler, TaskSpec};
 use agent_journal::{Journal, RecoveryPlan};
-use agent_permission::{Grant, PermissionRuntime, Principal};
+use agent_permission::{Capability, CapabilityKind, Grant, PermissionRuntime, Policy, Principal};
 use crate::session_policy::SessionPermissions;
 use agent_subagents::{JoinMode, SubAgentSupervisor, JOIN_MAX_TIMEOUT};
 use agent_ipc::transport::{StdioSender, StdioTransport, Transport};
@@ -208,331 +217,6 @@ impl Server {
         }
     }
 
-    /// Ask the host whether one action may proceed.
-    ///
-    /// This is what turns the capability check from a wall into a decision. `agent-dispatch` consults the
-    /// permission runtime, the permission runtime consults its `Approver`, and this is the approver that can
-    /// reach a person — through `HostChannel`, the same runtime→host request path the sub-agent body uses.
-    ///
-    /// Holds a `HostChannel` rather than the `Server`: asking a question needs the channel and nothing else,
-    /// and a long-lived `Arc<Server>` inside a permission object is a cycle waiting to be written.
-    ///
-    /// Denies on any failure — a timeout, a host that does not implement the method, a malformed reply. The
-    /// default approver denies for the same reason, and it is the only safe direction: a runtime that cannot
-    /// ask must not proceed as though it had asked and been told yes.
-    fn host_approver(&self) -> Arc<dyn agent_permission::Approver> {
-        struct HostApprover {
-            channel: HostChannel,
-        }
-        #[async_trait::async_trait]
-        impl agent_permission::Approver for HostApprover {
-            async fn approve(
-                &self,
-                principal: &agent_permission::Principal,
-                request: &agent_permission::Request,
-            ) -> bool {
-                let params = json!({
-                    "capability": request.kind.as_str(),
-                    "resource": format!("{:?}", request.resource),
-                    "call": request.call.to_string(),
-                    "agent": principal.agent.to_string(),
-                    "depth": principal.depth,
-                });
-                match self.channel.ask(HOST_REQUEST_CONSENT, params, CONSENT_TIMEOUT).await {
-                    Ok(v) => v.get("approved").and_then(Value::as_bool).unwrap_or(false),
-                    Err(e) => {
-                        tracing::warn!(error = %e, "consent request failed; denying");
-                        false
-                    }
-                }
-            }
-        }
-        Arc::new(HostApprover { channel: self.host_channel() })
-    }
-
-    /// The tools whose implementation is a person.
-    ///
-    /// Only `ask_user` today. Forwarded rather than answered because the runtime cannot render a dialog and
-    /// must not guess — a question the model asks and answers itself is not a question.
-    ///
-    /// A failure is reported to the MODEL rather than raised: a host that cannot ask, or a user who closed the
-    /// dialog, leaves the model needing to proceed without an answer, and telling it so is more useful than
-    /// ending the turn.
-    fn host_tools(&self) -> Arc<dyn agent_dispatch::HostTools> {
-        struct AskUser {
-            channel: HostChannel,
-        }
-        #[async_trait::async_trait]
-        impl agent_dispatch::HostTools for AskUser {
-            fn serves(&self, name: &str) -> bool {
-                name == "ask_user"
-            }
-            async fn call(&self, _name: &str, args: &Value) -> agent_loop::ToolOutcome {
-                match self.channel.ask(HOST_REQUEST_ASK, args.clone(), ASK_TIMEOUT).await {
-                    Ok(v) => {
-                        // The host returns whatever shape its dialog produced; it goes to the model verbatim.
-                        let text = v
-                            .get("answers")
-                            .map(|a| a.to_string())
-                            .unwrap_or_else(|| v.to_string());
-                        agent_loop::ToolOutcome::ok(text)
-                    }
-                    Err(e) => agent_loop::ToolOutcome::failed(format!(
-                        "The question could not be put to the user: {e}. Proceed without an answer, or say \
-                         what you need and stop."
-                    )),
-                }
-            }
-        }
-        Arc::new(AskUser { channel: self.host_channel() })
-    }
-
-    /// Run one agent turn to completion.
-    ///
-    /// Additive: nothing in the app calls this yet — `chatRequest.ts` and the TypeScript loop remain the live
-    /// path. What it demonstrates is that the runtime can hold a whole turn, which is the claim §2.1 makes and
-    /// the thing that could not previously be shown at all.
-    async fn run_agent(&self, p: AgentRunParams) -> Result<AgentRunResult, ErrorBody> {
-        use agent_loop::{AgentLoop, LoopConfig, Message, StopPolicyConfig};
-        use agent_provider::{HttpModel, ProviderConfig};
-
-        let messages: Vec<Message> = p
-            .messages
-            .into_iter()
-            .map(serde_json::from_value)
-            .collect::<std::result::Result<_, _>>()
-            .map_err(|e| {
-                RuntimeError::invalid("agent.bad_messages", format!("could not read the conversation: {e}"))
-            })?;
-
-        // Token streaming (TODO §10.1). The provider hands back the ACCUMULATED text on every chunk, so the
-        // increment is computed here and only that is sent: forwarding the accumulation would be quadratic in
-        // the answer's length, and a long reply would get slower to display the longer it grew.
-        //
-        // Through an unbounded channel rather than straight to the transport, for two reasons. The callback is
-        // synchronous and the transport is not; and a bounded queue would push backpressure from the host's
-        // stdout all the way into the model read, so a slow reader would stall the generation it is reading.
-        let (delta_tx, mut delta_rx) = tokio::sync::mpsc::unbounded_channel::<(String, String)>();
-        let forwarder = {
-            let events = Arc::clone(&self.events);
-            let run_id = p.run_id.clone();
-            tokio::spawn(async move {
-                while let Some((content, reasoning)) = delta_rx.recv().await {
-                    let Some(tx) = events.get().cloned() else { continue };
-                    let params = json!({ "run_id": run_id, "content": content, "reasoning": reasoning });
-                    if let Ok(line) =
-                        serde_json::to_string(&Notification { method: EVENT_AGENT_DELTA, params })
-                    {
-                        if tx.send(line).await.is_err() {
-                            break;
-                        }
-                    }
-                }
-            })
-        };
-        let sent = std::sync::Mutex::new((0usize, 0usize));
-        let on_delta: agent_provider::OnDelta = Box::new(move |content, reasoning| {
-            let mut sent = sent.lock().unwrap_or_else(|e| e.into_inner());
-            // Byte offsets into text that only ever grows by appending, so slicing at the previous length is
-            // always on a character boundary.
-            let (c_at, r_at) = *sent;
-            let c_new = content.get(c_at..).unwrap_or("");
-            let r_new = reasoning.get(r_at..).unwrap_or("");
-            if c_new.is_empty() && r_new.is_empty() {
-                return;
-            }
-            *sent = (content.len(), reasoning.len());
-            let _ = delta_tx.send((c_new.to_owned(), r_new.to_owned()));
-        });
-
-        let model = HttpModel::new(ProviderConfig {
-            endpoint: p.provider.endpoint,
-            api_key: p.provider.api_key,
-            model: p.provider.model.clone(),
-            capabilities: agent_loop::ModelCapabilities {
-                supports_per_turn_reasoning_effort: p.provider.supports_per_turn_reasoning_effort,
-                ..Default::default()
-            },
-            thinking_params: if p.provider.thinking_params.is_null() {
-                json!({})
-            } else {
-                p.provider.thinking_params
-            },
-            stream: p.provider.stream,
-            ..Default::default()
-        })?
-        .with_on_delta(on_delta);
-
-        // One token for the whole run, registered under the host's id so `call.cancel` reaches it. Registered
-        // BEFORE the first request goes out, so a cancel arriving during the opening round is not missed.
-        let token = self.root_cancel.child_token();
-        let task = agent_core::TaskId::from_host(p.run_id.clone());
-        self.inflight.insert(
-            p.run_id.clone(),
-            CallHandle { task: task.clone(), token: token.clone() },
-        );
-        // A cancel that arrived before this id was registered. The same race the scheduled path handles:
-        // the host can send `call.cancel` for a run whose request is still crossing the wire, and a cancel
-        // that found nothing to cancel must not be silently dropped.
-        let cancelled_early = {
-            let mut early = self.early_cancels.lock().unwrap_or_else(|e| e.into_inner());
-            early.iter().position(|c| *c == p.run_id).map(|pos| early.remove(pos)).is_some()
-        };
-        if cancelled_early {
-            token.cancel();
-        }
-
-        let workspace = agent_tools::workspace::Workspace::new(&p.workdir)
-            .with_assets(p.asset_dir.clone().unwrap_or_default());
-        // Read once: the policy can be replaced mid-session, and the executor and its principal must agree.
-        let policy = self.permissions.current().policy().clone();
-        let executor = agent_dispatch::DispatchingExecutor::new(
-            Arc::clone(&self.registry),
-            Arc::new(PermissionRuntime::new(policy.clone()).with_approver(self.host_approver())),
-            agent_dispatch::root_principal(task, agent_core::AgentId::from_host("main"), policy.ceiling),
-            agent_tools::tool::ToolContext::new(
-                workspace,
-                token.clone(),
-                agent_core::CallId::from_host(p.run_id.clone()),
-                Arc::clone(&self.file_cache),
-            ),
-        )
-        .with_host_tools(self.host_tools());
-
-        // Tool activity, so a UI can show work in flight rather than only its result. Same channel shape as
-        // the deltas, and for the same reasons.
-        let (tool_tx, mut tool_rx) = tokio::sync::mpsc::unbounded_channel::<Value>();
-        let tool_forwarder = {
-            let events = Arc::clone(&self.events);
-            tokio::spawn(async move {
-                while let Some(params) = tool_rx.recv().await {
-                    let Some(tx) = events.get().cloned() else { continue };
-                    if let Ok(line) =
-                        serde_json::to_string(&Notification { method: EVENT_AGENT_TOOL, params })
-                    {
-                        if tx.send(line).await.is_err() {
-                            break;
-                        }
-                    }
-                }
-            })
-        };
-
-        struct RunObserver {
-            run_id: String,
-            tx: tokio::sync::mpsc::UnboundedSender<Value>,
-            turns: tokio::sync::mpsc::UnboundedSender<Value>,
-        }
-        impl agent_loop::LoopObserver for RunObserver {
-            fn round_started(&self, round: u32, decision: &agent_loop::ReasoningDecision) {
-                let _ = self.turns.send(json!({
-                    "run_id": self.run_id,
-                    "phase": "start",
-                    "round": round,
-                    "effort": decision.effort_param(),
-                }));
-            }
-            fn round_finished(&self, record: &agent_loop::AgentTurnRecord) {
-                let _ = self.turns.send(json!({
-                    "run_id": self.run_id,
-                    "phase": "end",
-                    "round": record.round,
-                    "tool_calls": record.tool_calls.len(),
-                    "prompt_tokens": record.usage.prompt_tokens,
-                    "completion_tokens": record.usage.completion_tokens,
-                    "ms": record.ms,
-                }));
-            }
-            fn tool_started(&self, call: &agent_loop::ToolCall) {
-                let _ = self.tx.send(json!({
-                    "run_id": self.run_id, "phase": "start", "id": call.id, "name": call.name
-                }));
-            }
-            fn tool_finished(&self, record: &agent_loop::ToolRecord) {
-                let _ = self.tx.send(json!({
-                    "run_id": self.run_id,
-                    "phase": "end",
-                    "id": record.tool_call_id,
-                    "name": record.name,
-                    "ok": record.ok,
-                    "ms": record.ms
-                }));
-            }
-        }
-        let (turn_tx, mut turn_rx) = tokio::sync::mpsc::unbounded_channel::<Value>();
-        let turn_forwarder = {
-            let events = Arc::clone(&self.events);
-            tokio::spawn(async move {
-                while let Some(params) = turn_rx.recv().await {
-                    let Some(tx) = events.get().cloned() else { continue };
-                    if let Ok(line) =
-                        serde_json::to_string(&Notification { method: EVENT_AGENT_TURN, params })
-                    {
-                        if tx.send(line).await.is_err() {
-                            break;
-                        }
-                    }
-                }
-            })
-        };
-        let observer: Arc<dyn agent_loop::LoopObserver> =
-            Arc::new(RunObserver { run_id: p.run_id.clone(), tx: tool_tx, turns: turn_tx });
-
-        // Scoped so the loop — and with it the model, the delta callback, and the channel sender it owns — is
-        // dropped before the forwarder is awaited below.
-        let outcome = {
-            let agent = AgentLoop::new(
-                Arc::new(model),
-                Arc::new(executor),
-                LoopConfig {
-                    model: p.provider.model,
-                    tools: p.tools,
-                    stop_policy: StopPolicyConfig::default(),
-                    ..Default::default()
-                },
-            )
-            .with_observer(observer);
-            agent.run(messages, token).await
-        };
-
-        // Every delta is written before this method returns, and therefore before the reply.
-        //
-        // Without this the deltas race the answer: they are forwarded by a spawned task while the reply is
-        // written by this one, so a client could receive the finished text and then its tokens. A test caught
-        // exactly that — the run assembled "Hello world" correctly and not one delta had arrived.
-        let _ = forwarder.await;
-        let _ = tool_forwarder.await;
-        let _ = turn_forwarder.await;
-
-        self.inflight.remove(&p.run_id);
-        let outcome = outcome?;
-
-        let (prompt_tokens, completion_tokens) = outcome
-            .turns
-            .iter()
-            .fold((0, 0), |(p, c), t| (p + t.usage.prompt_tokens, c + t.usage.completion_tokens));
-
-        Ok(AgentRunResult {
-            stop_reason: outcome
-                .stop
-                .reason
-                .as_ref()
-                .and_then(|r| serde_json::to_value(r).ok().and_then(|v| v.as_str().map(str::to_owned)))
-                .unwrap_or_else(|| "unknown".to_owned()),
-            detail: outcome.stop.detail.clone(),
-            content: outcome.final_text().to_owned(),
-            rounds: outcome.state.round(),
-            tool_calls: outcome.state.tool_calls(),
-            messages: outcome
-                .messages
-                .iter()
-                .map(|m| serde_json::to_value(m).unwrap_or(Value::Null))
-                .collect(),
-            prompt_tokens,
-            completion_tokens,
-        })
-    }
-
     /// The filesystem policy a command should run under, or `None` when the host declared none.
     ///
     /// Built on [`FilesystemPolicy::workspace`], which already knows the part that is easy to get wrong: a
@@ -545,14 +229,22 @@ impl Server {
     /// its own tree, and a policy allowing the roots but not the cwd would break every command run from a
     /// subdirectory.
     fn sandbox_policy(&self, cwd: Option<&str>) -> Option<agent_sandbox::SandboxPolicy> {
-        let mut roots = self.permissions.declared_roots()?;
-        if let Some(cwd) = cwd {
-            roots.push(std::path::PathBuf::from(cwd));
+        let declared = self.permissions.declared_roots()?;
+        if declared.is_empty() {
+            // Declared, but naming no directory — an MCP-only policy. There is nothing to confine a command
+            // to, and confining it to nothing would stop it exec'ing a shell at all.
+            return None;
         }
-        let first = roots.first()?.clone();
+        let mut writable = declared.writable;
+        if let Some(cwd) = cwd {
+            writable.push(std::path::PathBuf::from(cwd));
+        }
 
-        let mut filesystem = agent_sandbox::FilesystemPolicy::workspace(first);
-        for root in roots {
+        // The system half, then each root under the access it was declared with. Built from `system()` rather
+        // than `workspace(first)` because the two kinds differ: a read-only root put through `workspace` would
+        // land in the write list as well, which is exactly the bug this separation exists to prevent.
+        let mut filesystem = agent_sandbox::FilesystemPolicy::system();
+        for root in writable {
             if !filesystem.read.contains(&root) {
                 filesystem.read.push(root.clone());
             }
@@ -560,35 +252,12 @@ impl Server {
                 filesystem.write.push(root);
             }
         }
+        for root in declared.readonly {
+            if !filesystem.read.contains(&root) {
+                filesystem.read.push(root);
+            }
+        }
         Some(agent_sandbox::SandboxPolicy { filesystem, ..Default::default() })
-    }
-
-    /// The grant a delegation of `turn` should start with.
-    ///
-    /// Derived through `issue_child` rather than written here, so the rule lives in one place: sub-agents do
-    /// not inherit elevated capabilities, and beyond the depth limit they starve out to nothing rather than
-    /// erroring. Before this, the spawn site passed `Grant::empty()` literally — correct at the time, and the
-    /// kind of correct that stops being correct the moment a policy is configured and nobody remembers this
-    /// line exists.
-    ///
-    /// With no ceiling configured the result is still empty, so behaviour is unchanged for a host that sends
-    /// no `workspace_roots`.
-    fn child_grant(&self, turn: &str) -> Grant {
-        let Some(permissions) = self.permissions.get() else { return Grant::empty() };
-        // The turn's own principal. Depth 0: this is the main agent, and the delegation about to be spawned is
-        // its first level of children.
-        //
-        // The parent holds exactly what the user approved — the ceiling itself — rather than an unrestricted
-        // grant. `Scope::Unrestricted` is deliberately something no code path constructs: it is the one scope
-        // that has to be typed by a person into a config file, and manufacturing one here to then clamp it
-        // would be the runtime widening its own ceiling in a way review could not see.
-        let parent = Principal {
-            task: agent_core::TaskId::from_host(turn),
-            agent: agent_core::AgentId::from_host("main"),
-            depth: 0,
-            grant: permissions.policy().ceiling.clone(),
-        };
-        permissions.issue_child(&parent)
     }
 
     /// Forward every event the runtime publishes to the host, as `runtime.event` notifications.
@@ -816,411 +485,9 @@ impl Server {
                 Ok(json!(self.call_tool(p).await))
             }
 
-
-            "mcp.connect" => {
-                let p: McpConnectParams = parse(req.params)?;
-                let max_response_bytes = ServerConfig::default().max_response_bytes;
-                // A local program or a remote endpoint. The supervisor above is identical either way,
-                // which is the point of the transport trait: reconnection, heartbeat, backpressure and
-                // degradation are written once.
-                let factory: Arc<dyn agent_mcp::TransportFactory> = match (&p.command, &p.url) {
-                    (Some(command), None) => Arc::new(StdioFactory::new(StdioServer {
-                        command: command.clone(),
-                        args: p.args.clone(),
-                        cwd: p.cwd.clone().map(Into::into),
-                        env: p.env.clone(),
-                        max_response_bytes,
-                    })),
-                    (None, Some(url)) => Arc::new(
-                        HttpFactory::new(HttpServer {
-                            url: url.clone(),
-                            headers: p.headers.clone(),
-                            max_response_bytes,
-                        })
-                        .map_err(|e| {
-                            RuntimeError::invalid("mcp.bad_endpoint", e.describe())
-                        })?,
-                    ),
-                    _ => {
-                        return Err(RuntimeError::invalid(
-                            "mcp.bad_config",
-                            "an MCP server needs exactly one of `command` (local) or `url` (remote).",
-                        )
-                        .into())
-                    }
-                };
-                let sup = self.mcp.add(p.id.clone(), factory, ServerConfig::default());
-
-                // Watch this connection and push every transition. Started here rather than inside the
-                // supervisor because who is told is the host's business, not the connection's.
-                let mut rx = sup.watch_state();
-                let events = Arc::clone(&self.events);
-                let watched = Arc::clone(&sup);
-                let id = p.id.clone();
-                tokio::spawn(async move {
-                    // `changed()` ends when the supervisor is dropped, which is the disconnect path.
-                    while rx.changed().await.is_ok() {
-                        let state = rx.borrow().clone();
-                        let closed = matches!(state, ConnState::Closed);
-                        if let Some(tx) = events.get().cloned() {
-                            let status = describe_server(&id, &watched);
-                            if let Ok(line) = serde_json::to_string(&Notification {
-                                method: EVENT_MCP_STATE,
-                                params: json!(status),
-                            }) {
-                                let _ = tx.send(line).await;
-                            }
-                        }
-                        if closed {
-                            break;
-                        }
-                    }
-                });
-
-                // Returns now, not when the server is ready: a connecting server must never delay a
-                // turn. Readiness arrives as an mcp.state event.
-                Ok(json!({ "id": p.id, "state": state_label(&sup.state()) }))
-            }
-
-            "mcp.call" => {
-                let p: McpCallParams = parse(req.params)?;
-                // Minted before the server lookup so that EVERY outcome below can be audited, including the
-                // one where there is no server: "the agent tried to call something that is not connected" is
-                // exactly the kind of thing an audit trail exists to show, and the first version of this
-                // returned before any event was published.
-                let call_id = p.call_id.clone().unwrap_or_else(|| CallId::new().to_string());
-
-                // `ToolCallOutcome` has no error variant by construction: an external server must not
-                // be able to abort a turn, which is the same invariant `callMcpTool` carries in JS.
-                let Some(sup) = self.mcp.get(&p.server) else {
-                    let detail = format!("no MCP server named '{}' is connected", p.server);
-                    self.bus.publish(agent_events::EventKind::McpCalled {
-                        call: CallId::from_host(call_id),
-                        server: p.server.clone(),
-                        tool: p.tool.clone(),
-                        delivered: false,
-                        detail: Some(detail.clone()),
-                    });
-                    return Ok(json!(McpCallResult { delivered: false, raw: None, error: Some(detail) }));
-                };
-                // Permission, before the call goes out (TODO §4.1 MCP Capability, §12 MCP Permission Bypass).
-                //
-                // Unconditional as of 2026-09-01 (§0.2 F7 resolved). It was gated on the host having declared
-                // a policy, because a host that declared nothing got a ceiling granting nothing and would have
-                // lost MCP entirely. That gate is gone: §12's "MCP must not bypass Runtime Permission" is not
-                // a property that can hold for some hosts and not others.
-                //
-                // The consequence is deliberate and worth stating plainly: a server the host has not approved —
-                // at the handshake or through `mcp.set_approved` — has no MCP tools. That is the same shape as
-                // the filesystem ceiling, and the same shape as fail-open's removal — the runtime no longer has
-                // a permissive mode to fall into.
-                let permissions = self.permissions.current();
-                let decision = permissions
-                    .decide(
-                        &Principal {
-                            task: agent_core::TaskId::from_host(call_id.clone()),
-                            agent: agent_core::AgentId::from_host("main"),
-                            depth: 0,
-                            grant: permissions.policy().ceiling.clone(),
-                        },
-                        &agent_permission::Request {
-                            kind: agent_permission::CapabilityKind::McpInvoke,
-                            resource: agent_permission::Resource::Name(p.server.clone()),
-                            call: CallId::from_host(call_id.clone()),
-                            // No justification, for the reason `agent-dispatch` gives: text the model supplies
-                            // must have nothing to influence.
-                            justification: None,
-                        },
-                    )
-                    .await;
-                if !decision.is_allowed() {
-                    // A refusal is a RESULT, not an error: `McpCallResult` has no error variant that aborts a
-                    // turn, and a denied MCP call is something the model should read and work around.
-                    let reason = match &decision {
-                        agent_permission::Decision::Deny { reason } => reason.clone(),
-                        agent_permission::Decision::NeedsApproval { reason } => {
-                            format!("this needs the user's approval and none was given: {reason}")
-                        }
-                        agent_permission::Decision::Allow => unreachable!("checked above"),
-                    };
-                    self.bus.publish(agent_events::EventKind::McpCalled {
-                        call: CallId::from_host(call_id.clone()),
-                        server: p.server.clone(),
-                        tool: p.tool.clone(),
-                        delivered: false,
-                        detail: Some(format!("denied: {reason}")),
-                    });
-                    return Ok(json!(McpCallResult {
-                        delivered: false,
-                        raw: None,
-                        error: Some(format!(
-                            "Permission denied for MCP server '{}' (mcp.invoke): {reason}. Nothing was sent.",
-                            p.server
-                        )),
-                    }));
-                }
-
-                // Scheduled like tools and commands, so `call.cancel` reaches an MCP call the same way
-                // it reaches anything else -- without which a stopped turn would leave the call holding
-                // its backpressure permit until the server answered. The per-server in-flight cap in
-                // `agent-mcp` still applies underneath; this one bounds MCP work across all servers.
-                let tool = p.tool.clone();
-                let args = p.args.clone();
-                let out = self
-                    .scheduled(
-                        format!("mcp:{}/{}", p.server, p.tool),
-                        ResourceClass::Mcp,
-                        Some(&call_id),
-                        // The supervisor owns the per-call timeout, and it words the failure for the
-                        // model; a second ceiling here would just race it.
-                        None,
-                        move |cancel| {
-                            let sup = Arc::clone(&sup);
-                            let tool = tool.clone();
-                            let args = args.clone();
-                            Box::pin(async move { sup.call_cancellable(&tool, args, &cancel).await })
-                        },
-                    )
-                    .await;
-                let Some(out) = out else {
-                    return Ok(json!(McpCallResult {
-                        delivered: false,
-                        raw: None,
-                        error: Some("the call was cancelled".to_owned()),
-                    }));
-                };
-                self.bus.publish(agent_events::EventKind::McpCalled {
-                    call: CallId::from_host(call_id.clone()),
-                    server: p.server.clone(),
-                    tool: p.tool.clone(),
-                    delivered: out.raw.is_some(),
-                    detail: out.raw.is_none().then(|| out.content.clone()),
-                });
-                // `raw` present means a server answered, whatever it said. The host reads `isError`
-                // off it and does its own flattening — see `McpToolDescriptor`.
-                Ok(json!(match out.raw {
-                    Some(raw) => McpCallResult { delivered: true, raw: Some(raw), error: None },
-                    None => McpCallResult { delivered: false, raw: None, error: Some(out.content) },
-                }))
-            }
-
-            "mcp.disconnect" => {
-                let p: McpServerParams = parse(req.params)?;
-                match self.mcp.get(&p.id) {
-                    Some(sup) => {
-                        sup.shutdown().await;
-                        Ok(json!({ "disconnected": true }))
-                    }
-                    None => Ok(json!({ "disconnected": false })),
-                }
-            }
-
-            // The user approved or withdrew a server after the handshake. See `session_policy`.
-            "mcp.set_approved" => {
-                let p: McpSetApprovedParams = parse(req.params)?;
-                Ok(json!({ "applied": self.permissions.set_approved_mcp_servers(p.servers) }))
-            }
-
-            "mcp.status" => Ok(json!(McpStatusResult {
-                servers: self
-                    .mcp
-                    .ids()
-                    .into_iter()
-                    .filter_map(|id: String| self.mcp.get(&id).map(|sup| describe_server(&id, &sup)))
-                    .collect(),
-            })),
-
-
-            "subagent.spawn" => {
-                let p: SubagentSpawnParams = parse(req.params)?;
-                let sup = self.supervisor_for(&p.turn);
-                let mut spawned = Vec::with_capacity(p.jobs.len());
-                for spec in p.jobs {
-                    let meta = spec.meta.clone();
-                    let turn = p.turn.clone();
-                    let this = self.host_channel();
-                    // The body is a call back into the host. Everything the runtime is good at --
-                    // ordering, coalescing, quotas, the cancellation tree -- happens around it; what
-                    // it wraps is a model conversation, which belongs where the models are.
-                    let body: agent_subagents::DelegationBody = Box::new(move |ctx| {
-                        Box::pin(async move {
-                            let params = json!({
-                                "turn": turn,
-                                "job": ctx.agent.to_string(),
-                                "meta": meta,
-                                "depth": ctx.depth,
-                            });
-                            // Deliberately NOT racing `ctx.cancel` here. The supervisor already does:
-                            // it gives a cancelled body a grace window to return its own partial
-                            // conclusion and then aborts it, which is what produces a `cancelled`
-                            // outcome. A body that noticed the token itself and returned `Err` would
-                            // report the delegation as FAILED instead — the same conclusion the model
-                            // draws when a sub-agent genuinely broke. Dropping this future is the
-                            // cancellation, and `ask` cleans up after itself when that happens.
-                            this.ask(HOST_RUN_SUBAGENT, params, SUBAGENT_BODY_TIMEOUT)
-                                .await
-                                .map(|v| {
-                                    v.get("result")
-                                        .and_then(Value::as_str)
-                                        .unwrap_or_default()
-                                        .to_owned()
-                                })
-                        })
-                    });
-                    let r = sup.spawn(spec.meta, spec.key, self.child_grant(&p.turn), body);
-                    spawned.push(SubagentSpawned {
-                        id: r.id,
-                        coalesced: r.coalesced,
-                        refused: r.refused,
-                    });
-                }
-                Ok(json!(SubagentSpawnResult { jobs: spawned }))
-            }
-
-            "subagent.join" => {
-                let p: SubagentJoinParams = parse(req.params)?;
-                let Some(sup) = self.subagents.get(&p.turn).map(|e| Arc::clone(&e)) else {
-                    // Nothing was ever spawned for this turn. Every id asked for is unknown, which is
-                    // what the model gets told rather than an error it cannot act on.
-                    return Ok(json!(SubagentJoinResult {
-                        ready: vec![],
-                        pending: vec![],
-                        unknown: p.ids,
-                        timed_out: false,
-                    }));
-                };
-                let mode = if p.mode.as_deref() == Some("any") { JoinMode::Any } else { JoinMode::All };
-                let timeout = p
-                    .timeout_ms
-                    .map(std::time::Duration::from_millis)
-                    .map(|d| d.min(JOIN_MAX_TIMEOUT));
-                let r = sup.join(&p.ids, mode, timeout, p.block).await;
-                Ok(json!(SubagentJoinResult {
-                    ready: r
-                        .ready
-                        .into_iter()
-                        .map(|(view, outcome)| SubagentOutcome {
-                            id: outcome.id,
-                            meta: view.meta,
-                            state: format!("{:?}", outcome.state).to_lowercase(),
-                            result: outcome.result,
-                            ms: outcome.ms,
-                            coalesced: view.coalesced,
-                        })
-                        .collect(),
-                    pending: r.pending,
-                    unknown: r.unknown,
-                    timed_out: r.timed_out,
-                }))
-            }
-
-            "subagent.cancel" => {
-                let p: SubagentTurnParams = parse(req.params)?;
-                if let Some(sup) = self.subagents.get(&p.turn) {
-                    sup.cancel_all(p.reason.as_deref().unwrap_or("the turn was interrupted"));
-                }
-                Ok(json!({ "ok": true }))
-            }
-
-            "subagent.status" => {
-                let p: SubagentTurnParams = parse(req.params)?;
-                let Some(sup) = self.subagents.get(&p.turn).map(|e| Arc::clone(&e)) else {
-                    return Ok(json!(SubagentStatus {
-                        turn: p.turn,
-                        queued: 0,
-                        running: 0,
-                        settled: 0,
-                        total: 0,
-                        outstanding: vec![],
-                    }));
-                };
-                let (queued, running, settled, total) = sup.counts();
-                Ok(json!(SubagentStatus {
-                    turn: p.turn,
-                    queued,
-                    running,
-                    settled,
-                    total,
-                    outstanding: sup.outstanding(),
-                }))
-            }
-
-            "process.run" => {
-                let p: ProcessRunParams = parse(req.params)?;
-                Ok(json!(self.run_process(p).await))
-            }
-
-            "process.start_background" => {
-                let p: StartBackgroundParams = parse(req.params)?;
-                // The sender outlives the call that started the service: the callback runs long
-                // after this request has been answered.
-                let events = Arc::clone(&self.events);
-                let command = p.command.clone();
-                let pid = self
-                    .background
-                    .start(&p.command, p.cwd.map(Into::into), move |exited| {
-                        // Retirement happens inside the registry before this fires, so a `process.list`
-                        // racing the event cannot report a service that has already ended.
-                        if let Some(tx) = events.get().cloned() {
-                            let event = ProcessExitedEvent {
-                                pid: exited.pid,
-                                code: exited.code,
-                                signal: exited.signal,
-                                output: exited.output,
-                                command: exited.command,
-                            };
-                            // Spawned because the reaper's callback is synchronous and writing to the
-                            // host is not. Losing the event would leave a dead service showing as
-                            // running in the UI, so it is worth a task.
-                            tokio::spawn(async move {
-                                match serde_json::to_string(&Notification {
-                                    method: EVENT_PROCESS_EXITED,
-                                    params: json!(event),
-                                }) {
-                                    Ok(line) => {
-                                        if let Err(e) = tx.send(line).await {
-                                            tracing::warn!(error = %e, "failed to push process.exited");
-                                        }
-                                    }
-                                    Err(e) => tracing::error!(error = %e, "failed to encode process.exited"),
-                                }
-                            });
-                        }
-                    })
-                    .map_err(|e| {
-                        // A service that could not start is a real error rather than a result: unlike a
-                        // command that ran and failed, there is no output to report and no pid to track.
-                        RuntimeError::new("process.spawn_failed", ErrorClass::Internal, e)
-                    })?;
-                tracing::info!(pid, command = %command, "background service started");
-                Ok(json!(StartBackgroundResult { pid }))
-            }
-
-            "process.peek" => {
-                let p: PidParams = parse(req.params)?;
-                // A finished service still answers, with `alive: false` and the output it left
-                // behind — see RECENTLY_EXITED_KEPT. An unknown pid answers empty.
-                Ok(match self.background.peek(p.pid) {
-                    Some((alive, output)) => json!(PeekResult { alive, output }),
-                    None => json!(PeekResult { alive: false, output: String::new() }),
-                })
-            }
-
-            "process.stop" => {
-                let p: PidParams = parse(req.params)?;
-                Ok(json!(StoppedResult { stopped: self.background.stop(p.pid) }))
-            }
-
-            "process.list" => Ok(json!(ServiceListResult {
-                services: self
-                    .background
-                    .list()
-                    .into_iter()
-                    .map(|(pid, command)| ServiceDescriptor { pid, command })
-                    .collect(),
-            })),
-
-            "process.stop_all" => Ok(json!({ "stopped": self.background.stop_all() })),
+            m if m.starts_with("mcp.") => self.handle_mcp(m, req.params).await,
+            m if m.starts_with("subagent.") => self.handle_subagent(m, req.params).await,
+            m if m.starts_with("process.") => self.handle_process(m, req.params).await,
 
             // One cancel for every kind of call — see `CancelParams`. `tool.cancel` is the 1.0
             // spelling and stays accepted: a host and a runtime are versioned separately here.
@@ -1231,6 +498,15 @@ impl Server {
                 //
                 // Handled on the request loop rather than scheduled, deliberately: a cancel that
                 // queued behind the work it is meant to stop would never run.
+                //
+                // Under `early_cancels`' lock for the WHOLE look-up-then-record, not just the record. The
+                // registering side (`register_call`) inserts into `inflight` and checks `early_cancels`
+                // under the same lock. Without that, the two sides interleave: this misses the call in
+                // `inflight`, the call registers and finds nothing in `early_cancels`, and only then does
+                // this record the id — which nobody reads again. The user's Stop is lost and the command
+                // runs to completion. That is what `a_call_can_be_cancelled_before_it_starts` was catching
+                // about one run in sixty, and one in five on a slow filesystem.
+                let mut early = self.early_cancels.lock().unwrap_or_else(|e| e.into_inner());
                 match self.inflight.get(&p.call_id) {
                     Some(handle) => {
                         // Both, because they cover different stages: the token reaches a body that is
@@ -1242,13 +518,13 @@ impl Server {
                     // from here, so the id is remembered and checked when a call claims it. Cancelling
                     // an id that already finished stays a no-op; the entry simply ages out.
                     None => {
-                        let mut early = self.early_cancels.lock().unwrap_or_else(|e| e.into_inner());
                         early.push_back(p.call_id.clone());
                         while early.len() > MAX_EARLY_CANCELS {
                             early.pop_front();
                         }
                     }
                 }
+                drop(early);
                 Ok(json!({ "ok": true }))
             }
 
@@ -1337,146 +613,6 @@ impl Server {
         }
     }
 
-    /// Run one foreground command, tracked so it can be cancelled by id.
-    ///
-    /// The host calls this from `native.mjs`'s `run()`, which means everything above that function
-    /// keeps its behaviour: the `run_command` guardrails, the engine choice, the sandbox fallback and
-    /// the result wording all stay in JS. What moves is the execution — and with it the two properties
-    /// the JS path cannot have: a Stop that actually reaches the process tree, and output that stops
-    /// being read at the cap instead of being buffered whole and trimmed afterwards.
-    ///
-    /// No workspace containment check, deliberately. `run()` accepts any `cwd` today and the caller
-    /// chooses it; adding a restriction here would be a security control invented mid-migration, in the
-    /// one place where a difference from the JS path shows up as a command that inexplicably refuses to
-    /// run. Confinement belongs to `agent-sandbox` and the permission runtime, gated by their own stage.
-    async fn run_process(&self, p: ProcessRunParams) -> ProcessRunResult {
-        use agent_process::{ExitCode, ProcessRequest};
-
-        let call_id = p.call_id.clone().unwrap_or_else(|| CallId::new().to_string());
-
-        let mut req = ProcessRequest::new(p.command.clone());
-        if let Some(dir) = &p.cwd {
-            req = req.in_dir(dir);
-        }
-        // Confinement (TODO §4.2, §11 Sandbox Decision, §15 "Sandbox is enforced by Runtime").
-        //
-        // `agent-sandbox` has been complete and orphaned since it was built: nothing depended on it, so
-        // "Sandbox is enforced by Runtime" was a diagram. It is applied here because this is the only place a
-        // command is spawned, and Landlock has to be applied IN THE CHILD between fork and exec — applying it
-        // in the parent would confine this runtime irrevocably for the rest of its life.
-        //
-        // Gated on the host having declared a policy, for the same reason the MCP check is: a host that
-        // declared nothing gets an empty allowlist, and confining every command to nothing would break every
-        // build, test and git command that works today. See §0.2 F7.
-        let sandbox_policy = self.sandbox_policy(p.cwd.as_deref()).unwrap_or_default();
-        if let Some(ms) = p.timeout_ms {
-            req = req.with_timeout(std::time::Duration::from_millis(ms));
-        }
-        if let Some(cap) = p.max_buffer {
-            // Saturating rather than `as`: a host sending a cap larger than this platform's usize
-            // means "do not cap", and wrapping it into a small number would silently truncate output.
-            req = req.with_max_buffer(usize::try_from(cap).unwrap_or(usize::MAX));
-        }
-
-        // Through the scheduler, which bounds how many host commands can run at once — the JS path
-        // has no such cap, so a model that fans out into twenty builds gets twenty.
-        let joined = self
-            .scheduled(
-                format!("process:{}", p.command.chars().take(40).collect::<String>()),
-                ResourceClass::Process,
-                Some(&call_id),
-                // No task timeout: the command carries its own, and `agent-process` reports a killed
-                // command as a RESULT with its partial output. A scheduler timeout would discard that.
-                None,
-                move |cancel| {
-                    let req = req.clone();
-                    let policy = sandbox_policy.clone();
-                    // Spawned for the same reason `call_tool` spawns: a panic becomes this call's
-                    // failure rather than a request the host waits out to its 180s timeout.
-                    //
-                    // Always through the backend, even when the policy is empty. With nothing to enforce it
-                    // runs `agent_process::run` exactly as before and reports `NotRequested` — so there is one
-                    // spawn path rather than two, and the sandbox cannot be forgotten on one of them.
-                    Box::pin(async move {
-                        tokio::spawn(async move {
-                            let sandbox_req = agent_sandbox::SandboxRequest {
-                                command: req.command.clone(),
-                                cwd: req.cwd.clone(),
-                                env: req.env.clone(),
-                                policy,
-                                limits: req.limits,
-                                timeout: req.timeout,
-                                max_buffer: req.max_buffer,
-                            };
-                            // The trait has to be in scope for its method to be callable.
-                            use agent_sandbox::ExecutionBackend as _;
-                            let out = agent_sandbox::NativeBackend::new().execute(sandbox_req, &cancel).await;
-                            (out.process, out.report)
-                        })
-                        .await
-                    })
-                },
-            )
-            .await;
-
-        let Some(joined) = joined else {
-            // Refused or cancelled before it produced anything. Reported as a user stop, which is the
-            // only way a caller can reach this today.
-            return ProcessRunResult {
-                stdout: String::new(),
-                stderr: String::new(),
-                code: json!("?"),
-                killed: false,
-                canceled: true,
-                truncated: false,
-            };
-        };
-
-        match joined {
-            Ok((r, report)) => {
-                // What actually confined this command, published so the audit trail records a decision rather
-                // than an intention (TODO §11 Sandbox Decision). Reported even when nothing was enforced: "not
-                // requested" and "requested and unavailable" are different facts, and only one of them is a
-                // problem.
-                tracing::debug!(
-                    filesystem = %report.filesystem.describe(),
-                    network = %report.network.describe(),
-                    "command finished"
-                );
-                self.bus.publish(agent_events::EventKind::SandboxDecided {
-                    call: CallId::from_host(call_id.clone()),
-                    filesystem: report.filesystem.describe(),
-                    network: report.network.describe(),
-                });
-                ProcessRunResult {
-                    stdout: r.stdout,
-                    stderr: r.stderr,
-                    code: match r.code {
-                        ExitCode::Code(c) => json!(c),
-                        ExitCode::Unknown => json!("?"),
-                    },
-                    killed: r.killed,
-                    canceled: r.canceled,
-                    truncated: r.truncated,
-                }
-            }
-            Err(join_err) => {
-                tracing::error!(error = %join_err, "process task failed");
-                // Shaped like a spawn failure, which is what the JS path reports when the child could
-                // not start: the reason on stderr, an unknown code, and no exception for a caller that
-                // has no way to handle one.
-                ProcessRunResult {
-                    stdout: String::new(),
-                    stderr: format!("the runtime failed to run this command: {join_err}"),
-                    code: json!("?"),
-                    killed: false,
-                    canceled: false,
-                    truncated: false,
-                }
-            }
-        }
-    }
-
     /// Run one tool call, tracked so it can be cancelled by id.
     async fn call_tool(&self, p: ToolCallParams) -> ToolCallResult {
         let started = std::time::Instant::now();
@@ -1561,22 +697,6 @@ impl Server {
         }
     }
 }
-
-/// How long a delegation may wait for the host to run it.
-///
-/// Generous because the work behind it is a whole sub-agent conversation — rounds of model calls and
-/// tool execution. It is a backstop against a host that has stopped answering, not a task deadline:
-/// the real bound is the caller's own cancellation, which reaches the delegation immediately.
-const SUBAGENT_BODY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30 * 60);
-
-/// How long a consent request waits for a person.
-///
-/// Generous, because the thing at the other end is a human reading a dialog — a timeout that fires while they
-/// are still deciding would deny an action they were about to allow, which reads as the app ignoring them.
-const CONSENT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
-
-/// How long a question to the user waits. Same reasoning as the consent timeout: a person is reading it.
-const ASK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
 
 /// Removes a pending host call when its future ends, however it ends.
 struct PendingGuard {
@@ -1678,18 +798,12 @@ impl Server {
         // Registered before submission, so a cancel arriving while the task is still queued finds it.
         // The same ordering rule as everywhere else in this migration (D12).
         if let Some(id) = call_id {
-            self.inflight
-                .insert(id.to_owned(), CallHandle { task: task_id.clone(), token: call_token.clone() });
-            // Claimed AFTER registering, so a cancel arriving in between is seen by one side or the
-            // other and never by neither.
-            //
-            // And answered by NOT STARTING, rather than by cancelling: the task has not been submitted
-            // yet, so `scheduler.cancel` on this id would be a no-op against a task the scheduler has
-            // never heard of. That was the first version of this fix, and it did nothing at all.
-            let claimed = {
-                let mut early = self.early_cancels.lock().unwrap_or_else(|e| e.into_inner());
-                early.iter().position(|c| c == id).map(|pos| early.remove(pos)).is_some()
-            };
+            // A cancel that arrived first is answered by NOT STARTING, rather than by cancelling: the task
+            // has not been submitted yet, so `scheduler.cancel` on this id would be a no-op against a task
+            // the scheduler has never heard of. That was the first version of this fix, and it did nothing
+            // at all.
+            let claimed =
+                self.register_call(id, CallHandle { task: task_id.clone(), token: call_token.clone() });
             if claimed {
                 self.inflight.remove(id);
                 return None;
@@ -1739,7 +853,22 @@ impl Server {
         }
     }
 
-    /// A handle to the runtime→host direction, for tasks that outlive a request.
+    /// Register `id` as cancellable and claim any cancel that arrived before it. Returns whether one had.
+    ///
+    /// Both steps under `early_cancels`' lock, which the `call.cancel` handler also holds across its own
+    /// look-up-then-record. That shared lock is the whole fix: each side's check-then-act is two operations,
+    /// and unless the pairs exclude each other they interleave — the cancel misses the registration, the
+    /// registration misses the cancel, and Stop is silently dropped. Registering first and claiming second
+    /// (the previous arrangement) orders the steps within one side; it cannot order them against the other.
+    ///
+    /// Lock order is `early_cancels` then an `inflight` shard, on both sides, so the two cannot deadlock.
+    fn register_call(&self, id: &str, handle: CallHandle) -> bool {
+        let mut early = self.early_cancels.lock().unwrap_or_else(|e| e.into_inner());
+        self.inflight.insert(id.to_owned(), handle);
+        early.iter().position(|c| c == id).map(|pos| early.remove(pos)).is_some()
+    }
+
+    /// A handle to the runtime→host direction, for tasks that outlive a request.    /// A handle to the runtime→host direction, for tasks that outlive a request.
     fn host_channel(&self) -> HostChannel {
         HostChannel {
             sender: Arc::clone(&self.events),
@@ -1748,68 +877,11 @@ impl Server {
         }
     }
 
-    /// The supervisor for one turn, created on first use.
-    ///
-    /// Its cancellation token derives from the runtime root, so shutting the runtime down cancels every
-    /// delegation beneath every turn without anyone keeping a list.
-    fn supervisor_for(&self, turn: &str) -> Arc<SubAgentSupervisor<Value>> {
-        if let Some(existing) = self.subagents.get(turn) {
-            return Arc::clone(&existing);
-        }
-        let sup = Arc::new(SubAgentSupervisor::new(
-            agent_core::TaskId::new(),
-            &self.root_cancel,
-            self.bus.clone(),
-        ));
-        // `entry` rather than `insert`: two spawns for one turn can race here, and the loser must get
-        // the supervisor that won rather than a second one holding half the jobs.
-        Arc::clone(self.subagents.entry(turn.to_owned()).or_insert(sup).value())
-    }
 }
 
 impl Default for Server {
     fn default() -> Self {
         Self::new()
-    }
-}
-
-/// The wire label for a connection state.
-fn state_label(state: &ConnState) -> String {
-    match state {
-        ConnState::Idle => "idle",
-        ConnState::Connecting => "connecting",
-        ConnState::Ready => "ready",
-        ConnState::Degraded { .. } => "degraded",
-        ConnState::Failed { .. } => "failed",
-        ConnState::Closed => "closed",
-    }
-    .to_owned()
-}
-
-/// One server's state and current declarations, in the shape the host consumes.
-fn describe_server(id: &str, sup: &agent_mcp::ConnectionSupervisor) -> McpServerStatus {
-    let state = sup.state();
-    let reason = match &state {
-        ConnState::Degraded { reason } | ConnState::Failed { reason } => Some(reason.clone()),
-        _ => None,
-    };
-    McpServerStatus {
-        id: id.to_owned(),
-        state: state_label(&state),
-        reason,
-        stderr: sup.diagnostics(),
-        // Empty unless ready — the supervisor's rule, not this function's: a server that cannot serve
-        // a call must not be declaring tools to the model.
-        tools: sup
-            .tools_snapshot()
-            .into_iter()
-            .map(|t| McpToolDescriptor {
-                // The server's own name, not the namespaced one: the host owns that scheme.
-                name: t.remote_name,
-                description: t.description,
-                input_schema: t.parameters,
-            })
-            .collect(),
     }
 }
 

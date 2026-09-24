@@ -85,7 +85,7 @@ export function defaultModel() {
 
 /**
  * Resolve one model spec into something callable.
- * @returns {{ok:true, config:{id,label,endpoint,apiKey,model,providerId}} | {ok:false, error:string}}
+ * @returns {{ok:true, config:{id,label,endpoint,apiKey,model,providerId,contextWindow}} | {ok:false, error:string}}
  */
 export function resolveModel(spec) {
   const entry = spec ? findModel(spec) : defaultModel();
@@ -123,6 +123,14 @@ export function resolveModel(spec) {
       apiKey,
       model: entry.model,
       providerId: entry.providerId,
+      // Carried through so a turn can be kept inside the window rather than sent whole and refused.
+      //
+      // Optional on purpose. The renderer persists it when it knows (see models.ts), guesses from the model
+      // name when it can, and records nothing when it cannot — and "nothing" has to stay distinguishable from
+      // a small number here, because a wrong window compacts a conversation that would have fitted. Absent,
+      // the runtime is told no window and sends the conversation as it stands, exactly as before.
+      contextWindow:
+        typeof entry.contextWindow === "number" && entry.contextWindow > 0 ? entry.contextWindow : null,
     },
   };
 }

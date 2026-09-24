@@ -16,7 +16,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const src = fs.readFileSync(
-  path.join(fileURLToPath(new URL("../", import.meta.url)), "electron/tools/rustRuntime.mjs"),
+  path.join(fileURLToPath(new URL("../", import.meta.url)), "electron/tools/rustRuntimeCore.mjs"),
   "utf8",
 );
 

@@ -21,7 +21,7 @@ pub const PROTOCOL_VERSION: &str = "1.1";
 /// exactly the case that matters: `ZERAIX_RUST_RUNTIME_BIN` pointing at an older binary, or a
 /// development tree whose sidecar was built before the host code that calls it.
 pub const FEATURES: &[&str] =
-    &["process.run", "process.background", "mcp.stdio", "mcp.http", "mcp.approval", "subagent.scheduler", "runtime.events", "task.pause", "agent.stream"];
+    &["process.run", "process.background", "mcp.stdio", "mcp.http", "mcp.approval", "subagent.scheduler", "runtime.events", "task.pause", "agent.stream", "agent.host_tools", "agent.round_gate", "agent.context", "agent.transport", "agent.round_context"];
 
 /// Parse a `major.minor` version string.
 fn parse_version(v: &str) -> Option<(u32, u32)> {
@@ -166,6 +166,15 @@ pub struct InitializeParams {
     /// path does not consult the ceiling yet (see `agent-dispatch`, wired in a later stage).
     #[serde(default)]
     pub workspace_roots: Vec<String>,
+    /// Roots the session may READ but never write.
+    ///
+    /// The media library is the case this exists for. Named in `workspace_roots` it became writable, because
+    /// the sandbox built its policy from a single flat list — so declaring the library at all handed commands
+    /// write access to it, which is the opposite of what the host's own file tools enforce (`resolvePath`
+    /// refuses to write there). Kept apart, "the agent may look at your media" no longer means "the agent may
+    /// overwrite your media".
+    #[serde(default)]
+    pub readonly_roots: Vec<String>,
     /// MCP servers the user has approved for this session, by id.
     ///
     /// Separate from `workspace_roots` because they answer different questions: what a given MCP server may be
@@ -663,8 +672,50 @@ pub const HOST_REQUEST_CONSENT: &str = "host.consent";
 /// answer, so `ask_user` is a tool whose implementation is the host's.
 pub const HOST_REQUEST_ASK: &str = "host.ask";
 
+/// Runtime → host: run one tool the runtime does not implement, and return what it produced.
+///
+/// ## Why the loop reaches back out at all
+///
+/// `agent.run` holds the whole Model → Tool → Result cycle, and it can only do that if it can execute every
+/// tool the model is offered. The runtime implements the filesystem and process tools; it does not implement —
+/// and should not — the ones whose substance lives in the app: an MCP server's tools, a plugin's, a browser
+/// panel, image generation, the app's own state. Those are host capabilities, not un-migrated code.
+///
+/// So the division is the same one `subagent.run` already draws. The runtime decides *when* a tool runs, in
+/// what order, under which permission and against which cancellation; the host decides *what the tool does*
+/// when the answer lives in the app. Without this the loop can only ever be offered a fraction of the catalog,
+/// which is why it stayed unreachable: a run that cannot call `web_search` is not a run anyone would route to.
+///
+/// Params are `{ name, args }`. The reply is `{ ok, content }` — the same pair `tool.call` answers with, so a
+/// host has one shape to produce whichever direction a call arrives from.
+pub const HOST_REQUEST_TOOL: &str = "host.tool";
+
+/// Runtime → host: may another round start?
+///
+/// The host's veto over a run it no longer drives. Everything the stop policy knows is something the loop can
+/// observe — a failure count, a clock, a context window; a spending limit is not, and neither is a workflow
+/// node's round budget or an approval withdrawn mid-turn. Those live with the caller, and before this the only
+/// way to enforce one was to own the loop, which is exactly what `agent.run` takes away.
+///
+/// Params are `{ run_id, round, prompt_tokens, completion_tokens }` — the round about to start, 0-based, and
+/// what the run has spent so far. The reply is `{ proceed, detail?, withdraw_tools? }`.
+///
+/// `withdraw_tools` is the "answer now" round: a caller whose budget is spent usually wants a final answer
+/// built from what the run already gathered, not a run terminated mid-investigation with its work thrown away.
+///
+/// Opt-in per run (`round_gate`), because it costs a round trip between every round and most runs have no
+/// policy to apply.
+pub const HOST_REQUEST_ROUND: &str = "host.round";
+
 /// A run's turn boundaries, so a UI can show a turn opening and what it cost.
 pub const EVENT_AGENT_TURN: &str = "agent.turn";
+
+/// A request being retried after a transport failure: `{ run_id, attempt, attempts, kind, delay_ms, message }`.
+///
+/// "Told, never silent" — the rule `withRequestRetry` follows in TypeScript. A retry nobody sees turns a failing
+/// network into an app that is merely slow. When it fires, the partial reply streamed so far is also being
+/// discarded: an `agent.delta` with `reset: true` precedes the next attempt's text.
+pub const EVENT_AGENT_RETRY: &str = "agent.retry";
 
 /// A background process ended, for any reason including a kill this runtime performed.
 ///
@@ -786,6 +837,36 @@ pub struct ProviderParams {
     pub stream: bool,
     #[serde(default)]
     pub supports_per_turn_reasoning_effort: bool,
+    /// Sampling temperature. Absent leaves it to the provider, which is what a host that does not set one means.
+    #[serde(default)]
+    pub temperature: Option<f64>,
+    /// Extra request headers — `X-Conversation-Id` for a local llama-server, so it restores this conversation's
+    /// KV cache instead of re-reading the prompt. The host decides which endpoints get which, as `chatRequest.ts`
+    /// does. Never sent on the summariser's requests (see `run_agent`).
+    #[serde(default)]
+    pub headers: std::collections::BTreeMap<String, String>,
+    /// What the host already knows this model refuses, so a known refusal costs no failed request.
+    #[serde(default)]
+    pub known: ProviderQuirks,
+    /// `thinking_params` for each effort a round may be issued at — see `ProviderConfig::thinking_by_effort`.
+    #[serde(default)]
+    pub thinking_by_effort: std::collections::BTreeMap<String, Value>,
+    /// `"direct"` or a proxy URL, as the host's own network stack would route this endpoint. Absent: the
+    /// runtime's environment decides. See `ProviderConfig::proxy`.
+    #[serde(default)]
+    pub proxy: Option<String>,
+}
+
+/// What one model is known to refuse. The host keeps these across turns; a run starts from them and reports
+/// what it learned (`AgentRunResult::learned`), so each refusal is paid for once rather than once per run.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProviderQuirks {
+    #[serde(default)]
+    pub thinking_unsupported: bool,
+    #[serde(default)]
+    pub reasoning_context_unsupported: bool,
+    #[serde(default)]
+    pub vision_unsupported: bool,
 }
 
 /// Run one agent turn inside the runtime.
@@ -807,6 +888,54 @@ pub struct AgentRunParams {
     /// Tool declarations, already in the provider's shape. Empty means the run has no tools.
     #[serde(default)]
     pub tools: Vec<Value>,
+    /// The model's context window, in tokens.
+    ///
+    /// Supplying it turns context management ON for the run: the conversation is kept inside the window by
+    /// `agent-context` — eliding tool output, then summarising the older part of the conversation with a model
+    /// call, then truncating as a last resort. Absent, the conversation is sent exactly as the loop holds it,
+    /// which is what every run did before 2026-09-22 and is still right for a caller that manages its own.
+    ///
+    /// It also gives the stop policy its `context_limit_fraction` something to measure against.
+    #[serde(default)]
+    pub context_window: Option<u64>,
+    /// Which model writes the summaries. Defaults to the one running the turn.
+    ///
+    /// Worth setting to something cheap: summarising is the one call in a run whose output nobody reads, and
+    /// it is issued against the same endpoint and key as the turn itself.
+    #[serde(default)]
+    pub summarizer_model: Option<String>,
+    /// Ask the host, between rounds, whether the run may continue (see [`HOST_REQUEST_ROUND`]).
+    ///
+    /// Off by default: it costs a round trip per round, and a host that does not answer it would have every
+    /// run stopped at the first round. A caller with a budget or a round cap turns it on.
+    #[serde(default)]
+    pub round_gate: bool,
+    /// Tools that may run at the same time when the model asks for several in a row. The host names them —
+    /// it is the side that knows which of ITS tools touch nothing. See `LoopConfig::parallel_safe`.
+    #[serde(default)]
+    pub parallel_tools: Vec<String>,
+    /// Send each round's thinking back with its reply for the rest of the turn. See
+    /// `LoopConfig::replay_reasoning`; the host decides, by the same policy it applies to earlier turns.
+    #[serde(default)]
+    pub replay_reasoning: bool,
+    /// Hand EVERY tool call to the host through `host.tool`, including the ones this runtime implements and
+    /// `ask_user`. For a host whose own tool path carries consent, display and logging it must not lose — a
+    /// chat window. The loop, and everything about when to stop, still runs here.
+    #[serde(default)]
+    pub host_tools_only: bool,
+    /// The user's thinking setting: the switch and the ceiling the loop's per-round effort never exceeds.
+    /// Absent, the loop assumes on at medium, as it always has.
+    #[serde(default)]
+    pub thinking: Option<ThinkingSetting>,
+}
+
+/// The user's thinking setting, in the host's terms.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ThinkingSetting {
+    pub enabled: bool,
+    /// `"low"`, `"medium"` or `"high"`. Anything else reads as medium.
+    #[serde(default)]
+    pub effort: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -822,10 +951,22 @@ pub struct AgentRunResult {
     pub rounds: u32,
     /// Tool calls executed across every round.
     pub tool_calls: u32,
-    /// The conversation as it now stands, including everything the loop appended.
+    /// The conversation as it now stands, including everything the loop appended. Verbatim: compaction
+    /// changes what the model is sent, never this.
     pub messages: Vec<Value>,
+    /// Indices into `messages` of the ones the host injected through `host.round`, which nobody in the
+    /// conversation said. Keep them on the wire; leave them out of a transcript a person reads. Always
+    /// present, empty when nothing was injected, so a host never has to tell "none" from "not reported".
+    pub injected: Vec<usize>,
     pub prompt_tokens: u64,
     pub completion_tokens: u64,
+    /// Of `prompt_tokens`, how many the provider served from its prefix cache.
+    pub cached_tokens: u64,
+    /// At least one round's usage was estimated because the provider reported none.
+    pub estimated: bool,
+    /// What is now known about this model: what the host passed in, plus anything this run discovered. The host
+    /// keeps it for the next run.
+    pub learned: ProviderQuirks,
 }
 
 #[cfg(test)]

@@ -54,7 +54,6 @@ import {
 } from "@/constants/Agent";
 import { migrateLegacyAgentStorage, putStorage } from "@/lib/ai/agentStorage";
 import { hydrateAppConfig } from "@/lib/ai/appConfig";
-import { getContextBudgetK } from "@/lib/ai/contextBudget";
 import { DEFAULT_THINKING, thinkingParams } from "@/lib/ai/thinking";
 import { approvalReminderLine } from "@/lib/ai/approvalMode";
 import { notifyAgentError } from "@/lib/ai/agentNotify";
@@ -69,7 +68,6 @@ import {
   buildWireContext,
   sanitizeToolCallPairs,
   deserializeCompaction,
-  resultCeilingTokens,
   type CompactionState,
 } from "./contextCompress";
 import {
@@ -101,7 +99,6 @@ import { useAuthStore } from "@/store/authStore";
 import {
   FEEDBACK_DOWN_NUDGE,
   FEEDBACK_UP_NUDGE,
-  LOOP_BREAK_NUDGE,
   repeatedCallNudge,
   repeatedFailureNudge,
   equivalentCallNudge,
@@ -125,11 +122,12 @@ import {
 // The doom-loop detector (docs/agent-runtime-loop.md §12). Superseded app/agent/chat/loopGuard.ts at M3:
 // §20 rule 7 forbids two competing Stop Policies, and a detector that withdraws the model's tools was one.
 import { runAgentLoop } from "@/lib/agent/agentLoop";
+import type { StopDecision } from "@/lib/agent/stopPolicy";
 import { createRendererTools, type RendererTool } from "./chatTools";
 import { createDelegationTools } from "./chatDelegation";
 import { createCompaction } from "./chatCompaction";
 import type { RuntimeBoundary } from "@/lib/agent/runtimeBoundary";
-import { prepareWire, type WireSteps } from "@/lib/agent/contextManager";
+import type { WireSteps } from "@/lib/agent/contextManager";
 import type { ToolRuntimeRules } from "@/lib/agent/toolRuntime";
 // Execution State, the reasoning policy and the doom-loop detector are all owned by runAgentLoop now;
 // only the capability derivation stays here, because both the loop and the delegation factory need it.
@@ -189,7 +187,8 @@ import { createJobHandlers } from "./jobEvents";
 import { checkTurnGoal, finishTurn } from "./turnFinish";
 import { landUserMessage } from "./turnSetup";
 import { createTurnBuffer } from "./turnBuffer";
-import { createRoundRunner, type RoundLog } from "./turnRound";
+import { createRoundRunner, runLoopBreakRound, type RoundLog, type RoundRunnerDeps } from "./turnRound";
+import { runChatTurnInRuntime, type RuntimeModel } from "./runtimeRound";
 import { restoreDisplay, restoreWireBuffer } from "./conversationRestore";
 import type { ViewToken } from "./displayBaseline";
 
@@ -1939,6 +1938,20 @@ function ChatAgent() {
       thinkingRejected: thinkingUnsupportedRef.current.has(modelName),
     });
 
+    // The model as a run in the Rust runtime reaches it — the pieces requestChat closes over. One object for the
+    // turn and its delegations, so both reach the provider the same way (see runtimeRound.ts).
+    const runtimeModel: RuntimeModel = {
+      endpoint,
+      apiKey,
+      modelName,
+      isLocalModel,
+      activeModel,
+      thinking,
+      capabilities: modelCaps,
+      thinkingUnsupported: () => thinkingUnsupportedRef.current,
+      reasoningContextUnsupported: () => reasoningContextUnsupportedRef.current,
+    };
+
     const {
       runSubAgent,
       spawnSubagents,
@@ -1968,6 +1981,7 @@ function ChatAgent() {
       brokerRef,
       orchestrationDeclsRef,
       pendingJobsRef,
+      runtimeModel,
     });
 
     try {
@@ -2142,121 +2156,80 @@ function ChatAgent() {
        */
       const roundLog: RoundLog = { lastWire: [], lastContent: "" };
 
-      const loopOutcome = await runAgentLoop({
-        boundary,
-        sessionId: genConvId,
+      const roundDeps: RoundRunnerDeps = {
+        convId: genConvId,
         turnId,
-        modelId: modelName,
-        thinking,
-        capabilities: modelCaps,
-        // The goal is NOT wired in here on purpose. `evaluateGoal` would make an unmet goal run another round
-        // inside this turn; today an unmet goal ends the turn and queues a fresh one carrying the evaluator's
-        // reason, which re-runs compaction and rebuilds the wire. Those are materially different, and the
-        // second is the behaviour this app has. The check therefore stays below, after the loop.
-        evaluateGoal: undefined,
-        // The proportional half of §12: name the specific signal, because a model told the vaguer thing
-        // ("you are looping") varies its arguments rather than changing course.
-        onDoomSignal: (signal, result, verdict) => {
-          if (signal === "identical") nudgeIntoLastTool(repeatedCallNudge(result.name, verdict.repeat));
-          else if (signal === "equivalent") nudgeIntoLastTool(equivalentCallNudge(result.name, verdict.repeat));
-          else if (signal === "failing") nudgeIntoLastTool(repeatedFailureNudge(result.name, verdict.failStreak));
-          else if (signal === "resource") nudgeIntoLastTool(repeatedResourceNudge(result.name, verdict.resourceHits));
-        },
-        now: () => Date.now(),
-        runRound: createRoundRunner({
-          convId: genConvId,
-          turnId,
-          checkpoint,
-          signal: ctrl.signal,
-          active,
-          t,
-          buf,
-          compaction,
-          log: roundLog,
-          activeModel,
-          modelName,
-          isLocalModel,
-          sendReasoningContext,
-          wireSteps: WIRE_STEPS,
-          tools,
-          requestChat,
+        checkpoint,
+        signal: ctrl.signal,
+        active,
+        t,
+        buf,
+        compaction,
+        log: roundLog,
+        activeModel,
+        modelName,
+        isLocalModel,
+        sendReasoningContext,
+        wireSteps: WIRE_STEPS,
+        tools,
+        requestChat,
+        boundary,
+        ctx,
+        rendererTools,
+        execToolCall,
+        toolRules: TOOL_RULES,
+        drainDelegations,
+        drainJobEvents,
+        displayRef,
+        viewTokenRef,
+        setDisplay,
+        setCtxTokens,
+        diagRef,
+        lastArtifactRef,
+        schedulerRef,
+        awaitingJobsRef,
+        tagLastAssistantStoredIndex,
+        goalFor,
+        setGoalFor,
+        setRenderDelta: (fn) => { renderDelta = fn; },
+      };
+      // The Rust runtime takes the whole turn (unless ZERAIX_RUST_CHAT_LOOP=off). Null means it cannot — before
+      // anything ran — and the turn runs on this window's own loop.
+      const loopOutcome: { stop: StopDecision } =
+        (await runChatTurnInRuntime({ ...roundDeps, ...runtimeModel, turnUsage: () => turnUsageRef.current })) ??
+        (await runAgentLoop({
           boundary,
-          ctx,
-          rendererTools,
-          execToolCall,
-          toolRules: TOOL_RULES,
-          drainDelegations,
-          drainJobEvents,
-          displayRef,
-          viewTokenRef,
-          setDisplay,
-          setCtxTokens,
-          diagRef,
-          lastArtifactRef,
-              schedulerRef,
-          awaitingJobsRef,
-          tagLastAssistantStoredIndex,
-          goalFor,
-          setGoalFor,
-          setRenderDelta: (fn) => { renderDelta = fn; },
-        }),
-      });
-
-      /**
-       * The wrap-up round after a detected doom loop.
-       *
-       * The Runtime stops on escalation; withdrawing the tools and making the model account for itself is the
-       * host's response, and it belongs here rather than inside the loop because it is a request this host
-       * builds. Same outcome the user saw before — one final, tool-free reply explaining where it got stuck —
-       * reached through one decision instead of two.
-       */
-      if (loopOutcome.stop.reason === "doom-loop" && !ctrl.signal.aborted) {
-        nudgeIntoLastTool(LOOP_BREAK_NUDGE);
-        // Said out loud, because from outside a loop and long work look identical — a spinner and a rising
-        // token count — and the user is the one paying for the difference.
-        if (active()) toast.warning(t("chat.loopBroken"));
-        console.warn(`[loop-guard] ${loopOutcome.stop.detail ?? "no new information"}; withdrawing tools for a final reply`);
-        // Built through prepareWire like every other request. Hand-composing a few of its steps here would be
-        // a second wire builder, and it would skip the two that matter least often and hurt most when missed:
-        // the reasoning replay policy, and image handling for a provider that rejects them.
-        const wrapWire = prepareWire(buf.messages, compaction, {
-          model: {
-            isLocal: isLocalModel,
-            acceptsImages: !!activeModel?.multimodal,
-            sendReasoningContext: sendReasoningContext(),
-            modelId: activeModel?.model,
-            resultCeilingTokens: resultCeilingTokens(
-              activeModel?.contextWindow ?? resolveContextWindow(activeModel?.model ?? ""),
-              getContextBudgetK(),
-            ),
-          },
-          steps: WIRE_STEPS,
-        });
-        const wrapUp = await requestChat(wrapWire, undefined, ctrl.signal, undefined, {
-          actor: "main",
-          convId: genConvId,
+          sessionId: genConvId,
           turnId,
+          modelId: modelName,
+          thinking,
+          capabilities: modelCaps,
+          // The goal is NOT wired in here on purpose. `evaluateGoal` would make an unmet goal run another round
+          // inside this turn; today an unmet goal ends the turn and queues a fresh one carrying the evaluator's
+          // reason, which re-runs compaction and rebuilds the wire. Those are materially different, and the
+          // second is the behaviour this app has. The check therefore stays below, after the loop.
+          evaluateGoal: undefined,
+          // The proportional half of §12: name the specific signal, because a model told the vaguer thing
+          // ("you are looping") varies its arguments rather than changing course.
+          onDoomSignal: (signal, result, verdict) => {
+            if (signal === "identical") nudgeIntoLastTool(repeatedCallNudge(result.name, verdict.repeat));
+            else if (signal === "equivalent") nudgeIntoLastTool(equivalentCallNudge(result.name, verdict.repeat));
+            else if (signal === "failing") nudgeIntoLastTool(repeatedFailureNudge(result.name, verdict.failStreak));
+            else if (signal === "resource") nudgeIntoLastTool(repeatedResourceNudge(result.name, verdict.resourceHits));
+          },
+          now: () => Date.now(),
+          runRound: createRoundRunner(roundDeps),
+        }));
+
+      // The wrap-up round after a detected doom loop: see runLoopBreakRound.
+      if (loopOutcome.stop.reason === "doom-loop" && !ctrl.signal.aborted) {
+        await runLoopBreakRound(roundDeps, {
+          detail: loopOutcome.stop.detail,
+          // Said out loud, because from outside a loop and long work look identical — a spinner and a rising
+          // token count — and the user is the one paying for the difference.
+          warn: () => { if (active()) toast.warning(t("chat.loopBroken")); },
+          show: (content) => { if (ownsView()) pushDisplay({ kind: "assistant", content }); },
         });
-        const wrapMsg = wrapUp.choices?.[0]?.message;
-        // A model that emits tool calls when none were declared: rare, and seen on local builds whose chat
-        // template writes call syntax out of habit. Nothing can execute them — there is no declaration to
-        // validate them against — and the round is over, so they are dropped rather than persisted. Writing
-        // them would leave an assistant.tool_calls that nothing answers, which the provider rejects on the
-        // conversation's NEXT request.
-        if (wrapMsg?.tool_calls?.length) {
-          console.warn(`[loop-guard] dropped ${wrapMsg.tool_calls.length} tool call(s) emitted with no tools declared`);
-          delete wrapMsg.tool_calls;
-        }
-        roundLog.lastWire = wrapWire;
-        roundLog.lastContent = wrapMsg?.content ?? "";
-        if (roundLog.lastContent && ownsView()) pushDisplay({ kind: "assistant", content: roundLog.lastContent });
-        if (roundLog.lastContent) {
-          store.appendMessage(genConvId, {
-            role: "assistant",
-            content: roundLog.lastContent,
-            ts: Date.now(),
-          });
-        }
       }
 
       /**

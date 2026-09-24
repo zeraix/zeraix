@@ -74,6 +74,15 @@ pub const DEFAULT_MAX_BUFFER: usize = 10 * 1024 * 1024;
 #[cfg(unix)]
 pub type PreExecHook = std::sync::Arc<dyn Fn() -> std::io::Result<()> + Send + Sync>;
 
+/// The same alias where there is no pre-exec stage at all.
+///
+/// Defined rather than omitted so a caller that accepts a hook has ONE signature on every platform —
+/// `BackgroundRegistry::start_confined` and `agent_sandbox::confinement_hook` both do. Nothing here can run
+/// it: [`ProcessRequest::pre_exec_hook`] stays unix-only, and a hook handed to this crate on Windows is
+/// dropped. That is the honest shape, because Windows has no unprivileged equivalent to apply.
+#[cfg(not(unix))]
+pub type PreExecHook = std::sync::Arc<dyn Fn() -> std::io::Result<()> + Send + Sync>;
+
 /// What to run.
 #[derive(Clone)]
 pub struct ProcessRequest {

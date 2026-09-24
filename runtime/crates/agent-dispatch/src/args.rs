@@ -57,6 +57,26 @@ impl ParsedArgs {
 const EMPTY_SPELLINGS: [&str; 10] =
     ["null", "undefined", "none", "nil", "nan", "{}", "()", "[]", "\"\"", "''"];
 
+/// The copy of a call's `arguments` to replay on later requests, or `None` to replay them as sent.
+///
+/// `sanitizeToolCallArguments` in the chat page, ported. Valid JSON is left alone even in an unusual spelling —
+/// rewriting it would break the provider's prefix cache on every healthy turn to fix a problem it does not have.
+/// Anything a provider would refuse is replaced by the canonical encoding of what could be read: the object, the
+/// partial a truncated payload carried, or `{}`. The tool result for such a call already says its arguments
+/// were unreadable, so the model is not misled by seeing less than it wrote.
+pub fn replay_arguments(raw: &str) -> Option<String> {
+    let parsed = parse_tool_arguments(raw);
+    if parsed.is_ok() && serde_json::from_str::<Value>(raw).is_ok() {
+        return None;
+    }
+    let readable = match parsed {
+        ParsedArgs::Ok(map) => map,
+        ParsedArgs::Failed { partial, .. } => partial.unwrap_or_default(),
+    };
+    let encoded = Value::Object(readable).to_string();
+    (encoded != raw).then_some(encoded)
+}
+
 /// Read one tool call's `arguments` string.
 ///
 /// Total on the happy path and on every recoverable near-miss; the error branch is reserved for a payload that
@@ -273,6 +293,22 @@ fn unreadable(text: &str, was_truncated: bool, partial: Option<&Map<String, Valu
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_arguments_a_provider_would_refuse_are_rewritten_for_replay() {
+        // Healthy, in any spelling: replayed byte for byte.
+        assert_eq!(replay_arguments(r#"{"path":"a"}"#), None);
+        assert_eq!(replay_arguments(r#"{ "path" : "a" }"#), None);
+        assert_eq!(replay_arguments("null"), None);
+        // Refused by a provider on every later request: replaced by what could be read.
+        assert_eq!(replay_arguments(""), Some("{}".to_owned()));
+        assert_eq!(replay_arguments("not json"), Some("{}".to_owned()));
+        let truncated = replay_arguments(r#"{"path": "src/main.rs", "content": "fn ma"#).expect("rewritten");
+        let back: Value = serde_json::from_str(&truncated).expect("valid JSON now");
+        assert_eq!(back["path"], "src/main.rs", "the part that arrived is kept: {truncated}");
+        // Fenced JSON reads fine but is not JSON text, so it is re-encoded.
+        assert_eq!(replay_arguments("```json\n{\"a\":1}\n```"), Some(r#"{"a":1}"#.to_owned()));
+    }
     use serde_json::json;
 
     fn ok(raw: &str) -> Map<String, Value> {

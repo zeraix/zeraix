@@ -7,6 +7,11 @@ use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::time::{Duration, Instant};
 
+mod agent;
+// Not every test file runs a model.
+#[allow(unused_imports)]
+pub use agent::*;
+
 pub struct Runtime {
     pub child: Child,
     pub stdin: ChildStdin,
@@ -21,8 +26,18 @@ impl Runtime {
 
     /// Start with extra command-line arguments — `--state-dir`, for the recovery tests.
     pub fn start_with(args: &[&str]) -> Self {
+        Self::spawn(args, &[])
+    }
+
+    /// Start with extra environment variables — the `*_PROXY` family, for the routing tests.
+    pub fn start_env(envs: &[(&str, &str)]) -> Self {
+        Self::spawn(&[], envs)
+    }
+
+    fn spawn(args: &[&str], envs: &[(&str, &str)]) -> Self {
         let mut child = Command::new(env!("CARGO_BIN_EXE_zeraix-agent-runtime"))
             .args(args)
+            .envs(envs.iter().copied())
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
@@ -106,9 +121,19 @@ impl Runtime {
 
     /// Handshake declaring which roots the user approved — the ceiling every tool call is decided against.
     pub fn init_with_roots(&mut self, roots: &[&str]) -> serde_json::Value {
+        self.init_with_policy(roots, &[])
+    }
+
+    /// The same, plus the roots that may be read and never written (the media library).
+    pub fn init_with_policy(&mut self, roots: &[&str], readonly: &[&str]) -> serde_json::Value {
         self.call(
             "runtime.initialize",
-            serde_json::json!({ "protocol_version": "1.1", "client": "test", "workspace_roots": roots }),
+            serde_json::json!({
+                "protocol_version": "1.1",
+                "client": "test",
+                "workspace_roots": roots,
+                "readonly_roots": readonly,
+            }),
         )
     }
 }
@@ -149,5 +174,16 @@ pub fn await_mcp_ready(rt: &mut Runtime, id: &str) -> serde_json::Value {
         if msg["method"] == "mcp.state" && msg["params"]["id"] == id && msg["params"]["state"] == "ready" {
             return msg;
         }
+    }
+}
+
+/// A command that runs long enough to be cancelled, spelled for whichever shell this platform uses.
+pub fn slow_command(seconds: u32) -> String {
+    if cfg!(windows) {
+        // No `sleep` on cmd.exe. `timeout` needs a console it does not have when stdin is a pipe, so
+        // ping's one-second interval is the portable spelling that actually works detached.
+        format!("ping -n {} 127.0.0.1 > nul", seconds + 1)
+    } else {
+        format!("sleep {seconds}")
     }
 }

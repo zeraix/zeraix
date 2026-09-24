@@ -6,9 +6,10 @@
  * earlier one, it says so.
  */
 import { app, BrowserWindow } from "electron";
-import { initEngine } from "../tools/aiToolkit.mjs";
+import { getAssetDir, getWorkingDir, initEngine } from "../tools/aiToolkit.mjs";
 // Reports at startup whether the Rust sidecar is enabled, active, or unavailable — see warmUp.
-import { warmUp as warmUpRustRuntime } from "../tools/rustRuntime.mjs";
+// setSessionPolicyProvider declares the roots the runtime confines commands to; see startServices.
+import { setSessionPolicyProvider as setRuntimeSessionPolicy, warmUp as warmUpRustRuntime } from "../tools/rustRuntime.mjs";
 // Sub-agent scheduling in the runtime (Stage 4b). Opt-in; see subagentBridge.mjs.
 import { subagentsEnabled } from "../agent/subagentBridge.mjs";
 // First-launch agreement to the Privacy Policy and the Terms of Service; gates every window. See legal/consentWindow.mjs.
@@ -104,6 +105,26 @@ function startServices() {
   registerProjectSkills();
   registerRecovery({ crashPolicyFor, loadAppInto });
   registerSandbox();
+  // Before the sidecar starts, not after: the media root is one of the roots the runtime is confined to, and a
+  // handshake that ran first would declare a session without it. Synchronous and never fatal (see assetRoot.mjs),
+  // so moving it ahead of the warm-up costs nothing.
+  syncAssetRoot();
+  // What this session may touch. Declaring it is what ARMS the runtime's sandbox: `session_policy.rs` confines
+  // every command to these roots (plus the command's own working directory and the system toolchain), and a
+  // host that declares nothing leaves every command unconfined — which is what the app did until now.
+  //
+  // A function rather than a value because the sidecar can respawn at any point in the session, and the user
+  // may have changed project since it last started. The filesystem half of the ceiling is frozen per handshake
+  // by design, so what matters is that each handshake sees the CURRENT workspace.
+  //
+  // The media library is declared READ-ONLY rather than as a second workspace. Both are directories the agent
+  // may look at; only one is a directory it may change. The host's own file tools already draw that line
+  // (`resolvePath` refuses to write to the asset root), and declaring the library as a workspace root made the
+  // sandbox disagree with them — commands could overwrite the user's media.
+  setRuntimeSessionPolicy(() => ({
+    workspaceRoots: [getWorkingDir()],
+    readonlyRoots: [getAssetDir()],
+  }));
   // Start the Rust sidecar now rather than on the first tool call, so its state is reported once at
   // boot instead of being inferred from behaviour. Fire-and-forget and never fatal: with the flag off it
   // prints one line and starts nothing. Not fatal here either: a failure is reported by the tools that
@@ -122,7 +143,6 @@ function startServices() {
   registerTerminal();
   // Select the command-execution engine (start a qemu VM in the background if hardware virtualization is available, otherwise keep running natively on the host).
   // Runs asynchronously in the background; on failure it silently falls back to native without affecting startup.
-  syncAssetRoot();
   initEngine();
   registerLlmProxy();
   registerUploadProxy();

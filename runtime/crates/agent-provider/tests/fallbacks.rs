@@ -349,14 +349,60 @@ async fn a_context_overflow_recovers_by_stripping_images_but_never_brands_the_mo
 }
 
 /// No images to blame: the failure is genuine and must reach the caller unchanged.
+///
+/// A 400, deliberately. This test is about the IMAGE ladder, and it used to use a 500 — which under C8 is a
+/// transient server failure that the transport retries, exactly as `withRequestRetry` does in TypeScript. The
+/// single request this asserted was the old Rust behaviour, and it was the divergence: the same 500 was
+/// retried three times on one side and once on the other. A request the provider REFUSED isolates the ladder.
 #[tokio::test]
 async fn a_failure_with_no_images_in_the_request_is_never_retried() {
+    let provider = FakeProvider::start(vec![Reply::error(400, "invalid request: bad parameter")]).await;
+    let m = model(&provider, serde_json::json!({}));
+
+    let err = m.complete(&request(vec![Message::user("hi")])).await.expect_err("the failure to surface");
+    assert!(err.message.contains("400"));
+    assert_eq!(provider.bodies().len(), 1, "nothing to strip means nothing to retry");
+}
+
+/// C8: a transient failure is sent again, identically, up to the attempt budget — and then surfaces.
+#[tokio::test]
+async fn a_server_failure_is_retried_to_the_c8_budget_and_then_surfaces() {
     let provider = FakeProvider::start(vec![Reply::error(500, "internal server error")]).await;
     let m = model(&provider, serde_json::json!({}));
 
     let err = m.complete(&request(vec![Message::user("hi")])).await.expect_err("the failure to surface");
     assert!(err.message.contains("500"));
-    assert_eq!(provider.bodies().len(), 1, "nothing to strip means nothing to retry");
+    let bodies = provider.bodies();
+    assert_eq!(bodies.len(), 3, "MAX_ATTEMPTS in requestError.ts is 3");
+    assert!(bodies.iter().all(|b| *b == bodies[0]), "a transport retry resends the IDENTICAL request");
+}
+
+/// C8: one dropped request costs a retry, not the turn — and the caller is told it happened.
+#[tokio::test]
+async fn one_transient_failure_is_absorbed_and_announced() {
+    let provider = FakeProvider::start(vec![
+        Reply::error(503, "service unavailable"),
+        Reply::ok(serde_json::json!({ "choices": [{ "message": { "content": "recovered" } }] })),
+    ])
+    .await;
+    let notices = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let seen = std::sync::Arc::clone(&notices);
+    let m = model(&provider, serde_json::json!({})).with_on_retry(Box::new(move |n| {
+        seen.lock().unwrap().push((n.attempt, n.attempts, n.kind));
+    }));
+
+    let turn = m.complete(&request(vec![Message::user("hi")])).await.expect("a single 503 must not end the turn");
+    assert_eq!(turn.content, "recovered");
+    assert_eq!(*notices.lock().unwrap(), vec![(1, 3, "server")], "told, never silent");
+}
+
+/// A request the provider refused is not resent: retrying cannot make a 401 succeed.
+#[tokio::test]
+async fn a_refused_request_is_not_retried() {
+    let provider = FakeProvider::start(vec![Reply::error(401, "invalid api key")]).await;
+    let m = model(&provider, serde_json::json!({}));
+    m.complete(&request(vec![Message::user("hi")])).await.expect_err("the refusal to surface");
+    assert_eq!(provider.bodies().len(), 1);
 }
 
 /// If the retry fails too, the caller sees the retry's own error rather than a stale first one.

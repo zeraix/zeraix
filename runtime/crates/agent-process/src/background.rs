@@ -123,10 +123,40 @@ impl BackgroundRegistry {
     where
         F: FnOnce(Exited) + Send + 'static,
     {
+        self.start_confined(command, cwd, None, on_exit)
+    }
+
+    /// Start a service that confines itself before `exec`.
+    ///
+    /// Separate from `start` rather than a fourth positional argument on it, because most callers — and every
+    /// test here — have nothing to confine and should not have to say so. `pre_exec` comes from
+    /// `agent_sandbox::confinement_hook`, which is the one place that decides what confinement means; this
+    /// module deliberately knows nothing about Landlock.
+    ///
+    /// A service outlives the call that started it, so its confinement matters MORE than a foreground
+    /// command's, not less: `npm run dev` started by a model runs until the app closes.
+    pub fn start_confined<F>(
+        &self,
+        command: &str,
+        cwd: Option<PathBuf>,
+        pre_exec: Option<crate::PreExecHook>,
+        on_exit: F,
+    ) -> Result<u32, String>
+    where
+        F: FnOnce(Exited) + Send + 'static,
+    {
         let mut req = ProcessRequest::new(command);
         if let Some(dir) = cwd {
             req = req.in_dir(dir);
         }
+        // The field exists only where there is a fork to hook. On Windows the hook is dropped — see
+        // `PreExecHook`; the signature is uniform so callers need no `cfg` of their own.
+        #[cfg(unix)]
+        {
+            req.pre_exec_hook = pre_exec;
+        }
+        #[cfg(not(unix))]
+        let _ = pre_exec;
         // No cap and no deadline: this is a process that is supposed to outlive the call. The trailing
         // buffer below is the only bound, and it bounds memory rather than the process.
         req.max_buffer = None;

@@ -15,6 +15,7 @@ agent-journal = { workspace = true }
 agent-dispatch = { workspace = true }
 agent-provider = { workspace = true }
 agent-loop = { workspace = true }
+agent-context = { workspace = true }
 agent-tools = { workspace = true }
 agent-process = { workspace = true }
 agent-sandbox = { workspace = true }
@@ -38,3 +39,6 @@ dashmap = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"
+# A local HTTPS server for tests/transport.rs, which pins that the OS certificate store is trusted. Already in the
+# lockfile through reqwest; `ring` because it is the provider the build already carries.
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }

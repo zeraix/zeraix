@@ -33,6 +33,7 @@ import {
   DELEGATION_TOOLS,
   FINALIZE_NUDGE,
   FORCE_REVIEW_NUDGE,
+  LOOP_BREAK_NUDGE,
   PENDING_DELEGATION_NUDGE,
   RECORD_MEMORY_NUDGE,
   RENDERER_HANDLED_TOOLS,
@@ -116,6 +117,167 @@ export interface RoundRunnerDeps {
 }
 
 /**
+ * Context diagnostics (Phase 1, measurement only): snapshot exactly what is about to be sent — buckets, the
+ * tool-schema tax the app's own estimate never counts, the redundant-re-read proxy. Also stashes the wire, tools
+ * and window so the offline replay harness can simulate budgets on this task.
+ *
+ * Exported for runtimeRound.ts, so a turn run in the Rust runtime is measured the same way.
+ */
+export function snapshotContext(
+  deps: Pick<RoundRunnerDeps, "activeModel" | "diagRef" | "tools" | "convId" | "turnId" | "modelName">,
+  wire: ApiMsg[],
+): void {
+  const { activeModel, diagRef, tools, convId, turnId, modelName } = deps;
+  const cw = activeModel?.contextWindow ?? resolveContextWindow(activeModel?.model ?? "");
+  diagRef.current = { messages: wire, tools, contextWindow: cw };
+  if (!isUsageLogEnabledSync()) return;
+  const b = describeContext(wire, tools);
+  logContextDiag({
+    actor: "main",
+    convId,
+    turnId,
+    model: modelName,
+    ctxWindow: cw,
+    ctxSystem: b.system,
+    ctxToolSchemas: b.toolSchemas,
+    ctxHistory: b.history,
+    ctxToolOutputs: b.toolOutputs,
+    ctxSubagent: b.subagentOutputs,
+    ctxTotal: b.total,
+    ctxWire: b.wireTotal,
+    rereads: b.rereads,
+    msgCount: b.msgCount,
+  });
+}
+
+/**
+ * One round's rows in the transcript: `render` rebuilds them as [baseline, deep-thinking?, body?].
+ *
+ * `asPhase`: the body is the phase summary of a tool-call round — it joins the "thinking process" timeline rather
+ * than standing as a reply; a final reply with no tool calls goes to `assistant` (its own bubble and action bar).
+ * `startedAt` is when the round's request went out: the thinking header reports how long the model took, and this
+ * is the only honest place to measure it from — the gap between two stored messages also covers tool execution,
+ * and for a background conversation however long the user left it sitting.
+ *
+ * Exported for runtimeRound.ts, so both loops draw a round identically.
+ */
+export function createRoundView(
+  deps: Pick<RoundRunnerDeps, "active" | "viewTokenRef" | "displayRef" | "setDisplay" | "convId">,
+) {
+  const { active, viewTokenRef, displayRef, setDisplay, convId } = deps;
+  // This round's memory of the transcript it appends to. NOT a frozen array: a round can begin while its
+  // conversation is in the background (no transcript to take a baseline from) and be switched back to
+  // mid-round, and it can be switched away from and back (the transcript is rebuilt from the archive). Both
+  // move the view out from under a captured baseline — see displayBaseline.ts for the failure that caused.
+  const baseline = newRoundBaseline();
+  const startedAt = Date.now();
+  const render = (reasoning: string, content: string, asPhase = false) => {
+    if (!active()) return;
+    // `active()` is not enough on its own: it reads convIdRef, which moves the instant the user clicks
+    // another conversation, while the transcript is rebuilt one await later. baselineFor answers the
+    // question that actually matters — is the transcript on screen mine, and what must I append to?
+    const base = baselineFor(baseline, { token: viewTokenRef.current, display: displayRef.current }, convId);
+    if (base === null) return; // the transcript on screen is another conversation's
+    const ms = Date.now() - startedAt;
+    const items: DisplayMsg[] = [];
+    if (reasoning) items.push({ kind: "reasoning", content: reasoning, ms });
+    if (content) items.push(asPhase ? { kind: "phase", content, ms } : { kind: "assistant", content });
+    const next = [...base, ...items];
+    displayRef.current = next;
+    setDisplay(next);
+  };
+  return { startedAt, render };
+}
+
+/**
+ * Append one tool result to the turn's buffer and to this conversation's record, with any generated artifact.
+ *
+ * The RESOLVED name is stored, not what the model emitted: the field is display-only (loadConversation rebuilds
+ * tool bubbles from it), so storing "call_tool" would make every reopened conversation show a row of identical
+ * dispatcher bubbles instead of the tools that ran. The wire copy in assistant.tool_calls is untouched. The
+ * CAPPED content is stored, to avoid bloating storage and the integrity hash.
+ *
+ * Exported for runtimeRound.ts, which stores results as the runtime reports them.
+ */
+export function storeToolResult(
+  deps: Pick<RoundRunnerDeps, "convId" | "buf" | "lastArtifactRef">,
+  result: { id: string; name: string; content: string },
+): void {
+  const { convId, buf, lastArtifactRef } = deps;
+  const store = useAgentChatStore.getState();
+  buf.pushTool({ role: "tool", tool_call_id: result.id, content: result.content });
+  // A generated image's artifact URL is stored display-only (not in content, so it never re-enters the wire), so
+  // the image bubble can be rebuilt after switching conversations. Consume the side-channel ref.
+  const artifact =
+    result.name === "image_generation" || result.name === "video_generation" ? lastArtifactRef.current : null;
+  lastArtifactRef.current = null;
+  store.appendMessage(convId, {
+    role: "tool",
+    content: result.content,
+    tool_call_id: result.id,
+    name: result.name,
+    ts: Date.now(),
+    ...(artifact
+      ? { [artifact.kind === "video" ? "video" : "image"]: artifact.src, servedBy: artifact.servedBy }
+      : {}),
+  });
+  buf.markToolStored((store.getConversation(convId)?.messages.length ?? 0) - 1);
+}
+
+/**
+ * The wrap-up round after a detected doom loop.
+ *
+ * The Runtime stops on escalation; withdrawing the tools and making the model account for itself is the host's
+ * response, and it belongs here rather than inside the loop because it is a request this host builds. Same
+ * outcome the user saw before — one final, tool-free reply explaining where it got stuck — reached through one
+ * decision instead of two. Used after either loop: the TypeScript one, or a turn the Rust runtime ran.
+ *
+ * `warn` says it out loud, because from outside a loop and long work look identical — a spinner and a rising
+ * token count — and the user is the one paying for the difference. `show` puts the answer on screen.
+ */
+export async function runLoopBreakRound(
+  deps: RoundRunnerDeps,
+  host: { detail?: string; warn: () => void; show: (content: string) => void },
+): Promise<void> {
+  const { buf, compaction, activeModel, isLocalModel, sendReasoningContext, wireSteps, requestChat, signal, convId, turnId, log } =
+    deps;
+  buf.nudgeIntoLastTool(LOOP_BREAK_NUDGE);
+  host.warn();
+  console.warn(`[loop-guard] ${host.detail ?? "no new information"}; withdrawing tools for a final reply`);
+  // Built through prepareWire like every other request. Hand-composing a few of its steps here would be a second
+  // wire builder, and it would skip the two that matter least often and hurt most when missed: the reasoning
+  // replay policy, and image handling for a provider that rejects them.
+  const wrapWire = prepareWire(buf.messages, compaction, {
+    model: {
+      isLocal: isLocalModel,
+      acceptsImages: !!activeModel?.multimodal,
+      sendReasoningContext: sendReasoningContext(),
+      modelId: activeModel?.model,
+      resultCeilingTokens: resultCeilingTokens(
+        activeModel?.contextWindow ?? resolveContextWindow(activeModel?.model ?? ""),
+        getContextBudgetK(),
+      ),
+    },
+    steps: wireSteps,
+  });
+  const wrapUp = await requestChat(wrapWire, undefined, signal, undefined, { actor: "main", convId, turnId });
+  const wrapMsg = wrapUp.choices?.[0]?.message;
+  // A model that emits tool calls when none were declared: rare, and seen on local builds whose chat template
+  // writes call syntax out of habit. Nothing can execute them — there is no declaration to validate them
+  // against — and the round is over, so they are dropped rather than persisted. Writing them would leave an
+  // assistant.tool_calls that nothing answers, which the provider rejects on the conversation's NEXT request.
+  if (wrapMsg?.tool_calls?.length) {
+    console.warn(`[loop-guard] dropped ${wrapMsg.tool_calls.length} tool call(s) emitted with no tools declared`);
+    delete wrapMsg.tool_calls;
+  }
+  log.lastWire = wrapWire;
+  log.lastContent = wrapMsg?.content ?? "";
+  if (!log.lastContent) return;
+  host.show(log.lastContent);
+  useAgentChatStore.getState().appendMessage(convId, { role: "assistant", content: log.lastContent, ts: Date.now() });
+}
+
+/**
  * One round of the turn: build the wire, make the request, execute whatever tools came back, and report the
  * result to the agent loop.
  *
@@ -131,9 +293,9 @@ export function createRoundRunner(deps: RoundRunnerDeps) {
     checkpoint,
     convId: genConvId, turnId, signal, active, t,
     buf, compaction, log,
-    activeModel, modelName, isLocalModel, sendReasoningContext, wireSteps, tools, requestChat, boundary, ctx,
+    activeModel, isLocalModel, sendReasoningContext, wireSteps, tools, requestChat, boundary, ctx,
     rendererTools, execToolCall, toolRules, drainDelegations, drainJobEvents,
-    displayRef, viewTokenRef, setDisplay, setCtxTokens, diagRef, lastArtifactRef, schedulerRef,
+    setCtxTokens, schedulerRef,
     awaitingJobsRef, tagLastAssistantStoredIndex, goalFor, setGoalFor, setRenderDelta,
   } = deps;
   const ctrl = { signal };
@@ -192,32 +354,7 @@ export function createRoundRunner(deps: RoundRunnerDeps) {
             "an mmproj projector, or a provider rejected image input for it within the last day",
         ),
     });
-    // Context diagnostics (Phase 1, measurement only): snapshot exactly what is about to be sent —
-    // buckets + the tool-schema tax the app's own estimate never counts + the redundant-re-read proxy.
-    // Also stash the wire/tools/window so the offline replay harness can simulate budgets on this task.
-    {
-      const cw = activeModel?.contextWindow ?? resolveContextWindow(activeModel?.model ?? "");
-      diagRef.current = { messages: wire, tools, contextWindow: cw };
-      if (isUsageLogEnabledSync()) {
-        const b = describeContext(wire, tools);
-        logContextDiag({
-          actor: "main",
-          convId: genConvId,
-          turnId,
-          model: modelName,
-          ctxWindow: cw,
-          ctxSystem: b.system,
-          ctxToolSchemas: b.toolSchemas,
-          ctxHistory: b.history,
-          ctxToolOutputs: b.toolOutputs,
-          ctxSubagent: b.subagentOutputs,
-          ctxTotal: b.total,
-          ctxWire: b.wireTotal,
-          rereads: b.rereads,
-          msgCount: b.msgCount,
-        });
-      }
-    }
+    snapshotContext(deps, wire);
     // Phased streaming: the final reply's content / reasoning renders chunk by chunk, and each "tool-call round" body is
     // shown as that phase's summary (phaseSummaryText strips the chain-of-thought remnants), presenting the process of
     // "phase summary → execute → next phase summary …". Daily mode used to discard tool-round bodies instead; with the
@@ -229,29 +366,9 @@ export function createRoundRunner(deps: RoundRunnerDeps) {
     // conversation is in the background (no transcript to take a baseline from) and be switched back to
     // mid-round, and it can be switched away from and back (the transcript is rebuilt from the archive). Both
     // move the view out from under a captured baseline — see displayBaseline.ts for the failure that caused.
-    const baseline = newRoundBaseline();
-    // Shared by finalization / increments: rebuild this round's display as [baseline, deep-thinking?, body?] (only effective in the active view).
-    // asPhase: the body is "the phase summary of a tool-call round" — collected into the card as a "thinking process" timeline entry,
-    // rather than a standalone final reply; a final reply with no tool calls goes to assistant (a standalone bubble + action bar).
-    // When this round's request went out. The thinking-process header reports how long the model took, and this is
-    // the only honest place to measure it from: the gap between two stored messages also covers tool execution,
-    // and for a background conversation, however long the user left it sitting.
-    const roundStart = Date.now();
-    const renderTurn = (reasoning: string, content: string, asPhase = false) => {
-      if (!active()) return;
-      // `active()` is not enough on its own: it reads convIdRef, which moves the instant the user clicks
-      // another conversation, while the transcript is rebuilt one await later. baselineFor answers the
-      // question that actually matters — is the transcript on screen mine, and what must I append to?
-      const base = baselineFor(baseline, { token: viewTokenRef.current, display: displayRef.current }, genConvId);
-      if (base === null) return; // the transcript on screen is another conversation's
-      const ms = Date.now() - roundStart;
-      const items: DisplayMsg[] = [];
-      if (reasoning) items.push({ kind: "reasoning", content: reasoning, ms });
-      if (content) items.push(asPhase ? { kind: "phase", content, ms } : { kind: "assistant", content });
-      const next = [...base, ...items];
-      displayRef.current = next;
-      setDisplay(next);
-    };
+    const view = createRoundView(deps);
+    const roundStart = view.startedAt;
+    const renderTurn = view.render;
     // Streaming always renders incrementally as a normal reply bubble (so the final reply forms smoothly); if this round ultimately carries tool calls,
     // the finalization below with asPhase=true folds that body into the "thinking process" timeline (exactly in sync with the tools starting to execute).
     // Each delta re-measures, so the header counts up while the round runs instead of appearing only at the end.
@@ -474,32 +591,7 @@ export function createRoundRunner(deps: RoundRunnerDeps) {
           const cappedContent = UNCAPPED_TOOLS.has(name)
             ? content
             : capToolOutput(content);
-          buf.pushTool({ role: "tool", tool_call_id: tc.id, content: cappedContent });
-          // A generated image's artifact URL is stored display-only (not in content, so it never re-enters the wire),
-          // so the image bubble can be rebuilt after switching conversations. Consume the side-channel ref.
-          const artifact =
-            name === "image_generation" || name === "video_generation"
-              ? lastArtifactRef.current
-              : null;
-          lastArtifactRef.current = null;
-          // Persist the tool result to this conversation (store the compressed version, to avoid bloating storage / the integrity hash).
-          store.appendMessage(genConvId, {
-            role: "tool",
-            content: cappedContent,
-            tool_call_id: tc.id,
-            // The RESOLVED name, not what the model emitted: this field is display-only (loadConversation rebuilds tool
-            // bubbles from it), so persisting "call_tool" would make every reopened conversation show a row of identical
-            // dispatcher bubbles instead of the tools that actually ran. The wire copy in assistant.tool_calls is untouched.
-            name,
-            ts: Date.now(),
-            ...(artifact
-              ? {
-                  [artifact.kind === "video" ? "video" : "image"]: artifact.src,
-                  servedBy: artifact.servedBy,
-                }
-              : {}),
-          });
-          buf.markToolStored((store.getConversation(genConvId)?.messages.length ?? 0) - 1);
+          storeToolResult(deps, { id: tc.id, name, content: cappedContent });
 
           // ── Progress guard ──────────────────────────────────────────────────────────────────────────
           // Judged on `cappedContent` rather than `content`: what the guard has to answer is "does the

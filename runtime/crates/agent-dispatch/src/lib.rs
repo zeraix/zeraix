@@ -50,7 +50,7 @@ use agent_tools::registry::ToolRegistry;
 use agent_tools::tool::{RiskLevel, ToolContext};
 use serde_json::{Map, Value};
 
-pub use args::{ParsedArgs, parse_tool_arguments};
+pub use args::{ParsedArgs, parse_tool_arguments, replay_arguments};
 pub use router::{DISPATCHER_NAME, ResolvedCall, resolve_tool_call};
 
 /// Argument keys that name a filesystem target, in the order a tool is likely to declare them.
@@ -161,6 +161,10 @@ impl DispatchingExecutor {
 
 #[async_trait::async_trait]
 impl ToolExecutor for DispatchingExecutor {
+    fn replay_arguments(&self, call: &ToolCall) -> Option<String> {
+        replay_arguments(&call.arguments)
+    }
+
     async fn execute(
         &self,
         call: &ToolCall,
@@ -193,7 +197,18 @@ impl ToolExecutor for DispatchingExecutor {
         // taken on their behalf, and gating it would mean the runtime needs permission to talk to them.
         if let Some(host) = &self.host {
             if host.serves(&name) {
-                let outcome = host.call(&name, &args_value).await;
+                // Raced against the token. A host tool is answered by another process — often by a person,
+                // for a consent prompt or an `ask_user` question — and the bridge waits minutes for it. A
+                // run the user has already stopped must not wait those minutes for an answer it will throw
+                // away: when a window closed with a tool outstanding, the run sat for the whole three-minute
+                // host timeout before noticing it had been cancelled.
+                let outcome = tokio::select! {
+                    biased;
+                    _ = token.cancelled() => {
+                        ToolOutcome::failed("The user stopped this operation before it finished.")
+                    }
+                    o = host.call(&name, &args_value) => o,
+                };
                 return (name, args_value, outcome);
             }
         }

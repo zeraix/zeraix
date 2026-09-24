@@ -157,20 +157,40 @@ impl ExecutionBackend for NativeBackend {
             process = process.with_max_buffer(cap);
         }
 
-        #[cfg(target_os = "linux")]
+        #[cfg(unix)]
         {
-            // Applied in the child, between fork and exec. It must be there: Landlock restrictions are
-            // inherited and irrevocable, so restricting the parent would confine the runtime itself for
-            // the rest of its life.
-            if !req.policy.filesystem.is_empty() && report.filesystem.is_kernel_enforced() {
-                let policy = req.policy.filesystem.clone();
-                process.pre_exec_hook = Some(std::sync::Arc::new(move || {
-                    crate::landlock_backend::apply(&policy)
-                }));
-            }
+            process.pre_exec_hook = confinement_hook(&req.policy);
         }
 
         let result = agent_process::run(process, cancel).await;
         SandboxOutcome { process: result, report }
+    }
+}
+
+/// What a child should apply to itself before `exec`, or `None` when there is nothing to enforce.
+///
+/// Extracted so the two places that spawn a child share one rule. A foreground command goes through
+/// [`NativeBackend::execute`]; a long-lived service goes through `agent_process::BackgroundRegistry`, which
+/// owns its own spawn because it has to keep the handle to reap it. While this logic lived inside `execute`,
+/// only the first was confined — so `run_command` was sandboxed and `npm run dev`, started from the same
+/// conversation and living far longer, was not.
+///
+/// Applied in the CHILD, between fork and exec. It must be: Landlock restrictions are inherited and
+/// irrevocable, so restricting the parent would confine the runtime itself for the rest of its life.
+pub fn confinement_hook(policy: &SandboxPolicy) -> Option<agent_process::PreExecHook> {
+    #[cfg(target_os = "linux")]
+    {
+        if policy.filesystem.is_empty() || !NativeBackend::fs_enforcement(policy).is_kernel_enforced() {
+            return None;
+        }
+        let filesystem = policy.filesystem.clone();
+        Some(std::sync::Arc::new(move || crate::landlock_backend::apply(&filesystem)))
+    }
+    // No unprivileged path-confinement mechanism here; `enforcement` already reports that rather than
+    // pretending otherwise.
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = policy;
+        None
     }
 }

@@ -47,6 +47,7 @@ import { formatJobDelivery } from "@/lib/ai/services";
 import type { SandboxStatus } from "@/lib/ai/sandbox";
 import type { TFunc } from "@/lib/i18n";
 import { createRunDelegation } from "./delegation";
+import type { RuntimeModel } from "./runtimeRound";
 import { applyReasoningPolicy } from "./wireHelpers";
 import type { ApiMsg, ChatResponse, DisplayMsg, RequestLog, RunCtx } from "./types";
 import type { ThinkingConfig } from "@/lib/ai/thinking";
@@ -122,6 +123,8 @@ export interface DelegationDeps {
   brokerRef: { current: { broker: CapabilityBroker; audit: InMemoryAuditLog } | null };
   orchestrationDeclsRef: { current: Map<string, ToolDeclaration> | null };
   pendingJobsRef: { current: Map<string, string[]> };
+  /** The model as the Rust runtime reaches it; with it, delegations run there when the build routes chat there. */
+  runtimeModel?: RuntimeModel;
 }
 
 export function createDelegationTools(deps: DelegationDeps): DelegationTools {
@@ -144,6 +147,7 @@ export function createDelegationTools(deps: DelegationDeps): DelegationTools {
     brokerRef,
     orchestrationDeclsRef,
     pendingJobsRef,
+    runtimeModel,
   } = deps;
 
   // ── Delegation plumbing ─────────────────────────────────────────────────────────────────────────
@@ -250,6 +254,7 @@ export function createDelegationTools(deps: DelegationDeps): DelegationTools {
     requestChat,
     execToolCall,
     delegations: () => delegationsRef.current,
+    runtimeModel,
   });
 
   /**

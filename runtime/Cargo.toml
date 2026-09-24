@@ -78,7 +78,15 @@ landlock = "0.4"
 # dist:* targets, which is what a native-tls build would add. Default features are off because they pull
 # in a second TLS stack and blocking support this runtime has no use for. Approved in
 # docs/agent-runtime-dependency-review.md (D14): 59 crates that compile, 85 in the lockfile.
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "stream", "charset", "http2"] }
+#
+# Two features added 2026-09-23, with the owner's approval, when chat turns moved into the runtime:
+# - rustls-tls-native-roots: the OS certificate store BESIDE the bundled Mozilla roots (rustls-tls keeps those),
+#   so a network that inspects TLS with a locally installed CA works here as it does in the chat window's own
+#   requests. Adds rustls-native-certs and its per-OS store crates: schannel (Windows), security-framework and
+#   core-foundation (macOS), openssl-probe (Linux) — six lockfile entries.
+# - socks: follow a SOCKS system proxy, as Chromium resolves it for the window, instead of bypassing it. No new
+#   crates: this reqwest implements SOCKS itself.
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "rustls-tls-native-roots", "socks", "json", "stream", "charset", "http2"] }
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
 
 [workspace.dependencies.nix]

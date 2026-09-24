@@ -8,6 +8,7 @@ license.workspace = true
 [dependencies]
 agent-core = { workspace = true }
 async-trait = { workspace = true }
+futures-util = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }

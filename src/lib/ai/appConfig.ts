@@ -88,20 +88,39 @@ const STATIC: Array<[dot: string, section: string, key: string]> = [
 const KEYS_PREFIX = "agent.llm.keys.";
 const MODELS_PREFIX = "agent.llm.models.";
 
+// ── The static table is consulted FIRST, in both directions ─────────────────────────────────────
+//
+// The per-provider prefixes (`key_<id>`, `model_<id>`) used to be tried first, and `model_list` — a static key
+// — matches `model_<id>` with id "list". So the file's model list was hydrated into `agent.llm.models.list`, a
+// slot nothing reads, while `agent.llm.modelList` stayed empty; the app saved that empty list at startup and
+// the mirror wrote `[]` over app.config. A fresh profile wiped the durable copy it should have restored, and a
+// hand edit to the file — which its header invites — was discarded on the next launch. Found 2026-09-23 by
+// running the app end to end from a fresh profile.
+//
+// Ordering alone is not enough. Every existing user has the stray `agent.llm.models.list` from those past
+// launches; with the static key now claimed, the provider backfill would find the stray one unclaimed and map
+// it straight back to `model_list`, overwriting the current list with an old one. So a prefix-derived INI key
+// that coincides with a static one is refused outright: provider id "list" is simply not a provider.
+const STATIC_INI = new Set(STATIC.map(([, section, key]) => `${section}.${key}`));
+
+function prefixed(section: string, key: string): { section: string; key: string } | null {
+  return STATIC_INI.has(`${section}.${key}`) ? null : { section, key };
+}
+
 function dotToIni(path: string): { section: string; key: string } | null {
-  if (path.startsWith(KEYS_PREFIX))
-    return { section: "llm", key: `key_${path.slice(KEYS_PREFIX.length)}` };
-  if (path.startsWith(MODELS_PREFIX))
-    return { section: "llm", key: `model_${path.slice(MODELS_PREFIX.length)}` };
   const hit = STATIC.find(([p]) => p === path);
-  return hit ? { section: hit[1], key: hit[2] } : null;
+  if (hit) return { section: hit[1], key: hit[2] };
+  if (path.startsWith(KEYS_PREFIX)) return prefixed("llm", `key_${path.slice(KEYS_PREFIX.length)}`);
+  if (path.startsWith(MODELS_PREFIX)) return prefixed("llm", `model_${path.slice(MODELS_PREFIX.length)}`);
+  return null;
 }
 
 function iniToDot(section: string, key: string): string | null {
+  const hit = STATIC.find(([, s, k]) => s === section && k === key);
+  if (hit) return hit[0];
   if (section === "llm" && key.startsWith("key_")) return `${KEYS_PREFIX}${key.slice(4)}`;
   if (section === "llm" && key.startsWith("model_")) return `${MODELS_PREFIX}${key.slice(6)}`;
-  const hit = STATIC.find(([, s, k]) => s === section && k === key);
-  return hit ? hit[0] : null;
+  return null;
 }
 
 function readLocal(path: string): string {

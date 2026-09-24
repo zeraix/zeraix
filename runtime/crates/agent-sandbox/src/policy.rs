@@ -18,15 +18,115 @@ pub struct FilesystemPolicy {
 }
 
 impl FilesystemPolicy {
-    /// A workspace-scoped policy: the project is readable and writable, the system is executable and
-    /// readable enough for a toolchain to run.
+    /// A workspace-scoped policy: [`Self::system`] plus one project root, readable and writable.
     pub fn workspace(root: impl Into<PathBuf>) -> Self {
+        let mut policy = Self::system();
         let root = root.into();
-        Self {
-            read: vec![root.clone(), PathBuf::from("/usr"), PathBuf::from("/lib"), PathBuf::from("/etc")],
-            write: vec![root, PathBuf::from("/tmp")],
-            execute: vec![PathBuf::from("/usr"), PathBuf::from("/bin"), PathBuf::from("/lib")],
+        policy.read.insert(0, root.clone());
+        policy.write.insert(0, root);
+        policy
+    }
+
+    /// Everything a toolchain needs and nothing of the user's — no project root at all.
+    ///
+    /// Split out of [`Self::workspace`] because a session has more than one kind of root: the project is
+    /// read AND written, while the media library is only read. Building from a single root forced every
+    /// declared directory into both lists, so naming the library at all made it writable — which is not what
+    /// the file tools mean by it (`resolvePath` refuses to write there) and not what anyone declaring it
+    /// intends.
+    ///
+    ///
+    /// ## Why this is longer than "the project plus /usr"
+    ///
+    /// The first version of this list was exactly that, and it was never exercised against a real command —
+    /// `agent-sandbox` was orphaned until the host declared a policy (2026-09-21). The moment it was armed, the
+    /// narrow list turned out to forbid ordinary work rather than forbid harm:
+    ///
+    /// - a toolchain installed per-user (`~/.nvm`, `~/.cargo`, `~/.rustup`, `~/.local/bin`) could not be
+    ///   **exec'd at all**, so an nvm-installed `node` failed before it ran a line;
+    /// - `npm`, `pnpm`, `cargo` and friends write to a per-user cache (`~/.npm`, `~/.cache`, `~/.cargo`), so
+    ///   every install failed on a directory that has nothing to do with the workspace;
+    /// - `/dev/null` was unreachable, which breaks the shell redirect in almost every build script there is.
+    ///
+    /// A sandbox that fails all of those does not get tightened in the field, it gets turned off. So the list
+    /// grants what a build genuinely needs and nothing broader.
+    ///
+    /// ## What stays out, deliberately
+    ///
+    /// `$HOME` itself is **not** granted, in either direction. That is what keeps `~/Documents`, `~/.ssh`,
+    /// `~/.aws`, `~/.gnupg` and `~/.netrc` out of reach — the paths whose loss is the reason to confine a
+    /// command in the first place. `~/.config` is readable (git and npm read their configuration from under it)
+    /// and deliberately **not** writable: it is also where several CLIs keep tokens, and a writable subtree is
+    /// a readable one in [`crate::landlock_backend::apply`].
+    ///
+    /// Nothing here is required to exist — `apply` skips a path it cannot open, so naming `~/.bun` on a machine
+    /// without Bun costs nothing.
+    pub fn system() -> Self {
+        let home = std::env::var_os("HOME").map(PathBuf::from);
+        // Relative to `$HOME`, or nothing at all when the environment has none (a service account, a test).
+        let at_home = |rel: &str| home.as_ref().map(|h| h.join(rel));
+
+        let mut read: Vec<PathBuf> = vec![
+            PathBuf::from("/usr"),
+            PathBuf::from("/lib"),
+            PathBuf::from("/lib64"),
+            PathBuf::from("/bin"),
+            PathBuf::from("/sbin"),
+            PathBuf::from("/etc"),
+            PathBuf::from("/opt"),
+            // Read by anything that inspects itself or the machine: node, git, the JVM, every `nproc`.
+            PathBuf::from("/proc"),
+            PathBuf::from("/sys"),
+            // Distribution-specific toolchain roots. Absent on most systems, skipped when they are.
+            PathBuf::from("/snap"),
+            PathBuf::from("/nix"),
+            PathBuf::from("/var/lib"),
+        ];
+        let mut write: Vec<PathBuf> = vec![
+            PathBuf::from("/tmp"),
+            PathBuf::from("/var/tmp"),
+            // `/dev/null`, `/dev/urandom`, `/dev/tty`. Write rather than read because a redirect to
+            // /dev/null opens it for writing, and a policy without it breaks most build scripts. The
+            // process is unprivileged, so the block devices alongside them are not reachable anyway.
+            PathBuf::from("/dev"),
+        ];
+        let mut execute: Vec<PathBuf> = vec![
+            PathBuf::from("/usr"),
+            PathBuf::from("/bin"),
+            PathBuf::from("/sbin"),
+            PathBuf::from("/lib"),
+            PathBuf::from("/lib64"),
+            PathBuf::from("/opt"),
+            PathBuf::from("/snap"),
+            PathBuf::from("/nix"),
+        ];
+
+        // Per-user toolchains and their caches. Each is both executable and writable: a version manager
+        // installs INTO the same tree it runs from, so splitting the two would break `nvm install` while
+        // leaving `node` working, which is the more confusing half-failure.
+        for rel in [
+            ".nvm", ".cargo", ".rustup", ".bun", ".deno", ".pyenv", ".rbenv", ".sdkman", ".volta",
+            ".local", "go",
+        ] {
+            if let Some(p) = at_home(rel) {
+                write.push(p.clone());
+                execute.push(p);
+            }
         }
+        // Caches and per-user state. Written constantly by package managers, never executed from.
+        for rel in [".cache", ".npm", ".yarn", ".pnpm-store", ".gradle", ".m2", ".bundle", ".composer"] {
+            if let Some(p) = at_home(rel) {
+                write.push(p);
+            }
+        }
+        // Configuration a toolchain reads and must not be allowed to rewrite. See the note above.
+        for rel in [".config", ".gitconfig", ".npmrc", ".yarnrc", ".yarnrc.yml", ".gitignore_global"] {
+            if let Some(p) = at_home(rel) {
+                read.push(p);
+            }
+        }
+
+        Self { read, write, execute }
     }
 
     pub fn is_empty(&self) -> bool {
@@ -142,6 +242,43 @@ mod tests {
         assert!(p.allows_write(Path::new("/home/u/proj/out.txt")));
         assert!(!p.allows_write(Path::new("/home/u/other/x")));
         assert!(!p.allows_read(Path::new("/home/u/.ssh/id_rsa")));
+    }
+
+    /// The failures that made the narrow list unusable the moment it was armed. Each of these is a command
+    /// that does ordinary work, not a command doing something questionable.
+    #[test]
+    fn workspace_policy_lets_a_real_toolchain_run() {
+        let p = FilesystemPolicy::workspace("/home/u/proj");
+        // A shell redirect. Nothing builds without it.
+        assert!(p.allows_write(Path::new("/dev/null")));
+        // `nproc`, and everything else that reads the machine.
+        assert!(p.allows_read(Path::new("/proc/cpuinfo")));
+        let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else { return };
+        // A per-user toolchain: installed, executed and updated in the same tree.
+        assert!(p.allows_read(&home.join(".nvm/versions/node/v20.0.0/bin/node")));
+        assert!(p.allows_write(&home.join(".cargo/registry/index")));
+        // A package manager's cache.
+        assert!(p.allows_write(&home.join(".npm/_cacache/tmp")));
+        // Configuration is readable, so git and npm find their settings.
+        assert!(p.allows_read(&home.join(".gitconfig")));
+    }
+
+    /// What confinement is FOR. Widening the list to make builds work must not have widened it to here.
+    #[test]
+    fn workspace_policy_still_withholds_the_paths_that_matter() {
+        let p = FilesystemPolicy::workspace("/home/u/proj");
+        let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else { return };
+        for secret in [".ssh/id_rsa", ".aws/credentials", ".gnupg/secring.gpg", ".netrc"] {
+            assert!(!p.allows_read(&home.join(secret)), "{secret} must stay out of reach");
+        }
+        assert!(!p.allows_write(&home.join("Documents/taxes.pdf")));
+        // $HOME itself is never granted, so a file that is not on the list is not reachable by being near one.
+        assert!(!p.allows_write(&home.join(".bashrc")));
+        // Readable configuration is not writable configuration: a token under ~/.config stays put.
+        assert!(!p.allows_write(&home.join(".config/gh/hosts.yml")));
+        // The system is readable and executable, never writable.
+        assert!(!p.allows_write(Path::new("/etc/passwd")));
+        assert!(!p.allows_write(Path::new("/usr/bin/node")));
     }
 
     #[test]

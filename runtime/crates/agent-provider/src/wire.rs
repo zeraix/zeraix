@@ -26,12 +26,22 @@ use serde::Deserialize;
 /// `stream` is a parameter rather than a field of [`ModelRequest`] because it is a transport decision, not
 /// something the loop asked for: the same request is sent streamed or not depending on what the caller wants
 /// to display, and the answer it produces is identical either way.
-pub fn build_body(req: &ModelRequest, stream: bool, thinking_params: &serde_json::Value) -> serde_json::Value {
+pub fn build_body(
+    req: &ModelRequest,
+    stream: bool,
+    thinking_params: &serde_json::Value,
+    temperature: Option<f64>,
+) -> serde_json::Value {
     let mut body = serde_json::json!({
         "model": req.model,
         "messages": req.messages,
         "stream": stream,
     });
+    // Only when the caller asked for one. Sending a default would override whatever the provider's own is,
+    // and "the app picked 1.0 for you" is not better than "the provider picked".
+    if let Some(t) = temperature {
+        body["temperature"] = serde_json::json!(t);
+    }
     if !req.tools.is_empty() {
         body["tools"] = serde_json::Value::Array(req.tools.clone());
     }
@@ -131,6 +141,34 @@ pub struct WireUsage {
     pub prompt_tokens: u64,
     #[serde(default)]
     pub completion_tokens: u64,
+    /// DeepSeek's spelling of a prefix-cache hit.
+    #[serde(default)]
+    pub prompt_cache_hit_tokens: Option<u64>,
+    /// The OpenAI-compatible spelling of the same thing.
+    #[serde(default)]
+    pub prompt_tokens_details: Option<PromptTokensDetails>,
+}
+
+#[derive(Debug, Default, Clone, Copy, Deserialize)]
+pub struct PromptTokensDetails {
+    #[serde(default)]
+    pub cached_tokens: Option<u64>,
+}
+
+impl WireUsage {
+    /// The usage as the loop records it. Whichever cache spelling is present, in the order `chatRequest.ts`
+    /// reads them, so a turn reports the same cache figure whichever side ran it.
+    pub fn to_usage(self) -> Usage {
+        Usage {
+            prompt_tokens: self.prompt_tokens,
+            completion_tokens: self.completion_tokens,
+            cached_tokens: self
+                .prompt_cache_hit_tokens
+                .or(self.prompt_tokens_details.and_then(|d| d.cached_tokens))
+                .unwrap_or(0),
+            estimated: false,
+        }
+    }
 }
 
 /// Reduce a complete (non-streamed) response to what the loop acts on.
@@ -145,10 +183,7 @@ pub fn normalize(resp: ChatResponse) -> NormalizedTurn {
             .into_iter()
             .map(|tc| ToolCall { id: tc.id, name: tc.function.name, arguments: tc.function.arguments })
             .collect(),
-        usage: resp.usage.map(|u| Usage {
-            prompt_tokens: u.prompt_tokens,
-            completion_tokens: u.completion_tokens,
-        }),
+        usage: resp.usage.map(WireUsage::to_usage),
     }
 }
 
@@ -179,8 +214,7 @@ impl StreamAccumulator {
             return false;
         };
         if let Some(u) = parsed.usage {
-            self.usage =
-                Some(Usage { prompt_tokens: u.prompt_tokens, completion_tokens: u.completion_tokens });
+            self.usage = Some(u.to_usage());
         }
         let Some(delta) = parsed.choices.into_iter().next().and_then(|c| c.delta) else {
             return false;
@@ -395,6 +429,23 @@ mod tests {
     }
 
     #[test]
+    fn a_cache_hit_is_read_in_either_spelling() {
+        let deepseek: WireUsage = serde_json::from_value(json!({
+            "prompt_tokens": 100, "completion_tokens": 5, "prompt_cache_hit_tokens": 80
+        }))
+        .unwrap();
+        assert_eq!(deepseek.to_usage().cached_tokens, 80);
+        let openai: WireUsage = serde_json::from_value(json!({
+            "prompt_tokens": 100, "completion_tokens": 5, "prompt_tokens_details": { "cached_tokens": 64 }
+        }))
+        .unwrap();
+        assert_eq!(openai.to_usage().cached_tokens, 64);
+        let neither: WireUsage = serde_json::from_value(json!({ "prompt_tokens": 1, "completion_tokens": 1 })).unwrap();
+        assert_eq!(neither.to_usage().cached_tokens, 0);
+        assert!(!neither.to_usage().estimated, "a provider that reported usage was not estimated");
+    }
+
+    #[test]
     fn usage_from_a_late_chunk_is_kept() {
         let mut acc = StreamAccumulator::new();
         acc.push(&json!({"choices":[{"delta":{"content":"x"}}]}).to_string());
@@ -454,11 +505,11 @@ mod tests {
     #[test]
     fn a_streamed_body_asks_for_usage_which_providers_otherwise_omit() {
         let req = ModelRequest { model: "m".into(), ..Default::default() };
-        let body = build_body(&req, true, &json!({}));
+        let body = build_body(&req, true, &json!({}), None);
         assert_eq!(body["stream"], true);
         assert_eq!(body["stream_options"]["include_usage"], true);
 
-        let body = build_body(&req, false, &json!({}));
+        let body = build_body(&req, false, &json!({}), None);
         assert_eq!(body["stream"], false);
         assert!(body.get("stream_options").is_none());
     }
@@ -466,7 +517,7 @@ mod tests {
     #[test]
     fn thinking_parameters_are_spread_last_so_a_provider_spelling_wins() {
         let req = ModelRequest { model: "m".into(), ..Default::default() };
-        let body = build_body(&req, false, &json!({ "reasoning_effort": "high", "model": "override" }));
+        let body = build_body(&req, false, &json!({ "reasoning_effort": "high", "model": "override" }), None);
         assert_eq!(body["reasoning_effort"], "high");
         assert_eq!(body["model"], "override");
     }
@@ -474,6 +525,6 @@ mod tests {
     #[test]
     fn tools_are_omitted_entirely_when_there_are_none() {
         let req = ModelRequest { model: "m".into(), ..Default::default() };
-        assert!(build_body(&req, false, &json!({})).get("tools").is_none());
+        assert!(build_body(&req, false, &json!({}), None).get("tools").is_none());
     }
 }

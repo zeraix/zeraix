@@ -39,6 +39,28 @@ export type TurnUsage = {
 /** What a retry tells the UI. Defined by the retry runner; re-exported name kept local for readability. */
 type RetryNotice = (info: RetryInfo) => void;
 
+/**
+ * A failed request, in words. Local llama-server failures are cryptic (raw llama.cpp text), so for a local endpoint
+ * the known template / tool-call failures become an actionable message; everything else keeps the raw
+ * "HTTP <status> — <text>" form. Exported for runtimeRound.ts, so a turn run in the Rust runtime words its
+ * failures the same way.
+ */
+export function describeHttpFailure(
+  status: number,
+  raw: string | undefined,
+  endpoint: string,
+  t: (key: string) => string,
+): string {
+  const base = `HTTP ${status}${raw ? ` — ${raw.slice(0, 300)}` : ""}`;
+  if (!isLocalEndpoint(endpoint)) return base;
+  const r = (raw || "").toLowerCase();
+  if (r.includes("generate parser") || r.includes("raise_exception") || r.includes("chat template") || r.includes("system message must be"))
+    return t("chat.localTemplateError");
+  if (r.includes("peg-native") || r.includes("unparsed") || r.includes("tool call") || r.includes("tool_call"))
+    return t("chat.localToolCallError");
+  return base;
+}
+
 export function createChatRequest(cfg: {
   activeModel: ResolvedModel | null;
   endpoint: string;
@@ -185,18 +207,7 @@ export function createChatRequest(cfg: {
         usage: accum.usage,
       };
     };
-    // Local llama-server failures are cryptic (raw llama.cpp text). For local endpoints, map the known template / tool-call
-    // failures to an actionable message; everything else keeps the raw "HTTP <status> — <text>" form.
-    const localErr = (status: number, raw?: string): string => {
-      const base = `HTTP ${status}${raw ? ` — ${raw.slice(0, 300)}` : ""}`;
-      if (!isLocalEndpoint(endpoint)) return base;
-      const r = (raw || "").toLowerCase();
-      if (r.includes("generate parser") || r.includes("raise_exception") || r.includes("chat template") || r.includes("system message must be"))
-        return t("chat.localTemplateError");
-      if (r.includes("peg-native") || r.includes("unparsed") || r.includes("tool call") || r.includes("tool_call"))
-        return t("chat.localToolCallError");
-      return base;
-    };
+    const localErr = (status: number, raw?: string): string => describeHttpFailure(status, raw, endpoint, t);
     const streamErr = (res: { ok: boolean; status: number; error?: string }): ChatResponse | never => {
       if (!res.ok) {
         if (signal?.aborted) return assemble(); // Aborted: return the accumulated part (the caller then exits on aborted and will not use it)

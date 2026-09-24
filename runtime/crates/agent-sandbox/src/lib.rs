@@ -44,5 +44,5 @@ pub mod policy;
 #[cfg(target_os = "linux")]
 pub mod landlock_backend;
 
-pub use backend::{ExecutionBackend, NativeBackend, SandboxRequest};
+pub use backend::{confinement_hook, ExecutionBackend, NativeBackend, SandboxRequest};
 pub use policy::{Enforcement, FilesystemPolicy, NetworkPolicy, SandboxPolicy};

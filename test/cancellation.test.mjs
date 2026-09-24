@@ -62,7 +62,7 @@ test("every disk mutator refuses to run after Stop", () => {
   //
   // What is pinned here is the routing that makes that true: the runtime must be the only thing serving them.
   // If one reappears as a handler in this file, or drops out of RUNTIME_ONLY_TOOLS, this fires.
-  const bridge = fs.readFileSync(path.join(root, "electron/tools/rustRuntime.mjs"), "utf8");
+  const bridge = fs.readFileSync(path.join(root, "electron/tools/rustRuntimeCore.mjs"), "utf8");
   const runtimeOnly = bridge.slice(bridge.indexOf("const RUNTIME_ONLY_TOOLS"), bridge.indexOf("];", bridge.indexOf("const RUNTIME_ONLY_TOOLS")));
   for (const name of ["append_file", "delete_file", "copy_file", "move_file", "create_directory"]) {
     assert.ok(runtimeOnly.includes(`"${name}"`), `${name} is served by the runtime`);

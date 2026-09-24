@@ -159,6 +159,30 @@ if (SUBAGENTS_ENABLED) contextBridge.exposeInMainWorld("subagents", {
   reply: (requestId, body) => ipcRenderer.send("subagent:reply", { requestId, ...body }),
 });
 
+// A chat turn run inside the Rust runtime (electron/agent/runtimeTurnBridge.mjs). Gated here as well as in the
+// main process, for the reason the sub-agent surface above is: with this object absent the renderer cannot even
+// ask, so the chat loop stays on its own TypeScript implementation. ON by default since 2026-09-23 (verified in the
+// packaged app and against a real provider); ZERAIX_RUST_CHAT_LOOP=off turns it off.
+const CHAT_LOOP_ENABLED = !["0", "off", "false", "no"].includes(
+  String(process.env.ZERAIX_RUST_CHAT_LOOP ?? "").trim().toLowerCase(),
+);
+if (CHAT_LOOP_ENABLED) contextBridge.exposeInMainWorld("agentRuntime", {
+  start: (runId, params, gated) => ipcRenderer.invoke("agent-run:start", { runId, params, gated }),
+  cancel: (runId) => ipcRenderer.send("agent-run:cancel", { runId }),
+  // One-way: this settles a promise the main process created while serving a different call.
+  reply: (requestId, body) => ipcRenderer.send("agent-run:reply", { requestId, ...body }),
+  onEvent: (cb) => {
+    const listener = (_e, payload) => cb(payload);
+    ipcRenderer.on("agent-run:event", listener);
+    return () => ipcRenderer.removeListener("agent-run:event", listener);
+  },
+  onRequest: (cb) => {
+    const listener = (_e, payload) => cb(payload);
+    ipcRenderer.on("agent-run:request", listener);
+    return () => ipcRenderer.removeListener("agent-run:request", listener);
+  },
+});
+
 // OSS upload proxy: the main process PUTs to a presigned URL, bypassing the CORS preflight block on the app:// origin.
 // payload = { url, contentType, data:ArrayBuffer }.
 contextBridge.exposeInMainWorld("upload", {

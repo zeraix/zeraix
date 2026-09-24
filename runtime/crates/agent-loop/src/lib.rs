@@ -47,8 +47,9 @@ pub mod stop;
 
 pub use doom::{CallObservation, CallVerdict, DoomLoop, DoomSignal, RoundVerdict};
 pub use driver::{
-    AgentLoop, AgentTurnRecord, ContextStrategy, LoopConfig, LoopObserver, LoopOutcome, NoObserver,
-    PassThroughContext, ToolExecutor, ToolOutcome, ToolRecord,
+    AgentLoop, AgentTurnRecord, CallSummary, ContextStrategy, LoopConfig, LoopObserver, LoopOutcome, NoObserver,
+    PassThroughContext, RoundContext, RoundDecision, RoundGate, RoundSummary, SignalRecord, ToolExecutor,
+    ToolOutcome, ToolRecord,
 };
 pub use model::{
     Message, ModelCapabilities, ModelClient, ModelRequest, NormalizedTurn, ScriptedModel, ToolCall, Usage,

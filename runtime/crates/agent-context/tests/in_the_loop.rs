@@ -230,9 +230,31 @@ async fn a_caller_can_mark_a_turn_as_worth_keeping() {
     let mut m = ContextManager::new(Budget { max_tokens: 400, compact_at: 0.85, target: 0.5 });
     m.push(Message::assistant("the decision that matters"), Tier::High);
     m.push(Message::assistant("x".repeat(8000)), Tier::Normal);
-    m.compact();
+    m.compact().await;
 
     let wire = m.wire();
     assert_eq!(wire[0].text(), "the decision that matters", "a High turn must survive untouched");
     assert!(wire[1].text().len() < 8000, "the Normal turn should have been compressed");
+}
+
+/// A message the loop amends after the manager has taken it in reaches the wire as amended.
+///
+/// The loop only ever appended until a host could nudge the latest tool result; a manager that kept its held copy
+/// of that result sent the model the version without the nudge. Found by the chat page's own test of a silent
+/// final answer: the reminder was stored, and the request that followed did not carry it.
+#[tokio::test]
+async fn an_amendment_the_loop_makes_reaches_the_wire() {
+    use agent_loop::ContextStrategy;
+    let mut manager = ContextManager::new(Budget::with_window(100_000));
+    let mut conversation = vec![
+        agent_loop::Message::user("go"),
+        agent_loop::Message::assistant_calls("", vec![call("c1", "read_file", json!({ "path": "a" }))]),
+        agent_loop::Message::tool_result("c1", "contents"),
+    ];
+    let (first, _) = manager.prepare(&conversation).await;
+    assert_eq!(first[2].content, "contents");
+
+    conversation[2].content = json!("contents\n\n<system-reminder>\nANSWER NOW\n</system-reminder>");
+    let (second, _) = manager.prepare(&conversation).await;
+    assert_eq!(second[2].content, conversation[2].content, "the manager sent its stale copy");
 }

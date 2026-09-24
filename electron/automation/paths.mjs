@@ -19,7 +19,7 @@ import { setLlmConfigReader } from "../agent/modelResolver.mjs";
 import { getAppConfig } from "../appConfig.mjs";
 import { llmChat } from "../llm/proxy.mjs";
 import { appendEntry } from "../store/usageLogStore.mjs";
-import { listTools, runTool } from "../tools/aiToolkit.mjs";
+import { getAssetDir, getWorkingDir, listTools, runTool } from "../tools/aiToolkit.mjs";
 
 /** Default location, alongside the conversation store under userData/agent. */
 export function defaultAutomationDir() {
@@ -59,7 +59,18 @@ export function initAutomation(dir) {
   // is separate (see electron/agent/turn.mjs for why).
   // logEvent records what an unattended node actually did into the usage log (off by default). Model
   // usage is captured inside llmChat itself; this covers the tool calls, which the transport can't see.
-  const dispatcher = createDispatcher({ agent: { llmChat, listTools, runTool, logEvent: appendEntry } });
+  // `getWorkdir` is what lets an agent node run its turn inside the Rust runtime: the runtime scopes its own
+  // file tools to a workspace, and only this side knows which one. See electron/agent/turn.mjs.
+  const dispatcher = createDispatcher({
+    agent: {
+      llmChat,
+      listTools,
+      runTool,
+      getWorkdir: getWorkingDir,
+      getAssetDir,
+      logEvent: appendEntry,
+    },
+  });
 
   manager = createExecutionManager({
     dispatcher,

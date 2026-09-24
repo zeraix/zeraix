@@ -17,17 +17,29 @@
  * concatenation, so an upstream output cannot silently displace the instruction.
  */
 import { runAgentTurn } from "../../agent/turn.mjs";
+
+/** Host only: a full endpoint can carry a key in its query string on some gateways (see llm/proxy.mjs). */
+function hostOf(endpoint) {
+  try {
+    return new URL(String(endpoint)).host;
+  } catch {
+    return undefined;
+  }
+}
 import { resolveChain } from "../../agent/modelResolver.mjs";
 import { createEventQueue, anySignal } from "./eventQueue.mjs";
 
 /**
  * @param {object} deps
  * @param {Function} deps.llmChat / deps.listTools / deps.runTool  Injected transport (see module header).
+ * @param {() => string} [deps.getWorkdir]  The workspace an in-runtime turn scopes its file tools to.
+ *   Absent, the turn runs on the loop in turn.mjs instead — which is also what happens under `npm test`.
+ * @param {() => string} [deps.getAssetDir]  The read-only media root, which travels with the workspace.
  * @param {(entry:object)=>void} [deps.logEvent]  Optional usage-log sink. Injected rather than imported
  *   for the same reason as everything else here: the store needs `electron`, and importing it would
  *   make this module -- and the dispatcher that pulls it in -- unloadable under `npm test`.
  */
-export function createAgentRuntime({ llmChat, listTools, runTool, logEvent }) {
+export function createAgentRuntime({ llmChat, listTools, runTool, getWorkdir, getAssetDir, logEvent }) {
   if (!llmChat || !listTools || !runTool) {
     throw new Error("agent runtime requires llmChat, listTools and runTool");
   }
@@ -78,6 +90,29 @@ export function createAgentRuntime({ llmChat, listTools, runTool, logEvent }) {
         maxRounds: cfg.maxRounds,
         meta,
         signal,
+        // Passed through, not resolved here: this file has no `electron` import (see the header), and the
+        // workspace is what lets the turn run inside the Rust runtime rather than on the loop in turn.mjs.
+        getWorkdir,
+        getAssetDir,
+        // Model calls made INSIDE the runtime, which never pass through the proxy that logs the others.
+        // Written here rather than in turn.mjs for the reason everything else is: the store needs
+        // `electron`, and this file must stay loadable without it.
+        onModelCall: (call) =>
+          logEvent?.({
+            kind: "model",
+            ...meta,
+            model: call.model,
+            endpoint: hostOf(call.endpoint),
+            promptTokens: call.promptTokens,
+            completionTokens: call.completionTokens,
+            totalTokens: call.promptTokens + call.completionTokens,
+            cachedTokens: call.cachedTokens,
+            estimated: call.estimated,
+            stream: false,
+            ms: call.ms,
+            ok: call.ok !== false,
+            error: call.error,
+          }),
         onEvent: (e) => queue.push(e),
       })
         .then((r) => {

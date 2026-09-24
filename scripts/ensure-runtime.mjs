@@ -28,18 +28,15 @@ import fs from "node:fs";
 import path from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
+import { runtimeBinaryPath } from "../electron/tools/runtimeBinary.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const exe = process.platform === "win32" ? "zeraix-agent-runtime.exe" : "zeraix-agent-runtime";
 
-// The same places `rustRuntime.mjs::binaryPath` looks, in the same order. Kept in step by hand, and worth a
-// glance if that function ever changes: a check that looks somewhere the app does not is a check that passes
-// while the app fails.
-const candidates = [
-  path.join(root, "resources", "runtime", exe),
-  path.join(root, "runtime", "target", "release", exe),
-  path.join(root, "runtime", "target", "debug", exe),
-];
+// The binary the DEV app will run, found by the very function the app uses. This list used to be a copy
+// "kept in step by hand" with `binaryPath()`, and it had drifted: it checked the repo's `resources/runtime/`
+// staging directory first, which the dev app never looks at. `resourcesPath: null` because in development
+// there is no packaged location — Electron's own resources directory holds no runtime.
+const found = runtimeBinaryPath({ resourcesPath: null, root, override: process.env.ZERAIX_RUST_RUNTIME_BIN });
 
 /**
  * The newest mtime under `dir`, ignoring build output.
@@ -75,7 +72,6 @@ function newestSource(dir) {
   return newest;
 }
 
-const found = candidates.find((p) => fs.existsSync(p));
 if (found) {
   // A binary that exists is not necessarily the RIGHT binary.
   //
@@ -104,11 +100,21 @@ try {
     cwd: root,
     stdio: "inherit",
   });
-} catch {
+} catch (e) {
+  // Advice that matches the failure. This used to say "install a Rust toolchain" whatever went wrong —
+  // including a compile error on a machine whose toolchain was fine, and a binary the running app had open,
+  // where the only fix is to quit the app. See the exit codes in build-rust-runtime.mjs.
   console.error("");
-  console.error("[runtime] the build failed. The app will start, but every tool call will report that the");
-  console.error("[runtime] runtime is not running. Install a Rust toolchain (https://rustup.rs) and run");
-  console.error("[runtime] `npm run build:runtime`.");
+  if (e?.status === 75) {
+    console.error("[runtime] the runtime binary is in use by the running app, so it could not be rebuilt.");
+    console.error("[runtime] Quit the app and run `npm run build:runtime` — the app will start on the OLD binary.");
+  } else if (e?.status === 127) {
+    console.error("[runtime] cargo is not installed. Install a Rust toolchain (https://rustup.rs) and run");
+    console.error("[runtime] `npm run build:runtime`. Until then every tool call reports the runtime is not running.");
+  } else {
+    console.error("[runtime] the build failed — cargo's output above says why. The app will start, but on an");
+    console.error("[runtime] OLD binary if there is one, and with no file tools or commands if there is not.");
+  }
   // Deliberately not a hard failure: a developer working on the UI should still be able to open the window,
   // and the app's own error message already says exactly what is wrong.
   process.exit(0);
