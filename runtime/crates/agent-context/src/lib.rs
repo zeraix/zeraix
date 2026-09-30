@@ -26,7 +26,7 @@
 //! **preservation priority**, and running it as a sequence of operations would be backwards — it would compress
 //! the conversation before dropping the tool output that is far larger and worth far less.
 //!
-//! So [`compact`] works from the cheapest loss upward and stops the moment it is under budget: drop EPHEMERAL,
+//! So [`compact`](ContextManager::compact) works from the cheapest loss upward and stops the moment it is under budget: drop EPHEMERAL,
 //! then compress NORMAL, and never touch HIGH or CRITICAL. The priority is identical; only the traversal
 //! differs, and it differs so that a turn that only needed to lose one tool result does not also lose the
 //! shape of its conversation.
@@ -38,13 +38,19 @@
 //! instead. That also tells the model something true and useful — the call happened, its output is gone, and
 //! it can be run again — which a silent deletion does not.
 
+mod dedup;
+pub mod estimate;
 pub mod memory;
+mod summarize;
 pub mod tier;
 
 use agent_loop::Message;
+use estimate::truncate_to;
 use serde::{Deserialize, Serialize};
 
+pub use estimate::{IMAGE_TOKENS, estimate, estimate_message};
 pub use memory::TaskMemory;
+pub use summarize::Summarizer;
 pub use tier::Tier;
 
 /// The loop's context seam, implemented by [`ContextManager`].
@@ -73,30 +79,9 @@ const TRUNCATED: &str = "\n[… trimmed to make room …]";
 /// answers the summary instead of the conversation.
 const SUMMARY_PREFIX: &str = "Summary of the earlier part of this conversation:";
 
-/// User turns kept verbatim at the end. The tail is where the current task lives, and summarising it is how a
-/// run forgets what it was just asked. Matches `KEEP_TAIL_TURNS` in the TypeScript path.
-const KEEP_TAIL_TURNS: usize = 4;
-
-/// Tools whose result is a snapshot of a file, and can therefore go stale.
-const READ_TOOLS: [&str; 1] = ["read_file"];
-
-/// Tools that change a file, making every earlier read of it stale.
-///
-/// `copy_file` and `move_file` are deliberately absent: their destination argument is `source`/`destination`
-/// rather than `path`, and a rule that half-reads their arguments would stub the wrong file. Missing a
-/// staleness is a wasted opportunity; stubbing a read that is still current is a lie to the model.
-const WRITE_TOOLS: [&str; 4] = ["write_file", "edit_file", "append_file", "delete_file"];
-
-/// Below this, a stub saves nothing worth the cache churn of rewriting the message.
-const MIN_STUB_CHARS: usize = 400;
-
 /// How a deduplicated read begins. Matched as well as written: eliding must recognise it as already-stubbed,
 /// or it replaces a message that says WHICH file went stale and why with one that says only "removed".
 const STALE_READ_PREFIX: &str = "[earlier read of ";
-
-/// Per-item ceiling when rendering a span for the summariser. A span can be enormous — that is why it is being
-/// summarised — and handing the whole of it over would spend more tokens than the compaction saves.
-const SUMMARY_SOURCE_TOKENS: u64 = 400;
 
 /// One piece of context, with what it is worth.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -164,12 +149,39 @@ impl Budget {
         Self { max_tokens, ..Self::default() }
     }
 
+    /// A window with a working-set budget below it: compact above `trigger`, down to `target` — the numbers the
+    /// host's context-budget setting resolves to, so a turn is held to the same size mid-turn as between turns.
+    ///
+    /// The window stays `max_tokens`, because "still over budget" and the stop policy's context limit are about
+    /// what the MODEL can take, not about the cap. Values the host should never send are made safe rather than
+    /// trusted: a trigger above the window is the window's own threshold, and a target at or above the trigger —
+    /// which would compact again every round — comes down to the same proportion `Default` keeps between them.
+    pub fn with_thresholds(max_tokens: u64, trigger: u64, target: u64) -> Self {
+        let window = Self::with_window(max_tokens);
+        if max_tokens == 0 || trigger == 0 {
+            return window;
+        }
+        let trigger = trigger.min(window.compact_threshold());
+        let target = if target > 0 && target < trigger {
+            target
+        } else {
+            (trigger as f64 * window.target / window.compact_at).round() as u64
+        };
+        Self {
+            max_tokens,
+            compact_at: trigger as f64 / max_tokens as f64,
+            target: target as f64 / max_tokens as f64,
+        }
+    }
+
+    // Rounded rather than truncated: a threshold that went in as a token count (see `with_thresholds`) comes back
+    // as the same count, not one less for the floating-point round trip.
     pub fn compact_threshold(&self) -> u64 {
-        (self.max_tokens as f64 * self.compact_at) as u64
+        (self.max_tokens as f64 * self.compact_at).round() as u64
     }
 
     pub fn target_tokens(&self) -> u64 {
-        (self.max_tokens as f64 * self.target) as u64
+        (self.max_tokens as f64 * self.target).round() as u64
     }
 }
 
@@ -192,24 +204,6 @@ pub struct CompactionReport {
     /// Not a failure — the run continues — but the caller should know, because the next thing to give is the
     /// conversation itself and that is a decision this crate will not make silently.
     pub still_over_budget: bool,
-}
-
-/// Turns a span of conversation into a few sentences.
-///
-/// Held as a seam rather than a concrete client so this crate stays testable without a network, and so the
-/// summary can be produced by a *different*, cheaper model than the one running the turn — which is usually
-/// what you want, since summarising is the one call in a run that nobody reads.
-#[derive(Clone)]
-pub struct Summarizer {
-    model: std::sync::Arc<dyn agent_loop::ModelClient>,
-    /// The model id sent on the wire. Separate from the client because one client can serve several.
-    pub model_id: String,
-}
-
-impl Summarizer {
-    pub fn new(model: std::sync::Arc<dyn agent_loop::ModelClient>, model_id: impl Into<String>) -> Self {
-        Self { model, model_id: model_id.into() }
-    }
 }
 
 /// The conversation, plus the state that outlives it.
@@ -431,209 +425,11 @@ impl ContextManager {
         out
     }
 
-    /// Replace reads that a later read or write has superseded. Returns how many were stubbed.
-    ///
-    /// ## Why this is not just "drop old tool output"
-    ///
-    /// Eliding does that, and it loses something: the model may still need what that call returned. This step
-    /// only touches results the conversation *already contains a newer version of* — the same file read again,
-    /// or written to. The model loses no information it could not read further down, which is what makes this
-    /// the one technique safe to run before the others rather than after.
-    ///
-    /// Spans, not paths. `read_file` takes `offset`/`limit` and returns a 1-based inclusive line window, so an
-    /// agent walking a large file emits reads like {460,+90}, {550,+90}, {640,+50} — DISJOINT windows, none of
-    /// which supersedes another. Comparing paths alone would stub all but the last and tell the model its
-    /// earlier pages had been superseded by a page that does not contain them.
-    fn dedup_stale_reads(&mut self) -> usize {
-        // A tool result carries only its `tool_call_id`; the name and arguments live on the assistant turn
-        // that asked for it. This is the join between the two.
-        let mut calls: std::collections::HashMap<&str, (&str, serde_json::Value)> =
-            std::collections::HashMap::new();
-        for item in &self.items {
-            for call in &item.message.tool_calls {
-                let args = serde_json::from_str(&call.arguments).unwrap_or(serde_json::Value::Null);
-                calls.insert(call.id.as_str(), (call.name.as_str(), args));
-            }
-        }
-
-        // What each tool result was: a read of a span, a write, or neither.
-        enum Touch {
-            Read { path: String, from: u64, to: u64 },
-            Wrote { path: String },
-        }
-        let touches: Vec<Option<Touch>> = self
-            .items
-            .iter()
-            .map(|item| {
-                if item.message.role != "tool" {
-                    return None;
-                }
-                let id = item.message.tool_call_id.as_deref()?;
-                let (name, args) = calls.get(id)?;
-                let path = normalize_path(args.get("path")?.as_str()?);
-                if READ_TOOLS.contains(name) {
-                    let from = args.get("offset").and_then(serde_json::Value::as_u64).unwrap_or(1).max(1);
-                    // An absent or zero `limit` reads to the end of the file, which supersedes everything.
-                    let to = match args.get("limit").and_then(serde_json::Value::as_u64) {
-                        Some(n) if n > 0 => from.saturating_add(n - 1),
-                        _ => u64::MAX,
-                    };
-                    Some(Touch::Read { path, from, to })
-                } else if WRITE_TOOLS.contains(name) {
-                    Some(Touch::Wrote { path })
-                } else {
-                    None
-                }
-            })
-            .collect();
-
-        let mut stale: Vec<usize> = Vec::new();
-        for (i, touch) in touches.iter().enumerate() {
-            let Some(Touch::Read { path, from, to }) = touch else { continue };
-            if self.items[i].message.text().len() < MIN_STUB_CHARS {
-                continue;
-            }
-            let superseded = touches[i + 1..].iter().flatten().any(|later| match later {
-                // Any later write makes the file different from what this read saw.
-                Touch::Wrote { path: p } => p == path,
-                // A later read supersedes this one only if it COVERS it.
-                Touch::Read { path: p, from: f, to: t } => p == path && f <= from && t >= to,
-            });
-            if superseded {
-                stale.push(i);
-            }
-        }
-
-        for &i in &stale {
-            let path = match &touches[i] {
-                Some(Touch::Read { path, .. }) => path.clone(),
-                _ => continue,
-            };
-            self.items[i].message.content = serde_json::Value::String(format!(
-                "{STALE_READ_PREFIX}{path} removed to make room; the current contents are shown by a later \
-                 read or write in this conversation]"
-            ));
-            self.items[i].recount();
-        }
-        stale.len()
-    }
-
-    /// Where the verbatim tail begins: everything before it may be folded into the summary.
-    ///
-    /// Counted in USER turns rather than messages, because a turn is the unit a person thinks in and a
-    /// message count would keep four tool results and call it four turns. Returns 0 — fold nothing — when the
-    /// conversation is not yet that long, which is the conservative answer.
-    fn summary_split(&self) -> usize {
-        let mut seen = 0;
-        let mut split = 0;
-        for (i, item) in self.items.iter().enumerate().rev() {
-            if item.message.role == "user" {
-                seen += 1;
-                if seen == KEEP_TAIL_TURNS {
-                    split = i;
-                    break;
-                }
-            }
-        }
-        // A `tool` message at the head of the kept tail would be an orphan: the assistant turn that called it
-        // is inside the folded span, and a provider rejects a tool result with no matching `tool_calls`.
-        // Extending the span forward takes the whole group rather than splitting it.
-        while split < self.items.len() && self.items[split].message.role == "tool" {
-            split += 1;
-        }
-        split
-    }
-
-    /// Fold everything before the kept tail into one summary. Returns how many messages were folded.
-    ///
-    /// Re-summarising a longer span later reads the ORIGINALS again, not the previous summary. That costs a
-    /// few more tokens in the summariser's own request and buys the property that matters: the error cannot
-    /// compound. A summary of a summary drifts further from the truth each time and nothing downstream can
-    /// see that it has — which is why the TypeScript path needs `MAX_SUMMARY_REUSE` to bound it and this one
-    /// does not.
-    async fn summarize_head(&mut self) -> usize {
-        let Some(summarizer) = self.summarizer.clone() else { return 0 };
-        let split = self.summary_split();
-        // Critical items are never folded, so a span of nothing but those is not worth a model call.
-        let foldable: Vec<usize> =
-            (0..split).filter(|&i| !self.items[i].tier.is_preserved()).collect();
-        if foldable.is_empty() {
-            return 0;
-        }
-        // Already folded exactly this far. Re-asking would spend a model call to produce the same summary.
-        if foldable.iter().all(|&i| self.items[i].summarized) {
-            return 0;
-        }
-
-        let source = self.render_span(&foldable);
-        let request = agent_loop::ModelRequest {
-            model: summarizer.model_id.clone(),
-            messages: vec![
-                Message::system(
-                    "You are compacting an agent's conversation so it fits in a smaller context window. \
-                     Write a factual summary of the exchange below, in prose, under 400 words. Preserve: what \
-                     the user asked for, decisions taken and why, files and identifiers touched, what has been \
-                     done, and what is still outstanding. Omit pleasantries and tool mechanics. Do not answer \
-                     the conversation, address the user, or add anything that is not in it.",
-                ),
-                Message::user(source),
-            ],
-            tools: Vec::new(),
-            reasoning_effort: None,
-        };
-
-        match summarizer.model.complete(&request).await {
-            Ok(turn) if !turn.content.trim().is_empty() => {
-                self.summary = Some(turn.content.trim().to_owned());
-                for &i in &foldable {
-                    self.items[i].summarized = true;
-                }
-                foldable.len()
-            }
-            // A summariser that fails must not fail the run. The caller falls through to compression, which
-            // is worse but always available — and the warning says which happened, because "the context got
-            // shorter" looks identical either way from outside.
-            Ok(_) => {
-                tracing::warn!("the summariser returned nothing; falling back to compression");
-                0
-            }
-            Err(e) => {
-                tracing::warn!(error = %e, "summarising failed; falling back to compression");
-                0
-            }
-        }
-    }
-
-    /// The span, rendered for the summariser: one line per message, each bounded.
-    fn render_span(&self, indices: &[usize]) -> String {
-        let mut out = String::new();
-        for &i in indices {
-            let item = &self.items[i];
-            let text = item.message.text();
-            if text.is_empty() {
-                continue;
-            }
-            out.push_str(&item.message.role);
-            out.push_str(": ");
-            out.push_str(&truncate_to(text, SUMMARY_SOURCE_TOKENS));
-            out.push('\n');
-        }
-        out
-    }
 }
 
 /// Has this message already been replaced by a marker, by any technique?
 fn is_stub(text: &str) -> bool {
     text == ELIDED || text.starts_with(STALE_READ_PREFIX)
-}
-
-/// Compare paths the way a model writes them: `./src/a.rs`, `src/a.rs` and `src/a.rs/` are one file.
-///
-/// Deliberately lexical. Resolving against the workspace would be more accurate and would need the filesystem,
-/// which this crate does not touch — and the cost of being wrong is asymmetric: a missed match wastes an
-/// opportunity, a false match tells the model a still-current read has been superseded.
-fn normalize_path(raw: &str) -> String {
-    raw.trim().trim_start_matches("./").trim_end_matches('/').to_owned()
 }
 
 /// The tier a message gets when this manager first sees it.
@@ -682,243 +478,6 @@ fn compression_allowance(items: &[ContextItem], target: u64, current: u64) -> u6
     (keep / compressible.len() as u64).max(32)
 }
 
-/// Trim to roughly `tokens`, keeping the head and marking the cut.
-///
-/// The head rather than the tail: the opening of a message is where its subject is, and a fragment that starts
-/// mid-sentence is harder to use than one that stops mid-sentence.
-fn truncate_to(text: &str, tokens: u64) -> String {
-    let chars = (tokens * CHARS_PER_TOKEN) as usize;
-    if text.chars().count() <= chars {
-        return text.to_owned();
-    }
-    let kept: String = text.chars().take(chars).collect();
-    format!("{kept}{TRUNCATED}")
-}
-
-/// Characters per token, as an estimate.
-///
-/// The same 4 the TypeScript tokenizer falls back to when `js-tiktoken` is unavailable. A real tokenizer would
-/// be more accurate and is worth adding, but this is used to decide *when* to compact rather than to bill
-/// anyone — and the budget already leaves 15% of the window as headroom, which is far more than the error here.
-const CHARS_PER_TOKEN: u64 = 4;
-
-/// Estimated tokens for a string.
-pub fn estimate(text: &str) -> u64 {
-    text.chars().count() as u64 / CHARS_PER_TOKEN
-}
-
-/// Estimated tokens for a message, including the per-message overhead a provider charges for role and
-/// separators.
-pub fn estimate_message(m: &Message) -> u64 {
-    let content = match &m.content {
-        serde_json::Value::String(s) => estimate(s),
-        // An image part's cost is not its JSON length, but a part array is dominated by whatever text sits
-        // beside the image, and over-counting here only makes compaction slightly eager.
-        other => estimate(&other.to_string()),
-    };
-    let calls: u64 = m.tool_calls.iter().map(|c| estimate(&c.name) + estimate(&c.arguments)).sum();
-    let reasoning = m.reasoning_content.as_deref().map(estimate).unwrap_or(0);
-    4 + content + calls + reasoning
-}
-
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn long(n: usize) -> String {
-        "x".repeat(n)
-    }
-
-    fn manager(window: u64) -> ContextManager {
-        ContextManager::new(Budget { max_tokens: window, compact_at: 0.85, target: 0.6 })
-    }
-
-    #[test]
-    fn an_empty_context_needs_no_compaction() {
-        let m = manager(1000);
-        assert!(!m.needs_compaction());
-        assert!(m.wire().is_empty());
-    }
-
-    #[tokio::test]
-    async fn compaction_does_not_run_below_the_threshold() {
-        let mut m = manager(1000);
-        m.push(Message::user(long(400)), Tier::Normal); // ~100 tokens
-        let report = m.compact().await;
-        assert!(!report.ran);
-        assert_eq!(report.tokens_before, report.tokens_after);
-    }
-
-    #[tokio::test]
-    async fn tool_output_is_elided_before_the_conversation_is_touched() {
-        let mut m = manager(1000);
-        m.push(Message::user(long(400)), Tier::Normal);
-        m.push(Message::tool_result("c1", long(4000)), Tier::Ephemeral);
-        assert!(m.needs_compaction());
-
-        let report = m.compact().await;
-        assert!(report.ran);
-        assert_eq!(report.elided, 1);
-        assert_eq!(report.compressed, 0, "the conversation should not have been touched");
-        assert!(report.tokens_after < report.tokens_before);
-    }
-
-    /// Deleting a tool message would make the request invalid; the stub is what keeps it well-formed.
-    #[tokio::test]
-    async fn an_elided_tool_result_is_still_present_and_still_paired() {
-        let mut m = manager(1000);
-        m.push(Message::assistant_calls("", vec![agent_loop::model::call("c1", "read_file", serde_json::json!({}))]), Tier::Normal);
-        m.push(Message::tool_result("c1", long(8000)), Tier::Ephemeral);
-        m.compact().await;
-
-        let wire = m.wire();
-        let tool = wire.iter().find(|msg| msg.role == "tool").expect("the tool message must survive");
-        assert_eq!(tool.tool_call_id.as_deref(), Some("c1"), "the pairing must survive");
-        assert!(tool.text().contains("re-run the call"), "the model should be told it can redo the work");
-    }
-
-    #[tokio::test]
-    async fn the_conversation_is_compressed_only_when_eliding_was_not_enough() {
-        let mut m = manager(1000);
-        for _ in 0..8 {
-            m.push(Message::assistant(long(2000)), Tier::Normal);
-        }
-        let report = m.compact().await;
-        assert!(report.ran);
-        assert_eq!(report.elided, 0, "there was nothing ephemeral to elide");
-        assert!(report.compressed > 0);
-        assert!(report.tokens_after < report.tokens_before);
-    }
-
-    /// §8.3's requirement, and the reason task memory lives outside the conversation.
-    #[tokio::test]
-    async fn task_state_survives_a_compaction_that_removes_everything_removable() {
-        let mut m = manager(600);
-        {
-            let memory = m.memory_mut();
-            memory.user_goal = Some("migrate the runtime to Rust".into());
-            memory.set_plan("finish the context crate, then wire it");
-            memory.set_phase("executing");
-            memory.add_pending("wire the compaction into the loop");
-            memory.complete("build the tier model");
-            memory.record_decision("task memory lives outside the conversation");
-            memory.add_constraint("never lose the user's goal");
-        }
-        for _ in 0..10 {
-            m.push(Message::tool_result("c", long(4000)), Tier::Ephemeral);
-            m.push(Message::assistant(long(4000)), Tier::Normal);
-        }
-
-        let report = m.compact().await;
-        assert!(report.ran);
-
-        let wire = m.wire();
-        let rendered = wire[0].text().to_owned();
-        for expected in [
-            "migrate the runtime to Rust",
-            "finish the context crate",
-            "executing",
-            "wire the compaction into the loop",
-            "build the tier model",
-            "task memory lives outside the conversation",
-            "never lose the user's goal",
-        ] {
-            assert!(rendered.contains(expected), "compaction lost {expected:?}:\n{rendered}");
-        }
-    }
-
-    #[tokio::test]
-    async fn nothing_important_is_ever_touched() {
-        let mut m = manager(500);
-        m.push(Message::system(long(2000)), Tier::Critical);
-        m.push(Message::assistant(long(2000)), Tier::High);
-        m.push(Message::tool_result("c", long(4000)), Tier::Ephemeral);
-
-        let critical_before = m.items()[0].message.clone();
-        let high_before = m.items()[1].message.clone();
-        m.compact().await;
-
-        assert_eq!(m.items()[0].message, critical_before, "a critical item was modified");
-        assert_eq!(m.items()[1].message, high_before, "a high item was modified");
-    }
-
-    /// Everything removable is gone and it is still not enough — reported, not hidden.
-    #[tokio::test]
-    async fn a_context_that_cannot_be_brought_under_budget_says_so() {
-        let mut m = manager(200);
-        m.push(Message::system(long(40_000)), Tier::Critical);
-        let report = m.compact().await;
-        assert!(report.ran);
-        assert!(report.still_over_budget, "an impossible budget must be reported, not silently accepted");
-    }
-
-    /// One compaction should buy several rounds, or a long task thrashes.
-    #[tokio::test]
-    async fn compaction_comes_down_well_below_the_threshold_it_fired_at() {
-        let mut m = manager(2000);
-        for _ in 0..12 {
-            m.push(Message::tool_result("c", long(2000)), Tier::Ephemeral);
-        }
-        let report = m.compact().await;
-        assert!(report.ran);
-        assert!(
-            report.tokens_after <= m.budget.target_tokens(),
-            "came down to {} but the target is {}",
-            report.tokens_after,
-            m.budget.target_tokens()
-        );
-        assert!(!m.needs_compaction(), "compacting again immediately is thrashing");
-    }
-
-    /// The prefix a provider can cache has to be at the front, and stable.
-    #[test]
-    fn task_memory_is_rendered_at_the_front_of_the_wire() {
-        let mut m = manager(1000);
-        m.memory_mut().user_goal = Some("the goal".into());
-        m.push(Message::user("hello"), Tier::Normal);
-        let wire = m.wire();
-        assert_eq!(wire[0].role, "system");
-        assert!(wire[0].text().contains("the goal"));
-        assert_eq!(wire[1].text(), "hello");
-    }
-
-    #[test]
-    fn an_absent_task_memory_adds_no_message_at_all() {
-        let mut m = manager(1000);
-        m.push(Message::user("hello"), Tier::Normal);
-        let wire = m.wire();
-        assert_eq!(wire.len(), 1);
-        assert_eq!(wire[0].role, "user");
-    }
-
-    #[tokio::test]
-    async fn a_second_compaction_does_not_re_elide_what_is_already_a_stub() {
-        let mut m = manager(1000);
-        for _ in 0..6 {
-            m.push(Message::tool_result("c", long(2000)), Tier::Ephemeral);
-        }
-        let first = m.compact().await;
-        let second = m.compact().await;
-        assert!(first.elided > 0);
-        assert_eq!(second.elided, 0, "a stub must not be elided again");
-    }
-
-    #[test]
-    fn the_estimate_counts_tool_calls_and_reasoning_not_only_content() {
-        let plain = estimate_message(&Message::assistant(long(400)));
-        let with_calls = estimate_message(&Message::assistant_calls(
-            long(400),
-            vec![agent_loop::model::call("c1", "read_file", serde_json::json!({ "path": long(400) }))],
-        ));
-        let with_reasoning = estimate_message(&Message::assistant(long(400)).with_reasoning(long(400)));
-        assert!(with_calls > plain);
-        assert!(with_reasoning > plain);
-    }
-
-    #[test]
-    fn the_budget_leaves_headroom_for_the_reply() {
-        let b = Budget::with_window(1000);
-        assert!(b.compact_threshold() < b.max_tokens);
-        assert!(b.target_tokens() < b.compact_threshold());
-    }
-}
+#[path = "lib_tests.rs"]
+mod tests;

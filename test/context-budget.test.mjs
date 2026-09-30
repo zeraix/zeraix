@@ -2,10 +2,10 @@
  * The context budget preference, and the one rule its Settings switch depends on.
  *
  * The switch was broken in a way the store's own tests could not see: the component restored
- * `DEFAULT_CONTEXT_BUDGET_K` when the cap was turned on, and that default is **0**, which means off. Ticking
- * the box wrote 0, the store read back 0, and the box un-ticked itself — while the number field beside it
- * stayed disabled, because it keys off the same value. The whole control was inert on a fresh install, which
- * is every install, since the feature ships opt-in.
+ * `DEFAULT_CONTEXT_BUDGET_K` when the cap was turned on, and that default was then **0**, which means off.
+ * Ticking the box wrote 0, the store read back 0, and the box un-ticked itself — while the number field beside
+ * it stayed disabled, because it keys off the same value. The default is on now (120K), but a user who has only
+ * ever had the cap off is in the same position, so the property still has to hold.
  *
  * `restoreBudgetK` is that decision pulled out of the component so it can be stated as a property: switching
  * something on must leave it on. The clamping tests below it are the surrounding contract that property has to
@@ -43,12 +43,25 @@ function installLocalStorage() {
 }
 
 test("turning the cap on always produces a value that is actually on", () => {
-  // The regression itself: nothing positive has ever been set, so the component has only the default to
-  // offer, and the default is off.
-  assert.equal(DEFAULT_CONTEXT_BUDGET_K, 0, "the feature ships opt-in; this test exists because of that");
+  // The regression itself: nothing positive has ever been seen, so the component has nothing to restore.
   assert.ok(restoreBudgetK(DEFAULT_CONTEXT_BUDGET_K) > 0, "restoring the default must not mean 'off'");
   assert.ok(restoreBudgetK(0) > 0);
   assert.equal(restoreBudgetK(0), SUGGESTED_CONTEXT_BUDGET_K);
+});
+
+test("an install that never set a budget has the cap on at 120K", () => {
+  // Off by default meant compacting at 750K of a 1M-window model — never: requests of 130K–318K tokens went out
+  // without one summary. Only an UNSET value falls back to the default.
+  installLocalStorage();
+  localStorage.removeItem("zeraix");
+  assert.equal(DEFAULT_CONTEXT_BUDGET_K, 120);
+  assert.equal(getContextBudgetK(), 120);
+});
+
+test("a cap the user switched off stays off under the new default", () => {
+  installLocalStorage();
+  setContextBudgetK(0);
+  assert.equal(getContextBudgetK(), 0, "an explicit off is a choice, not an unset value");
 });
 
 test("a value the user tuned is restored rather than replaced by the suggestion", () => {

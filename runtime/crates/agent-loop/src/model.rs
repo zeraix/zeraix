@@ -184,10 +184,12 @@ impl NormalizedTurn {
 /// permits — a string, *or* an array of typed parts, which is how an image is sent. Modelling it as a string
 /// would put the transport in the position of having to reconstruct a shape the loop had already flattened,
 /// and the image fallback in `agent-provider` depends on being able to see the parts to strip them.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+///
+/// Serialized by hand (below) for one field: when `content` may be left out depends on the role.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct Message {
     pub role: String,
-    #[serde(default, skip_serializing_if = "is_empty_content")]
+    #[serde(default)]
     pub content: serde_json::Value,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tool_calls: Vec<ToolCall>,
@@ -208,6 +210,37 @@ fn is_empty_content(v: &serde_json::Value) -> bool {
         serde_json::Value::String(s) => s.is_empty(),
         serde_json::Value::Array(a) => a.is_empty(),
         _ => false,
+    }
+}
+
+/// The derived shape, field for field and in the same order — so the bytes of every message that serialized
+/// before are unchanged — except for when `content` is left out.
+///
+/// Only an ASSISTANT message may go without it: a turn that only calls tools has no text, and a provider takes
+/// a missing `content` there. Every other role must carry one. A tool that returned nothing — `read_file` on
+/// an empty `__init__.py` — used to serialize as `{"role":"tool","tool_call_id":"c1"}`, which the schema
+/// rejects, and because the stored transcript went back through the same path, every later request in that
+/// conversation was rejected too. Empty is written as `""`, as the TypeScript path sends it.
+impl Serialize for Message {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        let mut map = serializer.serialize_map(None)?;
+        map.serialize_entry("role", &self.role)?;
+        if !is_empty_content(&self.content) {
+            map.serialize_entry("content", &self.content)?;
+        } else if self.role != "assistant" {
+            map.serialize_entry("content", "")?;
+        }
+        if !self.tool_calls.is_empty() {
+            map.serialize_entry("tool_calls", &self.tool_calls)?;
+        }
+        if let Some(id) = &self.tool_call_id {
+            map.serialize_entry("tool_call_id", id)?;
+        }
+        if let Some(reasoning) = &self.reasoning_content {
+            map.serialize_entry("reasoning_content", reasoning)?;
+        }
+        map.end()
     }
 }
 
@@ -390,89 +423,5 @@ pub fn call(id: &str, name: &str, arguments: serde_json::Value) -> ToolCall {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use serde_json::json;
-
-    #[test]
-    fn a_tool_call_is_written_in_the_shape_providers_accept() {
-        let call = ToolCall { id: "c1".into(), name: "read_file".into(), arguments: r#"{"path":"a"}"#.into() };
-        assert_eq!(
-            serde_json::to_value(Message::assistant_calls("", vec![call.clone()])).unwrap()["tool_calls"],
-            json!([{ "id": "c1", "type": "function", "function": { "name": "read_file", "arguments": "{\"path\":\"a\"}" } }])
-        );
-        // And read back as it was written, arguments byte for byte.
-        let back: ToolCall = serde_json::from_value(serde_json::to_value(&call).unwrap()).unwrap();
-        assert_eq!(back, call);
-    }
-
-    #[test]
-    fn a_tool_call_is_read_in_either_shape() {
-        let open_ai: ToolCall = serde_json::from_value(json!({
-            "id": "c1", "type": "function", "function": { "name": "grep", "arguments": "{ \"q\": 1 }" }
-        }))
-        .unwrap();
-        // Unusual spacing survives: rewriting it would change the replayed prefix for nothing.
-        assert_eq!(open_ai.arguments, "{ \"q\": 1 }");
-        let flat: ToolCall = serde_json::from_value(json!({ "id": "c2", "name": "grep", "arguments": "{}" })).unwrap();
-        assert_eq!((flat.id.as_str(), flat.name.as_str()), ("c2", "grep"));
-        // An object where a string belongs, and no arguments at all: both readable.
-        let object: ToolCall =
-            serde_json::from_value(json!({ "id": "c3", "function": { "name": "grep", "arguments": { "q": 1 } } })).unwrap();
-        assert_eq!(object.arguments, r#"{"q":1}"#);
-        let bare: ToolCall = serde_json::from_value(json!({ "id": "c4", "function": { "name": "grep" } })).unwrap();
-        assert_eq!(bare.arguments, "");
-    }
-
-    #[tokio::test]
-    async fn a_scripted_model_answers_in_order_and_records_what_it_was_asked() {
-        let m = ScriptedModel::new(vec![
-            NormalizedTurn::calls(vec![call("c1", "read_file", json!({"path": "a.ts"}))]),
-            NormalizedTurn::text("done"),
-        ]);
-        let req = ModelRequest { model: "scripted".into(), ..Default::default() };
-
-        let first = m.complete(&req).await.expect("first turn");
-        assert_eq!(first.tool_calls.len(), 1);
-        assert_eq!(first.tool_calls[0].name, "read_file");
-
-        let second = m.complete(&req).await.expect("second turn");
-        assert_eq!(second.content, "done");
-        assert!(second.tool_calls.is_empty());
-
-        assert_eq!(m.request_count(), 2);
-    }
-
-    /// A test that runs off the end of its own script has not described what it is testing.
-    #[tokio::test]
-    async fn an_exhausted_script_fails_rather_than_looking_like_a_model_that_stopped() {
-        let m = ScriptedModel::new(vec![NormalizedTurn::text("only one")]);
-        let req = ModelRequest::default();
-        m.complete(&req).await.expect("scripted turn");
-        let err = m.complete(&req).await.expect_err("must not answer past the script");
-        assert_eq!(err.code, "model.script_exhausted");
-    }
-
-    #[tokio::test]
-    async fn a_scripted_provider_failure_surfaces_as_an_upstream_error() {
-        let m = ScriptedModel::new(vec![]).then_fails("502 from the provider");
-        let err = m.complete(&ModelRequest::default()).await.expect_err("scripted failure");
-        assert_eq!(err.class, ErrorClass::Retryable);
-        assert!(err.message.contains("502"));
-    }
-
-    #[test]
-    fn an_assistant_turn_carrying_tool_calls_keeps_its_text() {
-        let m = Message::assistant_calls("I will read it", vec![call("c1", "read_file", json!({}))]);
-        assert_eq!(m.role, "assistant");
-        assert_eq!(m.text(), "I will read it");
-        assert_eq!(m.tool_calls.len(), 1);
-    }
-
-    #[test]
-    fn a_tool_message_is_paired_with_the_call_it_answers() {
-        let m = Message::tool_result("c1", "contents");
-        assert_eq!(m.role, "tool");
-        assert_eq!(m.tool_call_id.as_deref(), Some("c1"));
-    }
-}
+#[path = "model_tests.rs"]
+mod tests;

@@ -194,6 +194,28 @@ test("falls back to the next model when the first fails", async () => {
   assert.equal(llmChat.calls[1].endpoint, "https://b/v1/chat/completions");
 });
 
+test("a model that fails after its tools ran is not replaced by the next one", async () => {
+  // A fallback model starts the node again from its prompt, so it would repeat every write the first made.
+  const llmChat = scriptedLlm([callTool("write_file", { path: "a.txt" }), httpError(500, "boom"), say("never asked")]);
+  let writes = 0;
+  const res = await runAgentTurn({
+    ...baseDeps,
+    llmChat,
+    runTool: async () => {
+      writes++;
+      return "written";
+    },
+    chain: [
+      { id: "m1", label: "Primary", endpoint: "https://a/v1/chat/completions", apiKey: "k", model: "a" },
+      { id: "m2", label: "Backup", endpoint: "https://b/v1/chat/completions", apiKey: "k", model: "b" },
+    ],
+  });
+  assert.equal(res.ok, false);
+  assert.match(res.error, /tools had already run/);
+  assert.equal(writes, 1, "the write must not be repeated");
+  assert.equal(llmChat.calls.length, 2, "the backup model must not be asked");
+});
+
 test("reports failure when every model in the chain fails", async () => {
   const llmChat = scriptedLlm([httpError(500, "a down"), httpError(503, "b down")]);
   const res = await runAgentTurn({

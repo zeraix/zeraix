@@ -303,3 +303,44 @@ async fn the_reply_is_reported_before_its_tools_and_flushed_before_every_questio
         }
     }
 }
+
+/// A host tool asks the host directly, not through the event channel — so a call's start event must already be
+/// delivered when it runs, or the host is asked to run a call it has not been told began.
+#[tokio::test]
+async fn every_start_event_is_flushed_before_its_call_runs() {
+    struct Logged(Arc<Mutex<Vec<String>>>);
+    #[async_trait::async_trait]
+    impl ToolExecutor for Logged {
+        async fn execute(&self, call: &ToolCall, _: &CancellationToken) -> (String, serde_json::Value, ToolOutcome) {
+            self.0.lock().unwrap().push(format!("run:{}", call.id));
+            (call.name.clone(), json!({}), ToolOutcome::ok("ok"))
+        }
+    }
+
+    let log: Arc<Mutex<Vec<String>>> = Arc::default();
+    let model = Arc::new(ScriptedModel::new(vec![
+        // One batch of two parallel-safe reads, then a lone write: both shapes of dispatch.
+        NormalizedTurn::calls(vec![
+            call("r1", "read_file", json!({})),
+            call("r2", "read_file", json!({})),
+            call("w1", "write_file", json!({})),
+        ]),
+        NormalizedTurn::text("done"),
+    ]));
+    let cfg = LoopConfig { parallel_safe: HashSet::from(["read_file".to_owned()]), ..LoopConfig::default() };
+    AgentLoop::new(Arc::clone(&model) as Arc<dyn ModelClient>, Arc::new(Logged(Arc::clone(&log))), cfg)
+        .with_observer(Arc::new(Recorder(Arc::clone(&log))))
+        .run(vec![Message::user("go")], CancellationToken::new())
+        .await
+        .unwrap();
+
+    let log = log.lock().unwrap().clone();
+    for id in ["r1", "r2", "w1"] {
+        let start = log.iter().position(|e| *e == format!("start:{id}")).expect("a start event");
+        let run = log.iter().position(|e| *e == format!("run:{id}")).expect("the call ran");
+        assert!(
+            log[start..run].iter().any(|e| e == "flush"),
+            "{id} ran before its start event was flushed: {log:?}"
+        );
+    }
+}

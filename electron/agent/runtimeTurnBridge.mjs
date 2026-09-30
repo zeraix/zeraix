@@ -38,8 +38,12 @@ import { runAgent } from "../tools/rustRuntime.mjs";
 /**
  * How long a renderer-served tool may take. Long, because a tool may be waiting on the user — a consent
  * prompt, an `ask_user` question — and a person reading a dialog is not a stuck tool.
+ *
+ * Longer than the longest wait a tool is ALLOWED — `join_subagents` may be told to wait 30 minutes
+ * (JOIN_MAX_TIMEOUT_MS), and at exactly 30 this limit raced it — and shorter than the runtime's own 60-minute
+ * host timeout, so the answer to a stuck tool comes from this side, which can tell the window to drop it.
  */
-const TOOL_TIMEOUT_MS = 30 * 60_000;
+const TOOL_TIMEOUT_MS = 45 * 60_000;
 
 /**
  * How long the between-rounds question may take. Under the runtime's own 30 s gate timeout, so a slow renderer
@@ -74,7 +78,9 @@ function askRenderer(runId, kind, body, timeoutMs) {
   const requestId = `ar${++seq}`;
   const answer = new Promise((resolve, reject) => {
     const timer = setTimeout(() => {
+      const entry = pending.get(requestId);
       pending.delete(requestId);
+      if (entry) abandon(requestId, entry);
       reject(new Error(`the window did not answer the ${kind} request in time`));
     }, timeoutMs);
     pending.set(requestId, { resolve, reject, timer, runId, sender: run.sender });
@@ -83,12 +89,24 @@ function askRenderer(runId, kind, body, timeoutMs) {
   return answer;
 }
 
+/**
+ * Tell the window a question will no longer be read, so it stops the work behind it.
+ *
+ * Giving up here used to be one-sided: the runtime heard "no answer", and the window carried on — its consent
+ * prompt still on screen, and the command behind it run after the turn had ended, its result dropped. And run
+ * TWICE if the model had tried again in the meantime.
+ */
+function abandon(requestId, entry) {
+  if (!entry.sender.isDestroyed()) entry.sender.send("agent-run:abandon", { requestId, runId: entry.runId });
+}
+
 /** Fail every question still open for a run, so nothing waits on a turn that has ended. */
 function settleRun(runId, why) {
   for (const [requestId, entry] of pending) {
     if (entry.runId !== runId) continue;
     pending.delete(requestId);
     clearTimeout(entry.timer);
+    abandon(requestId, entry);
     entry.reject(new Error(why));
   }
 }
@@ -122,6 +140,14 @@ export function initRuntimeTurnBridge({ getWorkdir, getAssetDir, logUsage } = {}
       settleRun(runId, "the window that started this turn was closed");
     };
     sender.once?.("destroyed", onGone);
+    // And a window whose PAGE is gone while the window stays: a renderer crash (recovery reloads the same
+    // webContents, so "destroyed" never fires) or a full reload. The page that started the turn — its listeners,
+    // its handlers, the turn's state — no longer exists; the new one never asked for this run and cannot answer
+    // it. Left running, the run spent a model call and then waited out the tool timeout on questions sent to a
+    // page that ignores them.
+    const onPageGone = () => onGone();
+    sender.once?.("render-process-gone", onPageGone);
+    sender.once?.("did-navigate", onPageGone);
 
     // Events are one-way and best-effort: a window gone by the time a token arrives simply misses it.
     const forward = (kind) => (payload) => {
@@ -187,7 +213,9 @@ export function initRuntimeTurnBridge({ getWorkdir, getAssetDir, logUsage } = {}
           onTool: forward("tool"),
           onTurn: onRound,
           onRetry: forward("retry"),
-          toolHandler: (name, args) => askRenderer(runId, "tool", { name, args }, TOOL_TIMEOUT_MS),
+          // With the model's call id, so the window can tell two calls to one tool in the same batch apart.
+          toolHandler: (name, args, { callId } = {}) =>
+            askRenderer(runId, "tool", { name, args, callId }, TOOL_TIMEOUT_MS),
           // Only when the renderer asked for it: a gate costs a round trip per round, and one nobody answers
           // stops the run at the first round.
           roundGate: gated ? (info) => askRenderer(runId, "round", info, ROUND_TIMEOUT_MS) : undefined,
@@ -200,6 +228,8 @@ export function initRuntimeTurnBridge({ getWorkdir, getAssetDir, logUsage } = {}
     } finally {
       runs.delete(runId);
       sender.removeListener?.("destroyed", onGone);
+      sender.removeListener?.("render-process-gone", onPageGone);
+      sender.removeListener?.("did-navigate", onPageGone);
       settleRun(runId, "the run ended before this was answered");
     }
   });

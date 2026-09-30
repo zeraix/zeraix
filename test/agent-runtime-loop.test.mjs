@@ -308,6 +308,70 @@ test("the tool policy is applied to a call the runtime hands back", async (t) =>
   }
 });
 
+test("the tool policy also holds for the tools the runtime runs itself", async (t) => {
+  if (!(await runtimeCanHoldATurn())) return t.skip("no runtime that can hold a turn");
+  if (!(await hasFeature("agent.allowed_tools"))) return t.skip("runtime predates allowed_tools");
+  // The runtime's own tools never come back through runOneTool, so a node that denied write_file used to have
+  // its file written anyway — the deny-list held only for the tools the host serves.
+  const target = path.join(workdir, "denied.txt");
+  const provider = await fakeProvider([
+    callTool("c1", "write_file", { path: "denied.txt", content: "should not exist" }),
+    text("did without it"),
+  ]);
+  const events = [];
+  try {
+    const r = await runAgentTurn({
+      prompt: "go",
+      chain: [{ label: "test", endpoint: provider.endpoint, apiKey: "k", model: "m" }],
+      llmChat: llmChatMustNotBeCalled,
+      listTools: async () => [declare("write_file"), declare("web_search")],
+      runTool: async () => ({ ok: true, content: "" }),
+      toolPolicy: { deny: ["write_file"] },
+      getWorkdir: () => workdir,
+      onEvent: (e) => events.push(e),
+    });
+    assert.equal(r.ok, true, `turn failed: ${r.error ?? ""}`);
+    assert.equal(fs.existsSync(target), false, "a denied tool must not execute");
+    const result = provider.seen[1].messages.find((m) => m.role === "tool");
+    assert.match(result.content, /not one of the tools this run may use/, "the model is told why");
+    const blocked = events.find((e) => e.type === "tool:finished" && e.name === "write_file");
+    assert.ok(blocked?.blocked, `the refusal must be on the timeline: ${JSON.stringify(events)}`);
+  } finally {
+    await provider.close();
+  }
+});
+
+test("a model that fails after its tools ran is not replaced by the next one", async (t) => {
+  if (!(await runtimeCanHoldATurn())) return t.skip("no runtime that can hold a turn");
+  // The next model starts the node again from its prompt, so it would repeat whatever the first one's tools did.
+  fs.writeFileSync(path.join(workdir, "seen.txt"), "x");
+  const first = await fakeProvider([
+    callTool("c1", "list_directory", { path: "." }),
+    { status: 401, body: { error: { message: "key revoked mid-run" } } },
+  ]);
+  const second = await fakeProvider([text("never asked")]);
+  try {
+    const r = await runAgentTurn({
+      prompt: "go",
+      chain: [
+        { label: "first", endpoint: first.endpoint, apiKey: "k", model: "m" },
+        { label: "second", endpoint: second.endpoint, apiKey: "k", model: "m" },
+      ],
+      llmChat: llmChatMustNotBeCalled,
+      listTools: async () => [declare("list_directory")],
+      runTool: async () => ({ ok: true, content: "" }),
+      getWorkdir: () => workdir,
+      onEvent: () => {},
+    });
+    assert.equal(r.ok, false);
+    assert.match(r.error, /tools had already run/);
+    assert.equal(second.seen.length, 0, "the next model must not be asked");
+  } finally {
+    await first.close();
+    await second.close();
+  }
+});
+
 test("a declared context window keeps a long node inside it", async (t) => {
   if (!(await runtimeCanHoldATurn())) return t.skip("no runtime that can hold a turn");
   // The capability existed in the runtime and nothing in the app switched it on. This is the test that the

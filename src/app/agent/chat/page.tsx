@@ -86,7 +86,7 @@ import { parseGoalCommand, GOAL_CLEAR_ALIASES, type GoalCommand } from "./goalCo
 import { parseSlashCommand } from "./slashCommands";
 import { createGoalEvaluator, TRANSCRIPT_BUDGET_FRACTION } from "./goalEvaluator";
 import { GoalBar } from "./GoalBar";
-import { countMessagesTokens, countTokens } from "@/lib/ai/tokenizer";
+import { countTokens } from "@/lib/ai/tokenizer";
 // ── Extracted modules (data / types / constants / tool declarations / display components) ──────────────────────
 import {
   resolveModelById,
@@ -125,7 +125,7 @@ import { runAgentLoop } from "@/lib/agent/agentLoop";
 import type { StopDecision } from "@/lib/agent/stopPolicy";
 import { createRendererTools, type RendererTool } from "./chatTools";
 import { createDelegationTools } from "./chatDelegation";
-import { createCompaction } from "./chatCompaction";
+import { countSentTokens, createCompaction } from "./chatCompaction";
 import type { RuntimeBoundary } from "@/lib/agent/runtimeBoundary";
 import type { WireSteps } from "@/lib/agent/contextManager";
 import type { ToolRuntimeRules } from "@/lib/agent/toolRuntime";
@@ -1104,7 +1104,7 @@ function ChatAgent() {
       manualCompactRef.current = false;
       setCompacted(false);
       // No cache: estimate usage from the current conversation size, so the progress bar has a value immediately (refreshed with the provider's exact value on the next send).
-      setCtxTokens(countMessagesTokens(convoRef.current));
+      setCtxTokens(countSentTokens(convoRef.current, activeModel));
     }
     // Align the loading state with the "conversation switched to": that conversation is generating in the background → show loading / thinking; otherwise clear it
     // (fixes "still showing AI thinking after a fast switch" — loading/status were originally global and were not reset per conversation after switching).
@@ -1950,6 +1950,7 @@ function ChatAgent() {
       capabilities: modelCaps,
       thinkingUnsupported: () => thinkingUnsupportedRef.current,
       reasoningContextUnsupported: () => reasoningContextUnsupportedRef.current,
+      turnUsage: () => turnUsageRef.current,
     };
 
     const {

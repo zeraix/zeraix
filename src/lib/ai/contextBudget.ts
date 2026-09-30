@@ -8,22 +8,31 @@
  * to be. The effective trigger becomes min(window * 75%, budget) — see resolveHybridBudget().
  *
  * The value is user-configurable (Settings → General), NOT hardcoded. 0 disables the absolute cap and
- * restores the original window-relative behaviour. Persisted in localStorage like the other prefs.
+ * restores the original window-relative behaviour. Persisted in localStorage like the other prefs; an install
+ * that never set it gets DEFAULT_CONTEXT_BUDGET_K.
  */
 import { getStorage, setStorage } from "@zzcpt/zztool";
 import STORAGE_KEY from "@/constants/Storage";
 
 /**
- * Default budget in K tokens. **0 = off (opt-in).** A fixed cap is deliberately NOT imposed by default:
- * it's inert on common windows (≤160K, where the window's own 75% is tighter) and its "good" value depends
- * on the window, so a single hardcoded number would be arbitrary — and correctness never depends on it
- * (Task Memory preserves the mission regardless). Users on large-window models opt in; the offline replay
- * of a real 186K / 1M-window task suggested ~120K (≈47% lower avg context, ~2 summariser calls) as a
- * sensible starting cap, with tighter values raising re-summary cost.
+ * The cap an install starts with, and the one the switch in Settings turns back on to (see restoreBudgetK).
+ *
+ * 120K, from the offline replay of a real 186K / 1M-window task: about 47% lower average context for ~2
+ * summariser calls, where tighter values raise the re-summary cost.
  */
-export const DEFAULT_CONTEXT_BUDGET_K = 0;
-/** Suggested cap for a user opting in on a large-window model (see DEFAULT note). */
 export const SUGGESTED_CONTEXT_BUDGET_K = 120;
+
+/**
+ * Default budget in K tokens: ON, at the suggested cap.
+ *
+ * It shipped OFF, for two reasons that no longer hold. The first was losing the task to a summary, which Task
+ * Memory now prevents. The second was that a fixed cap looks arbitrary — but it only binds above a 160K window
+ * (below that, 75% of the window is already tighter), and above it "off" meant compacting at 750K of a 1M model:
+ * never. Measured on 2026-09-29, conversations on 1M models ran requests of 130K–318K tokens and were never once
+ * summarised. A user who switched the cap off keeps it off: an explicit 0 is stored, and only an unset value
+ * falls back to this.
+ */
+export const DEFAULT_CONTEXT_BUDGET_K = SUGGESTED_CONTEXT_BUDGET_K;
 /** Below this the summariser thrashes (re-summary cost dominates); above it the cap is moot on any real window. */
 export const MIN_CONTEXT_BUDGET_K = 40;
 export const MAX_CONTEXT_BUDGET_K = 500;
@@ -47,9 +56,9 @@ export function getContextBudgetK(): number {
 /**
  * What to apply when the cap is switched back ON, given the last positive budget seen.
  *
- * Exists because "restore the previous value" has no answer the first time: the default is 0, so a UI that
- * restores the default turns the cap on by setting it to off. The toggle then appears to do nothing at all —
- * it flips, the store reads back 0, and it flips straight back — which is exactly what it did.
+ * Exists because "restore the previous value" has no answer the first time. When the default was 0, a UI that
+ * restored the default turned the cap on by setting it to off: the toggle flipped, the store read back 0, and it
+ * flipped straight back. The default is on now, but a user who has only ever had it off is in the same place.
  *
  * So the fallback is the SUGGESTED value rather than the default. Turning something on has to result in it
  * being on; a switch whose "on" position means off is not a preference, it is a broken control.

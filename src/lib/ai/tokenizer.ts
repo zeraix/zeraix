@@ -104,6 +104,8 @@ interface MsgLike {
   // A multimodal message's content may be an array of segments; counted as 0 when not a string (fallback estimation only).
   content?: string | null | unknown[];
   tool_calls?: Array<{ function?: { name?: string; arguments?: string } }>;
+  /** A replayed thinking block. Present on a message only when it is sent — see applyReasoningPolicy. */
+  reasoning_content?: string | null;
 }
 
 /**
@@ -196,20 +198,37 @@ export function countTokens(text: string): number {
  * are not kept alive by their counts; validated by identity of the fields that were counted, so a message whose
  * content was replaced (a stub, a withheld result) is counted afresh.
  */
-const messageTokens = new WeakMap<object, { content: unknown; toolCalls: unknown; n: number }>();
+const messageTokens = new WeakMap<object, { content: unknown; toolCalls: unknown; reasoning: unknown; n: number }>();
 
-/** Token count for a single message (including content and tool_calls). */
+/**
+ * Token count for a single message: its content, its tool_calls, and its replayed thinking.
+ *
+ * Thinking counts because it is sent. It used to be left out, and with "send thinking as context" on it was the
+ * largest thing in the request: a 551-message conversation measured 125K while its requests carried 308K, the
+ * difference being every earlier turn's reasoning. The compaction trigger reads this count, so the conversation
+ * never looked long enough to summarise. A message whose thinking is NOT sent has none by the time it is
+ * counted — applyReasoningPolicy strips it — which is why a count of the stored conversation has to be taken
+ * on that view (see chatCompaction.ts) rather than on the buffer.
+ */
 export function countMessageTokens(msg: MsgLike | undefined | null): number {
   if (!msg) return 0;
   const memo = messageTokens.get(msg);
-  if (memo && memo.content === msg.content && memo.toolCalls === msg.tool_calls) return memo.n;
+  if (
+    memo &&
+    memo.content === msg.content &&
+    memo.toolCalls === msg.tool_calls &&
+    memo.reasoning === msg.reasoning_content
+  ) {
+    return memo.n;
+  }
   let n = 0;
   if (typeof msg.content === "string") n += countTokens(msg.content);
   for (const tc of msg.tool_calls ?? []) {
     n += countTokens(tc.function?.name ?? "");
     n += countTokens(tc.function?.arguments ?? "");
   }
-  messageTokens.set(msg, { content: msg.content, toolCalls: msg.tool_calls, n });
+  if (typeof msg.reasoning_content === "string") n += countTokens(msg.reasoning_content);
+  messageTokens.set(msg, { content: msg.content, toolCalls: msg.tool_calls, reasoning: msg.reasoning_content, n });
   return n;
 }
 

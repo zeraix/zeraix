@@ -123,6 +123,13 @@ pub fn sse(chunks: &[&str], truncate: bool) -> Scripted {
     Scripted { status: 200, body, truncate }
 }
 
+/// An SSE reply from whole frames — for a streamed round that carries more than text, such as a tool call.
+pub fn sse_frames(frames: &[serde_json::Value]) -> Scripted {
+    let mut body: String = frames.iter().map(|f| format!("data: {f}\n\n")).collect();
+    body.push_str("data: [DONE]\n\n");
+    Scripted { status: 200, body, truncate: false }
+}
+
 /// Each request as `(headers, body)`, in arrival order.
 pub type SeenRequests = std::sync::Arc<std::sync::Mutex<Vec<(String, String)>>>;
 

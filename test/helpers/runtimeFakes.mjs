@@ -46,8 +46,9 @@ export function stubElectron() {
  * that itself; a test that subscribes and does NOT reply is how an unresponsive or closing window is modelled.
  */
 export function fakeWindow({ handlers, listeners }) {
-  const subs = { "agent-run:event": new Set(), "agent-run:request": new Set() };
-  const gone = new Set();
+  const subs = { "agent-run:event": new Set(), "agent-run:request": new Set(), "agent-run:abandon": new Set() };
+  // webContents events ("destroyed", "render-process-gone", "did-navigate"), one-shot as `once` makes them.
+  const once = new Map();
   const wc = {
     destroyed: false,
     isDestroyed() {
@@ -57,15 +58,21 @@ export function fakeWindow({ handlers, listeners }) {
       for (const cb of subs[channel] ?? []) cb(payload);
     },
     once(event, cb) {
-      if (event === "destroyed") gone.add(cb);
+      if (!once.has(event)) once.set(event, new Set());
+      once.get(event).add(cb);
     },
     removeListener(event, cb) {
-      if (event === "destroyed") gone.delete(cb);
+      once.get(event)?.delete(cb);
+    },
+    /** Fire a webContents event: a renderer crash is `emit("render-process-gone")`, a reload `emit("did-navigate")`. */
+    emit(event) {
+      const cbs = [...(once.get(event) ?? [])];
+      once.delete(event);
+      for (const cb of cbs) cb();
     },
     destroy() {
       this.destroyed = true;
-      for (const cb of [...gone]) cb();
-      gone.clear();
+      this.emit("destroyed");
     },
   };
   const event = { sender: wc };
@@ -80,6 +87,10 @@ export function fakeWindow({ handlers, listeners }) {
     onRequest: (cb) => {
       subs["agent-run:request"].add(cb);
       return () => subs["agent-run:request"].delete(cb);
+    },
+    onAbandon: (cb) => {
+      subs["agent-run:abandon"].add(cb);
+      return () => subs["agent-run:abandon"].delete(cb);
     },
   };
   return { wc, api, event };

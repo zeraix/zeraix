@@ -222,6 +222,39 @@ async fn a_run_cancelled_before_it_starts_issues_no_request_at_all() {
     assert!(out.turns.is_empty());
 }
 
+/// Preparing the context can be a model request of its own — a summary, with its own retries — and a Stop
+/// pressed during it must not wait for it to finish.
+#[tokio::test]
+async fn a_stop_during_context_preparation_ends_the_run_at_once() {
+    struct NeverPrepares;
+    #[async_trait::async_trait]
+    impl agent_loop::ContextStrategy for NeverPrepares {
+        async fn prepare(&mut self, _: &[agent_loop::Message]) -> (Vec<agent_loop::Message>, bool) {
+            std::future::pending().await
+        }
+    }
+
+    let token = CancellationToken::new();
+    let model = Arc::new(ScriptedModel::new(vec![NormalizedTurn::text("never asked")]));
+    let agent =
+        AgentLoop::new(Arc::clone(&model) as Arc<dyn agent_loop::ModelClient>, FakeTools::new(), LoopConfig::default())
+            .with_context(Box::new(NeverPrepares));
+    let run = agent.run(vec![agent_loop::Message::user("go")], token.clone());
+    let stop = token.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        stop.cancel();
+    });
+
+    let out = tokio::time::timeout(std::time::Duration::from_secs(5), run)
+        .await
+        .expect("the run must return once Stop is pressed")
+        .expect("run");
+    assert_eq!(out.stop.reason, Some(StopReason::Cancelled));
+    assert_eq!(model.request_count(), 0);
+    assert_eq!(out.messages.len(), 1, "the conversation is returned as it stood");
+}
+
 /// A provider failure on a late round must not cost the user the rounds that did complete.
 #[tokio::test]
 async fn a_provider_failure_ends_the_run_but_keeps_the_rounds_that_completed() {

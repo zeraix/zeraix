@@ -41,6 +41,21 @@ pub struct ResolvedCall {
     pub args: Map<String, Value>,
 }
 
+/// The name a call will run as, read straight from its raw `arguments` — for a caller deciding something about
+/// the call before it runs, such as whether it may run beside its neighbours.
+///
+/// Only a dispatcher envelope is parsed; every other call is its own name. An envelope whose arguments cannot
+/// be read keeps the dispatcher's name: it will fail without running, so it has no business in a batch.
+pub fn resolved_name(name: &str, raw_arguments: &str) -> String {
+    if name != DISPATCHER_NAME {
+        return name.to_owned();
+    }
+    match crate::args::parse_tool_arguments(raw_arguments) {
+        crate::args::ParsedArgs::Ok(args) => resolve_tool_call(name, args).name,
+        crate::args::ParsedArgs::Failed { .. } => name.to_owned(),
+    }
+}
+
 /// Resolve a `call_tool` wrapper into the call it names. Anything else passes through untouched.
 ///
 /// A **declared** tool's name arriving through `call_tool` resolves normally rather than erroring. Models do

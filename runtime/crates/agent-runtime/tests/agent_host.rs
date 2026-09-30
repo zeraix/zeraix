@@ -469,3 +469,61 @@ fn a_run_can_hand_every_tool_call_to_the_host() {
         "the runtime's own read_file and ask_user both went to the host, through one path"
     );
 }
+
+/// Reads the chat routes through `call_tool` still run side by side.
+///
+/// The chat declares its reads behind the `call_tool` dispatcher, and the loop batched on the WRAPPER's name — so
+/// no batch of reads was ever recognised as reads, and every one of them ran alone, a host round trip at a time.
+/// Checked by order rather than by timing: in a batch, every call is put to the host before any of them ends; one
+/// at a time, the first ends before the second is asked.
+#[test]
+fn reads_routed_through_the_dispatcher_reach_the_host_side_by_side() {
+    let routed = |id: &str, path: &str| {
+        serde_json::json!({
+            "id": id,
+            "type": "function",
+            "function": {
+                "name": "call_tool",
+                "arguments": serde_json::json!({ "name": "read_file", "arguments": { "path": path } }).to_string()
+            }
+        })
+    };
+    let batch = serde_json::json!({
+        "choices": [{ "message": { "content": "", "tool_calls": [routed("c1", "a"), routed("c2", "b"), routed("c3", "c")] } }],
+        "usage": { "prompt_tokens": 5, "completion_tokens": 3 }
+    })
+    .to_string();
+    let (endpoint, _server) = fake_provider(vec![batch, assistant_text("done")]);
+    let mut rt = Runtime::start();
+    rt.init();
+    let mut params = run_params(&endpoint, ".", "routed-reads", serde_json::json!([{ "role": "user", "content": "go" }]));
+    params["host_tools_only"] = serde_json::json!(true);
+    params["parallel_tools"] = serde_json::json!(["read_file"]);
+    let id = rt.send("agent.run", params);
+
+    // What happened, in the order the host saw it: `ask:<name>` for a tool put to it, `end:<id>` for a call that ended.
+    let mut seen: Vec<String> = Vec::new();
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let reply = loop {
+        assert!(Instant::now() < deadline, "no reply; saw {seen:?}");
+        let msg = rt.read();
+        if msg["method"] == "host.tool" && msg["id"].is_number() {
+            seen.push(format!("ask:{}", msg["params"]["name"].as_str().unwrap_or("")));
+            rt.reply(msg["id"].clone(), serde_json::json!({ "ok": true, "content": "contents" }));
+            continue;
+        }
+        if msg["method"] == "agent.tool" && msg["params"]["phase"] == "end" {
+            seen.push(format!("end:{}", msg["params"]["id"].as_str().unwrap_or("")));
+            continue;
+        }
+        if msg["id"].as_u64() == Some(id) {
+            break msg;
+        }
+    };
+    assert_eq!(reply["result"]["stop_reason"], "completed", "{reply}");
+    assert_eq!(
+        seen,
+        ["ask:read_file", "ask:read_file", "ask:read_file", "end:c1", "end:c2", "end:c3"],
+        "all three routed reads must be put to the host before any of them ends"
+    );
+}

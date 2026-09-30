@@ -22,7 +22,9 @@
  */
 import { toast } from "sonner";
 import { getContextBudgetK } from "@/lib/ai/contextBudget";
+import { isLocalEndpoint, LOCAL_PROVIDER_ID } from "@/lib/ai/localModel";
 import { resolveContextWindow } from "@/lib/ai/models";
+import { loadThinking } from "@/lib/ai/thinking";
 import { countMessagesTokens } from "@/lib/ai/tokenizer";
 import { useAgentChatStore } from "@/store/agentChatStore";
 import type { StoredCompaction } from "@/lib/ai/conversation";
@@ -40,6 +42,29 @@ import {
 } from "./contextCompress";
 import { mergeExtracted, type ExtractedTaskState, type TaskMemory } from "./taskMemory";
 import type { ApiMsg, RequestLog } from "./types";
+import { applyReasoningPolicy } from "./wireHelpers";
+
+/** The model fields that decide whether its requests carry replayed thinking. */
+type SentModel = { providerId?: string; endpoint?: string } | null | undefined;
+
+/**
+ * The conversation as a request carries it, as far as its SIZE goes: thinking kept only where it is replayed.
+ *
+ * The buffer holds every turn's thinking whether or not it is sent, and a count now includes thinking (see
+ * countMessageTokens) — so a count of the buffer itself would overstate a conversation whose thinking is
+ * stripped. Same array length and order as the input, so a compaction plan made on this view indexes the
+ * buffer correctly. The setting is read from storage; a model that has refused a replayed block is not known
+ * here, so for one the count errs high, which only makes compaction a little early.
+ */
+export function asSent(messages: ApiMsg[], model: SentModel): ApiMsg[] {
+  const isLocal = !!model && (model.providerId === LOCAL_PROVIDER_ID || isLocalEndpoint(model.endpoint ?? ""));
+  return applyReasoningPolicy(messages, isLocal, loadThinking().sendContext);
+}
+
+/** Estimated prompt size of the conversation as it would be sent. */
+export function countSentTokens(messages: ApiMsg[], model: SentModel): number {
+  return countMessagesTokens(asSent(messages, model));
+}
 
 /** One conversation's compaction snapshot, as held in the session cache. */
 export interface CachedCompaction {
@@ -71,8 +96,8 @@ export interface CompactionApi {
 
 export interface CompactionDeps {
   t: TFunc;
-  /** Read for the context window only; compaction is meaningless without one. */
-  activeModel: { model?: string; contextWindow?: number } | null;
+  /** Read for the context window, and for whether its requests replay thinking (which counts toward the size). */
+  activeModel: { model?: string; contextWindow?: number; providerId?: string; endpoint?: string } | null;
   /** Live UI state, read at click time by the manual path. */
   compacting: boolean;
   loading: boolean;
@@ -188,7 +213,10 @@ export function createCompaction(deps: CompactionDeps): CompactionApi {
   ): Promise<CompactionState | null> => {
     // Both captured before the first await: everything below must act on the conversation this round started in.
     const targetConvId = opts.convId !== undefined ? opts.convId : convIdRef.current;
-    const full = opts.messages ?? convoRef.current;
+    // Planned on the conversation as it is SENT: with "send thinking as context" on, every earlier turn's thinking
+    // rides along and has to count, or a conversation carrying hundreds of thousands of tokens of it never looks
+    // long enough to summarise.
+    const full = asSent(opts.messages ?? convoRef.current, activeModel);
     const cw = activeModel?.contextWindow ?? resolveContextWindow(activeModel?.model ?? "");
     const currentTokens = countMessagesTokens(full);
     // Hybrid working-set budget: cap the trigger/target at an absolute token budget (configurable in

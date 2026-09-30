@@ -72,10 +72,42 @@ export function useConsentQueue() {
     diff: string | null,
     warning: string | null = null,
     requester: ConsentRequester | null = null,
+    // The call this prompt asks about. When it aborts — the turn was stopped, or the runtime stopped waiting for
+    // the call — the prompt is withdrawn and answered "no": a "yes" given later would run a command nobody is
+    // waiting for, after its turn is over.
+    signal?: AbortSignal,
   ) =>
-    new Promise<ConsentDecision>((resolve) => {
+    new Promise<ConsentDecision>((settle) => {
+      if (signal?.aborted) {
+        settle("no");
+        return;
+      }
+      const withdraw = () => {
+        const at = consentQueueRef.current.indexOf(item);
+        item.resolve("no");
+        if (at < 0) return; // already answered
+        consentQueueRef.current = consentQueueRef.current.filter((r) => r !== item);
+        syncConsentBadges();
+        // Re-show the front only if it was the one withdrawn: re-showing an unchanged front would reset the option
+        // the user had highlighted on it. Otherwise only the "N more pending" count changed.
+        if (at === 0) showFrontConsent();
+        else setPending((p) => (p ? { ...p, queued: consentQueueRef.current.length - 1 } : p));
+      };
+      const item: ConsentQueueItem = {
+        convId,
+        name,
+        args,
+        diff,
+        warning,
+        requester,
+        resolve: (d) => {
+          signal?.removeEventListener("abort", withdraw);
+          settle(d);
+        },
+      };
+      signal?.addEventListener("abort", withdraw, { once: true });
       const wasEmpty = consentQueueRef.current.length === 0;
-      consentQueueRef.current.push({ convId, name, args, diff, warning, requester, resolve });
+      consentQueueRef.current.push(item);
       syncConsentBadges();
       if (wasEmpty) showFrontConsent(); // queue was empty → show immediately; otherwise wait behind the others
       else setPending((p) => (p ? { ...p, queued: consentQueueRef.current.length - 1 } : p)); // just refresh "N more pending"

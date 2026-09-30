@@ -27,6 +27,7 @@ import { isUsageLogEnabledSync, logToolCall } from "@/lib/ai/usageLog";
 import { prepareWire } from "@/lib/agent/contextManager";
 import type { StopDecision } from "@/lib/agent/stopPolicy";
 import { dueReminders, noObligations, recordTool, unansweredCalls } from "@/lib/agent/toolRuntime";
+import { linkSignals } from "@/lib/agent/abortSignals";
 import {
   runTurnInRuntime,
   runtimeChatAvailable,
@@ -36,6 +37,7 @@ import {
   type RuntimeRoundAnswer,
   type RuntimeRoundSummary,
   type RuntimeToolCall,
+  type RuntimeToolCallInfo,
 } from "@/lib/agent/runtimeTurn";
 import { useAgentChatStore } from "@/store/agentChatStore";
 import { useAuthStore } from "@/store/authStore";
@@ -55,7 +57,7 @@ import {
   repeatedFailureNudge,
   repeatedResourceNudge,
 } from "./constants";
-import { resultCeilingTokens } from "./contextCompress";
+import { resolveHybridBudget, resultCeilingTokens } from "./contextCompress";
 import { isGoalActive, recordEvidence } from "./goalState";
 import { wrapReminder } from "./reminders";
 import { createRoundView, snapshotContext, storeToolResult, type RoundRunnerDeps } from "./turnRound";
@@ -79,6 +81,12 @@ export interface RuntimeModel {
   /** Models known to refuse the thinking switch, and a replayed thinking block — told to the runtime up front. */
   thinkingUnsupported: () => Set<string>;
   reasoningContextUnsupported: () => Set<string>;
+  /**
+   * The turn's running token total. A delegation adds its rounds here too, as `requestChat` adds every
+   * sub-agent request on the other path — or the turn's usage row, the session total and the goal's cost all
+   * leave out whatever the sub-agents spent.
+   */
+  turnUsage?: () => TurnUsage;
 }
 
 /** Everything `createRoundRunner` is given, plus what `requestChat` held that the runtime now needs directly. */
@@ -198,16 +206,34 @@ export async function runChatTurnInRuntime(deps: RuntimeTurnDeps): Promise<Runti
   };
 
   /** Every tool call, on the path createRoundRunner's runToolCall takes. Returns what the model will read. */
-  const runTool = async (name: string, rawArgs: unknown): Promise<{ ok: boolean; content: string }> => {
+  const runTool = async (
+    name: string,
+    rawArgs: unknown,
+    call?: RuntimeToolCallInfo,
+  ): Promise<{ ok: boolean; content: string }> => {
     const args = (rawArgs && typeof rawArgs === "object" ? rawArgs : {}) as Record<string, unknown>;
     const startedAt = Date.now();
     const handler = rendererTools[name];
     let callOk = true;
-    const base = handler
-      ? await handler(ctx, args)
-      : await execToolCall(ctx, name, args, name, "main", null, (v) => {
+    let base: string;
+    if (handler) {
+      // The turn's own context, never a per-call one. Renderer tools include the delegation family, which hooks
+      // the turn's sub-agent scheduler to `ctx.signal` — work that outlives the call. A per-call signal is
+      // released when the call returns, and a scheduler hooked to it would stop hearing the user's Stop.
+      base = await handler(ctx, args);
+    } else {
+      // Stopped by the turn's Stop, or by the main process giving up on this one call — its consent prompt closes
+      // and the work behind it ends, rather than finishing after nobody is left to read the result. Safe to scope
+      // to the call: execToolCall uses its context only while the call runs.
+      const linked = call ? linkSignals(ctx.signal, call.signal) : null;
+      try {
+        base = await execToolCall(linked ? { ...ctx, signal: linked.signal } : ctx, name, args, name, "main", null, (v) => {
           callOk = v;
         });
+      } finally {
+        linked?.release();
+      }
+    }
     // Finished delegations and background jobs ride back on the result, as they do on the other path.
     const content = (name === "join_subagents" ? base : base + drainDelegations(ctx)) + drainJobEvents(ctx);
     if (RENDERER_HANDLED_TOOLS.has(name)) {
@@ -270,6 +296,11 @@ export async function runChatTurnInRuntime(deps: RuntimeTurnDeps): Promise<Runti
       tools,
       // Declared so a turn that outgrows the window mid-turn is compacted there rather than refused.
       contextWindow: activeModel?.contextWindow ?? resolveContextWindow(modelName),
+      // And the user's budget below it, so mid-turn compaction starts where compaction between turns does.
+      contextBudget: resolveHybridBudget(
+        activeModel?.contextWindow ?? resolveContextWindow(modelName),
+        getContextBudgetK(),
+      ),
       meta: { convId, turnId, source: "chat", actor: "main", provider: activeModel?.providerId },
       parallelTools: [...PARALLEL_SAFE_TOOLS],
       // The replay policy applyReasoningPolicy applies to this turn's own rounds: local models, or everyone with

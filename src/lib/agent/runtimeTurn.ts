@@ -62,6 +62,11 @@ export interface RuntimeTurnParams {
   tools: unknown[];
   /** The model's window. Turns on context management in the runtime; omit when unknown. */
   contextWindow?: number | null;
+  /**
+   * The user's working-set budget below the window (Settings → General), as the trigger/target compaction between
+   * turns uses. Without it the runtime compacts only near the WINDOW, so a long turn on a 1M model grows unchecked.
+   */
+  contextBudget?: { triggerTokens: number; targetTokens: number } | null;
   summarizerModel?: string | null;
   /** Usage-log attribution. Never sent to the runtime. */
   meta?: RuntimeTurnMeta;
@@ -196,9 +201,17 @@ export interface RuntimeTurnResult {
   learned: RuntimeQuirks;
 }
 
+/** What `runTool` is told about the call besides its name and arguments. */
+export interface RuntimeToolCallInfo {
+  /** The model's id for the call — tells two calls to one tool in the same batch apart. */
+  callId: string;
+  /** Aborted when the main process gives up waiting for this call, so the work behind it stops too. */
+  signal: AbortSignal;
+}
+
 export interface RuntimeTurnHandlers {
   /** Run a tool the runtime does not implement. Always resolves to the text the model reads. */
-  runTool(name: string, args: unknown): Promise<{ ok: boolean; content: string }>;
+  runTool(name: string, args: unknown, call: RuntimeToolCallInfo): Promise<{ ok: boolean; content: string }>;
   /** Answer "may another round start?". Omit to run ungated, which saves a round trip per round. */
   round?(info: RuntimeRoundInfo): Promise<RuntimeRoundAnswer>;
   onDelta?(delta: RuntimeDelta): void;
@@ -220,6 +233,7 @@ interface Request {
   kind: string;
   name?: string;
   args?: unknown;
+  callId?: string;
   round?: number;
   promptTokens?: number;
   completionTokens?: number;
@@ -233,6 +247,8 @@ interface AgentRuntimeApi {
   reply(requestId: string, body: { result?: unknown; error?: string }): void;
   onEvent(cb: (e: Envelope) => void): () => void;
   onRequest(cb: (r: Request) => void): () => void;
+  /** Optional so a preload without it still runs turns; nothing is then abandoned early. */
+  onAbandon?(cb: (a: { requestId: string; runId: string }) => void): () => void;
 }
 
 function api(): AgentRuntimeApi | null {
@@ -281,14 +297,26 @@ export async function runTurnInRuntime(
     if (r.runId !== runId) return;
     void answer(r);
   });
+  // One controller per open request. The main process abandons a request it stopped waiting for — its timeout,
+  // or the run ending first — and the work behind it must stop with it: a consent prompt left on screen, and
+  // the command behind it run after the turn was over, was what abandoning used to leave behind.
+  const open = new Map<string, AbortController>();
+  const offAbandon = runtime.onAbandon?.((a) => {
+    if (a.runId === runId) open.get(a.requestId)?.abort(new Error("the request was abandoned"));
+  });
 
   // Every path ends in a reply. The runtime is blocked on each of these, and silence would read as a tool
   // that is still running.
   async function answer(r: Request): Promise<void> {
+    const controller = new AbortController();
+    open.set(r.requestId, controller);
     try {
       let result: unknown;
       if (r.kind === "tool") {
-        result = await handlers.runTool(String(r.name ?? ""), r.args ?? {});
+        result = await handlers.runTool(String(r.name ?? ""), r.args ?? {}, {
+          callId: String(r.callId ?? ""),
+          signal: controller.signal,
+        });
       } else if (r.kind === "round") {
         result = handlers.round
           ? await handlers.round({
@@ -305,6 +333,8 @@ export async function runTurnInRuntime(
       runtime!.reply(r.requestId, { result });
     } catch (err) {
       runtime!.reply(r.requestId, { error: err instanceof Error ? err.message : String(err) });
+    } finally {
+      open.delete(r.requestId);
     }
   }
 
@@ -316,6 +346,9 @@ export async function runTurnInRuntime(
     signal?.removeEventListener("abort", onAbort);
     offEvent();
     offRequest();
+    offAbandon?.();
+    // Nothing still open will be read now that the run is over.
+    for (const controller of open.values()) controller.abort(new Error("the turn ended"));
   }
 }
 

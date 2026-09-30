@@ -292,3 +292,30 @@ test("a routine round goes out at low effort, as the chat's own loop sends it", 
   }
 });
 
+
+test("a renderer tool gets the turn's own context, so what it starts still hears Stop after the call returns", async (t) => {
+  if (!(await canHoldAChatTurn())) return t.skip("no runtime that can hold a chat turn");
+  // spawn_subagents hooks the turn's sub-agent scheduler to `ctx.signal`, and the delegations outlive the call.
+  // Handed a per-call signal instead — released the moment the call returns — the scheduler stopped hearing
+  // the user's Stop, and running sub-agents carried on until the turn's cleanup caught up with them.
+  const p = await provider([call("c1", "spawn_subagents", { tasks: [] }), text("started them")]);
+  const stop = new AbortController();
+  let seen = null;
+  const x = turn(p.endpoint, {
+    signal: stop.signal,
+    tools: {
+      spawn_subagents: async (ctx) => {
+        seen = ctx;
+        return "spawned";
+      },
+    },
+  });
+  try {
+    await run(x.deps);
+    assert.ok(seen, "the renderer tool ran");
+    stop.abort();
+    assert.equal(seen.signal.aborted, true, "a Stop pressed after the call must still reach what the call started");
+  } finally {
+    await p.close();
+  }
+});

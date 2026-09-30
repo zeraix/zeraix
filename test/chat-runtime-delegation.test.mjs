@@ -25,8 +25,9 @@ process.env.ZERAIX_RUST_CHAT_LOOP = "on";
 const { initRuntimeTurnBridge } = await import("../electron/agent/runtimeTurnBridge.mjs");
 const { hasFeature, setSessionPolicyProvider, shutdown } = await import("../electron/tools/rustRuntime.mjs");
 const { createRunDelegation } = await import("../src/app/agent/chat/delegation.ts");
-const { beginExecution, cancelExecution } = await import("../src/lib/agent/executionRegistry.ts");
+const { beginExecution, cancelExecution, subscribeExecutionEvents } = await import("../src/lib/agent/executionRegistry.ts");
 const { STOPPED_BY_USER_RESULT } = await import("../src/lib/ai/subagentScheduler.ts");
+const { runDelegationInRuntime } = await import("../src/app/agent/chat/delegationRuntime.ts");
 
 const workdir = fs.mkdtempSync(path.join(os.tmpdir(), "zeraix-delegation-"));
 setSessionPolicyProvider(() => ({ workspaceRoots: [workdir] }));
@@ -51,7 +52,7 @@ async function canHoldAChatTurn() {
 const CAPS = { supportsPerTurnReasoningEffort: false };
 
 /** A delegation runner over `endpoint`, recording every tool call the delegation's own path was asked to run. */
-function runner(endpoint, { toolResult = () => "found in a.ts" } = {}) {
+function runner(endpoint, { toolResult = () => "found in a.ts", turnUsage } = {}) {
   const executed = [];
   const bucket = { turnId: "t1", done: [] };
   const run = createRunDelegation({
@@ -83,6 +84,7 @@ function runner(endpoint, { toolResult = () => "found in a.ts" } = {}) {
       capabilities: CAPS,
       thinkingUnsupported: () => new Set(),
       reasoningContextUnsupported: () => new Set(),
+      turnUsage,
     },
   });
   return { run, executed, bucket };
@@ -194,5 +196,119 @@ test("a delegation whose provider refuses fails, with the rounds it spent report
     assert.equal(failed.length, 1, "the execution is failed, not left looking as if it were still running");
   } finally {
     await p.close();
+  }
+});
+
+test("what a delegation spends is added to the turn's usage, as every sub-agent request is on the other path", async (t) => {
+  if (!(await canHoldAChatTurn())) return t.skip("no runtime that can hold a chat turn");
+  // Two requests, 10 + 5 tokens each (the fake provider's usage). Left out, the turn's usage row, the session
+  // total and a goal's cost all under-reported whatever the sub-agents spent.
+  const p = await provider([call("c1", "search_files", { query: "x" }), text("done")]);
+  const turn = { prompt: 0, completion: 0, total: 0, cached: 0, estimated: false };
+  const { run } = runner(p.endpoint, { turnUsage: () => turn });
+  try {
+    await delegate(() => run(ctx(), opts(undefined)));
+    assert.deepEqual({ prompt: turn.prompt, completion: turn.completion, total: turn.total }, { prompt: 20, completion: 10, total: 30 });
+  } finally {
+    await p.close();
+  }
+});
+
+test("a call that never reached the window is the one the Inspector shows as failed, even beside a twin", async (t) => {
+  if (!(await canHoldAChatTurn())) return t.skip("no runtime that can hold a chat turn");
+  // One batch, two calls to one tool: the first cut off mid-arguments, so the runtime refuses it without asking the
+  // window; the second fine. Attributed by NAME, the refused call was credited with the good one's arrival and the
+  // Inspector showed a phantom failure carrying the good call's result, while the real parse error never appeared.
+  const batch = {
+    choices: [
+      {
+        message: {
+          role: "assistant",
+          content: "",
+          tool_calls: [
+            { id: "cut", type: "function", function: { name: "search_files", arguments: '{"query": "hand' } },
+            { id: "fine", type: "function", function: { name: "search_files", arguments: JSON.stringify({ query: "handler" }) } },
+          ],
+        },
+      },
+    ],
+  };
+  const p = await provider([batch, text("done")]);
+  const { run, executed } = runner(p.endpoint);
+  const execution = beginExecution({ agent: "explore", task: "find the handler", origin: "run_subagent" });
+  const reported = [];
+  const off = subscribeExecutionEvents((e) => {
+    if (e.executionId === execution.id && e.type === "tool_result") reported.push(e);
+  });
+  try {
+    await delegate(() => run(ctx(), opts(execution)));
+    assert.deepEqual(executed.map((e) => e.args), [{ query: "handler" }], "only the readable call reached the window");
+    // execToolCall reports the calls it ran (the stand-in here reports none); the delegation reports the one it never saw.
+    assert.equal(reported.length, 1, JSON.stringify(reported));
+    assert.equal(reported[0].ok, false);
+    assert.doesNotMatch(String(reported[0].output), /found in a\.ts/, "the refused call must not carry the good call's result");
+  } finally {
+    off();
+    await p.close();
+  }
+});
+
+test("a sidecar too old to send call ids still has its calls attributed, not reported twice", async () => {
+  // Over a stand-in preload: the runtime asks for one call WITHOUT a call id, as one built before host.tool carried
+  // them does, then reports it ended. Matched by id alone, every such call read as one that never reached the
+  // window, and the Inspector showed a failure beside each real result.
+  let onEvent;
+  let onRequest;
+  const replies = [];
+  globalThis.agentRuntime = {
+    start: async (runId) => {
+      onRequest({ requestId: "q1", runId, kind: "tool", name: "search_files", args: { query: "x" } });
+      while (!replies.length) await new Promise((r) => setTimeout(r, 1));
+      onEvent({ runId, kind: "tool", payload: { phase: "start", id: "c1", name: "search_files" } });
+      onEvent({ runId, kind: "tool", payload: { phase: "end", id: "c1", name: "search_files", ok: true, content: "found" } });
+      return { stop_reason: "completed", messages: [], injected: [], learned: {} };
+    },
+    cancel() {},
+    reply: (requestId, body) => replies.push({ requestId, ...body }),
+    onEvent: (cb) => ((onEvent = cb), () => {}),
+    onRequest: (cb) => ((onRequest = cb), () => {}),
+  };
+  const execution = beginExecution({ agent: "explore", task: "t", origin: "run_subagent" });
+  const reported = [];
+  const off = subscribeExecutionEvents((e) => {
+    if (e.executionId === execution.id && e.type === "tool_result") reported.push(e);
+  });
+  try {
+    const out = await runDelegationInRuntime({
+      model: {
+        endpoint: "http://unused.invalid",
+        apiKey: "k",
+        modelName: "m",
+        isLocalModel: false,
+        activeModel: null,
+        thinking: { enabled: false, effort: "medium" },
+        capabilities: CAPS,
+        thinkingUnsupported: () => new Set(),
+        reasoningContextUnsupported: () => new Set(),
+      },
+      sendReasoningContext: () => false,
+      t: (k) => k,
+      ctx: ctx(),
+      signal: new AbortController().signal,
+      messages: [],
+      tools: [],
+      actor: "sub:explore",
+      displayName: (tool) => `explore→${tool}`,
+      subConvId: undefined,
+      execToolCall: async () => "found",
+      execution,
+      onRoundStart: () => {},
+      progress: { rounds: 0, steps: 0, lastContent: "", usage: { prompt: 0, completion: 0, total: 0 } },
+    });
+    assert.equal(out?.stop.reason, "completed");
+    assert.deepEqual(reported, [], "a call that reached the window is execToolCall's to report, not a phantom failure");
+  } finally {
+    off();
+    delete globalThis.agentRuntime;
   }
 });

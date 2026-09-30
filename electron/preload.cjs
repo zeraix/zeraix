@@ -181,6 +181,12 @@ if (CHAT_LOOP_ENABLED) contextBridge.exposeInMainWorld("agentRuntime", {
     ipcRenderer.on("agent-run:request", listener);
     return () => ipcRenderer.removeListener("agent-run:request", listener);
   },
+  // A request the main process gave up on: the work behind it should stop.
+  onAbandon: (cb) => {
+    const listener = (_e, payload) => cb(payload);
+    ipcRenderer.on("agent-run:abandon", listener);
+    return () => ipcRenderer.removeListener("agent-run:abandon", listener);
+  },
 });
 
 // OSS upload proxy: the main process PUTs to a presigned URL, bypassing the CORS preflight block on the app:// origin.

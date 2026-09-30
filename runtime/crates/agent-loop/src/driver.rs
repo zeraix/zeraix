@@ -23,81 +23,27 @@
 //! Swapping (2) and (3) would issue a recovery round at reduced effort. Swapping the two folds in (5) would
 //! let a round be judged against a phase that had not yet noticed the failure in it.
 
+mod context;
+mod gate;
+mod observer;
+mod tools;
+
+pub use context::{ContextStrategy, PassThroughContext};
+pub use gate::{CallSummary, RoundContext, RoundDecision, RoundGate, RoundSummary, SignalRecord};
+pub use observer::{LoopObserver, NoObserver};
+pub use tools::{ToolExecutor, ToolOutcome, ToolRecord};
+
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Instant;
 
 use agent_core::{CancellationToken, Result};
 
-use crate::doom::{CallObservation, CallVerdict, DoomLoop, DoomSignal};
+use crate::doom::{CallObservation, CallVerdict, DoomLoop};
 use crate::model::{Message, ModelClient, ModelRequest, NormalizedTurn, ToolCall, Usage};
-use crate::reasoning::{Effort, ReasoningDecision, ThinkingConfig, resolve_reasoning};
+use crate::reasoning::{Effort, ThinkingConfig, resolve_reasoning};
 use crate::state::ExecutionState;
 use crate::stop::{StopDecision, StopInput, StopPolicyConfig, StopReason, decide_stop};
-
-/// What executing one tool produced.
-///
-/// There is no error variant, and that is deliberate: a tool that fails produces a *result* saying so, which
-/// the model reads and responds to. An `Err` here would abort the turn, and a failing tool is the most
-/// ordinary thing that happens in an agent run — the model is usually the right thing to hand it to.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ToolOutcome {
-    /// The text fed back to the model, after any capping.
-    pub content: String,
-    pub ok: bool,
-}
-
-impl ToolOutcome {
-    pub fn ok(content: impl Into<String>) -> Self {
-        Self { content: content.into(), ok: true }
-    }
-    pub fn failed(content: impl Into<String>) -> Self {
-        Self { content: content.into(), ok: false }
-    }
-}
-
-/// One executed call, as the loop records it.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ToolRecord {
-    /// Pairs with [`ToolCall::id`], which is what keeps the assistant turn aligned with its results.
-    pub tool_call_id: String,
-    /// The RESOLVED tool name, never a dispatcher's — a routed call must not be recorded as `call_tool`.
-    pub name: String,
-    /// Arguments as executed, after routing resolved them.
-    pub args: serde_json::Value,
-    pub content: String,
-    pub ok: bool,
-    pub ms: u64,
-}
-
-/// The tool seam.
-///
-/// Resolving a call — reading its `arguments` string, routing a dispatcher, applying permission — belongs to
-/// the implementation, not to the loop. The loop needs three things back: what actually ran, what to tell the
-/// model, and whether it worked.
-#[async_trait::async_trait]
-pub trait ToolExecutor: Send + Sync {
-    /// Execute one call. Must not panic and must honour `token`.
-    ///
-    /// The returned `name` and `args` are what the loop records and what the doom-loop detector sees, so an
-    /// implementation that routes a call is expected to report the resolved name rather than the wrapper's.
-    async fn execute(
-        &self,
-        call: &ToolCall,
-        token: &CancellationToken,
-    ) -> (String, serde_json::Value, ToolOutcome);
-
-    /// The arguments to REPLAY for `call` on later requests, when they must differ from what the model sent.
-    ///
-    /// A call whose `arguments` are not valid JSON is refused by the provider on every later request that
-    /// replays it — the conversation dies, not the round. The executor owns the rules for reading arguments, so
-    /// it also says what a readable copy is. The call itself still executes as sent, so the error it reports is
-    /// about what the model actually wrote. `None`, the default, replays the call byte for byte.
-    fn replay_arguments(&self, call: &ToolCall) -> Option<String> {
-        let _ = call;
-        None
-    }
-}
 
 /// One model request and everything it produced.
 ///
@@ -173,217 +119,6 @@ impl LoopOutcome {
         self.turns.last().map(|t| t.content.as_str()).unwrap_or("")
     }
 }
-
-/// How the conversation is kept within the model's window.
-///
-/// A trait for the same reason [`ModelClient`] and [`ToolExecutor`] are: the loop owns *when* the context is
-/// prepared — once per round, before the request is built — and nothing about *how*. Budgets, memory tiers and
-/// compaction live in `agent-context`, which depends on this crate; putting them behind a trait is what keeps
-/// that dependency pointing one way.
-///
-/// ## Why it is async
-///
-/// Dropping and truncating are decisions a strategy can make on its own. Summarising is not: it is a model
-/// call, and it is the only technique that keeps what a conversation MEANT rather than merely what fitted. A
-/// synchronous seam quietly rules it out, so the strategy that most needs to exist could not be written behind
-/// it. The cost is one boxed future per round, against a request that takes seconds.
-#[async_trait::async_trait]
-pub trait ContextStrategy: Send + Sync {
-    /// Produce the messages for this round.
-    ///
-    /// Returns the wire array and whether anything was compacted to produce it. The loop uses the flag to move
-    /// the execution state — §6.1 makes the round after a compaction a planning round, because the model is
-    /// about to be handed a conversation it has not seen before.
-    async fn prepare(&mut self, messages: &[Message]) -> (Vec<Message>, bool);
-}
-
-/// The default: hand the conversation over untouched.
-///
-/// A loop with no strategy is not a loop with a broken one — it is a loop whose caller has not asked for
-/// context management, and it must behave exactly as it did before the trait existed.
-pub struct PassThroughContext;
-#[async_trait::async_trait]
-impl ContextStrategy for PassThroughContext {
-    async fn prepare(&mut self, messages: &[Message]) -> (Vec<Message>, bool) {
-        (messages.to_vec(), false)
-    }
-}
-
-/// The host's right to stop the loop between rounds.
-///
-/// ## Why the loop does not decide this itself
-///
-/// Everything in [`StopPolicyConfig`] is something the loop can observe: a failure count, a clock, a context
-/// window. A spending limit is not. Neither is a workflow node's round budget, nor an approval a user revoked
-/// while the turn was running. Those live with the caller, and before this existed the caller could only
-/// enforce them by *owning the loop* — which is precisely what moving the loop into the runtime takes away.
-///
-/// So the loop keeps the decision about whether a run is going well, and the host keeps the decision about
-/// whether it may continue at all. Consulted between rounds, which is the only safe moment: no request is in
-/// flight and no tool is half-done, so a refusal costs nothing that has to be unwound.
-///
-/// A gate must be quick. The loop is holding a turn open while it waits.
-#[async_trait::async_trait]
-pub trait RoundGate: Send + Sync {
-    /// May the next round begin? See [`RoundContext`] for what the host is told.
-    async fn before_round(&self, ctx: &RoundContext) -> RoundDecision;
-}
-
-/// What a [`RoundGate`] is told.
-#[derive(Debug, Clone, Default)]
-pub struct RoundContext {
-    /// The round about to start, 0-based.
-    pub round: u32,
-    /// Everything the run has spent so far, which is what a budget is decided against.
-    pub usage: Usage,
-    /// The last round was a final answer, and the run completes unless the gate answers `resume`.
-    ///
-    /// Asked because a host can know a final answer is not one: the model spent the turn on tools and then
-    /// said nothing, or it is ending the turn with delegations it started still running. Before this the only
-    /// way to act on that was to own the loop.
-    pub after_final: bool,
-    /// The round that just closed. `None` before the first.
-    pub last: Option<RoundSummary>,
-}
-
-/// One closed round, as much as a host needs to decide what to say next.
-#[derive(Debug, Clone, Default)]
-pub struct RoundSummary {
-    /// The reply carried no text.
-    pub content_empty: bool,
-    /// The reply carried reasoning.
-    pub has_reasoning: bool,
-    /// Every call that ran, in order: the resolved name and the arguments as executed.
-    pub calls: Vec<CallSummary>,
-    /// The repetitions the detector noticed this round, one per call that drew one.
-    pub signals: Vec<SignalRecord>,
-}
-
-#[derive(Debug, Clone)]
-pub struct CallSummary {
-    pub id: String,
-    pub name: String,
-    pub args: serde_json::Value,
-    pub ok: bool,
-}
-
-/// A repetition worth telling the model about. The host words it.
-#[derive(Debug, Clone)]
-pub struct SignalRecord {
-    pub call_id: String,
-    pub name: String,
-    pub signal: DoomSignal,
-    pub repeat: u32,
-    pub fail_streak: u32,
-    pub resource_hits: u32,
-}
-
-impl RoundSummary {
-    fn of(record: &AgentTurnRecord, signals: Vec<SignalRecord>) -> Self {
-        Self {
-            content_empty: record.content.trim().is_empty(),
-            has_reasoning: !record.reasoning.trim().is_empty(),
-            calls: record
-                .tool_results
-                .iter()
-                .map(|r| CallSummary { id: r.tool_call_id.clone(), name: r.name.clone(), args: r.args.clone(), ok: r.ok })
-                .collect(),
-            signals,
-        }
-    }
-}
-
-/// What a [`RoundGate`] decided.
-// No `Eq`: `inject` carries `Message`, whose content is a JSON value and has no total equality.
-#[derive(Debug, Clone, Default, PartialEq)]
-pub struct RoundDecision {
-    /// False ends the run with [`StopReason::HostStopped`].
-    pub proceed: bool,
-    /// Why, in words a user will read. Carried onto the stop decision.
-    pub detail: Option<String>,
-    /// Offer the model no tools this round.
-    ///
-    /// The "answer now" round: a caller that has spent its budget usually wants a final answer built from what
-    /// the run already gathered, not a run terminated mid-investigation with its work discarded. Withdrawing
-    /// the tools removes the option the model keeps taking, which turns the next round into the answer.
-    pub withdraw_tools: bool,
-    /// Messages to append to the conversation before this round's request.
-    ///
-    /// The other half of "answer now": withdrawing the tools removes the option, and a message says what to do
-    /// instead — in the format the caller originally asked for, which the loop has no way to know. It is also
-    /// how a host injects what it learned between rounds (a file that changed underneath the run, an approval
-    /// that was revoked) without owning the loop to do it.
-    ///
-    /// Appended to the real conversation, not to a prepared copy: these are part of the transcript the run
-    /// returns, because a model's answer is unreadable next to a transcript that does not contain the
-    /// instruction it was answering.
-    pub inject: Vec<Message>,
-    /// Text to append to the turn's latest tool result, joined with a blank line, before the next request.
-    ///
-    /// The chat page's nudges ride the result the model is about to read rather than arriving as a message of
-    /// their own: a user-role instruction would read as the user speaking, and a tool result the model has not
-    /// yet been sent can be amended without breaking the provider's prefix cache. Ignored when this turn has
-    /// no tool result yet, and when the result already carries the same text.
-    pub nudge: Option<String>,
-    /// Asked after a final answer ([`RoundContext::after_final`]): run another round instead of completing.
-    /// Pair it with a `nudge` or `inject` saying why, or the model will answer the same way again.
-    pub resume: bool,
-}
-
-impl RoundDecision {
-    /// Carry on.
-    pub fn proceed() -> Self {
-        Self { proceed: true, ..Default::default() }
-    }
-
-    /// Carry on, but this round has no tools. See [`RoundDecision::withdraw_tools`].
-    pub fn answer_now() -> Self {
-        Self { proceed: true, withdraw_tools: true, ..Default::default() }
-    }
-
-    /// Stop here, for this reason.
-    pub fn stop(detail: impl Into<String>) -> Self {
-        Self { proceed: false, detail: Some(detail.into()), ..Default::default() }
-    }
-}
-
-/// Observers of a run, for the UI and the audit log.
-///
-/// Every hook is optional and none may fail the run: an observer that returns an error would give reporting
-/// the power to stop work, which is backwards.
-#[allow(unused_variables)]
-pub trait LoopObserver: Send + Sync {
-    fn round_started(&self, round: u32, decision: &ReasoningDecision) {}
-    /// The model answered, before any tool it asked for runs.
-    ///
-    /// `record` carries the reply, its reasoning, and the calls as they will be REPLAYED (see
-    /// [`ToolExecutor::replay_arguments`]). A host that keeps its own copy of the conversation stores the
-    /// assistant turn here, so it lands before the results that answer it.
-    fn response_received(&self, record: &AgentTurnRecord) {}
-    /// A round closed, with everything it produced.
-    ///
-    /// Paired with `round_started` rather than folded into it: they fire at different times and a UI needs
-    /// both — one to show a turn opening, the other to show what it cost.
-    fn round_finished(&self, record: &AgentTurnRecord) {}
-    fn tool_started(&self, call: &ToolCall) {}
-    fn tool_finished(&self, record: &ToolRecord) {}
-    /// A repetition worth telling the model about. The host decides how to phrase it.
-    fn doom_signal(&self, signal: DoomSignal, record: &ToolRecord, verdict: &CallVerdict) {}
-    fn stopped(&self, decision: &StopDecision) {}
-    /// The context was compacted before this round's request.
-    fn compacted(&self, round: u32) {}
-    /// Resolves once every event reported before this call has been delivered.
-    ///
-    /// The loop awaits it before it asks the host anything, so the host has seen everything it is being asked
-    /// about. An observer that delivers synchronously has nothing to wait for and returns `None`.
-    fn flush(&self) -> Option<tokio::sync::oneshot::Receiver<()>> {
-        None
-    }
-}
-
-/// The no-op observer, so a caller that wants none does not have to write one.
-pub struct NoObserver;
-impl LoopObserver for NoObserver {}
 
 pub struct AgentLoop {
     model: Arc<dyn ModelClient>,
@@ -532,9 +267,24 @@ impl AgentLoop {
             // Assigning `wire = prepared` here would compile, pass every test about compaction, and quietly
             // replace the user's transcript with the lossy copy the model was sent. Compaction is for fitting
             // a window; it is not an edit to what the user said.
-            let (prepared, compacted) = {
+            //
+            // Raced against the token like the model request below, and for the same reason: preparing can
+            // itself be a model request — a summary — with its own retries, and a Stop that waited for it to
+            // finish could wait minutes. Dropping the future aborts that request too.
+            let prepared = {
                 let mut strategy = self.context.lock().await;
-                strategy.prepare(&wire).await
+                tokio::select! {
+                    biased;
+                    _ = token.cancelled() => None,
+                    p = strategy.prepare(&wire) => Some(p),
+                }
+            };
+            let Some((prepared, compacted)) = prepared else {
+                record.ms = started.elapsed().as_millis() as u64;
+                turns.push(record);
+                let stop = StopDecision { stop: true, reason: Some(StopReason::Cancelled), detail: None };
+                self.observer.stopped(&stop);
+                return Ok(LoopOutcome { stop, state, turns, messages: wire, injected });
             };
             if compacted {
                 state.mark_compacted();
@@ -622,7 +372,7 @@ impl AgentLoop {
 
             let mut verdicts: Vec<CallVerdict> = Vec::with_capacity(tool_calls.len());
             let mut signals: Vec<SignalRecord> = Vec::new();
-            for group in group_calls(&tool_calls, &self.config.parallel_safe) {
+            for group in group_calls(&tool_calls, |c| self.tools.resolved_name(c), &self.config.parallel_safe) {
                 // Checked per batch, not only per round: a fan-out of twelve calls must stop at the one the
                 // user interrupted, not run the remaining eleven first.
                 if token.is_cancelled() {
@@ -631,6 +381,9 @@ impl AgentLoop {
                 for call in &group {
                     self.observer.tool_started(call);
                 }
+                // Delivered before any of them runs. A host tool asks the host directly, not through the event
+                // channel, so without this the host could be asked to run a call it has not yet been told began.
+                self.flush().await;
                 let executed: Vec<ToolRecord> = if group.len() == 1 {
                     vec![self.execute_one(group[0], &token).await]
                 } else {
@@ -762,14 +515,24 @@ fn spent(turns: &[AgentTurnRecord]) -> Usage {
     })
 }
 
-/// Batch consecutive parallel-safe calls; everything else runs alone, in order. `groupParallelCalls`'s rule.
-fn group_calls<'a>(calls: &'a [ToolCall], parallel_safe: &HashSet<String>) -> Vec<Vec<&'a ToolCall>> {
+/// Batch consecutive parallel-safe calls; everything else runs alone, in order. `groupParallelCalls`'s rule,
+/// applied as it is there to the RESOLVED name (`name_of`), so a read reached through a dispatcher is a read.
+fn group_calls<'a>(
+    calls: &'a [ToolCall],
+    name_of: impl Fn(&ToolCall) -> String,
+    parallel_safe: &HashSet<String>,
+) -> Vec<Vec<&'a ToolCall>> {
     let mut groups: Vec<Vec<&ToolCall>> = Vec::new();
+    // Whether the group being built may take another member: it began with a parallel-safe call.
+    let mut open = false;
     for call in calls {
-        let safe = parallel_safe.contains(&call.name);
+        let safe = parallel_safe.contains(&name_of(call));
         match groups.last_mut() {
-            Some(prev) if safe && parallel_safe.contains(&prev[0].name) => prev.push(call),
-            _ => groups.push(vec![call]),
+            Some(prev) if safe && open => prev.push(call),
+            _ => {
+                groups.push(vec![call]);
+                open = safe;
+            }
         }
     }
     groups

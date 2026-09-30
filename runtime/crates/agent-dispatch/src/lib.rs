@@ -51,7 +51,7 @@ use agent_tools::tool::{RiskLevel, ToolContext};
 use serde_json::{Map, Value};
 
 pub use args::{ParsedArgs, parse_tool_arguments, replay_arguments};
-pub use router::{DISPATCHER_NAME, ResolvedCall, resolve_tool_call};
+pub use router::{DISPATCHER_NAME, ResolvedCall, resolve_tool_call, resolved_name};
 
 /// Argument keys that name a filesystem target, in the order a tool is likely to declare them.
 ///
@@ -118,7 +118,10 @@ pub trait HostTools: Send + Sync {
     /// Whether this name is one the host implements.
     fn serves(&self, name: &str) -> bool;
     /// Run it. The returned text goes back to the model as the tool's result.
-    async fn call(&self, name: &str, args: &Value) -> ToolOutcome;
+    ///
+    /// `call_id` is the model's id for the call, so a host can tell apart two calls to one tool in the same batch
+    /// — and so tell which of them reached it at all: a call whose arguments could not be read never does.
+    async fn call(&self, call_id: &str, name: &str, args: &Value) -> ToolOutcome;
 }
 
 /// Executes a model's tool calls: route, read, check, run.
@@ -130,6 +133,8 @@ pub struct DispatchingExecutor {
     context: ToolContext,
     /// Tools the host implements. Consulted after the registry and before "unknown tool".
     host: Option<Arc<dyn HostTools>>,
+    /// The only tools this run may use, when the host restricted it. `None` is unrestricted.
+    allowed: Option<std::collections::HashSet<String>>,
 }
 
 impl DispatchingExecutor {
@@ -139,7 +144,19 @@ impl DispatchingExecutor {
         principal: Principal,
         context: ToolContext,
     ) -> Self {
-        Self { registry, permissions, principal, context, host: None }
+        Self { registry, permissions, principal, context, host: None, allowed: None }
+    }
+
+    /// Refuse every call to a tool not in `names`, before it is routed anywhere — the runtime's own tools
+    /// included.
+    ///
+    /// A host's tool policy used to be applied only to the calls that reached the host. The runtime's own tools
+    /// never do, so an automation node that denied `write_file` still had its files written: the deny-list held
+    /// for `web_search` and meant nothing for everything the runtime serves itself. Checked on the RESOLVED
+    /// name, so a dispatcher envelope cannot carry a refused tool past it.
+    pub fn with_allowed_tools(mut self, names: impl IntoIterator<Item = String>) -> Self {
+        self.allowed = Some(names.into_iter().collect());
+        self
     }
 
     /// Route the names this host implements to it rather than reporting them unknown.
@@ -163,6 +180,10 @@ impl DispatchingExecutor {
 impl ToolExecutor for DispatchingExecutor {
     fn replay_arguments(&self, call: &ToolCall) -> Option<String> {
         replay_arguments(&call.arguments)
+    }
+
+    fn resolved_name(&self, call: &ToolCall) -> String {
+        resolved_name(&call.name, &call.arguments)
     }
 
     async fn execute(
@@ -190,6 +211,19 @@ impl ToolExecutor for DispatchingExecutor {
         let ResolvedCall { name, args } = resolve_tool_call(&call.name, raw_args);
         let args_value = Value::Object(args.clone());
 
+        // A tool this run was not given. Before the host and the registry alike: the restriction is the host's
+        // policy, and it covers every tool rather than only the ones that reach the host.
+        if self.allowed.as_ref().is_some_and(|allowed| !allowed.contains(&name)) {
+            return (
+                name.clone(),
+                args_value,
+                ToolOutcome::failed(format!(
+                    "\"{name}\" is not one of the tools this run may use, so nothing ran. Continue with the \
+                     tools you were given."
+                )),
+            );
+        }
+
         // 2. A tool the HOST implements — `ask_user`, whose implementation is a person.
         //
         // Checked before the registry rather than after, so a host tool cannot be shadowed by a runtime one
@@ -207,7 +241,7 @@ impl ToolExecutor for DispatchingExecutor {
                     _ = token.cancelled() => {
                         ToolOutcome::failed("The user stopped this operation before it finished.")
                     }
-                    o = host.call(&name, &args_value) => o,
+                    o = host.call(&call.id, &name, &args_value) => o,
                 };
                 return (name, args_value, outcome);
             }

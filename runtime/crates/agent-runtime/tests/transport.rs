@@ -221,6 +221,43 @@ fn a_retry_after_a_partial_stream_resets_the_reply() {
     assert_eq!(shown, "Hello world", "the stale partial must be gone and the retry shown in full");
 }
 
+/// Each round is a new request whose text starts from nothing, so the delta offsets must restart with it.
+///
+/// Carried over from round 1, they sliced round 2's reply at round 1's final length: its opening words were
+/// dropped — and when that offset fell inside a character, as 2 bytes into `你` does, nothing streamed for the
+/// whole round.
+#[test]
+fn every_round_streams_its_reply_from_the_first_character() {
+    let tool_call = serde_json::json!({ "choices": [{ "delta": { "tool_calls": [
+        { "index": 0, "id": "c1", "type": "function", "function": { "name": "web_search", "arguments": "{}" } }
+    ] } }] });
+    let (endpoint, _) = scripted_provider(vec![
+        sse_frames(&[serde_json::json!({ "choices": [{ "delta": { "content": "Hi" } }] }), tool_call]),
+        sse(&["你好世界"], false),
+    ]);
+    let mut rt = Runtime::start();
+    rt.init();
+    let mut params = run_params(&endpoint, ".", "run-rounds", serde_json::json!([{ "role": "user", "content": "hi" }]));
+    params["provider"]["stream"] = serde_json::json!(true);
+    let (reply, events) = run_collecting(&mut rt, params);
+    assert_eq!(reply["result"]["content"], "你好世界", "{reply}");
+
+    // What a UI shows for each round: the deltas between one round's start and the next.
+    let mut rounds: Vec<String> = Vec::new();
+    for e in &events {
+        if e["method"] == "agent.turn" && e["params"]["phase"] == "start" {
+            rounds.push(String::new());
+        } else if e["method"] == "agent.delta" {
+            let shown = rounds.last_mut().expect("a delta inside a round");
+            if e["params"]["reset"] == true {
+                shown.clear();
+            }
+            shown.push_str(e["params"]["content"].as_str().unwrap_or(""));
+        }
+    }
+    assert_eq!(rounds, vec!["Hi".to_owned(), "你好世界".to_owned()]);
+}
+
 /// A refusal the host already knows costs nothing, and one the run discovers is handed back.
 #[test]
 fn known_refusals_are_applied_up_front_and_learned_ones_reported() {

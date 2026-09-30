@@ -45,12 +45,16 @@
 //! Checked before every attempt *and* before every fallback. A user who pressed Stop must not have three more
 //! requests issued on their behalf while the runtime works through its ladder.
 
+mod config;
 pub mod rejection;
+mod retry;
 pub mod wire;
+
+pub use config::{ProviderConfig, Quirks};
+pub use retry::{OnRetry, RetryNotice};
 
 use std::collections::HashSet;
 use std::sync::Mutex;
-use std::time::Duration;
 
 use agent_core::{CancellationToken, ErrorClass, Result, RuntimeError};
 use agent_loop::{Message, ModelCapabilities, ModelClient, ModelRequest, NormalizedTurn};
@@ -58,69 +62,6 @@ use futures_util::StreamExt;
 
 /// How a caller receives tokens as they arrive. Returns nothing: a display that fails must not fail the turn.
 pub type OnDelta = Box<dyn Fn(&str, &str) + Send + Sync>;
-
-/// Everything needed to reach one provider.
-pub struct ProviderConfig {
-    /// Full URL of the completions endpoint.
-    pub endpoint: String,
-    /// Bearer token. Empty for a local model, which is the normal case for llama.cpp.
-    pub api_key: String,
-    /// The model id sent on the wire.
-    pub model: String,
-    pub capabilities: ModelCapabilities,
-    /// Provider fields for the thinking configuration, spread into the body.
-    ///
-    /// Supplied by the caller rather than computed here: which spelling a family wants is the app's existing
-    /// `thinkingParams` decision, and reimplementing it would give the two request paths two answers.
-    pub thinking_params: serde_json::Value,
-    /// The thinking fields for each effort the loop may settle on for a round — `"low"`, `"medium"`, `"high"`.
-    ///
-    /// The loop lowers effort on routine rounds (see `resolve_reasoning`), and how a lower effort is SPELLED is
-    /// the host's knowledge, family by family, as `thinking_params` is. A request whose effort has an entry here
-    /// sends that entry; anything else sends `thinking_params`. Empty, every round sends `thinking_params` —
-    /// which is what every request did before, when the per-round effort was resolved and then never sent.
-    pub thinking_by_effort: std::collections::BTreeMap<String, serde_json::Value>,
-    /// Stream the response. The answer is identical either way; this decides whether `on_delta` ever fires.
-    pub stream: bool,
-    /// Extra request headers, sent verbatim.
-    ///
-    /// For `X-Conversation-Id` above all: a local llama-server keys its KV cache by conversation and restores
-    /// it by that id instead of re-reading the whole prompt. Without the header a long local conversation paid
-    /// a full prefill on every round. The host decides which endpoints get it, as `chatRequest.ts` does.
-    pub headers: Vec<(String, String)>,
-    /// Sampling temperature, when the caller has an opinion. `None` leaves it to the provider.
-    ///
-    /// Not a style preference: an automation node has always sent 0.2, and a workflow step that silently
-    /// moved to the provider's default would start producing different output for the same input — the
-    /// hardest kind of change to notice, because nothing fails.
-    pub temperature: Option<f64>,
-    /// The route to the endpoint, as the host resolved it: `"direct"`, or a proxy URL. `None` leaves it to the
-    /// `*_PROXY` environment variables.
-    ///
-    /// Resolved by the host because only the host can: a request from the chat window goes through Chromium,
-    /// which follows the OS proxy settings and PAC scripts, and this client can read neither. Without it a user
-    /// who reaches their provider through a system proxy would find chat stopped connecting the day it moved.
-    pub proxy: Option<String>,
-    pub request_timeout: Duration,
-}
-
-impl Default for ProviderConfig {
-    fn default() -> Self {
-        Self {
-            endpoint: String::new(),
-            api_key: String::new(),
-            model: String::new(),
-            capabilities: ModelCapabilities::default(),
-            thinking_params: serde_json::json!({}),
-            thinking_by_effort: std::collections::BTreeMap::new(),
-            stream: false,
-            headers: Vec::new(),
-            temperature: None,
-            proxy: None,
-            request_timeout: Duration::from_secs(600),
-        }
-    }
-}
 
 /// What the transport has learned about models, the hard way.
 ///
@@ -132,38 +73,6 @@ struct Learned {
     reasoning_context_unsupported: HashSet<String>,
     vision_unsupported: HashSet<String>,
 }
-
-/// What one model is known to refuse, as the host remembers it and as a run discovers it.
-///
-/// The per-run `Learned` sets used to be the whole of it, and a run is short: every run paid the same failed
-/// request again to rediscover a refusal the app had already seen. The TypeScript path keeps these across
-/// turns (and `visionUnsupported` on the model itself), so the host passes in what it knows and reads back
-/// what the run learned.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub struct Quirks {
-    #[serde(default)]
-    pub thinking_unsupported: bool,
-    #[serde(default)]
-    pub reasoning_context_unsupported: bool,
-    #[serde(default)]
-    pub vision_unsupported: bool,
-}
-
-/// A transport failure being retried, so the caller can say so. "Told, never silent": a retry nobody sees
-/// turns a failing network into an app that is merely slow.
-#[derive(Debug, Clone)]
-pub struct RetryNotice {
-    /// The attempt that just failed, 1-based.
-    pub attempt: u32,
-    pub attempts: u32,
-    /// `network`, `rate-limit` or `server` — the three `requestError.ts` retries.
-    pub kind: &'static str,
-    pub delay_ms: u64,
-    pub message: String,
-}
-
-/// How a caller hears about retries. Returns nothing: a display that fails must not fail the turn.
-pub type OnRetry = Box<dyn Fn(&RetryNotice) + Send + Sync>;
 
 /// One provider, reachable over HTTP.
 pub struct HttpModel {
@@ -178,7 +87,7 @@ pub struct HttpModel {
 
 impl HttpModel {
     pub fn new(config: ProviderConfig) -> Result<Self> {
-        let mut builder = reqwest::Client::builder().timeout(config.request_timeout);
+        let mut builder = reqwest::Client::builder().read_timeout(config.idle_timeout);
         match config.proxy.as_deref() {
             None => {}
             // Direct means direct: an environment proxy the host's resolver did not choose must not apply either.
@@ -320,6 +229,7 @@ impl HttpModel {
     async fn read_stream(&self, response: reqwest::Response) -> Result<NormalizedTurn> {
         let mut acc = wire::StreamAccumulator::new();
         let mut buffer = String::new();
+        let mut partial_char = Vec::new();
         let mut stream = response.bytes_stream();
 
         loop {
@@ -331,7 +241,7 @@ impl HttpModel {
                     None => break,
                 },
             };
-            buffer.push_str(&String::from_utf8_lossy(&chunk));
+            wire::decode_utf8_into(&mut partial_char, &chunk, &mut buffer);
             let (events, tail) = wire::split_events(&buffer);
             buffer = tail;
             for event in events {
@@ -372,59 +282,6 @@ impl ModelClient for HttpModel {
 }
 
 impl HttpModel {
-    /// `send_once`, retried when the failure was the TRANSPORT rather than the request — C8, ported from
-    /// `withRequestRetry` in src/lib/ai/requestError.ts, with the same classification, attempt budget and backoff
-    /// so a turn weathers the same network either side.
-    ///
-    /// Beneath the three fallbacks, as in TypeScript: those change the request because the provider objected
-    /// to it; this resends the identical request because it never arrived. Kept separate, a dropped connection
-    /// during a fallback attempt is retried too, and neither mechanism has to know about the other.
-    ///
-    /// Safe with respect to side effects: the model request is the first thing a round does, so no tool of this
-    /// round has run when a retry fires.
-    async fn send_with_retry(
-        &self,
-        messages: &[Message],
-        req: &ModelRequest,
-        thinking: bool,
-    ) -> Result<NormalizedTurn> {
-        let mut attempt: u32 = 1;
-        loop {
-            let err = match self.send_once(messages, req, thinking).await {
-                Ok(turn) => return Ok(turn),
-                Err(e) => e,
-            };
-            if err.is_cancelled() || self.token.is_cancelled() {
-                return Err(err);
-            }
-            let (kind, retryable) = classify_failure(&err);
-            if !retryable || attempt >= MAX_ATTEMPTS {
-                return Err(err);
-            }
-            let delay = retry_delay_ms(attempt, kind);
-            if let Some(notify) = &self.on_retry {
-                notify(&RetryNotice {
-                    attempt,
-                    attempts: MAX_ATTEMPTS,
-                    kind,
-                    delay_ms: delay,
-                    message: err.message.clone(),
-                });
-            }
-            // Clear the half-streamed reply before the next attempt writes over it, so a reader sees a restart
-            // rather than text that appears to un-write itself. Accumulated text going BACKWARDS is the signal;
-            // the forwarder turns it into a reset.
-            if let Some(on_delta) = &self.on_delta {
-                on_delta("", "");
-            }
-            tokio::select! {
-                biased;
-                _ = self.token.cancelled() => return Err(RuntimeError::cancelled()),
-                _ = tokio::time::sleep(Duration::from_millis(delay)) => {}
-            }
-            attempt += 1;
-        }
-    }
 
     /// One request, with the three fallbacks.
     ///
@@ -500,75 +357,6 @@ impl HttpModel {
     }
 }
 
-/// Attempts per request, the first included. `MAX_ATTEMPTS` in requestError.ts.
-const MAX_ATTEMPTS: u32 = 3;
-
-/// HTTP statuses that mean "try again", not "you asked wrong". `RETRYABLE_STATUS` in requestError.ts.
-const RETRYABLE_STATUS: [u16; 13] = [408, 425, 429, 500, 502, 503, 504, 507, 520, 521, 522, 523, 524];
-
-/// Substrings of a transport failure. `NETWORK_HINTS` in requestError.ts; matched case-insensitively.
-const NETWORK_HINTS: [&str; 24] = [
-    "fetch failed",
-    "failed to fetch",
-    "network error",
-    "networkerror",
-    "load failed",
-    "socket hang up",
-    "premature close",
-    "terminated",
-    "econnreset",
-    "econnrefused",
-    "econnaborted",
-    "enotfound",
-    "eai_again",
-    "ehostunreach",
-    "enetunreach",
-    "epipe",
-    "etimedout",
-    "timeout",
-    "connection error",
-    "connection closed",
-    "getaddrinfo",
-    "tls",
-    "certificate",
-    "could not connect",
-];
-
-/// `(kind, retryable)`, by the rule `classifyFailure` in requestError.ts applies — so the same failure is
-/// retried, or not, whichever side sent the request.
-fn classify_failure(e: &RuntimeError) -> (&'static str, bool) {
-    let status: u16 =
-        e.message.strip_prefix("HTTP ").and_then(|rest| rest.get(..3)).and_then(|d| d.parse().ok()).unwrap_or(0);
-    let lower = e.message.to_lowercase();
-    let kind = if status == 429 {
-        "rate-limit"
-    } else if RETRYABLE_STATUS.contains(&status) {
-        "server"
-    } else if (400..500).contains(&status) {
-        "client"
-    } else if status >= 500 {
-        "server"
-    } else if e.code == "provider.transport" || NETWORK_HINTS.iter().any(|h| lower.contains(h)) {
-        "network"
-    } else {
-        "unknown"
-    };
-    (kind, matches!(kind, "network" | "rate-limit" | "server"))
-}
-
-/// Backoff: 600 ms (2 s when rate-limited) × 3^(attempt-1), ±25% jitter, capped at 30 s. `retryDelayMs`.
-///
-/// Jitter from the clock rather than a random-number crate: it only has to decorrelate clients hitting the
-/// same provider, and the offline build this runtime ships from cannot take on a dependency casually.
-fn retry_delay_ms(attempt: u32, kind: &str) -> u64 {
-    let base: f64 = if kind == "rate-limit" { 2000.0 } else { 600.0 };
-    let ideal = base * 3f64.powi(attempt.saturating_sub(1) as i32);
-    let nanos =
-        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.subsec_nanos()).unwrap_or(0);
-    let jitter = 1.0 + ((nanos % 1000) as f64 / 1000.0 - 0.5) * 0.5;
-    (ideal * jitter).min(30_000.0).round() as u64
-}
-
 /// Usage for a response that carried none, estimated from the text and marked as such.
 ///
 /// Four characters a token: the same rough rule `agent-context` budgets with. Not what the TypeScript path's
@@ -625,105 +413,5 @@ fn truncate(s: &str, max: usize) -> String {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn a_transport_failure_carries_no_status_so_it_cannot_be_read_as_a_verdict() {
-        // Built through the real path rather than by hand: the point is what `send_once` produces.
-        let msg = "could not connect to the provider";
-        assert!(!rejection::is_vision_rejection(msg));
-        assert!(!rejection::is_thinking_param_error(msg));
-    }
-
-    #[test]
-    fn a_request_that_cannot_be_built_is_not_retried() {
-        // Every attempt would build the same invalid request. The host drops unsendable headers before they
-        // get here, but a runtime driven by anything else must not spend three backoffs learning that.
-        let built = reqwest::Client::new().post("http://127.0.0.1:9/").header("Not A Header", "x").build();
-        let err = transport_error(built.expect_err("an invalid header name must not build"));
-        assert_eq!(classify_failure(&err), ("unknown", false));
-    }
-
-    #[test]
-    fn an_http_error_is_formatted_so_the_predicates_can_read_it() {
-        let formatted = format!("HTTP {} — {}", 400, "unknown variant `image_url`");
-        assert!(rejection::is_vision_rejection(&formatted));
-    }
-
-    #[test]
-    fn a_long_error_body_is_truncated_rather_than_carried_whole() {
-        let long = "x".repeat(5000);
-        let out = truncate(&long, 2000);
-        assert!(out.len() < long.len());
-        assert!(out.ends_with("… (truncated)"));
-        assert_eq!(truncate("short", 2000), "short");
-    }
-
-    // ── C8 parity: the same failure is retried, or not, whichever side sent the request ─────────────────
-
-    fn http(status: u16) -> RuntimeError {
-        RuntimeError::new("provider.http_error", ErrorClass::Invalid, format!("HTTP {status} — body"))
-    }
-
-    #[test]
-    fn failures_are_classified_as_request_error_ts_classifies_them() {
-        // One row per branch of `kindOf` in src/lib/ai/requestError.ts.
-        assert_eq!(classify_failure(&http(429)), ("rate-limit", true));
-        for s in [408, 425, 500, 502, 503, 504, 507, 520, 524] {
-            assert_eq!(classify_failure(&http(s)), ("server", true), "HTTP {s}");
-        }
-        assert_eq!(classify_failure(&http(501)), ("server", true), "any other 5xx is server too");
-        for s in [400, 401, 403, 404, 422] {
-            assert_eq!(classify_failure(&http(s)), ("client", false), "HTTP {s} must NOT be retried");
-        }
-        let transport =
-            RuntimeError::new("provider.transport", ErrorClass::Retryable, "could not connect to the provider");
-        assert_eq!(classify_failure(&transport), ("network", true));
-        let reset = RuntimeError::new("provider.stream", ErrorClass::Retryable, "stream failed: ECONNRESET");
-        assert_eq!(classify_failure(&reset), ("network", true), "recognised by its network hint");
-        // Retryable by class, but not by C8's table: a body that is not JSON is not a transport failure, and the
-        // TypeScript path would not resend it either.
-        let garbage = RuntimeError::new(
-            "provider.bad_response",
-            ErrorClass::Retryable,
-            "the provider's response was not valid JSON",
-        );
-        assert_eq!(classify_failure(&garbage), ("unknown", false));
-    }
-
-    #[test]
-    fn backoff_follows_the_c8_schedule_and_never_exceeds_its_cap() {
-        for _ in 0..50 {
-            let first = retry_delay_ms(1, "network");
-            assert!((450..=750).contains(&first), "600 ms ±25%: {first}");
-            let second = retry_delay_ms(2, "server");
-            assert!((1350..=2250).contains(&second), "1800 ms ±25%: {second}");
-            let limited = retry_delay_ms(1, "rate-limit");
-            assert!((1500..=2500).contains(&limited), "a rate limit starts at 2 s: {limited}");
-            assert!(retry_delay_ms(9, "rate-limit") <= 30_000, "capped at 30 s");
-        }
-    }
-
-    #[test]
-    fn a_response_without_usage_is_estimated_and_says_so() {
-        let turn = NormalizedTurn { content: "x".repeat(40), ..Default::default() };
-        let u = estimate_usage(&[Message::user("y".repeat(400))], &turn);
-        assert!(u.estimated, "an estimate must never be passed off as a count");
-        assert_eq!((u.prompt_tokens, u.completion_tokens), (100, 10));
-    }
-
-    #[test]
-    fn known_quirks_go_in_and_learned_ones_come_out() {
-        let model = HttpModel::new(ProviderConfig { model: "m".into(), ..Default::default() })
-            .unwrap()
-            .with_known(Quirks { vision_unsupported: true, ..Default::default() });
-        assert!(model.knows(|l| &l.vision_unsupported), "a refusal the host already knows is applied up front");
-        model.learned.lock().unwrap().thinking_unsupported.insert("m".into());
-        assert_eq!(
-            model.quirks(),
-            Quirks { thinking_unsupported: true, reasoning_context_unsupported: false, vision_unsupported: true },
-            "what the run learned is handed back beside what it was told"
-        );
-    }
-}
+#[path = "lib_tests.rs"]
+mod tests;

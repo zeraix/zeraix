@@ -31,7 +31,7 @@ pub enum Tier {
     /// The user's goal, the task goal, the current plan, hard constraints. Preserved, always.
     ///
     /// §8.3's requirement — "the Agent must not lose its task state after compaction" — is this tier being
-    /// unreachable by every reduction in [`crate::compact`].
+    /// unreachable by every reduction in [`ContextManager::compact`](crate::ContextManager::compact).
     Critical,
 }
 

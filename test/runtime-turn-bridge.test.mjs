@@ -179,6 +179,138 @@ test("a window that closes mid-turn ends its turn instead of leaving it to run",
   }
 });
 
+test("a question the main process stops waiting for is withdrawn from the window", async (t) => {
+  if (!(await canHoldAChatTurn())) return t.skip("no runtime that can hold a turn");
+  // Giving up used to be one-sided: the runtime heard "no answer" and the window carried on — its consent prompt
+  // on screen, and the command behind it run after the turn had ended, its result dropped.
+  const p = await provider([call("c1", "web_search", { query: "q" }), text("never read")]);
+  const win = fakeWindow();
+  const requests = [];
+  const abandoned = [];
+  win.api.onRequest((r) => requests.push(r));
+  win.api.onAbandon((a) => abandoned.push(a));
+  try {
+    const running = win.api.start("abandon-1", params(p.endpoint), false);
+    while (!requests.length) await new Promise((r) => setTimeout(r, 10));
+    assert.equal(requests[0].callId, "c1", "the window is told which call it is serving");
+    win.api.cancel("abandon-1");
+    const r = await running;
+    assert.equal(r.stop_reason, "cancelled");
+    assert.deepEqual(abandoned, [{ requestId: requests[0].requestId, runId: "abandon-1" }]);
+  } finally {
+    await p.close();
+  }
+});
+
+for (const [event, what] of [
+  ["render-process-gone", "crashes"],
+  ["did-navigate", "reloads"],
+]) {
+  test(`a page that ${what} mid-turn ends its turn, though its window stays`, async (t) => {
+    if (!(await canHoldAChatTurn())) return t.skip("no runtime that can hold a turn");
+    // Crash recovery reloads the SAME webContents, so "destroyed" never fires. The page that started the turn is
+    // gone and the new one never asked for it: left running, the turn waited out the tool timeout on a question
+    // sent to a page that would never answer.
+    const p = await provider([call("c1", "web_search", { query: "q" }), text("never read")]);
+    const win = fakeWindow();
+    const requests = [];
+    win.api.onRequest((r) => requests.push(r));
+    try {
+      const running = win.api.start(`page-gone-${event}`, params(p.endpoint), false);
+      while (!requests.length) await new Promise((r) => setTimeout(r, 10));
+      const goneAt = Date.now();
+      win.wc.emit(event);
+      const r = await running;
+      assert.equal(r.stop_reason, "cancelled");
+      assert.ok(Date.now() - goneAt < 5_000, `the turn took ${Date.now() - goneAt}ms to stop`);
+    } finally {
+      await p.close();
+    }
+  });
+}
+
+test("an abandoned request aborts its own call and no other, while the turn goes on", async () => {
+  // The client alone, over a stand-in preload: which signal an abandon reaches is decided here.
+  let runId = "";
+  let finish;
+  let onRequest;
+  let onAbandon;
+  const replies = [];
+  globalThis.agentRuntime = {
+    start: (id) => {
+      runId = id;
+      return new Promise((resolve) => (finish = resolve));
+    },
+    cancel() {},
+    reply: (requestId, body) => replies.push({ requestId, ...body }),
+    onEvent: () => () => {},
+    onRequest: (cb) => ((onRequest = cb), () => {}),
+    onAbandon: (cb) => ((onAbandon = cb), () => {}),
+  };
+  const signals = {};
+  try {
+    const running = runTurnInRuntime(params("http://unused.invalid"), {
+      runTool: (_name, _args, call) => {
+        signals[call.callId] = call.signal;
+        return new Promise((resolve) => call.signal.addEventListener("abort", () => resolve({ ok: false, content: "stopped" })));
+      },
+    });
+    while (!runId) await new Promise((r) => setTimeout(r, 1));
+    onRequest({ requestId: "q1", runId, kind: "tool", name: "run_command", args: {}, callId: "c1" });
+    onRequest({ requestId: "q2", runId, kind: "tool", name: "run_command", args: {}, callId: "c2" });
+    onAbandon({ requestId: "q1", runId });
+    await new Promise((r) => setTimeout(r, 10));
+    assert.equal(signals.c1.aborted, true, "the abandoned call is stopped");
+    assert.equal(signals.c2.aborted, false, "its neighbour is not");
+    assert.deepEqual(replies.map((r) => r.requestId), ["q1"]);
+
+    finish({ stop_reason: "completed", messages: [], injected: [] });
+    await running;
+    assert.equal(signals.c2.aborted, true, "and nothing outlives the turn it belonged to");
+  } finally {
+    delete globalThis.agentRuntime;
+  }
+});
+
+test("the user's context budget reaches the runtime, which compacts a turn to it on a large-window model", async (t) => {
+  if (!(await canHoldAChatTurn())) return t.skip("no runtime that can hold a turn");
+  // Between turns the renderer compacts at the budget; mid-turn the runtime used only the window — 85% of 1M.
+  const big = "x".repeat(100_000);
+  const messages = [
+    { role: "user", content: "look at both files" },
+    {
+      role: "assistant",
+      content: "",
+      tool_calls: ["c1", "c2"].map((id) => ({ id, type: "function", function: { name: "read_file", arguments: "{}" } })),
+    },
+    { role: "tool", tool_call_id: "c1", content: big },
+    { role: "tool", tool_call_id: "c2", content: big },
+    { role: "assistant", content: "read both" },
+    { role: "user", content: "what did they have in common?" },
+  ];
+  const p = await provider([text("they both hold x")]);
+  globalThis.agentRuntime = fakeWindow().api;
+  try {
+    const r = await runTurnInRuntime(
+      params(p.endpoint, {
+        messages,
+        contextWindow: 1_000_000,
+        contextBudget: { triggerTokens: 20_000, targetTokens: 10_000 },
+      }),
+      { runTool: async () => ({ ok: true, content: "" }) },
+    );
+    assert.equal(r.stop_reason, "completed", JSON.stringify(r));
+    const sent = JSON.stringify(p.seen[0].messages);
+    assert.match(sent, /tool output removed/, "the old tool output should have been elided before sending");
+    assert.ok(sent.length < 100_000, `sent ${sent.length} characters of a 200,000-character conversation`);
+    // The transcript handed back is the conversation as it happened; compaction only changed what was sent.
+    assert.equal(r.messages[2].content, big);
+  } finally {
+    delete globalThis.agentRuntime;
+    await p.close();
+  }
+});
+
 test("messages the host injects are kept for the model and kept out of the user's view", async (t) => {
   if (!(await canHoldAChatTurn())) return t.skip("no runtime that can hold a turn");
   const p = await provider([call("c1", "web_search", { query: "q" }), text("the answer")]);

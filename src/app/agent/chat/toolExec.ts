@@ -81,6 +81,8 @@ export interface ToolExecDeps {
     previewDiff: string | null,
     warning: string | null,
     requester: ConsentRequester | null,
+    /** Withdraws the prompt — answered "no" — when it aborts: the call it asks about is no longer wanted. */
+    signal?: AbortSignal,
   ) => Promise<ConsentDecision>;
   /**
    * The mutable pieces arrive as accessors rather than as refs, and are called at TOOL-CALL time, never
@@ -136,7 +138,7 @@ export function createToolExec(deps: ToolExecDeps) {
    * and the "don't ask again" set are all behaviour worth keeping exactly as it is. What this adds is the
    * contract's argument shape, so that the caller does not have to know the queue's six-parameter signature.
    */
-  const hostConsent = (convId: string | null, req: ConsentRequest): Promise<ConsentDecision> =>
+  const hostConsent = (convId: string | null, req: ConsentRequest, signal?: AbortSignal): Promise<ConsentDecision> =>
     requestConsent(
       convId,
       req.name,
@@ -144,6 +146,7 @@ export function createToolExec(deps: ToolExecDeps) {
       req.previewDiff ?? null,
       req.warning ?? null,
       (req.requester ?? null) as ConsentRequester | null,
+      signal,
     );
 
   const execToolCall = async (
@@ -255,7 +258,10 @@ export function createToolExec(deps: ToolExecDeps) {
       // Routed through the §13 contract shape rather than the raw six-argument call (M2b). `hostConsent` is
       // the same function the boundary hands the Runtime, so consent has one implementation whether it is
       // asked for from here or from a Runtime that no longer lives in this component.
-      const decision = await hostConsent(ctx.convId, { name, args, previewDiff, warning, requester });
+      // The call's signal goes with the prompt: a call abandoned while its prompt is open (the turn stopped, or
+      // the runtime stopped waiting for it) takes its prompt away, rather than leaving one whose "yes" would run
+      // a command nobody is waiting for.
+      const decision = await hostConsent(ctx.convId, { name, args, previewDiff, warning, requester }, ctx.signal);
       if (decision === "always") allowedTools().add(name);
       if (decision === "no") {
         const denied = "The user rejected this operation.";

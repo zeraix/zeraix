@@ -157,6 +157,18 @@ export async function runAgentTurn({
   return { ok: false, error: lastError ?? "all models failed" };
 }
 
+/**
+ * A failed attempt the chain may hand to its next model — unless tools already ran.
+ *
+ * A fallback model starts the node again from its prompt, so it would repeat every write, command and delegation
+ * the failed attempt made. The rule the crash-recovery design gives everything: work that may already have had
+ * side effects is never silently re-run. So the node fails here instead, and says why.
+ */
+function failedAttempt(error, toolsRan) {
+  if (!toolsRan) return { ok: false, error };
+  return { ok: false, error: `${error} (not retried on another model: tools had already run)`, fatal: true };
+}
+
 /** One model's full multi-round attempt. `fatal` marks errors no fallback model could fix. */
 async function runWithModel({ model, messages, tools, llmChat, runTool, toolPolicy, maxRounds, meta, signal, onEvent, usage, getWorkdir, getAssetDir, onModelCall }) {
   // Local models are uncapped (see LOCAL_MAX_ROUNDS): the round ceiling exists to bound spending.
@@ -176,6 +188,7 @@ async function runWithModel({ model, messages, tools, llmChat, runTool, toolPoli
     if (offloaded) return offloaded;
   }
 
+  let toolsRan = false;
   for (let round = 1; roundCap === null || round <= roundCap; round++) {
     if (signal?.aborted) return { ok: false, error: "cancelled", fatal: true };
 
@@ -219,7 +232,7 @@ async function runWithModel({ model, messages, tools, llmChat, runTool, toolPoli
     if (signal?.aborted) return { ok: false, error: "cancelled", fatal: true };
     if (!res?.ok) {
       const detail = res?.error || (res?.data ? JSON.stringify(res.data).slice(0, 300) : "");
-      return { ok: false, error: `LLM request failed (status ${res?.status ?? "?"})${detail ? `: ${detail}` : ""}` };
+      return failedAttempt(`LLM request failed (status ${res?.status ?? "?"})${detail ? `: ${detail}` : ""}`, toolsRan);
     }
 
     accumulateUsage(usage, res.data?.usage);
@@ -233,14 +246,14 @@ async function runWithModel({ model, messages, tools, llmChat, runTool, toolPoli
 
     const choice = res.data?.choices?.[0];
     const message = choice?.message;
-    if (!message) return { ok: false, error: "LLM returned no message" };
+    if (!message) return failedAttempt("LLM returned no message", toolsRan);
 
     const calls = message.tool_calls ?? [];
     if (calls.length === 0) {
       const text = String(message.content ?? "").trim();
       // An empty final answer is a failure, not a success with no output: a downstream node reading
       // this node's `text` would otherwise silently receive "".
-      if (!text) return { ok: false, error: "model returned an empty final message" };
+      if (!text) return failedAttempt("model returned an empty final message", toolsRan);
       return { ok: true, text, rounds: round };
     }
 
@@ -250,6 +263,7 @@ async function runWithModel({ model, messages, tools, llmChat, runTool, toolPoli
 
     for (const call of calls) {
       if (signal?.aborted) return { ok: false, error: "cancelled", fatal: true };
+      toolsRan = true;
       const result = await executeToolCall({ call, runTool, toolPolicy, onEvent });
       messages.push({ role: "tool", tool_call_id: call.id, content: result });
     }
@@ -362,11 +376,17 @@ async function runWithModelInRuntime({
       },
       messages,
       tools,
+      // The tool policy, applied where it can reach every call. `tools` is already the policy-filtered list, but a
+      // declaration only says what the model is TOLD it has: the runtime's own tools — write, delete, move — never
+      // come back through `runOneTool`, so a node that denied `write_file` still had its files written. Named
+      // here, the runtime refuses anything else itself. The interactive tools are let through to `runOneTool`,
+      // which refuses them with the reason that is true of them — they need a person — rather than a policy's.
+      allowedTools: [...tools.map((t) => t?.function?.name ?? t?.name).filter(Boolean), ...INTERACTIVE_TOOLS],
     },
     {
       signal,
-      // Every tool, including the ones the runtime implements: `serves()` on the Rust side already decided
-      // which calls reach here, and it only sends the ones it cannot run itself.
+      // The calls the runtime cannot run itself — `serves()` on the Rust side decides which reach here. Its own
+      // tools never do, which is why the policy also goes to the runtime as `allowedTools` above.
       toolHandler: (name, args) => runOneTool({ name, args, runTool, toolPolicy, onEvent }),
       roundGate: async ({ round, promptTokens, completionTokens, final }) => {
         // Asked once more after the final answer, in case the host wants another round. An automation node
@@ -433,6 +453,8 @@ async function runWithModelInRuntime({
             chars: content.length,
             preview: clip(content, TOOL_PREVIEW_CHARS),
             ...(e.ok === false ? { error: clip(content, TOOL_PREVIEW_CHARS) } : {}),
+            // Refused by the tool policy (see `allowedTools`), marked as `runOneTool` marks its own refusals.
+            ...(e.ok === false && !isToolAllowed(e.name, toolPolicy) ? { blocked: true } : {}),
           });
         }
       },
@@ -504,17 +526,18 @@ async function runWithModelInRuntime({
   const text = String(result.content ?? "").trim();
   const rounds = Number(result.rounds ?? 0);
   const detail = result.detail ? String(result.detail) : "";
+  const toolsRan = Number(result.tool_calls ?? 0) > 0;
   switch (String(result.stop_reason ?? "")) {
     case "completed":
       // An empty final answer is a failure, not a success with no output: a downstream node reading this
       // node's `text` would otherwise silently receive "".
-      return text ? { ok: true, text, rounds } : { ok: false, error: "model returned an empty final message" };
+      return text ? { ok: true, text, rounds } : failedAttempt("model returned an empty final message", toolsRan);
     case "cancelled":
       return { ok: false, error: "cancelled", fatal: true };
-    // Deliberately NOT fatal: a provider that refused is exactly what the model chain exists for, and the
-    // loop below reports its own request failures the same way.
+    // NOT fatal while nothing has run: a provider that refused is exactly what the model chain exists for, and
+    // the loop below reports its own request failures the same way. Once tools have run, see `failedAttempt`.
     case "error":
-      return { ok: false, error: `LLM request failed${detail ? `: ${detail}` : ""}` };
+      return failedAttempt(`LLM request failed${detail ? `: ${detail}` : ""}`, toolsRan);
     case "host-stopped":
       return { ok: false, error: detail || "the run was stopped", fatal: true };
     default:

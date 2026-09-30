@@ -157,7 +157,8 @@ onRequest(
       console.warn(`[rust-runtime] the runtime asked for ${name} with no host tool handler registered`);
       return { ok: false, content: `${name} is not available in this app. Continue without it.` };
     }
-    const out = await handler(name, params?.args ?? {});
+    // The call id rides along for a handler that needs to tell calls apart; one that takes two arguments ignores it.
+    const out = await handler(name, params?.args ?? {}, { callId: String(params?.call_id ?? "") });
     // Normalised here rather than trusted: `runTool` has several shapes in the wild (a string, a bare
     // object, `{ ok, content }`), and the runtime's contract is exactly one of them.
     if (typeof out === "string") return { ok: true, content: out };
@@ -322,8 +323,16 @@ function requestHeaders(raw) {
   return out;
 }
 
+/** `{ triggerTokens, targetTokens }` as the protocol spells it, or null when either is not a positive number. */
+function contextBudgetParam(b) {
+  const trigger = Number(b?.triggerTokens);
+  const target = Number(b?.targetTokens);
+  if (!(trigger > 0) || !(target > 0)) return null;
+  return { trigger_tokens: Math.floor(trigger), target_tokens: Math.floor(target) };
+}
+
 export async function runAgent(
-  { runId, workdir, assetDir, provider, messages, tools, contextWindow, summarizerModel, parallelTools, replayReasoning, hostToolsOnly, thinking } = {},
+  { runId, workdir, assetDir, provider, messages, tools, contextWindow, contextBudget, summarizerModel, parallelTools, replayReasoning, hostToolsOnly, allowedTools, thinking } = {},
   { onDelta, onTool, onTurn, onRetry, toolHandler, roundGate, signal } = {},
 ) {
   const s = await ensureStarted();
@@ -343,6 +352,15 @@ export async function runAgent(
   if (hostToolsOnly && !s.features.has("agent.round_context")) {
     console.warn(
       "[rust-runtime] this runtime predates host_tools_only; the turn stays on the caller's own loop. " +
+        "Rebuild it with `npm run build:runtime`.",
+    );
+    return null;
+  }
+  // The same rule for a tool restriction: a runtime too old to know it would ignore it and run a tool the caller's
+  // policy refuses — the one outcome the restriction exists to prevent.
+  if (Array.isArray(allowedTools) && !s.features.has("agent.allowed_tools")) {
+    console.warn(
+      "[rust-runtime] this runtime predates allowed_tools; the turn stays on the caller's own loop. " +
         "Rebuild it with `npm run build:runtime`.",
     );
     return null;
@@ -410,6 +428,9 @@ export async function runAgent(
         // within it by eliding tool output, then summarising the older part, then truncating. Omitted when
         // the caller does not know the window — a guessed one compacts conversations that would have fitted.
         context_window: typeof contextWindow === "number" && contextWindow > 0 ? contextWindow : null,
+        // The user's working-set budget below that window, as trigger/target token counts — the ones compaction
+        // between turns already uses, so a turn is held to the same size mid-turn. Omitted when the budget is off.
+        context_budget: contextBudgetParam(contextBudget),
         summarizer_model: summarizerModel || null,
         round_gate: Boolean(roundGate),
         // Tools that may run side by side when the model asks for several in a row; only consecutive ones are
@@ -420,6 +441,9 @@ export async function runAgent(
         // Every tool call to the host, the runtime's own tools and `ask_user` included — for a caller whose tool
         // path carries consent, display and logging it must keep (a chat window).
         host_tools_only: Boolean(hostToolsOnly),
+        // The only tools the run may use, when the caller has a policy. Enforced inside the runtime, so it covers the
+        // runtime's own tools too — which never come back here and so never meet the caller's own check.
+        allowed_tools: Array.isArray(allowedTools) ? allowedTools.filter((n) => typeof n === "string") : null,
         // The user's switch and ceiling for the loop's per-round effort. Absent, the runtime assumes on at medium.
         thinking:
           thinking && typeof thinking === "object"
