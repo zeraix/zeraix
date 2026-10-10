@@ -22,6 +22,7 @@ import { foldReminders, renderSnapshot } from "./reminders";
 import type { ApiMsg, ContentPart } from "./types";
 import { countMessagesTokens, countTokens } from "@/lib/ai/tokenizer";
 import { resolveToolCall } from "@/lib/ai/toolRouter";
+import { recallCall } from "./recall";
 
 // ── Tunable parameters ──────────────────────────────────────────────────────────────────
 /** Only start compressing when context usage exceeds this fraction of the window (hysteresis: below this value, no compression at all, keeping the prefix cache most stable). */
@@ -327,13 +328,15 @@ export function measureResult(text: string): ResultShape {
  * this exists for — how to get at the content in pieces. A Rust port reproduces this string byte for byte,
  * the way read_file.rs mirrors its own note.
  */
-export function oversizedResultStub(call: { name: string; path?: string }, shape: ResultShape, ceiling: number): string {
+export function oversizedResultStub(call: { name: string; path?: string; id?: string }, shape: ResultShape, ceiling: number): string {
   const n = (v: number) => Math.round(v).toLocaleString("en-US");
   const what = call.path ? `${call.name} ${call.path}` : call.name;
+  // Paging the kept result is the way into a command's output, which cannot be asked for "in pieces" by re-running it.
+  const recall = call.id ? ` Or page through the kept result: ${recallCall(call.id)}, adding "offset"/"limit" (lines).` : "";
   const how =
     call.name === "read_file"
       ? `Read the part you need with read_file offset/limit (the file has ${n(shape.lines)} lines; for example offset:1, limit:2000), or find the lines first with search_in_files.`
-      : "Ask for less: a narrower range, a filter, or a search.";
+      : `Ask for less: a narrower range, a filter, or a search.${recall}`;
   return (
     `[tool result withheld: ${what} returned ${n(shape.lines)} lines, ${n(shape.chars)} characters, about ${n(shape.tokens)} tokens — ` +
     `more than the ${n(ceiling)} tokens one result may occupy in this model's context. The call succeeded and nothing was ` +
@@ -362,7 +365,7 @@ export function withholdOversizedResults(
     if (shape.tokens <= ceiling) continue;
     const info = calls.get(m.tool_call_id);
     if (!out) out = messages.slice();
-    out[i] = { ...m, content: oversizedResultStub({ name: info?.name ?? "tool", path: info?.path }, shape, ceiling) };
+    out[i] = { ...m, content: oversizedResultStub({ name: info?.name ?? "tool", path: info?.path, id: m.tool_call_id }, shape, ceiling) };
   }
   return out ?? messages;
 }
@@ -524,11 +527,11 @@ function describeCall(rawName: string, argsJson: string): string {
   return firstStr ? `${name} ${firstStr.slice(0, 60)}` : name;
 }
 
-const releaseText = (desc: string): string =>
+const releaseText = (desc: string, id: string): string =>
   marker(
     "released-result",
     `This call belongs to a task that has since completed, so its output is no longer carried in context. ` +
-      `It was: ${desc}. Run it again if you need the content.`,
+      `It was: ${desc}. To see what it returned, recall it with ${recallCall(id)}; run it again instead for its current state.`,
   );
 
 /**
@@ -698,7 +701,7 @@ export function applyReleases(messages: ApiMsg[], released: Map<string, string>)
   if (released.size === 0) return messages;
   return messages.map((m) =>
     m.role === "tool" && released.has(m.tool_call_id)
-      ? { ...m, content: releaseText(released.get(m.tool_call_id)!) }
+      ? { ...m, content: releaseText(released.get(m.tool_call_id)!, m.tool_call_id) }
       : m,
   );
 }

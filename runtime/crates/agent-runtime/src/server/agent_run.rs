@@ -326,14 +326,19 @@ impl Server {
                 Some(window) => {
                     let summarizer_id =
                         p.summarizer_model.clone().unwrap_or_else(|| p.provider.model.clone());
-                    // The host's working-set budget when it has one. Without it a turn was held only to its window
-                    // — 85% of a 1M model is 850K — so a long turn on a large-window model grew for as long as it
-                    // ran, whatever the user's budget said, and nothing was ever summarised.
+                    // The host's working-set budget when it has one, held against the history BEFORE this turn:
+                    // a long conversation on a 1M model still sheds and summarises its settled turns mid-run. The
+                    // turn in progress answers only to the window — cutting it to the budget made runs re-read
+                    // what they had just read (see agent-context's header).
                     let budget = match p.context_budget {
                         Some(b) => agent_context::Budget::with_thresholds(window, b.trigger_tokens, b.target_tokens),
                         None => agent_context::Budget::with_window(window),
                     };
                     let manager = agent_context::ContextManager::new(budget);
+                    let manager = match &p.elision_hint {
+                        Some(hint) => manager.with_elision_hint(hint.clone()),
+                        None => manager,
+                    };
                     // A summariser is only useful if it can be reached; a provider this one cannot build is a
                     // reason to compact WITHOUT it rather than to fail the run.
                     let manager = match HttpModel::new(provider_config(false, true)) {

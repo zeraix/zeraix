@@ -91,7 +91,8 @@ export async function runDelegationInRuntime(run: DelegationRun): Promise<{ stop
       messages: run.messages,
       tools: run.tools ?? [],
       contextWindow,
-      // A sub-agent's conversation is held to the user's budget like the turn's (see runtimeRound.ts).
+      // Passed like the turn's (see runtimeRound.ts). A delegation is one turn from its first message, so in
+      // practice only the window cuts it — as only the window cuts the turn in progress.
       contextBudget: contextWindow ? resolveHybridBudget(contextWindow, getContextBudgetK()) : null,
       meta: { convId: ctx.convId, turnId: ctx.turnId, source: "chat", actor, provider: model.activeModel?.providerId },
       parallelTools: [...PARALLEL_SAFE_TOOLS],

@@ -94,6 +94,9 @@ pub struct AgentRunParams {
     /// When to compact, in tokens, when the host caps the working set below the window — the user's context
     /// budget, as the host already applies it between turns. Absent, compaction is relative to `context_window`.
     ///
+    /// Held against settled history only: the turns before this run's. The run's own turn is cut only near
+    /// `context_window`, because eliding the model's fresh reads to honour a budget made it read them again.
+    ///
     /// Separate from the window, not a smaller window: the window is also what the stop policy measures
     /// `context_limit_fraction` against, and a turn that could not be compacted under a 120K budget on a 1M
     /// model must not be stopped as though it were out of room.
@@ -105,6 +108,11 @@ pub struct AgentRunParams {
     /// it is issued against the same endpoint and key as the turn itself.
     #[serde(default)]
     pub summarizer_model: Option<String>,
+    /// What a tool result removed to make room says instead of "re-run the call", with `{id}` standing for the
+    /// result's id: the host's own way back to the result it kept. Absent, the runtime keeps its own wording —
+    /// re-running repeats a command's side effects, so a host that can return the original should say how.
+    #[serde(default)]
+    pub elision_hint: Option<String>,
     /// Ask the host, between rounds, whether the run may continue (see [`HOST_REQUEST_ROUND`](super::HOST_REQUEST_ROUND)).
     ///
     /// Off by default: it costs a round trip per round, and a host that does not answer it would have every

@@ -408,7 +408,7 @@ fn a_run_with_a_context_window_summarises_instead_of_sending_the_history() {
     assert_eq!(bodies.len(), 2, "one summariser call, then the round");
 
     // The summariser was asked to summarise, and was given the ORIGINALS.
-    assert!(bodies[0].contains("compacting an agent's conversation"), "not a summarisation request");
+    assert!(bodies[0].contains("You are a conversation summarizer"), "not a summarisation request");
     assert!(bodies[0].contains("old question 0"), "the summariser must see the history it is folding");
 
     // The round itself carries the summary and the recent turns, and NOT the folded originals.

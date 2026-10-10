@@ -64,10 +64,15 @@ export interface RuntimeTurnParams {
   contextWindow?: number | null;
   /**
    * The user's working-set budget below the window (Settings → General), as the trigger/target compaction between
-   * turns uses. Without it the runtime compacts only near the WINDOW, so a long turn on a 1M model grows unchecked.
+   * turns uses. The runtime holds the history before this turn to it; the turn itself is cut only near the WINDOW.
    */
   contextBudget?: { triggerTokens: number; targetTokens: number } | null;
   summarizerModel?: string | null;
+  /**
+   * What a result the runtime removes mid-turn says instead of "re-run the call", `{id}` standing for the result's
+   * id — the host's way back to it (chat: `ELISION_HINT` in recall.ts). Omit when the host keeps no results to recall.
+   */
+  elisionHint?: string | null;
   /** Usage-log attribution. Never sent to the runtime. */
   meta?: RuntimeTurnMeta;
   /** Tools that may run side by side when the model asks for several in a row (only consecutive ones batch). */

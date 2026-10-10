@@ -128,7 +128,7 @@ async fn a_large_context_stays_within_its_window_for_the_whole_run() {
     script.push(NormalizedTurn::text("done"));
     let model = Arc::new(ScriptedModel::new(script));
 
-    let mut manager = ContextManager::new(Budget { max_tokens: WINDOW, compact_at: 0.85, target: 0.5 });
+    let mut manager = ContextManager::new(Budget { max_tokens: WINDOW, compact_at: 0.85, target: 0.5, working_set: None });
     manager.memory_mut().user_goal = Some("the goal that must survive all of it".into());
     manager.memory_mut().add_constraint("and the constraint too");
 

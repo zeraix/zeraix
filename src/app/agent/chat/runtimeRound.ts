@@ -59,6 +59,7 @@ import {
 } from "./constants";
 import { resolveHybridBudget, resultCeilingTokens } from "./contextCompress";
 import { isGoalActive, recordEvidence } from "./goalState";
+import { ELISION_HINT } from "./recall";
 import { wrapReminder } from "./reminders";
 import { createRoundView, snapshotContext, storeToolResult, type RoundRunnerDeps } from "./turnRound";
 import type { ApiMsg } from "./types";
@@ -296,11 +297,14 @@ export async function runChatTurnInRuntime(deps: RuntimeTurnDeps): Promise<Runti
       tools,
       // Declared so a turn that outgrows the window mid-turn is compacted there rather than refused.
       contextWindow: activeModel?.contextWindow ?? resolveContextWindow(modelName),
-      // And the user's budget below it, so mid-turn compaction starts where compaction between turns does.
+      // And the user's budget below it. Mid-turn the runtime holds only the turns before this one to it; this
+      // turn's own work is cut only near the window (eliding fresh reads to fit the budget made the model re-read).
       contextBudget: resolveHybridBudget(
         activeModel?.contextWindow ?? resolveContextWindow(modelName),
         getContextBudgetK(),
       ),
+      // Results the runtime removes mid-turn name the call that brings them back from the store (see recall.ts).
+      elisionHint: ELISION_HINT,
       meta: { convId, turnId, source: "chat", actor: "main", provider: activeModel?.providerId },
       parallelTools: [...PARALLEL_SAFE_TOOLS],
       // The replay policy applyReasoningPolicy applies to this turn's own rounds: local models, or everyone with

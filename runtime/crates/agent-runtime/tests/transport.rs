@@ -144,7 +144,7 @@ fn headers_reach_the_provider_and_the_summariser_never_carries_the_conversation_
     let requests = seen.lock().expect("seen").clone();
     assert_eq!(requests.len(), 2, "the summariser's request, then the round's");
     let (summariser, round) = (&requests[0].0, &requests[1].0);
-    assert!(requests[0].1.contains("compacting an agent's conversation"), "request 0 is the summariser's");
+    assert!(requests[0].1.contains("You are a conversation summarizer"), "request 0 is the summariser's");
     assert!(round.contains("x-conversation-id: conv-42"), "the round must carry it: {round}");
     assert!(!summariser.contains("x-conversation-id"), "the summariser must NOT: {summariser}");
     assert!(summariser.contains("x-gateway: keep"), "other headers still reach the summariser");

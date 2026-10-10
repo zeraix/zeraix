@@ -54,7 +54,7 @@ impl ToolExecutor for Verbose {
 }
 
 fn manager_with_goal(window: u64) -> ContextManager {
-    let mut m = ContextManager::new(Budget { max_tokens: window, compact_at: 0.85, target: 0.5 });
+    let mut m = ContextManager::new(Budget { max_tokens: window, compact_at: 0.85, target: 0.5, working_set: None });
     {
         let memory = m.memory_mut();
         memory.user_goal = Some("migrate the runtime to Rust".into());
@@ -227,7 +227,7 @@ async fn a_loop_without_a_context_strategy_is_unchanged() {
 /// Tiers are assigned by whoever knows, not inferred from prose.
 #[tokio::test]
 async fn a_caller_can_mark_a_turn_as_worth_keeping() {
-    let mut m = ContextManager::new(Budget { max_tokens: 400, compact_at: 0.85, target: 0.5 });
+    let mut m = ContextManager::new(Budget { max_tokens: 400, compact_at: 0.85, target: 0.5, working_set: None });
     m.push(Message::assistant("the decision that matters"), Tier::High);
     m.push(Message::assistant("x".repeat(8000)), Tier::Normal);
     m.compact().await;

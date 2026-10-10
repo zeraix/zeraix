@@ -332,7 +332,7 @@ function contextBudgetParam(b) {
 }
 
 export async function runAgent(
-  { runId, workdir, assetDir, provider, messages, tools, contextWindow, contextBudget, summarizerModel, parallelTools, replayReasoning, hostToolsOnly, allowedTools, thinking } = {},
+  { runId, workdir, assetDir, provider, messages, tools, contextWindow, contextBudget, summarizerModel, elisionHint, parallelTools, replayReasoning, hostToolsOnly, allowedTools, thinking } = {},
   { onDelta, onTool, onTurn, onRetry, toolHandler, roundGate, signal } = {},
 ) {
   const s = await ensureStarted();
@@ -429,9 +429,13 @@ export async function runAgent(
         // the caller does not know the window — a guessed one compacts conversations that would have fitted.
         context_window: typeof contextWindow === "number" && contextWindow > 0 ? contextWindow : null,
         // The user's working-set budget below that window, as trigger/target token counts — the ones compaction
-        // between turns already uses, so a turn is held to the same size mid-turn. Omitted when the budget is off.
+        // between turns already uses. Mid-turn it holds only the turns before this one; the turn itself is cut only
+        // near the window. Omitted when the budget is off.
         context_budget: contextBudgetParam(contextBudget),
         summarizer_model: summarizerModel || null,
+        // What a result removed mid-turn says instead of "re-run the call" — the caller's way to recall it, `{id}`
+        // standing for the result's id. Omitted, the runtime keeps its own wording.
+        elision_hint: typeof elisionHint === "string" && elisionHint ? elisionHint : null,
         round_gate: Boolean(roundGate),
         // Tools that may run side by side when the model asks for several in a row; only consecutive ones are
         // batched. Named by the host, which is the side that knows which of its tools touch nothing.

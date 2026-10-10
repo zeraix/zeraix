@@ -40,7 +40,10 @@ impl ContextManager {
     /// agent walking a large file emits reads like {460,+90}, {550,+90}, {640,+50} — DISJOINT windows, none of
     /// which supersedes another. Comparing paths alone would stub all but the last and tell the model its
     /// earlier pages had been superseded by a page that does not contain them.
-    pub(crate) fn dedup_stale_reads(&mut self) -> usize {
+    ///
+    /// Only reads at an index `within` are stubbed — settled history, or the turn in progress — though what
+    /// supersedes them is looked for anywhere later in the conversation.
+    pub(crate) fn dedup_stale_reads(&mut self, within: std::ops::Range<usize>) -> usize {
         // A tool result carries only its `tool_call_id`; the name and arguments live on the assistant turn
         // that asked for it. This is the join between the two.
         let mut calls: std::collections::HashMap<&str, (&str, serde_json::Value)> =
@@ -86,7 +89,8 @@ impl ContextManager {
         let mut stale: Vec<usize> = Vec::new();
         for (i, touch) in touches.iter().enumerate() {
             let Some(Touch::Read { path, from, to }) = touch else { continue };
-            if self.items[i].message.text().len() < MIN_STUB_CHARS {
+            // A folded item is not on the wire; stubbing it would change nothing the model sees.
+            if !within.contains(&i) || self.items[i].summarized || self.items[i].message.text().len() < MIN_STUB_CHARS {
                 continue;
             }
             let superseded = touches[i + 1..].iter().flatten().any(|later| match later {
@@ -105,11 +109,10 @@ impl ContextManager {
                 Some(Touch::Read { path, .. }) => path.clone(),
                 _ => continue,
             };
-            self.items[i].message.content = serde_json::Value::String(format!(
+            self.items[i].replace_content(format!(
                 "{STALE_READ_PREFIX}{path} removed to make room; the current contents are shown by a later \
                  read or write in this conversation]"
             ));
-            self.items[i].recount();
         }
         stale.len()
     }

@@ -3,6 +3,7 @@
 // The system prompt body is now maintained in Markdown, imported as a string via the Turbopack raw-loader (see systemPromptFor below).
 import baseSystemMd from "./system/base.system.md";
 import developmentModeMd from "./system/development.mode.md";
+import { RECALL_TOOL } from "./recall";
 
 // MAX_TOOL_ROUNDS / MAX_SUBAGENT_ROUNDS / MAX_SAME_TOOL_CALLS / MAX_CONSECUTIVE_TIMEOUTS lived here and are
 // gone (M3). Nothing had imported any of them since the run-parameter settings were removed, so they read as
@@ -73,6 +74,7 @@ export const RENDERER_HANDLED_TOOLS = new Set([
   "ask_user",
   "update_todos",
   "set_task_state",
+  RECALL_TOOL,
   "openBrowser",
   "browser",
   "image_generation",
@@ -102,7 +104,7 @@ export const DELEGATION_TOOLS = new Set([
  *  the slice the model asked for — running it through a head+tail cap would punch a hole in the middle of the very
  *  code the model is reasoning about, and the model cannot tell elided code from absent code. Everything else
  *  (run_command, fetch_url, search_*, browser) is genuinely unbounded and stays capped. */
-export const UNCAPPED_TOOLS = new Set(["read_file"]);
+export const UNCAPPED_TOOLS = new Set(["read_file", RECALL_TOOL]);
 
 /** Resume-after-interrupt nudge (model-facing only, never displayed; persisted into the carrying user turn's wireText — see reminders.ts): written when the user sends again after interrupting the previous turn, to prompt the model to reuse existing analysis and continue. */
 export const RESUME_NUDGE =

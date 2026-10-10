@@ -1,33 +1,36 @@
-//! A working-set budget below the window: compaction starts at the budget, not near the window.
+//! A working-set budget below the window: settled history is shed at the budget, not near the window.
 //!
-//! On a 1M-window model, compacting at a fraction of the WINDOW means never: 85% of 1M is 850K, so a long turn
-//! grew for as long as it ran and nothing was summarised, whatever the user's context budget said.
+//! On a 1M-window model, compacting at a fraction of the WINDOW means never: 85% of 1M is 850K, so history
+//! grew for as long as the conversation ran and nothing was summarised, whatever the user's context budget said.
+//! The turn in progress is the exception, and answers to the window alone — see `tests/live_turn.rs`.
 
-use agent_context::{Budget, ContextManager};
+use agent_context::{Budget, ContextManager, WorkingSet};
 use agent_loop::model::call;
 use agent_loop::{ContextStrategy, Message};
 use serde_json::json;
 
 #[test]
-fn the_budget_sets_both_thresholds_exactly_and_the_window_stays_the_window() {
+fn the_budget_becomes_a_working_set_and_the_window_keeps_its_own_thresholds() {
     let b = Budget::with_thresholds(1_000_000, 120_000, 80_000);
+    let window = Budget::with_window(1_000_000);
     assert_eq!(b.max_tokens, 1_000_000, "the model's limit is still the window");
-    assert_eq!(b.compact_threshold(), 120_000);
-    assert_eq!(b.target_tokens(), 80_000);
+    assert_eq!(b.working_set, Some(WorkingSet { trigger: 120_000, target: 80_000 }));
+    // Only the window may cut the turn in progress, so its thresholds are the window's, not the budget's.
+    assert_eq!(b.compact_threshold(), window.compact_threshold());
+    assert_eq!(b.target_tokens(), window.target_tokens());
 }
 
 #[test]
 fn values_a_host_should_never_send_are_made_safe() {
+    let ws = |b: Budget| b.working_set.expect("a working set");
     // A trigger above the window's own threshold is that threshold: a budget cannot make compaction LATER.
-    assert_eq!(Budget::with_thresholds(100_000, 200_000, 50_000).compact_threshold(), 85_000);
+    assert_eq!(ws(Budget::with_thresholds(100_000, 200_000, 50_000)).trigger, 85_000);
     // A target at or above the trigger would compact again every round; it keeps Default's proportion instead.
-    let b = Budget::with_thresholds(1_000_000, 120_000, 150_000);
-    assert_eq!(b.compact_threshold(), 120_000);
-    assert!(b.target_tokens() < 120_000, "{}", b.target_tokens());
-    assert_eq!(b.target_tokens(), (120_000_f64 * 0.6 / 0.85).round() as u64);
+    let b = ws(Budget::with_thresholds(1_000_000, 120_000, 150_000));
+    assert_eq!(b.trigger, 120_000);
+    assert_eq!(b.target, (120_000_f64 * 0.6 / 0.85).round() as u64);
     // No trigger is no budget.
-    let unset = Budget::with_thresholds(1_000_000, 0, 0);
-    assert_eq!(unset.compact_threshold(), Budget::with_window(1_000_000).compact_threshold());
+    assert_eq!(Budget::with_thresholds(1_000_000, 0, 0), Budget::with_window(1_000_000));
 }
 
 /// About 200K tokens of conversation: old tool output, then the current question.

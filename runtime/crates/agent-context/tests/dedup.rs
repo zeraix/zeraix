@@ -42,7 +42,7 @@ fn write_call(id: &str, path: &str) -> Message {
 
 /// Tight enough that compaction always runs, loose enough that dedup alone can satisfy it.
 fn budget() -> Budget {
-    Budget { max_tokens: 900, compact_at: 0.6, target: 0.55 }
+    Budget { max_tokens: 900, compact_at: 0.6, target: 0.55, working_set: None }
 }
 
 /// A manager that would never summarise, so any shrinking seen is dedup's doing.
@@ -56,7 +56,7 @@ fn manager() -> ContextManager {
 /// remaining tool output too — correct behaviour, and it would make "the current read is still there" a claim
 /// about the budget rather than about dedup.
 fn roomy() -> ContextManager {
-    ContextManager::new(Budget { max_tokens: 2000, compact_at: 0.6, target: 0.55 })
+    ContextManager::new(Budget { max_tokens: 2000, compact_at: 0.6, target: 0.55, working_set: None })
 }
 
 /// Run one compaction and report what each technique did.
@@ -177,7 +177,7 @@ async fn dedup_alone_can_settle_a_conversation_without_calling_the_summariser() 
     // A window where removing the five superseded reads is, on its own, enough to get under target. With a
     // tighter one elision would run too and the claim this test makes — that the cheapest step came first and
     // settled it — would not be the thing being tested.
-    let mut m = ContextManager::new(Budget { max_tokens: 2000, compact_at: 0.6, target: 0.55 })
+    let mut m = ContextManager::new(Budget { max_tokens: 2000, compact_at: 0.6, target: 0.55, working_set: None })
         .with_summarizer(Summarizer::new(Arc::clone(&model) as Arc<dyn ModelClient>, "summary-model"));
 
     let mut messages = vec![Message::user("read the same file repeatedly")];

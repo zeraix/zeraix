@@ -23,6 +23,13 @@ pub trait ContextStrategy: Send + Sync {
     /// the execution state — §6.1 makes the round after a compaction a planning round, because the model is
     /// about to be handed a conversation it has not seen before.
     async fn prepare(&mut self, messages: &[Message]) -> (Vec<Message>, bool);
+
+    /// What the provider counted for the request `prepare` last returned: its prompt tokens, cached ones included.
+    ///
+    /// The provider's count is the only exact one — it sees the tool declarations, the role framing and its own
+    /// tokenizer, none of which a strategy's estimate can. The loop reports it after each response, and only when
+    /// the provider sent it: usage the transport had to estimate is the same guess the strategy already makes.
+    fn observe_prompt_tokens(&mut self, _prompt_tokens: u64) {}
 }
 
 /// The default: hand the conversation over untouched.

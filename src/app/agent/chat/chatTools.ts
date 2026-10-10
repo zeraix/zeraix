@@ -33,6 +33,8 @@ import { searchMemories } from "@/lib/ai/memoryRetrieval";
 import { browserAction, requestOpenBrowser, setBrowserBusy, type BrowserAction } from "@/lib/automation";
 import type { ResolvedModel } from "@/lib/ai/models";
 import { applyTaskState, type TaskMemory } from "./taskMemory";
+import { RECALL_TOOL, recallToolResult } from "./recall";
+import { useAgentChatStore } from "@/store/agentChatStore";
 import { applyTodoStatuses, isGoalActive, type GoalState } from "./goalState";
 import type { ChoiceQuestion, RunCtx, Todo, TodoStatus } from "./types";
 
@@ -422,6 +424,9 @@ export function createRendererTools(deps: RendererToolDeps): Record<string, Rend
     ask_user: askUserChoice,
     update_todos: updateTodos,
     set_task_state: setTaskState,
+    // A removed result, back from the store that kept it in full (see recall.ts). Routed, never declared.
+    [RECALL_TOOL]: (ctx: RunCtx, args: Record<string, unknown>) =>
+      recallToolResult(useAgentChatStore.getState().getConversation(ctx.convId)?.messages ?? [], args),
     openBrowser: openBrowserAction,
     browser: browserControl,
     image_generation: generateImageAction,

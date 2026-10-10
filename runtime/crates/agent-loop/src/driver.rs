@@ -356,6 +356,9 @@ impl AgentLoop {
             record.content = content.clone();
             record.reasoning = thought.clone();
             record.usage = usage.unwrap_or_default();
+            if let Some(counted) = usage.filter(|u| !u.estimated && u.prompt_tokens > 0) {
+                self.context.lock().await.observe_prompt_tokens(counted.prompt_tokens);
+            }
             record.tool_calls = replayed.clone();
 
             // The assistant turn is appended with its calls attached, before any result: the transcript has to

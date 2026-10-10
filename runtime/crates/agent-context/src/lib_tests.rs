@@ -7,7 +7,7 @@ fn long(n: usize) -> String {
 }
 
 fn manager(window: u64) -> ContextManager {
-    ContextManager::new(Budget { max_tokens: window, compact_at: 0.85, target: 0.6 })
+    ContextManager::new(Budget { max_tokens: window, compact_at: 0.85, target: 0.6, working_set: None })
 }
 
 #[test]
@@ -130,12 +130,18 @@ async fn a_context_that_cannot_be_brought_under_budget_says_so() {
 }
 
 /// One compaction should buy several rounds, or a long task thrashes.
+///
+/// Results the model has already seen — each asked for by a turn of its own, then answered. The batch it has NOT
+/// seen yet is cut only as far as the window needs (see `the_unseen_batch_goes_only_when_the_request_would_not_fit`).
 #[tokio::test]
 async fn compaction_comes_down_well_below_the_threshold_it_fired_at() {
     let mut m = manager(2000);
-    for _ in 0..12 {
-        m.push(Message::tool_result("c", long(2000)), Tier::Ephemeral);
+    for i in 0..12 {
+        let id = format!("c{i}");
+        m.push(Message::assistant_calls("", vec![agent_loop::model::call(&id, "run_command", serde_json::json!({}))]), Tier::Normal);
+        m.push(Message::tool_result(id, long(2000)), Tier::Ephemeral);
     }
+    m.push(Message::assistant("done"), Tier::Normal);
     let report = m.compact().await;
     assert!(report.ran);
     assert!(

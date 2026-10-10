@@ -108,6 +108,7 @@ const TOOL_ACTIONS: Record<string, Action> = {
   file_info: EXPLORE(),
   search_files: EXPLORE(),
   search_in_files: EXPLORE(),
+  recall_tool_result: EXPLORE(),
 
   // Commands
   run_command: { labelKey: "chat.act.ran", icon: Terminal, kind: "text" },
