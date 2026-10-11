@@ -14,7 +14,7 @@ import { register } from "node:module";
 register("./helpers/srcResolve.mjs", import.meta.url);
 const { approvalDecision, approvalReminderLine, loadApprovalMode, APPROVAL_MODES, DEFAULT_APPROVAL_MODE } =
   await import("../src/lib/ai/approvalMode.ts");
-const { diffReminder, foldReminders, renderReminder } = await import("../src/app/agent/chat/reminders.ts");
+const { diffReminder, foldReminders, renderReminder } = await import("../src/app/agent/chat/context/reminders.ts");
 
 test("default: reads run, sensitive tools ask, and an allowance silences the repeat", () => {
   assert.equal(approvalDecision("default", { sensitive: false }), "run");

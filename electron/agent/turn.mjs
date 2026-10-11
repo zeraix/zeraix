@@ -2,8 +2,8 @@
  * Headless agent turn loop (main process). See docs/automation-workflow-design.md §3.2.
  *
  * WHY THIS EXISTS RATHER THAN REUSING THE CHAT LOOP
- * The interactive loop lives in the renderer, inside ChatPage's `send` (src/app/agent/chat/page.tsx),
- * as a closure over React state. Automation runs in the main process with no window at all, so it
+ * The interactive loop lives in the renderer, inside the chat page's `send` (src/app/agent/chat/hooks/useChatSend.ts
+ * and chatTurn.ts), as a closure over React state. Automation runs in the main process with no window at all, so it
  * cannot call that code. This is a deliberate second implementation, with the drift risk accepted
  * and recorded in the design doc.
  *

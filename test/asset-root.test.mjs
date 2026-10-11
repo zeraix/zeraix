@@ -9,7 +9,7 @@
  * evaluation already sets for this codebase: a test that checks a policy object certifies a boundary that may
  * not exist. So each case below is a path a confused or hostile caller would actually send.
  *
- * The other half of the boundary is a bind mount (`--ro-bind` in sandbox/qemu.mjs). This half covers the file
+ * The other half of the boundary is a bind mount (`--ro-bind` in sandbox/qemu/args.mjs). This half covers the file
  * tools; that half covers `run_command`. Neither is sufficient alone, which is why both exist.
  */
 import test from "node:test";

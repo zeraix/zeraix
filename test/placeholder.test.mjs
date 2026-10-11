@@ -9,9 +9,9 @@ import { register } from "node:module";
 import { isContextPlaceholder, PLACEHOLDER_REFUSED, placeholderRefusal } from "../electron/tools/placeholder.mjs";
 
 register("./helpers/srcResolve.mjs", import.meta.url);
-const { releaseCallPayloads } = await import("../src/app/agent/chat/contextCompress.ts");
+const { releaseCallPayloads } = await import("../src/app/agent/chat/context/contextCompress.ts");
 const { marker, selfClosingMarker, isContextMarker, MARKER_TAG } = await import(
-  "../src/app/agent/chat/contextMarker.ts"
+  "../src/app/agent/chat/context/contextMarker.ts"
 );
 const { unloadedBlobNote, missingBlobNote } = await import("../electron/store/resultBlobs.mjs");
 

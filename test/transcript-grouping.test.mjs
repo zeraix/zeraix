@@ -14,7 +14,7 @@ import assert from "node:assert/strict";
 import { register } from "node:module";
 
 register("./helpers/srcResolve.mjs", import.meta.url);
-const { groupTranscript, lastAssistantIndex } = await import("../src/app/agent/chat/transcriptRows.ts");
+const { groupTranscript, lastAssistantIndex } = await import("../src/app/agent/chat/transcript/transcriptRows.ts");
 
 const user = (content = "hi") => ({ kind: "user", content });
 const assistant = (content = "there") => ({ kind: "assistant", content });

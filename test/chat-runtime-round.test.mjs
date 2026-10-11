@@ -24,19 +24,19 @@ register("./helpers/srcResolve.mjs", import.meta.url);
 process.env.ZERAIX_RUST_CHAT_LOOP = "on";
 const { initRuntimeTurnBridge } = await import("../electron/agent/runtimeTurnBridge.mjs");
 const { hasFeature, setSessionPolicyProvider, shutdown } = await import("../electron/tools/rustRuntime.mjs");
-const { runChatTurnInRuntime } = await import("../src/app/agent/chat/runtimeRound.ts");
-const { createTurnBuffer } = await import("../src/app/agent/chat/turnBuffer.ts");
+const { runChatTurnInRuntime } = await import("../src/app/agent/chat/turn/runtimeRound.ts");
+const { createTurnBuffer } = await import("../src/app/agent/chat/turn/turnBuffer.ts");
 const { useAgentChatStore } = await import("../src/store/agentChatStore.ts");
-const { emptyGoal } = await import("../src/app/agent/chat/goalState.ts");
-const { wrapReminder } = await import("../src/app/agent/chat/reminders.ts");
+const { emptyGoal } = await import("../src/app/agent/chat/goal/goalState.ts");
+const { wrapReminder } = await import("../src/app/agent/chat/context/reminders.ts");
 const { FINALIZE_NUDGE, repeatedCallNudge, DELEGATION_TOOLS, MUTATING_FILE_TOOLS, RISKY_PATH_PATTERN } = await import(
   "../src/app/agent/chat/constants.ts"
 );
 
 // page.tsx's WIRE_STEPS, assembled from the same modules: the page itself cannot be imported here.
-const compress = await import("../src/app/agent/chat/contextCompress.ts");
-const wire = await import("../src/app/agent/chat/wireHelpers.ts");
-const { materializeReminders } = await import("../src/app/agent/chat/reminders.ts");
+const compress = await import("../src/app/agent/chat/context/contextCompress.ts");
+const wire = await import("../src/app/agent/chat/context/wireHelpers.ts");
+const { materializeReminders } = await import("../src/app/agent/chat/context/reminders.ts");
 const WIRE_STEPS = {
   buildWireContext: (messages, compaction, ceiling) => compress.buildWireContext(messages, compaction, ceiling),
   sanitizeToolCallPairs: compress.sanitizeToolCallPairs,

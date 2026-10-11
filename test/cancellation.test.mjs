@@ -15,7 +15,14 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = fileURLToPath(new URL("../", import.meta.url));
-const toolkit = fs.readFileSync(path.join(root, "electron/tools/aiToolkit.mjs"), "utf8");
+// The toolkit is aiToolkit.mjs plus its parts in aiToolkit/ (the handler table spreads theirs in), read as one text
+// so a handler is found wherever it lives — and a migrated one reappearing in ANY part is still caught below.
+const toolsDir = path.join(root, "electron/tools");
+const toolkitFiles = [
+  "aiToolkit.mjs",
+  ...fs.readdirSync(path.join(toolsDir, "aiToolkit")).filter((f) => f.endsWith(".mjs")).sort().map((f) => `aiToolkit/${f}`),
+];
+const toolkit = toolkitFiles.map((f) => fs.readFileSync(path.join(toolsDir, f), "utf8")).join("\n");
 const pageConsole = fs.readFileSync(path.join(root, "electron/tools/pageConsole.mjs"), "utf8");
 
 /** The body of one handler in the toolkit's handler table, up to the next handler. */
@@ -62,7 +69,7 @@ test("every disk mutator refuses to run after Stop", () => {
   //
   // What is pinned here is the routing that makes that true: the runtime must be the only thing serving them.
   // If one reappears as a handler in this file, or drops out of RUNTIME_ONLY_TOOLS, this fires.
-  const bridge = fs.readFileSync(path.join(root, "electron/tools/rustRuntimeCore.mjs"), "utf8");
+  const bridge = fs.readFileSync(path.join(root, "electron/tools/rustRuntime/core.mjs"), "utf8");
   const runtimeOnly = bridge.slice(bridge.indexOf("const RUNTIME_ONLY_TOOLS"), bridge.indexOf("];", bridge.indexOf("const RUNTIME_ONLY_TOOLS")));
   for (const name of ["append_file", "delete_file", "copy_file", "move_file", "create_directory"]) {
     assert.ok(runtimeOnly.includes(`"${name}"`), `${name} is served by the runtime`);

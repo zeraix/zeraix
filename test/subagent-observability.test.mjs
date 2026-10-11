@@ -37,7 +37,7 @@ const {
 const { linkSignals } = await import("../src/lib/agent/abortSignals.ts");
 const { redactArgs, redactOutput, REDACTED } = await import("../src/lib/agent/executionRedaction.ts");
 const { executionTranscript, executionIsRunning } = await import(
-  "../src/app/agent/chat/executionTranscript.ts"
+  "../src/app/agent/chat/delegation/executionTranscript.ts"
 );
 
 /** Collect everything the registry publishes, and fold it the way the store does. */

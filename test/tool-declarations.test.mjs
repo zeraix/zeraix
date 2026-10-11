@@ -66,7 +66,7 @@ test("the model cannot reach set_goal or update_plan by any route", async () => 
 /** The prompt must not advertise a tool that no longer exists, or the model spends rounds calling it. */
 test("no prompt text tells the model to call a removed goal tool", async () => {
   const { GOAL_EXPLAINER, goalContinuationPrompt, startGoal } = await import(
-    "../src/app/agent/chat/goalState.ts"
+    "../src/app/agent/chat/goal/goalState.ts"
   );
   const goal = startGoal("ship it", { now: 0 });
   const surfaces = [GOAL_EXPLAINER, goalContinuationPrompt(goal, "not yet"), buildSystemPrompt()];

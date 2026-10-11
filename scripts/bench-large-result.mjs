@@ -21,7 +21,7 @@ import "./electron-stub-hook.mjs";
 register("../test/helpers/srcResolve.mjs", import.meta.url);
 const store = await import("../electron/store/conversationStore.mjs");
 const { buildWireContext, indexCalls, resultCeilingTokens, withholdOversizedResults } = await import(
-  "../src/app/agent/chat/contextCompress.ts"
+  "../src/app/agent/chat/context/contextCompress.ts"
 );
 const { countMessagesTokens } = await import("../src/lib/ai/tokenizer.ts");
 

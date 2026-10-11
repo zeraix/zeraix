@@ -15,15 +15,15 @@
  * tool call should be able to destroy, and "the instructions said not to" is not a mechanism.
  *
  * This is only half the boundary. It governs the file tools; `run_command` is governed by the sandbox's bind
- * mounts (`--ro-bind` for the asset folder — see sandbox/qemu.mjs). Both are needed and they must agree:
+ * mounts (`--ro-bind` for the asset folder — see sandbox/qemu/args.mjs). Both are needed and they must agree:
  * enforcing here alone would leave a shell able to write what the file tools refuse.
  */
 import path from "node:path";
 
-/** The name the sandbox mounts the working directory at (GUEST_WORKSPACE in sandbox/qemu.mjs). */
+/** The name the sandbox mounts the working directory at (GUEST_WORKSPACE in sandbox/qemu/args.mjs). */
 export const WORKSPACE_ALIAS = /^\/workspace(?:\/(.*))?$/;
 
-/** The name the sandbox mounts the asset folder at (GUEST_ASSETS in sandbox/qemu.mjs). */
+/** The name the sandbox mounts the asset folder at (GUEST_ASSETS in sandbox/qemu/args.mjs). */
 export const ASSET_ALIAS = /^\/assets(?:\/(.*))?$/;
 
 /**

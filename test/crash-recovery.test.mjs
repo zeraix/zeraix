@@ -23,7 +23,7 @@ import { setRecoveryLogDir, recordRecovery, readRecoveryLog, recoveryLogPath } f
 import { acquireSessionLock, releaseSessionLock, lastSession, pidAlive } from "../electron/store/sessionLock.mjs";
 
 const { createTurnCheckpoint, describeInterruptedTurn, summarizeInterruptedTurn, isMutatingTool, isInterrupted } =
-  await import("../src/app/agent/chat/turnState.ts");
+  await import("../src/app/agent/chat/turn/turnState.ts");
 
 function tmpdir(name) {
   return fs.mkdtempSync(path.join(os.tmpdir(), `zeraix-${name}-`));
@@ -225,7 +225,7 @@ test("the banner summary carries the same facts as the model's notice", () => {
 // ── The notice on the wire: emitted once, never replayed ───────────────────────────────────────────
 
 const { diffReminder, renderReminder, renderSnapshot, foldReminders } = await import(
-  "../src/app/agent/chat/reminders.ts"
+  "../src/app/agent/chat/context/reminders.ts"
 );
 
 test("the recovery notice is announced once and never restated or retracted", () => {
@@ -364,10 +364,11 @@ test("the checkpoint never breaks the turn it observes", () => {
 
 // ── Failure attribution in the UI ───────────────────────────────────────────────────────────────
 
-const chatPage = fs.readFileSync(
-  path.join(fileURLToPath(new URL("../", import.meta.url)), "src/app/agent/chat/page.tsx"),
-  "utf8",
-);
+// The page owns the banner; `send` lives in hooks/useChatSend.ts. Read as one text so each assertion finds its code
+// wherever the split put it.
+const chatPage = ["page.tsx", "hooks/useChatSend.ts"]
+  .map((f) => fs.readFileSync(path.join(fileURLToPath(new URL("../", import.meta.url)), "src/app/agent/chat", f), "utf8"))
+  .join("\n");
 
 test("an error banner belongs to the conversation that produced it", () => {
   // Reported from real use: a "Failed to fetch" from one chat stayed on screen while the user read a different

@@ -18,9 +18,9 @@ import { register } from "node:module";
 
 register("./helpers/srcResolve.mjs", import.meta.url);
 const { normalizeTodos } = await import("../src/lib/ai/conversation.ts");
-const { normalizeTaskMemory } = await import("../src/app/agent/chat/taskMemory.ts");
+const { normalizeTaskMemory } = await import("../src/app/agent/chat/context/taskMemory.ts");
 const { restoreGoal, emptyGoal, isGoalActive, toStoredGoal, startGoal } = await import(
-  "../src/app/agent/chat/goalState.ts"
+  "../src/app/agent/chat/goal/goalState.ts"
 );
 
 // ── Backward compatibility: records written before this field existed ───────────────────────────────────

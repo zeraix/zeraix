@@ -5,7 +5,7 @@
 //                   (hostfwd_add / hostfwd_remove), host-side, instant
 //   guestAgent() -> qemu-guest-agent client: runStatus() (non-throwing timed run for the
 //                   run_command engine) + exec() (raw guest-exec). The workload is confined
-//                   by bubblewrap; qemu.mjs builds the bwrap argv (bind set = mount set).
+//                   by bubblewrap; qemu/args.mjs builds the bwrap argv (bind set = mount set).
 import net from 'node:net';
 
 const HOST = '127.0.0.1';

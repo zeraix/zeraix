@@ -56,7 +56,7 @@ export { setServiceEventHandler } from "./events.mjs";
  *     -m 2048 + swap    3.25 GB resident, and no OOM
  *
  * The guest keeps every page it touches and there is no way to get them back — a virtio-balloon with free-page-reporting was
- * tried and measured WORSE (see the note in qemu.mjs where the device would go). So `-m` is a permanent cost for a sandbox
+ * tried and measured WORSE (see the note in qemu/args.mjs where the device would go). So `-m` is a permanent cost for a sandbox
  * that is idle most of the time, on a machine that also has to hold a local model of ~25 GB. Raise it per install for a job
  * that genuinely needs more.
  */

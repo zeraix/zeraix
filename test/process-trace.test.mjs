@@ -21,8 +21,8 @@ import {
   splitPath,
   tallyExplore,
   targetOf,
-} from "../src/app/agent/chat/processTrace.ts";
-import { phaseSummaryText, thinkingProcessText } from "../src/app/agent/chat/wireHelpers.ts";
+} from "../src/app/agent/chat/transcript/processTrace.ts";
+import { phaseSummaryText, thinkingProcessText } from "../src/app/agent/chat/context/wireHelpers.ts";
 
 /** The shape aiToolkit's makeUnifiedDiff emits: @@ headers, then ' ' / '+' / '-' prefixed lines. */
 const DIFF = ["@@ -1,3 +1,4 @@", " const a = 1;", "-const b = 2;", "+const b = 3;", "+const c = 4;", " export {};"].join(

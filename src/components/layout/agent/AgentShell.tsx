@@ -7,7 +7,7 @@ import { PanelLeft } from "lucide-react";
 import { shouldHideAgentSidebar, pageDrawsOwnTitleBar } from "@/constants/Agent";
 import AgentSidebar from "./AgentSidebar";
 import FilesSidebar from "./FilesSidebar";
-import FilesPanel from "@/app/agent/chat/FilesPanel";
+import FilesPanel from "@/app/agent/chat/components/FilesPanel";
 import { ChatAgentView } from "@/app/agent/chat/page";
 import MediaViewerHost from "@/components/media/MediaViewerHost";
 import SkinDecor from "@/components/theme/SkinDecor";

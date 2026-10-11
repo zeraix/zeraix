@@ -10,8 +10,8 @@ import assert from "node:assert/strict";
 import { register } from "node:module";
 
 register("./helpers/srcResolve.mjs", import.meta.url);
-const { ELISION_HINT, RECALL_TOOL, recallCall, recallToolResult } = await import("../src/app/agent/chat/recall.ts");
-const { buildWireContext, oversizedResultStub } = await import("../src/app/agent/chat/contextCompress.ts");
+const { ELISION_HINT, RECALL_TOOL, recallCall, recallToolResult } = await import("../src/app/agent/chat/context/recall.ts");
+const { buildWireContext, oversizedResultStub } = await import("../src/app/agent/chat/context/contextCompress.ts");
 
 const call = (id, name, args) => ({
   role: "assistant",

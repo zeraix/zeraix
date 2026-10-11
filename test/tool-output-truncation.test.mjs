@@ -21,7 +21,7 @@ import { register } from "node:module";
 // capToolOutput lives in src/ behind a TypeScript extension node does not resolve on its own. Registered
 // before the dynamic import, which is why that import is not a static one.
 register("./helpers/srcResolve.mjs", import.meta.url);
-const { capToolOutput, MAX_TOOL_OUTPUT_CHARS } = await import("../src/app/agent/chat/compress.ts");
+const { capToolOutput, MAX_TOOL_OUTPUT_CHARS } = await import("../src/app/agent/chat/context/compress.ts");
 
 /** The Rust tools that now cap, concatenated — the source the markers have to appear in. */
 const toolkitSource = ["read_file", "list_directory", "search_files", "search_in_files"]
@@ -62,7 +62,7 @@ test("a capped result states how much of the whole it is showing", () => {
   const out = capToolOutput("H".repeat(total - 1) + "T");
 
   assert.ok(out.includes('kind="truncated"'), "the notice does not say it is truncated");
-  // The sizes are attributes now rather than prose — see src/app/agent/chat/contextMarker.ts.
+  // The sizes are attributes now rather than prose — see src/app/agent/chat/context/contextMarker.ts.
   assert.ok(out.includes(`total="${total}"`), "the notice does not state the total character count");
   assert.ok(out.startsWith("H"), "the head was not preserved");
   assert.ok(out.endsWith("T"), "the tail was not preserved — the end of a command's output is where its error is");

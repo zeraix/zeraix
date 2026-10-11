@@ -80,7 +80,7 @@ export function isBlobRef(v) {
 }
 
 /**
- * The tag every context marker uses. Must match MARKER_TAG in src/app/agent/chat/contextMarker.ts and the
+ * The tag every context marker uses. Must match MARKER_TAG in src/app/agent/chat/context/contextMarker.ts and the
  * guard in runtime/crates/agent-tools/src/edittext.rs — test/result-blobs.test.mjs pins that it does.
  */
 const MARKER_TAG = "context-compressed";

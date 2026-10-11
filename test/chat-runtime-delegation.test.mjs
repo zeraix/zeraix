@@ -24,10 +24,10 @@ register("./helpers/srcResolve.mjs", import.meta.url);
 process.env.ZERAIX_RUST_CHAT_LOOP = "on";
 const { initRuntimeTurnBridge } = await import("../electron/agent/runtimeTurnBridge.mjs");
 const { hasFeature, setSessionPolicyProvider, shutdown } = await import("../electron/tools/rustRuntime.mjs");
-const { createRunDelegation } = await import("../src/app/agent/chat/delegation.ts");
+const { createRunDelegation } = await import("../src/app/agent/chat/delegation/delegation.ts");
 const { beginExecution, cancelExecution, subscribeExecutionEvents } = await import("../src/lib/agent/executionRegistry.ts");
 const { STOPPED_BY_USER_RESULT } = await import("../src/lib/ai/subagentScheduler.ts");
-const { runDelegationInRuntime } = await import("../src/app/agent/chat/delegationRuntime.ts");
+const { runDelegationInRuntime } = await import("../src/app/agent/chat/delegation/delegationRuntime.ts");
 
 const workdir = fs.mkdtempSync(path.join(os.tmpdir(), "zeraix-delegation-"));
 setSessionPolicyProvider(() => ({ workspaceRoots: [workdir] }));

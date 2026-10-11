@@ -152,7 +152,7 @@ export interface Conversation {
    *  like compaction; restored on reopen so the mission survives, and not part of the integrity hash. */
   taskMemory?: StoredTaskMemory;
   /** Goal State (optional): objective, acceptance criteria, plan, blockers and the verification record (see
-   *  app/agent/chat/goalState.ts). Persisted for the same reason as taskMemory and one more: the wrap-up gate
+   *  app/agent/chat/goal/goalState.ts). Persisted for the same reason as taskMemory and one more: the wrap-up gate
    *  refuses to end a turn on an unmet goal, so a goal that did not survive reopen would silently turn a
    *  half-finished task into a finished one. A runtime artifact, not part of the integrity hash. */
   goal?: StoredGoalState;
@@ -196,7 +196,7 @@ export interface Conversation {
   updatedAt: number;
 }
 
-/** Persisted Task Memory (see app/agent/chat/taskMemory.ts). Structurally identical to TaskMemory; kept
+/** Persisted Task Memory (see app/agent/chat/context/taskMemory.ts). Structurally identical to TaskMemory; kept
  *  here to avoid a lib→app import. Read back through normalizeTaskMemory, which repairs any partial data. */
 export interface StoredTaskMemory {
   /** Free-form markdown task brief (mission / plan / constraints / decisions in the model's own words). */
@@ -206,7 +206,7 @@ export interface StoredTaskMemory {
 }
 
 /**
- * Persisted Goal State (see app/agent/chat/goalState.ts).
+ * Persisted Goal State (see app/agent/chat/goal/goalState.ts).
  *
  * Deliberately typed as an opaque JSON record rather than a structural copy of GoalState. StoredTaskMemory could
  * mirror its two fields without cost; this shape has six nested arrays whose members carry their own status
@@ -216,7 +216,7 @@ export interface StoredTaskMemory {
 export type StoredGoalState = Record<string, unknown>;
 
 /**
- * The in-flight turn, checkpointed at every round boundary (see app/agent/chat/turnState.ts).
+ * The in-flight turn, checkpointed at every round boundary (see app/agent/chat/turn/turnState.ts).
  *
  * docs/agent-runtime-crash-recovery.md C2. Written when a round starts and when its tool calls start and finish;
  * cleared when the turn ends by any route (reply, error, user stop). A record still present when the conversation is

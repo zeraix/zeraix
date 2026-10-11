@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
  * Stage a self-contained QEMU for macOS into resources/bin/darwin-<arch>/qemu/ so it ships in
- * the app (electron-builder extraResources) and qemu.mjs finds it at
+ * the app (electron-builder extraResources) and qemu/args.mjs finds it at
  * process.resourcesPath/qemu/darwin-<arch>/qemu-system-aarch64 (+ qemu-img).
  *
  * Copies qemu-system-aarch64 + qemu-img and their non-system dylib closure into libs/,

@@ -22,7 +22,15 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = fileURLToPath(new URL("../", import.meta.url));
-const qemu = fs.readFileSync(path.join(root, "electron/tools/sandbox/qemu.mjs"), "utf8");
+// The guest engine is qemu.mjs plus its parts in qemu/ (the background services live in qemu/services.mjs). Read as one
+// text, so "one place starts the watcher" still means one place in the whole engine, not just in one of its files.
+const sandboxDir = path.join(root, "electron/tools/sandbox");
+const qemuParts = [
+  "qemu.mjs",
+  ...fs.readdirSync(path.join(sandboxDir, "qemu")).filter((f) => f.endsWith(".mjs")).sort().map((f) => `qemu/${f}`),
+];
+assert.ok(qemuParts.includes("qemu.mjs") && qemuParts.includes("qemu/services.mjs"), "the engine's files are where this test looks");
+const qemu = qemuParts.map((f) => fs.readFileSync(path.join(sandboxDir, f), "utf8")).join("\n");
 const native = fs.readFileSync(path.join(root, "electron/tools/sandbox/native.mjs"), "utf8");
 
 test("every guest background job is watched, not only the ones that asked to be notified", () => {

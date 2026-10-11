@@ -11,7 +11,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { isVisionRejection, stripAllImagesForText } from "../src/app/agent/chat/wireHelpers.ts";
+import { isVisionRejection, stripAllImagesForText } from "../src/app/agent/chat/context/wireHelpers.ts";
 
 const err = (m) => new Error(m);
 

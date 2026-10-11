@@ -14,15 +14,15 @@
  * drift from send(), and the failure mode is a published seed that silently never matches.
  */
 import { SYSTEM_PROMPT, WORKDIR_RULES } from "@/app/agent/chat/constants";
-import { TASK_STATE_EXPLAINER } from "@/app/agent/chat/taskMemory";
-import { GOAL_EXPLAINER } from "@/app/agent/chat/goalState";
+import { TASK_STATE_EXPLAINER } from "@/app/agent/chat/context/taskMemory";
+import { GOAL_EXPLAINER } from "@/app/agent/chat/goal/goalState";
 import { skillSystemHint, loadSkillTool } from "@/lib/ai/skills/runtime";
 import { SANDBOX_TOOLBOX_SKILL } from "@/lib/ai/skills/builtin";
 import {
   askUserTool, updateTodosTool, setTaskStateTool, openBrowserTool, browserTool, imageGenerationTool,
   videoGenerationTool,
   saveMemoryTool, deleteMemoryTool, searchMemoryTool, callToolTool,
-} from "@/app/agent/chat/agentTools";
+} from "@/app/agent/chat/tools/agentTools";
 import { joinSubagentsTool, spawnSubagentsTool, subAgentTool } from "@/lib/ai/subagents";
 import { isMcpToolName, isRouted, ROUTED_TOOLS } from "@/lib/ai/toolRouter";
 import { spawnSubAgentTool } from "@/lib/ai/orchestration/orchestrator-tool";

@@ -1,5 +1,5 @@
 /**
- * The renderer's adapter onto the runtime scheduler (src/app/agent/chat/runtimeScheduler.ts).
+ * The renderer's adapter onto the runtime scheduler (src/app/agent/chat/delegation/runtimeScheduler.ts).
  *
  * It has to satisfy the same surface `SubAgentScheduler` does, because the delegation tools call it
  * without knowing which one they hold. What is worth testing is not the pass-through but the three
@@ -53,7 +53,7 @@ function installBridge({ spawnIds = ["j0", "j1", "j2"], joinResult } = {}) {
   return bridge;
 }
 
-const { createRuntimeScheduler } = await import("../src/app/agent/chat/runtimeScheduler.ts");
+const { createRuntimeScheduler } = await import("../src/app/agent/chat/delegation/runtimeScheduler.ts");
 
 /** `isSameDelegation` compares agent plus a subject token set, so metas need both. */
 const meta = (agent, subject) => ({ agent, task: subject.join(" "), subject: new Set(subject) });

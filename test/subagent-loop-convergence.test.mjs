@@ -16,7 +16,7 @@ import assert from "node:assert/strict";
 import { register } from "node:module";
 
 register("./helpers/srcResolve.mjs", import.meta.url);
-const { createRunDelegation } = await import("../src/app/agent/chat/delegation.ts");
+const { createRunDelegation } = await import("../src/app/agent/chat/delegation/delegation.ts");
 const { beginExecution, cancelExecution, resetExecutionListenersForTest, subscribeExecutionEvents } =
   await import("../src/lib/agent/executionRegistry.ts");
 const { STOPPED_BY_USER_RESULT } = await import("../src/lib/ai/subagentScheduler.ts");

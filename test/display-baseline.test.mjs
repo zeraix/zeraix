@@ -1,5 +1,5 @@
 /**
- * Which transcript a round writes onto (src/app/agent/chat/displayBaseline.ts).
+ * Which transcript a round writes onto (src/app/agent/chat/transcript/displayBaseline.ts).
  *
  * The bug these exist for, as reported: running two sessions at once, the transcript of a conversation goes
  * blank except for the round currently generating — every user message and every earlier step gone. Switching
@@ -18,7 +18,7 @@ import assert from "node:assert/strict";
 import { register } from "node:module";
 
 register("./helpers/srcResolve.mjs", import.meta.url);
-const { baselineFor, newRoundBaseline } = await import("../src/app/agent/chat/displayBaseline.ts");
+const { baselineFor, newRoundBaseline } = await import("../src/app/agent/chat/transcript/displayBaseline.ts");
 
 const msg = (t) => ({ kind: "user", content: t });
 /** A transcript with real history in it, the thing that went missing. */

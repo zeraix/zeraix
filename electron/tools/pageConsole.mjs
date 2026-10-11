@@ -7,9 +7,9 @@
  * changed actually renders without errors, without the visible browser opening in the user's face and
  * without needing openBrowser, which is deliberately off-limits for investigation.
  *
- * Its own module rather than another handler in aiToolkit.mjs: that file is long past the 1000-line
- * ceiling, and this one owns a window lifecycle (create → load → settle → destroy) that must not leak a
- * hidden window on any path, including a throw.
+ * Its own module rather than another handler in aiToolkit.mjs: the toolkit stays under the 1000-line
+ * ceiling by keeping each concern in its own module, and this one owns a window lifecycle (create → load →
+ * settle → destroy) that must not leak a hidden window on any path, including a throw.
  */
 import { BrowserWindow } from "electron";
 

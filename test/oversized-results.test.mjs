@@ -19,7 +19,7 @@ const {
   planCompaction,
   resultCeilingTokens,
   withholdOversizedResults,
-} = await import("../src/app/agent/chat/contextCompress.ts");
+} = await import("../src/app/agent/chat/context/contextCompress.ts");
 const { countMessagesTokens } = await import("../src/lib/ai/tokenizer.ts");
 
 const call = (id, name, args) => ({

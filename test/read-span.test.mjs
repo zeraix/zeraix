@@ -12,7 +12,7 @@ import { register } from "node:module";
 
 register("./helpers/srcResolve.mjs", import.meta.url);
 const { indexCalls, computeStaleStubs, covers, MIN_STUB_CHARS } = await import(
-  "../src/app/agent/chat/contextCompress.ts"
+  "../src/app/agent/chat/context/contextCompress.ts"
 );
 
 const read = (id, args) => ({

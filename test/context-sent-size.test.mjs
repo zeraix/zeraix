@@ -24,7 +24,7 @@ const replayThinking = (on) =>
   on ? store.set("agent", JSON.stringify({ thinking: { sendContext: "1" } })) : store.delete("agent");
 
 const { countMessageTokens, countMessagesTokens } = await import("../src/lib/ai/tokenizer.ts");
-const { asSent, countSentTokens } = await import("../src/app/agent/chat/chatCompaction.ts");
+const { asSent, countSentTokens } = await import("../src/app/agent/chat/context/chatCompaction.ts");
 
 const THOUGHT = "Let me think about which file holds the handler before reading anything. ".repeat(200);
 const conversation = () => [

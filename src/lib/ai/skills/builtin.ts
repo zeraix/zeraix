@@ -11,7 +11,7 @@
  */
 import type { InstalledSkill } from "./types";
 
-/** Document / Media Processing Toolbox (equipped only for sandbox execution; see runtimeSkills in page.tsx). */
+/** Document / Media Processing Toolbox (equipped only for sandbox execution; see runtimeSkills in useChatSkills.ts). */
 export const SANDBOX_TOOLBOX_SKILL: InstalledSkill = {
   id: "doc-media-toolbox",
   name: "Document, Image & Media Toolbox",

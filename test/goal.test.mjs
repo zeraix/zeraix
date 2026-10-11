@@ -20,8 +20,8 @@ import { register } from "node:module";
 // These modules import each other extensionlessly (bundler resolution), which node does not do on its own.
 // Registered before the dynamic imports below; a static import would be hoisted above this call and fail.
 register("./helpers/srcResolve.mjs", import.meta.url);
-const { parseGoalCommand, GOAL_CLEAR_ALIASES } = await import("../src/app/agent/chat/goalCommand.ts");
-const { parseVerdict, createGoalEvaluator } = await import("../src/app/agent/chat/goalEvaluator.ts");
+const { parseGoalCommand, GOAL_CLEAR_ALIASES } = await import("../src/app/agent/chat/goal/goalCommand.ts");
+const { parseVerdict, createGoalEvaluator } = await import("../src/app/agent/chat/goal/goalEvaluator.ts");
 const {
   emptyGoal,
   isGoalActive,
@@ -42,7 +42,7 @@ const {
   renderGoalState,
   decideNextRound,
   GOAL_CONDITION_WARN,
-} = await import("../src/app/agent/chat/goalState.ts");
+} = await import("../src/app/agent/chat/goal/goalState.ts");
 
 const NOW = 1_700_000_000_000;
 const started = (condition = "all tests pass") => startGoal(condition, { now: NOW, source: "user" });
@@ -580,7 +580,7 @@ test("an inactive goal renders nothing", () => {
 
 /* ------------------------------------------------------------------ the composer's `/` menu */
 
-const { matchSlashCommands, SLASH_COMMANDS } = await import("../src/app/agent/chat/slashCommands.ts");
+const { matchSlashCommands, SLASH_COMMANDS } = await import("../src/app/agent/chat/utils/slashCommands.ts");
 
 test("a bare slash offers every command", () => {
   // The discovery case: `/goal` shipped with no affordance at all, so this is the whole point of the menu.
@@ -630,7 +630,7 @@ test("every offered goal row inserts something the goal parser accepts", () => {
 
 /* ------------------------------------------------------------------ the command tag in the input box */
 
-const { commandTokenLength } = await import("../src/app/agent/chat/slashCommands.ts");
+const { commandTokenLength } = await import("../src/app/agent/chat/utils/slashCommands.ts");
 
 test("a complete command word is measured for the tag", () => {
   assert.equal(commandTokenLength("/goal"), 5);
@@ -797,7 +797,7 @@ test("a truncated transcript tells the evaluator what the omission means", async
 
 /* ------------------------------------------------------------------ the command dispatcher */
 
-const { parseSlashCommand } = await import("../src/app/agent/chat/slashCommands.ts");
+const { parseSlashCommand } = await import("../src/app/agent/chat/utils/slashCommands.ts");
 
 test("the dispatcher splits a registered command from its arguments", () => {
   assert.deepEqual(parseSlashCommand("/clear"), { name: "clear", rest: "" });

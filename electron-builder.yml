@@ -114,7 +114,7 @@ afterAllArtifactBuild: scripts/afterAllArtifactBuild.cjs
 
 # Native binaries bundled in the package: QEMU sandbox only (layout: <platform>-<arch>/qemu/).
 # `download-bin-*.mjs` first places files in `resources/bin/<platform>-<arch>/`; here, they are copied as-is into the `Contents/Resources/` root:
-#   `qemu.mjs` consumes them from `process.resourcesPath/<platform>-<arch>/qemu`.
+#   `qemu/args.mjs` (qemuBin) consumes them from `process.resourcesPath/<platform>-<arch>/qemu`.
 # Llama inference binaries are not distributed within the package: at runtime, `llamaInstaller.mjs` downloads them from the CDN (llama.cpp GitHub release builds) to `userData`.
 # (Directory names use `darwin`/`win32`/`linux`—differing from electron-builder's `${os}` macro "mac"—so they are copied directly based on `<os>-*`.)
 # The corresponding `<arch>/` directories for macOS and Windows are generated prior to packaging via `npm run bundle:bin:mac` and `npm run bundle:bin:win`, respectively.
@@ -136,7 +136,7 @@ extraResources:
   - from: resources/icon.png
     to: icon.png
   # The PP-OCRv6 adapter, shipped so it can be updated with the app. The VM image also bakes a copy in at /opt/ocr, but
-  # changing that one costs a rootfs rebuild and a ~1 GB re-download per user; qemu.mjs binds this over it (GUEST_OCR_ADAPTER).
+  # changing that one costs a rootfs rebuild and a ~1 GB re-download per user; qemu/args.mjs binds this over it (GUEST_OCR_ADAPTER).
   # Staged straight from the docker build context so there is ONE copy of the file in the repo and the two cannot drift.
   - from: sandbox/qemu/rapidocr_v6_api.py
     to: ocr/rapidocr_v6_api.py

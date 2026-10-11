@@ -25,7 +25,7 @@
  *
  * Checked here AND in preload, for the reason subagentBridge gives: the two gates fail differently. On by default
  * since 2026-09-23, after the cutover was verified in the packaged app and against a real provider. `page.tsx` hands
- * each turn to `runChatTurnInRuntime` (src/app/agent/chat/runtimeRound.ts) and keeps `runAgentLoop` as the
+ * each turn to `runChatTurnInRuntime` (src/app/agent/chat/turn/runtimeRound.ts) and keeps `runAgentLoop` as the
  * fallback, which also serves every turn a runtime cannot take (absent, or too old for `host_tools_only`). The
  * transport's share lives here — usage log entries below, retries and stream resets as events,
  * `X-Conversation-Id` as a provider header, known and learned refusals, the network route; the chat page does the

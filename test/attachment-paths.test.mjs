@@ -1,5 +1,5 @@
 /**
- * The path an attachment is announced under (src/app/agent/chat/sendPrep.ts).
+ * The path an attachment is announced under (src/app/agent/chat/turn/sendPrep.ts).
  *
  * Two facts about a saved attachment are easy to get wrong together, and getting either wrong produces the
  * same symptom: the model runs a file command against a file that is sitting right there and is told the
@@ -20,7 +20,7 @@ import assert from "node:assert/strict";
 import { register } from "node:module";
 
 register("./helpers/srcResolve.mjs", import.meta.url);
-const { composeWireText } = await import("../src/app/agent/chat/sendPrep.ts");
+const { composeWireText } = await import("../src/app/agent/chat/turn/sendPrep.ts");
 
 /** A name with spaces is the interesting case: it is the one the store rewrites. */
 const ORIGINAL = "新建 文本文档 (2).txt";

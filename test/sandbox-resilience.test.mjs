@@ -17,6 +17,9 @@ import { fileURLToPath } from "node:url";
 
 const root = fileURLToPath(new URL("../", import.meta.url));
 const qemu = fs.readFileSync(path.join(root, "electron/tools/sandbox/qemu.mjs"), "utf8");
+// The two answers a failed command gets (sandboxFailure, sandboxDiedMidCommand) live in qemu/shared.mjs, because the
+// background-service part answers with sandboxFailure too. Everything else asserted here is still in qemu.mjs.
+const shared = fs.readFileSync(path.join(root, "electron/tools/sandbox/qemu/shared.mjs"), "utf8");
 const control = fs.readFileSync(path.join(root, "electron/tools/sandbox/control.mjs"), "utf8");
 const recovery = fs.readFileSync(path.join(root, "electron/main/startupRecovery.mjs"), "utf8");
 
@@ -26,9 +29,12 @@ function block(src, start, end) {
   const b = end ? src.indexOf(end, a + 1) : -1;
   return src.slice(a, b === -1 ? a + 2500 : b);
 }
+// End marker for "to the end of this top-level function": its closing brace, the first one at column 0. Used where the
+// function is no longer followed in its file by the code that used to come next.
+const FN_END = "\n}\n";
 
 test("a command that had started is never reported as not run", () => {
-  const died = block(qemu, "function sandboxDiedMidCommand", "/**\n * Check that the guest");
+  const died = block(shared, "function sandboxDiedMidCommand", FN_END);
   assert.match(died, /STATUS UNKNOWN/);
   assert.match(died, /may have completed, partly completed, or done nothing/);
   assert.match(died, /Do NOT assume it failed and do NOT simply repeat it/);
@@ -37,7 +43,7 @@ test("a command that had started is never reported as not run", () => {
 });
 
 test("the never-started case keeps its own, different answer", () => {
-  const never = block(qemu, "function sandboxFailure", "function sandboxDiedMidCommand");
+  const never = block(shared, "function sandboxFailure", "function sandboxDiedMidCommand");
   assert.match(never, /The command was NOT run/, "true here, and the reason the two are separate functions");
   assert.doesNotMatch(never, /STATUS UNKNOWN/);
 });
@@ -78,7 +84,7 @@ test("the probe stands down while a real command is in flight", () => {
   assert.match(probe, /commandsInFlight > 0/, "a running command suppresses the probe");
   assert.match(probe, /restarting/, "and it defers to a restart already under way");
   // The counter has to be maintained around the call that actually talks to the guest, and released on every path.
-  const run = block(qemu, "export async function run(cmd, opts", "// ── Background long-lived services");
+  const run = block(qemu, "export async function run(cmd, opts", FN_END);
   assert.match(run, /commandsInFlight \+= 1;/);
   assert.match(run, /finally \{\n\s*commandsInFlight -= 1;/, "released even when the command throws");
 });
@@ -86,14 +92,14 @@ test("the probe stands down while a real command is in flight", () => {
 test("no partial output is invented for a command whose bytes are gone", () => {
   // qemu's guest agent returns a command's stdout only when it has exited, so a VM that dies mid-command takes the
   // output with it. Claiming empty output would read as "the command produced nothing", which is a different claim.
-  const died = block(qemu, "function sandboxDiedMidCommand", "/**\n * Check that the guest");
+  const died = block(shared, "function sandboxDiedMidCommand", FN_END);
   assert.match(died, /stdout: "",/);
   assert.match(died, /Its output was lost with the sandbox/, "said plainly rather than implied by an empty string");
-  assert.match(qemu, /returns a command's stdout only once it has exited/, "and the reason is recorded where someone will look");
+  assert.match(shared, /returns a command's stdout only once it has exited/, "and the reason is recorded where someone will look");
 });
 
 test("an unknown outcome is distinguishable by the caller, not only by prose", () => {
-  const died = block(qemu, "function sandboxDiedMidCommand", "/**\n * Check that the guest");
+  const died = block(shared, "function sandboxDiedMidCommand", FN_END);
   assert.match(died, /unknown: true/, "a flag the host can branch on later without parsing English");
   assert.match(died, /code: 125/, "and a code distinct from the 126 the never-started case uses");
 });

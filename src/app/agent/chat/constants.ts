@@ -3,7 +3,7 @@
 // The system prompt body is now maintained in Markdown, imported as a string via the Turbopack raw-loader (see systemPromptFor below).
 import baseSystemMd from "./system/base.system.md";
 import developmentModeMd from "./system/development.mode.md";
-import { RECALL_TOOL } from "./recall";
+import { RECALL_TOOL } from "./context/recall";
 
 // MAX_TOOL_ROUNDS / MAX_SUBAGENT_ROUNDS / MAX_SAME_TOOL_CALLS / MAX_CONSECUTIVE_TIMEOUTS lived here and are
 // gone (M3). Nothing had imported any of them since the run-parameter settings were removed, so they read as
