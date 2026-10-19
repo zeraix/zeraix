@@ -37,6 +37,9 @@ anyhow = { workspace = true }
 async-trait = { workspace = true }
 dashmap = { workspace = true }
 
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true }
+
 [dev-dependencies]
 tempfile = "3"
 # A local HTTPS server for tests/transport.rs, which pins that the OS certificate store is trusted. Already in the

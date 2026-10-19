@@ -117,6 +117,10 @@ impl StdioConnection {
         }
         cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
         cmd.kill_on_drop(true);
+        // Its own hidden console, so a server that broadcasts Ctrl+C to its console cannot reach the runtime
+        // that shares it. Same reason as `spawn_command` in agent-process.
+        #[cfg(windows)]
+        cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW; agent-mcp carries no windows-sys for one constant
 
         let mut child = cmd.spawn().map_err(|e| {
             // The most common failure by far, and the one worth wording well: a server configured with

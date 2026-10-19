@@ -28,6 +28,42 @@ fn state_dir_arg() -> Option<std::path::PathBuf> {
     None
 }
 
+/// Survive a console Ctrl+C / Ctrl+Break that was not meant for the runtime.
+///
+/// The host spawns this sidecar hidden with piped stdio, which gives it a console of its own that has no
+/// window. Every command and stdio MCP server it starts used to attach to that same console, and Windows
+/// delivers `GenerateConsoleCtrlEvent(CTRL_C_EVENT, 0)` to EVERY process on a console. So one command that
+/// broadcast a Ctrl+C (a dev server stopping its workers, Python's `send_signal(CTRL_C_EVENT)`) reached the
+/// runtime as well, and the default handler ended it with STATUS_CONTROL_C_EXIT — exit code 3221225786
+/// (0xC000013A) in the host's "runtime exited" error, mid-turn, in the packaged app.
+///
+/// Children now get consoles of their own (CREATE_NO_WINDOW in agent-process and agent-mcp); this handler is
+/// the second half, for anything that still shares ours. The runtime's lifetime belongs to the host — stdin
+/// EOF, `runtime.shutdown`, or a kill — never to a console event. A handler function is not inherited by
+/// children (unlike `SetConsoleCtrlHandler(NULL, TRUE)`), so the commands it runs still stop on Ctrl+C.
+///
+/// Skipped when stdin is a terminal: someone running the binary by hand expects Ctrl+C to stop it.
+#[cfg(windows)]
+fn ignore_console_ctrl_events() {
+    use std::io::IsTerminal;
+    use windows_sys::core::BOOL;
+    use windows_sys::Win32::System::Console::{SetConsoleCtrlHandler, CTRL_BREAK_EVENT, CTRL_C_EVENT};
+
+    unsafe extern "system" fn handler(ctrl_type: u32) -> BOOL {
+        // TRUE = handled, so the default handler (ExitProcess) is not reached. Close, logoff and shutdown
+        // fall through: the system terminates the process after those regardless of the answer.
+        (ctrl_type == CTRL_C_EVENT || ctrl_type == CTRL_BREAK_EVENT) as BOOL
+    }
+
+    if std::io::stdin().is_terminal() {
+        return;
+    }
+    // SAFETY: registers a plain function with no captured state; it lives for the whole process.
+    if unsafe { SetConsoleCtrlHandler(Some(handler), 1) } == 0 {
+        tracing::warn!("could not install the console control handler; a Ctrl+C on this console will end the runtime");
+    }
+}
+
 fn main() -> anyhow::Result<()> {
     // Explicitly to stderr: a log line on stdout would be parsed as a protocol frame and corrupt the
     // stream for everything after it.
@@ -49,6 +85,9 @@ fn main() -> anyhow::Result<()> {
     // parity harness, a manual run — the runtime works exactly as before, with no durability and nothing to
     // recover.
     let state_dir = state_dir_arg();
+
+    #[cfg(windows)]
+    ignore_console_ctrl_events();
 
     let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
     let result = runtime.block_on(async {

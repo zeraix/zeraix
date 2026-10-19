@@ -47,6 +47,11 @@ use std::time::Duration;
 use tokio::io::AsyncReadExt;
 use tokio::process::{Child, Command};
 
+/// `CREATE_NO_WINDOW` from processthreadsapi.h, spelled out rather than pulling in windows-sys's Threading
+/// feature for one constant.
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
 /// How long a stopped command is given to exit on SIGTERM before it is killed outright.
 /// Mirrors `KILL_GRACE_MS` in native.mjs.
 pub const KILL_GRACE: Duration = Duration::from_millis(2000);
@@ -236,6 +241,11 @@ pub(crate) fn spawn_command(req: &ProcessRequest) -> std::io::Result<Child> {
         let mut c = Command::new(shell);
         c.arg("/d").arg("/s").arg("/c");
         c.raw_arg(format!("\"{}\"", req.command));
+        // A console of its own (hidden), which is what Node's `windowsHide` gives the JS path. Sharing the
+        // runtime's console meant a command that broadcast Ctrl+C to it (`GenerateConsoleCtrlEvent(_, 0)`
+        // reaches every process attached) also killed the runtime and every other service on it. See
+        // `ignore_console_ctrl_events` in agent-runtime's main.rs.
+        c.creation_flags(CREATE_NO_WINDOW);
         c
     };
 

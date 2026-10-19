@@ -98,7 +98,7 @@ features = ["signal", "process", "resource"]
 # surface would add build time for bindings nothing calls. See agent-process/src/job.rs.
 [workspace.dependencies.windows-sys]
 version = "0.61"
-features = ["Win32_Foundation", "Win32_Security", "Win32_System_JobObjects"]
+features = ["Win32_Foundation", "Win32_Security", "Win32_System_JobObjects", "Win32_System_Console"]
 
 [profile.release]
 opt-level = 3

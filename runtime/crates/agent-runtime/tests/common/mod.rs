@@ -34,8 +34,22 @@ impl Runtime {
         Self::spawn(&[], envs)
     }
 
+    /// Start the way the packaged app does on Windows: Node's `windowsHide` with every stdio piped adds
+    /// CREATE_NO_WINDOW, so the runtime gets a hidden console of its own rather than sharing the test's.
+    #[cfg(windows)]
+    pub fn start_like_host() -> Self {
+        use std::os::windows::process::CommandExt;
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_zeraix-agent-runtime"));
+        cmd.creation_flags(0x0800_0000);
+        Self::spawn_from(cmd, &[], &[])
+    }
+
     fn spawn(args: &[&str], envs: &[(&str, &str)]) -> Self {
-        let mut child = Command::new(env!("CARGO_BIN_EXE_zeraix-agent-runtime"))
+        Self::spawn_from(Command::new(env!("CARGO_BIN_EXE_zeraix-agent-runtime")), args, envs)
+    }
+
+    fn spawn_from(mut cmd: Command, args: &[&str], envs: &[(&str, &str)]) -> Self {
+        let mut child = cmd
             .args(args)
             .envs(envs.iter().copied())
             .stdin(Stdio::piped())
